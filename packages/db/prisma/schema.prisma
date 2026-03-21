@@ -1,0 +1,585 @@
+// Prisma schema — мультитенантная SaaS AI платформа генерации видео
+// Полная изоляция данных по tenant_id на уровне каждой таблицы
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANTS (организации / аккаунты)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+    id        String   @id @default(uuid()) @db.Uuid
+    name      String
+    slug      String   @unique
+    plan      String   @default("starter") // starter | pro | enterprise
+    isActive  Boolean  @default(true) @map("is_active")
+    credits   Int      @default(0) // текущий баланс кредитов
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    users        User[]
+    projects     Project[]
+    products     Product[]
+    jobs         Job[]
+    assets       Asset[]
+    videos       Video[]
+    generations  Generation[]
+    usageRecords UsageRecord[]
+    billingPlans TenantBillingPlan[]
+
+    @@map("tenants")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USERS (пользователи внутри tenant)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+    owner // полный доступ к tenant
+    admin // управление пользователями и проектами
+    member // только свои проекты
+    viewer // только чтение
+
+    @@map("user_role")
+}
+
+model User {
+    id              String    @id @default(uuid()) @db.Uuid
+    tenantId        String    @map("tenant_id") @db.Uuid
+    email           String    @unique
+    role            UserRole  @default(member)
+    passwordHash    String?   @map("password_hash")
+    displayName     String?   @map("display_name")
+    avatarUrl       String?   @map("avatar_url")
+    isActive        Boolean   @default(true) @map("is_active")
+    lastLoginAt     DateTime? @map("last_login_at")
+    emailVerifiedAt DateTime? @map("email_verified_at")
+    createdAt       DateTime  @default(now()) @map("created_at")
+    updatedAt       DateTime  @updatedAt @map("updated_at")
+
+    tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    jobs        Job[]
+    videos      Video[]
+    generations Generation[]
+    sessions    UserSession[]
+
+    @@index([tenantId])
+    @@index([email])
+    @@map("users")
+}
+
+// Сессии пользователей (для управления refresh-токенами)
+model UserSession {
+    id           String   @id @default(uuid()) @db.Uuid
+    userId       String   @map("user_id") @db.Uuid
+    refreshToken String   @unique @map("refresh_token")
+    userAgent    String?  @map("user_agent")
+    ipAddress    String?  @map("ip_address")
+    expiresAt    DateTime @map("expires_at")
+    createdAt    DateTime @default(now()) @map("created_at")
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+    @@index([expiresAt])
+    @@map("user_sessions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECTS (рабочие пространства для видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Project {
+    id          String   @id @default(uuid()) @db.Uuid
+    tenantId    String   @map("tenant_id") @db.Uuid
+    name        String
+    description String?
+    settings    Json     @default("{}") // аватар по умолчанию, разрешение, язык
+    isArchived  Boolean  @default(false) @map("is_archived")
+    createdAt   DateTime @default(now()) @map("created_at")
+    updatedAt   DateTime @updatedAt @map("updated_at")
+
+    tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    jobs     Job[]
+    assets   Asset[]
+    videos   Video[]
+    products Product[]
+
+    @@index([tenantId])
+    @@index([tenantId, isArchived])
+    @@map("projects")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRODUCTS (товары / продукты для генерации видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Product {
+    id             String   @id @default(uuid()) @db.Uuid
+    tenantId       String   @map("tenant_id") @db.Uuid
+    projectId      String?  @map("project_id") @db.Uuid
+    createdBy      String?  @map("created_by") @db.Uuid
+    name           String
+    description    String?  @db.Text
+    features       String[] @default([]) // ключевые характеристики продукта
+    targetAudience String?  @map("target_audience")
+    brandVoice     String?  @map("brand_voice") // тон бренда: дружелюбный, экспертный и т.д.
+    category       String? // категория товара
+    price          String? // цена (строка, для отображения)
+    websiteUrl     String?  @map("website_url")
+    images         String[] @default([]) // ключи MinIO загруженных изображений
+    metadata       Json     @default("{}")
+    isArchived     Boolean  @default(false) @map("is_archived")
+    createdAt      DateTime @default(now()) @map("created_at")
+    updatedAt      DateTime @updatedAt @map("updated_at")
+
+    tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project Project? @relation(fields: [projectId], references: [id])
+    videos  Video[]
+
+    @@index([tenantId])
+    @@index([tenantId, isArchived])
+    @@map("products")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIDEOS (финальные смонтированные видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum VideoStatus {
+    draft // создан, не запущен
+    pending // в очереди
+    processing // в процессе генерации
+    composing // финальный монтаж
+    completed // готов
+    failed // ошибка
+    cancelled // отменён
+
+    @@map("video_status")
+}
+
+model Video {
+    id            String      @id @default(uuid()) @db.Uuid
+    tenantId      String      @map("tenant_id") @db.Uuid
+    projectId     String?     @map("project_id") @db.Uuid
+    productId     String?     @map("product_id") @db.Uuid
+    createdBy     String?     @map("created_by") @db.Uuid
+    title         String
+    description   String?
+    status        VideoStatus @default(draft)
+    outputUrl     String?     @map("output_url") // ключ в MinIO/S3
+    thumbnailUrl  String?     @map("thumbnail_url")
+    durationSec   Decimal?    @map("duration_sec") @db.Decimal(6, 2)
+    fileSizeBytes BigInt?     @map("file_size_bytes")
+    resolution    String? // 1080x1920
+    fps           Int?        @default(30) @db.SmallInt
+    error         String?
+    creditsUsed   Int         @default(0) @map("credits_used")
+    metadata      Json        @default("{}") // любые дополнительные данные
+    publishedAt   DateTime?   @map("published_at")
+    createdAt     DateTime    @default(now()) @map("created_at")
+    updatedAt     DateTime    @updatedAt @map("updated_at")
+    completedAt   DateTime?   @map("completed_at")
+
+    tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project Project? @relation(fields: [projectId], references: [id])
+    product Product? @relation(fields: [productId], references: [id])
+    creator User?    @relation(fields: [createdBy], references: [id])
+    job     Job?
+    scenes  Scene[]
+
+    @@index([tenantId, status])
+    @@index([tenantId, createdAt(sort: Desc)])
+    @@index([projectId])
+    @@index([productId])
+    @@map("videos")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JOBS (очередь обработки)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum JobStatus {
+    pending
+    running
+    scenes_ready
+    processing
+    composing
+    completed
+    failed
+    cancelled
+
+    @@map("job_status")
+}
+
+model Job {
+    id          String    @id @default(uuid()) @db.Uuid
+    tenantId    String    @map("tenant_id") @db.Uuid
+    videoId     String?   @unique @map("video_id") @db.Uuid
+    projectId   String?   @map("project_id") @db.Uuid
+    createdBy   String?   @map("created_by") @db.Uuid
+    status      JobStatus @default(pending)
+    payload     Json
+    error       String?
+    creditsUsed Int       @default(0) @map("credits_used")
+    createdAt   DateTime  @default(now()) @map("created_at")
+    updatedAt   DateTime  @updatedAt @map("updated_at")
+    completedAt DateTime? @map("completed_at")
+
+    tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    video   Video?     @relation(fields: [videoId], references: [id])
+    project Project?   @relation(fields: [projectId], references: [id])
+    creator User?      @relation(fields: [createdBy], references: [id])
+    scenes  Scene[]
+    events  JobEvent[]
+
+    @@index([tenantId, status])
+    @@index([createdAt(sort: Desc)])
+    @@map("jobs")
+}
+
+// Аудит лог событий задачи (неизменяемый)
+model JobEvent {
+    id        BigInt   @id @default(autoincrement())
+    jobId     String   @map("job_id") @db.Uuid
+    tenantId  String   @map("tenant_id") @db.Uuid
+    stage     String
+    status    String // started | completed | failed
+    message   String?
+    meta      Json?
+    createdAt DateTime @default(now()) @map("created_at")
+
+    job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+    @@index([jobId, createdAt])
+    @@map("job_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCENES (сцены внутри видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SceneType {
+    avatar // говорящий аватар (HeyGen)
+    clip // b-roll клип (Kling AI)
+    image // статичное изображение продукта
+    text // текстовая заставка
+
+    @@map("scene_type")
+}
+
+enum SceneStatus {
+    pending
+    processing
+    completed
+    failed
+
+    @@map("scene_status")
+}
+
+model Scene {
+    id             String      @id @default(uuid()) @db.Uuid
+    jobId          String      @map("job_id") @db.Uuid
+    videoId        String?     @map("video_id") @db.Uuid
+    tenantId       String      @map("tenant_id") @db.Uuid
+    sceneIndex     Int         @map("scene_index") @db.SmallInt
+    type           SceneType
+    status         SceneStatus @default(pending)
+    // Промпты и сценарий
+    script         String? // для avatar
+    bRollPrompt    String?     @map("b_roll_prompt") // для clip/image
+    // Длительность
+    durationSec    Decimal?    @map("duration_sec") @db.Decimal(5, 2)
+    // Флаги завершения по каждому провайдеру
+    avatarDone     Boolean     @default(false) @map("avatar_done")
+    clipDone       Boolean     @default(false) @map("clip_done")
+    imageDone      Boolean     @default(false) @map("image_done")
+    // Ссылки на артефакты в хранилище (ключи MinIO)
+    avatarUrl      String?     @map("avatar_url")
+    clipUrl        String?     @map("clip_url")
+    imageUrl       String?     @map("image_url")
+    // Внешние ID провайдеров
+    heygenVideoId  String?     @map("heygen_video_id")
+    klingTaskId    String?     @map("kling_task_id")
+    runwayTaskId   String?     @map("runway_task_id")
+    imageGenTaskId String?     @map("image_gen_task_id")
+    // Стоимость сцены
+    costUsd        Decimal     @default(0) @map("cost_usd") @db.Decimal(10, 6)
+    error          String?
+    createdAt      DateTime    @default(now()) @map("created_at")
+    updatedAt      DateTime    @updatedAt @map("updated_at")
+
+    job         Job          @relation(fields: [jobId], references: [id], onDelete: Cascade)
+    video       Video?       @relation(fields: [videoId], references: [id])
+    generations Generation[]
+
+    @@unique([jobId, sceneIndex])
+    @@index([jobId])
+    @@index([videoId])
+    @@map("scenes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASSETS (загружаемые пользователем файлы)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum AssetType {
+    product_image // фото продукта
+    logo // логотип бренда
+    audio // музыка / озвучка
+    avatar_ref // референс для аватара
+    font // шрифт для субтитров
+    other
+
+    @@map("asset_type")
+}
+
+model Asset {
+    id            String    @id @default(uuid()) @db.Uuid
+    tenantId      String    @map("tenant_id") @db.Uuid
+    projectId     String?   @map("project_id") @db.Uuid
+    uploadedBy    String?   @map("uploaded_by") @db.Uuid
+    type          AssetType
+    filename      String
+    storageKey    String    @map("storage_key")
+    mimeType      String?   @map("mime_type")
+    fileSizeBytes BigInt?   @map("file_size_bytes")
+    width         Int?
+    height        Int?
+    durationSec   Decimal?  @map("duration_sec") @db.Decimal(6, 2)
+    tags          String[]  @default([])
+    isDeleted     Boolean   @default(false) @map("is_deleted")
+    createdAt     DateTime  @default(now()) @map("created_at")
+
+    tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project Project? @relation(fields: [projectId], references: [id])
+
+    @@index([tenantId, type])
+    @@index([tenantId, isDeleted])
+    @@map("assets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERATIONS (трекинг каждого вызова AI API)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum GenerationProvider {
+    openai
+    gptunnel
+    heygen
+    kling
+    runway
+    fal
+    replicate
+    comfyui
+    elevenlabs
+
+    @@map("generation_provider")
+}
+
+enum GenerationStatus {
+    pending
+    processing
+    completed
+    failed
+    cancelled
+
+    @@map("generation_status")
+}
+
+model Generation {
+    id               String             @id @default(uuid()) @db.Uuid
+    tenantId         String             @map("tenant_id") @db.Uuid
+    userId           String?            @map("user_id") @db.Uuid
+    jobId            String?            @map("job_id") @db.Uuid
+    sceneId          String?            @map("scene_id") @db.Uuid
+    provider         GenerationProvider
+    model            String // gpt-4o, heygen-avatar-v2, kling-v1.5, etc.
+    status           GenerationStatus   @default(pending)
+    // Запрос / ответ
+    promptTokens     Int?               @map("prompt_tokens")
+    completionTokens Int?               @map("completion_tokens")
+    requestPayload   Json?              @map("request_payload") // сохраняем что отправили
+    responsePayload  Json?              @map("response_payload") // сохраняем что получили
+    // Внешний ID задачи у провайдера
+    externalTaskId   String?            @map("external_task_id")
+    // Стоимость
+    costUsd          Decimal            @default(0) @map("cost_usd") @db.Decimal(10, 6)
+    creditsCharged   Int                @default(0) @map("credits_charged")
+    // Время
+    latencyMs        Int?               @map("latency_ms")
+    startedAt        DateTime?          @map("started_at")
+    completedAt      DateTime?          @map("completed_at")
+    error            String?
+    createdAt        DateTime           @default(now()) @map("created_at")
+
+    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    user   User?  @relation(fields: [userId], references: [id])
+    scene  Scene? @relation(fields: [sceneId], references: [id])
+
+    @@index([tenantId, provider, createdAt(sort: Desc)])
+    @@index([tenantId, status])
+    @@index([sceneId])
+    @@index([externalTaskId])
+    @@map("generations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BILLING (тарифные планы и транзакции)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BillingPlan {
+    id                String   @id @default(uuid()) @db.Uuid
+    name              String   @unique // starter, pro, enterprise
+    displayName       String   @map("display_name")
+    priceMonthlyUsd   Decimal  @map("price_monthly_usd") @db.Decimal(10, 2)
+    priceYearlyUsd    Decimal? @map("price_yearly_usd") @db.Decimal(10, 2)
+    creditsPerMonth   Int      @map("credits_per_month")
+    maxVideosPerMonth Int?     @map("max_videos_per_month") // null = unlimited
+    maxScenesPer      Int?     @map("max_scenes_per_video")
+    maxResolution     String   @default("1080x1920") @map("max_resolution")
+    features          Json     @default("{}") // флаги фич: watermark, priority_queue, etc.
+    isActive          Boolean  @default(true) @map("is_active")
+    createdAt         DateTime @default(now()) @map("created_at")
+
+    tenantPlans TenantBillingPlan[]
+
+    @@map("billing_plans")
+}
+
+// Активный тариф тенанта (история смен тарифа)
+model TenantBillingPlan {
+    id          String    @id @default(uuid()) @db.Uuid
+    tenantId    String    @map("tenant_id") @db.Uuid
+    planId      String    @map("plan_id") @db.Uuid
+    activatedAt DateTime  @default(now()) @map("activated_at")
+    expiresAt   DateTime? @map("expires_at")
+    isCurrent   Boolean   @default(true) @map("is_current")
+
+    tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    plan   BillingPlan @relation(fields: [planId], references: [id])
+
+    @@index([tenantId, isCurrent])
+    @@map("tenant_billing_plans")
+}
+
+// Транзакции кредитов (пополнение и списание)
+enum CreditTxType {
+    purchase // покупка кредитов
+    monthly // ежемесячное начисление по тарифу
+    charge // списание за генерацию
+    refund // возврат при ошибке
+    admin_grant // ручная выдача от администратора
+    expiry // сгорание неиспользованных кредитов
+
+    @@map("credit_tx_type")
+}
+
+model CreditTransaction {
+    id           BigInt       @id @default(autoincrement())
+    tenantId     String       @map("tenant_id") @db.Uuid
+    type         CreditTxType
+    amount       Int // положительное = начисление, отрицательное = списание
+    balanceAfter Int          @map("balance_after")
+    description  String?
+    jobId        String?      @map("job_id") @db.Uuid
+    invoiceId    String?      @map("invoice_id")
+    createdAt    DateTime     @default(now()) @map("created_at")
+
+    @@index([tenantId, createdAt(sort: Desc)])
+    @@index([tenantId, type])
+    @@map("credit_transactions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USAGE RECORDS (агрегационная таблица для аналитики и биллинга)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Агрегат по дням: сколько потратил тенант за день
+model UsageRecord {
+    id               BigInt   @id @default(autoincrement())
+    tenantId         String   @map("tenant_id") @db.Uuid
+    date             DateTime @db.Date // только дата (без времени)
+    videosCreated    Int      @default(0) @map("videos_created")
+    scenesGenerated  Int      @default(0) @map("scenes_generated")
+    creditsUsed      Int      @default(0) @map("credits_used")
+    totalCostUsd     Decimal  @default(0) @map("total_cost_usd") @db.Decimal(10, 4)
+    storageUsedBytes BigInt   @default(0) @map("storage_used_bytes")
+    apiCallsCount    Int      @default(0) @map("api_calls_count")
+    // разбивка по провайдерам
+    costByProvider   Json     @default("{}") @map("cost_by_provider")
+
+    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+    @@unique([tenantId, date])
+    @@index([tenantId, date(sort: Desc)])
+    @@map("usage_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN SETTINGS (настройки платформы)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Глобальные настройки платформы (ключ-значение)
+model AdminSetting {
+    key         String   @id
+    value       Json
+    description String?
+    isPublic    Boolean  @default(false) @map("is_public") // видно ли фронтенду
+    updatedBy   String?  @map("updated_by") @db.Uuid
+    updatedAt   DateTime @updatedAt @map("updated_at")
+
+    @@map("admin_settings")
+}
+
+// Журнал действий администратора (неизменяемый)
+model AdminAuditLog {
+    id         BigInt   @id @default(autoincrement())
+    adminId    String   @map("admin_id") @db.Uuid
+    action     String // tenant.suspend | user.reset_password | plan.change | etc.
+    targetType String?  @map("target_type") // tenant | user | job | billing_plan
+    targetId   String?  @map("target_id")
+    before     Json? // состояние до изменения
+    after      Json? // состояние после изменения
+    ipAddress  String?  @map("ip_address")
+    createdAt  DateTime @default(now()) @map("created_at")
+
+    @@index([adminId, createdAt(sort: Desc)])
+    @@index([targetType, targetId])
+    @@map("admin_audit_logs")
+}
+
+// Уведомления (системные + от провайдеров)
+enum NotificationType {
+    system
+    billing
+    job_failed
+    credits_low
+    plan_expiring
+
+    @@map("notification_type")
+}
+
+model Notification {
+    id        String           @id @default(uuid()) @db.Uuid
+    tenantId  String           @map("tenant_id") @db.Uuid
+    userId    String?          @map("user_id") @db.Uuid
+    type      NotificationType
+    title     String
+    body      String
+    isRead    Boolean          @default(false) @map("is_read")
+    actionUrl String?          @map("action_url")
+    createdAt DateTime         @default(now()) @map("created_at")
+    readAt    DateTime?        @map("read_at")
+
+    @@index([tenantId, isRead, createdAt(sort: Desc)])
+    @@index([userId, isRead])
+    @@map("notifications")
+}

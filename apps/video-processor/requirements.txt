@@ -1,0 +1,16 @@
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Data validation
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# Storage (MinIO / S3-compatible)
+aioboto3==13.1.1
+
+# System metrics (used in /metrics endpoint)
+psutil==6.0.0
+
+# CLI
+click==8.1.7

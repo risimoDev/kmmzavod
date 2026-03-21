@@ -1,0 +1,47 @@
+FROM node:22-alpine AS base
+RUN corepack enable pnpm
+
+# ── Dependencies ───────────────────────────────────────────────────────────
+FROM base AS deps
+WORKDIR /app
+COPY pnpm-workspace.yaml turbo.json ./
+COPY package.json pnpm-lock.yaml .npmrc* ./
+COPY apps/web/package.json ./apps/web/
+RUN pnpm install --frozen-lockfile --filter @kmmzavod/web
+
+# ── Builder ────────────────────────────────────────────────────────────────
+FROM deps AS builder
+WORKDIR /app
+COPY apps/web ./apps/web
+COPY tsconfig.base.json ./
+
+ARG NEXT_PUBLIC_API_URL=http://localhost:3000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN pnpm --filter @kmmzavod/web build
+
+# ── Runner ─────────────────────────────────────────────────────────────────
+FROM node:22-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --from=builder /app/apps/web/public        ./apps/web/public
+COPY --from=builder --chown=appuser:appgroup /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=appuser:appgroup /app/apps/web/.next/static ./apps/web/.next/static
+
+USER appuser
+
+EXPOSE 3001
+
+ENV PORT=3001
+ENV HOSTNAME="0.0.0.0"
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -qO- http://localhost:3001/ || exit 1
+
+CMD ["node", "apps/web/server.js"]
