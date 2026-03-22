@@ -104,6 +104,9 @@ export class InstagramClient {
     fullCaption = fullCaption.slice(0, MAX_CAPTION_LENGTH);
 
     // ── 2. Create media container ────────────────────────────────────────
+    // NOTE: Meta Graph API v20.0 requires access_token as a query parameter
+    // for /{ig-user-id}/media, /media_publish, and /{creation-id} endpoints.
+    // Authorization: Bearer header is NOT supported for these endpoints.
     const createUrl = new URL(`${GRAPH_API}/${igUserId}/media`);
     createUrl.searchParams.set('media_type', 'REELS');
     createUrl.searchParams.set('video_url', videoPath);

@@ -1,11 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // output: "standalone", // Enable in production (requires symlink permission on Windows)
+  output: process.env.DOCKER_BUILD === "1" ? "standalone" : undefined,
   images: {
     remotePatterns: [
       { protocol: "http",  hostname: "localhost"  },
       { protocol: "https", hostname: "*.minio.io" },
       { protocol: "https", hostname: "placehold.co" },
+      { protocol: "https", hostname: process.env.MINIO_PUBLIC_HOST ?? "minio" },
     ],
   },
   experimental: {

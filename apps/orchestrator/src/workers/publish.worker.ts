@@ -123,11 +123,12 @@ export function createPublishWorker(deps: Deps): Worker {
         // ── Instagram: presigned URL (no temp file) ─────────────────────────
         case 'instagram': {
           if (!instagram) throw new Error('Instagram client not configured (missing appId/appSecret)');
+          if (!account.igUserId) throw new Error(`Social account ${socialAccountId} is missing igUserId (Instagram Business Account ID)`);
 
           const presignedUrl = await storage.presignedUrl(storageKey, 3600);
           const result = await instagram.uploadReel(
             account.accessToken,
-            account.accountName,
+            account.igUserId,
             presignedUrl,
             publishJob.caption ?? '',
             publishJob.hashtags as string[] | undefined,

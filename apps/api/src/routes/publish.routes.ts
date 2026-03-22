@@ -16,6 +16,7 @@ const CreateSocialAccountBody = z.object({
   refreshToken: z.string().optional(),
   expiresAt: z.string().datetime().optional(),
   accountName: z.string().min(1).max(200),
+  igUserId: z.string().regex(/^\d+$/, 'Must be a numeric Instagram Business Account ID').optional(),
 });
 
 const PublishVideoBody = z.object({
@@ -52,6 +53,7 @@ export async function publishRoutes(app: FastifyInstance) {
         refreshToken: body.refreshToken,
         expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
         accountName: body.accountName,
+        igUserId: body.igUserId,
       },
     });
 

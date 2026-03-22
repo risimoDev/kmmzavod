@@ -39,6 +39,7 @@ const INITIAL: VideoProgress = {
 
 const MIN_RETRY_DELAY = 1_000;
 const MAX_RETRY_DELAY = 30_000;
+const MAX_RETRIES = 15;
 
 /**
  * SSE hook for tracking video generation progress in real-time.
@@ -58,6 +59,7 @@ export function useVideoProgress(
   const [state, setState] = useState<VideoProgress>(INITIAL);
   const esRef = useRef<EventSource | null>(null);
   const retryRef = useRef(MIN_RETRY_DELAY);
+  const retryCountRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
@@ -87,6 +89,12 @@ export function useVideoProgress(
       const url = `${BASE}/api/v1/videos/${videoId}/progress?token=${encodeURIComponent(token)}`;
       const es = new EventSource(url);
       esRef.current = es;
+
+      es.onopen = () => {
+        // Reset retry state on successful connection
+        retryRef.current = MIN_RETRY_DELAY;
+        retryCountRef.current = 0;
+      };
 
       es.onmessage = (e) => {
         try {
@@ -124,8 +132,12 @@ export function useVideoProgress(
 
         if (cancelled) return;
 
-        // Exponential backoff reconnect
-        const delay = retryRef.current;
+        retryCountRef.current += 1;
+        if (retryCountRef.current > MAX_RETRIES) return;
+
+        // Exponential backoff with jitter
+        const jitter = Math.random() * 500;
+        const delay = retryRef.current + jitter;
         retryRef.current = Math.min(retryRef.current * 2, MAX_RETRY_DELAY);
         timerRef.current = setTimeout(connect, delay);
       };

@@ -26,6 +26,9 @@ const HEYGEN_MIN_USD = 0.10;
 /** Runway Gen-3 Turbo: $0.05 per second (5 s = $0.25, 10 s = $0.50) */
 const RUNWAY_PER_SEC = 0.05;
 
+/** Kling v1 Standard: $0.028 per second */
+const KLING_PER_SEC = 0.028;
+
 /** fal.ai flux-pro: $0.055 per image */
 const FAL_PER_IMAGE = 0.055;
 /** Replicate SDXL: $0.006 per image */
@@ -87,6 +90,20 @@ export function heygenCostUsd(durationSec: number): number {
  */
 export function runwayCostUsd(durationSec: number): number {
   return durationSec * RUNWAY_PER_SEC;
+}
+
+/**
+ * Estimate cost of a Kling v1 Standard video clip.
+ *
+ * Pricing (as of 2024-Q4):
+ * - $0.028 per second
+ * - 5 s clip = $0.14, 10 s clip = $0.28
+ *
+ * @param durationSec Duration of the clip in seconds
+ * @returns Cost in USD
+ */
+export function klingCostUsd(durationSec: number): number {
+  return durationSec * KLING_PER_SEC;
 }
 
 /**

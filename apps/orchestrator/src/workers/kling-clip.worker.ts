@@ -21,7 +21,7 @@ import type { PrismaClient } from '@kmmzavod/db';
 import type { Queue } from 'bullmq';
 import type { KlingClient } from '../clients/kling.client';
 import type { IStorageClient } from '@kmmzavod/storage';
-import { runwayCostUsd, creditsFromUsd } from '../lib/costs';
+import { klingCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
 
 interface Deps {
@@ -72,7 +72,7 @@ export function createKlingClipWorker(deps: Deps) {
       log.info({ storageKey }, 'Kling: клип загружен в MinIO');
 
       // ─── 4. Обновляем Scene ───────────────────────────────────────────────
-      const costUsd        = runwayCostUsd(actualDuration);
+      const costUsd        = klingCostUsd(actualDuration);
       const creditsCharged = creditsFromUsd(costUsd);
 
       await db.scene.update({
@@ -87,7 +87,7 @@ export function createKlingClipWorker(deps: Deps) {
           jobId,
           sceneId,
           provider:        'kling',
-          model:           'kling-v1.5-text2video',
+          model:           'kling-v1-standard',
           status:          'completed',
           externalTaskId:  taskId,
           requestPayload:  { prompt, durationSec },

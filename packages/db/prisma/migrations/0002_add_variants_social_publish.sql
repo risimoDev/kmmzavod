@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS social_accounts (
   refresh_token TEXT,
   expires_at    TIMESTAMPTZ,
   account_name  TEXT           NOT NULL,
+  ig_user_id    TEXT,
   is_active     BOOLEAN        NOT NULL DEFAULT true,
   created_at    TIMESTAMPTZ    NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ    NOT NULL DEFAULT now(),

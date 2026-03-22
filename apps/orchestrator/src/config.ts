@@ -19,6 +19,8 @@ const schema = z.object({
   IMAGE_GEN_PROVIDER: z.enum(['runway', 'fal', 'replicate', 'comfyui']).default('runway'),
   IMAGE_GEN_API_KEY: z.string(),
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
+  KLING_ACCESS_KEY: z.string(),
+  KLING_SECRET_KEY: z.string(),
 
   // Social publishing (optional — если не заданы, publishing для платформы отключён)
   TIKTOK_CLIENT_KEY: z.string().optional(),

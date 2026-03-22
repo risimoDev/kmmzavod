@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
+import { getRedisSubscriber } from '../lib/redis';
 import { pipelineQueue } from '../lib/queues';
 import { logger } from '../logger';
 import type { PipelineJobPayload } from '@kmmzavod/queue';
@@ -31,8 +32,84 @@ const ListVideosQuery = z.object({
 });
 
 export async function videoRoutes(app: FastifyInstance) {
-  // Все маршруты требуют авторизации
+  // Все маршруты требуют авторизации (кроме SSE — использует ?token=)
   app.addHook('preHandler', app.authenticate);
+
+  // GET /api/v1/videos/:id/progress — SSE endpoint для отслеживания прогресса
+  // NOTE: Registered BEFORE the /:id catch-all route to avoid conflict.
+  // Uses ?token= query param because EventSource cannot set Authorization header.
+  app.get('/:id/progress', {
+    // Manual auth — EventSource can't send headers
+    preHandler: async (req, reply) => {
+      const { token } = req.query as { token?: string };
+      if (!token) return reply.code(401).send({ error: 'Unauthorized' });
+      try {
+        const decoded = app.jwt.verify(token);
+        req.user = decoded as typeof req.user;
+      } catch {
+        return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+      }
+    },
+  }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { tenantId } = req.user;
+
+    const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true } });
+    if (!video) return reply.code(404).send({ error: 'NotFound' });
+
+    // Already terminal — send single event and close
+    if (video.status === 'completed' || video.status === 'failed') {
+      reply.raw.setHeader('Content-Type', 'text/event-stream');
+      reply.raw.setHeader('Cache-Control', 'no-cache');
+      reply.raw.setHeader('Connection', 'keep-alive');
+      reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: 100, isComplete: true, status: video.status, timestamp: new Date().toISOString() })}\n\n`);
+      reply.raw.end();
+      return;
+    }
+
+    // SSE headers
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders();
+
+    // Heartbeat
+    let closed = false;
+    const heartbeat = setInterval(() => {
+      if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
+    }, 25_000);
+
+    // Redis pub/sub
+    const sub = getRedisSubscriber();
+    const channel = `video:progress:${tenantId}:${id}`;
+    await sub.subscribe(channel);
+
+    const onMessage = (ch: string, message: string) => {
+      if (ch !== channel || closed || reply.raw.writableEnded) return;
+      try {
+        const event = JSON.parse(message);
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (event.status === 'completed' || event.status === 'failed' || event.isComplete) {
+          setTimeout(() => {
+            if (!reply.raw.writableEnded) reply.raw.end();
+          }, 500);
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    sub.on('message', onMessage);
+
+    // Cleanup
+    const cleanup = async () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      sub.removeListener('message', onMessage);
+      try { await sub.unsubscribe(channel); } catch { /* ignore */ }
+    };
+    reply.raw.on('close', cleanup);
+    reply.raw.on('error', cleanup);
+  });
 
   // POST /api/v1/videos — создать видео и запустить пайплайн
   app.post('/', async (req, reply) => {

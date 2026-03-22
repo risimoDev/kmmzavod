@@ -642,10 +642,11 @@ model SocialAccount {
     id           String         @id @default(uuid()) @db.Uuid
     tenantId     String         @map("tenant_id") @db.Uuid
     platform     SocialPlatform
-    accessToken  String         @map("access_token") // encrypted at app layer
+    accessToken  String         @map("access_token") // TODO: encrypt at rest using application-level encryption
     refreshToken String?        @map("refresh_token")
     expiresAt    DateTime?      @map("expires_at")
     accountName  String         @map("account_name")
+    igUserId     String?        @map("ig_user_id")
     isActive     Boolean        @default(true) @map("is_active")
     createdAt    DateTime       @default(now()) @map("created_at")
     updatedAt    DateTime       @updatedAt @map("updated_at")
