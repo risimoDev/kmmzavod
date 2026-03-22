@@ -125,6 +125,8 @@ async function main() {
     connection,
     tiktokClientKey: config.TIKTOK_CLIENT_KEY,
     tiktokClientSecret: config.TIKTOK_CLIENT_SECRET,
+    instagramAppId: config.INSTAGRAM_APP_ID,
+    instagramAppSecret: config.INSTAGRAM_APP_SECRET,
   });
 
   // Pipeline-worker — точка входа пайплайна (enqueue из API)
@@ -167,6 +169,20 @@ async function main() {
   heygenWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'heygen-render'));
   runwayWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'runway-clip'));
   imageGenWorker.on('failed', (j, err) => handleSceneFailure(j, err, 'image-gen'));
+
+  publishWorker.on('failed', async (j, err) => {
+    if (!j) return;
+    const { publishJobId, tenantId } = j.data;
+    try {
+      await db.publishJob.update({
+        where: { id: publishJobId },
+        data: { status: 'failed', error: err.message },
+      });
+      logger.error({ publishJobId, tenantId, err: err.message }, 'Publish: final failure after retries');
+    } catch (dbErr) {
+      logger.error({ dbErr, publishJobId }, 'Publish failed handler: DB error');
+    }
+  });
 
   const allWorkers = [
     pipelineWorker,

@@ -153,15 +153,20 @@ export function createGptScriptWorker(deps: Deps): Worker {
         + (productContext ? buildProductSection(productContext) : '')
         + `\n\nProject settings: ${JSON.stringify(projectSettings)}`;
 
-      const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
-        { type: 'text', text: prompt },
-      ];
+      const hasProductImages = (productContext?.imageUrls?.length ?? 0) > 0;
 
-      if (productContext?.imageUrls?.length) {
-        for (const url of productContext.imageUrls) {
-          userContent.push({ type: 'image_url', image_url: { url, detail: 'low' } });
-        }
-      }
+      const userMessage: OpenAI.Chat.Completions.ChatCompletionUserMessageParam = hasProductImages
+        ? {
+            role: 'user',
+            content: [
+              ...productContext!.imageUrls.slice(0, 3).map((url) => ({
+                type: 'image_url' as const,
+                image_url: { url, detail: 'high' as const },
+              })),
+              { type: 'text' as const, text: `Product: ${productContext!.name}\n\n${prompt}` },
+            ],
+          }
+        : { role: 'user', content: prompt };
 
       // ── Call OpenAI ───────────────────────────────────────────────────────
       const response = await deps.openai.chat.completions.create({
@@ -169,7 +174,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: systemContent },
-          { role: 'user',   content: userContent },
+          userMessage,
         ],
       });
 

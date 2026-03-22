@@ -141,6 +141,8 @@ export interface VideoDetail extends Video {
   description: string | null;
   outputUrl: string | null;
   metadata: Record<string, unknown>;
+  variants: VideoVariant[];
+  publishJobs: PublishJob[];
   job: {
     id: string;
     status: string;
@@ -162,6 +164,34 @@ export interface VideoDetail extends Video {
       createdAt: string;
     }>;
   } | null;
+}
+
+export interface VideoVariant {
+  id: string;
+  preset: string;
+  status: string;
+  outputUrl: string | null;
+  durationSec: number | null;
+  fileSizeMb: number | null;
+  selectedAt: string | null;
+}
+
+export interface PublishJob {
+  id: string;
+  platform: string;
+  status: string;
+  publishedAt: string | null;
+  externalPostId: string | null;
+  error: string | null;
+  scheduledAt: string | null;
+  socialAccountId: string;
+}
+
+export interface SocialAccount {
+  id: string;
+  platform: string;
+  accountName: string;
+  isActive: boolean;
 }
 
 export interface Project {
@@ -281,6 +311,24 @@ export const videosApi = {
 
   downloadUrl: (id: string) =>
     apiFetch<{ url: string; expiresIn: number }>(`/api/v1/videos/${id}/download`),
+
+  selectVariant: (id: string, variantId: string) =>
+    apiFetch<void>(`/api/v1/videos/${id}/select-variant`, {
+      method: 'PATCH',
+      body: JSON.stringify({ variantId }),
+    }),
+
+  publish: (id: string, body: { socialAccountId: string; platform: string; scheduledAt?: string }) =>
+    apiFetch<PublishJob>(`/api/v1/videos/${id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+};
+
+// ── Social Accounts API ───────────────────────────────────────────────────────
+
+export const socialAccountsApi = {
+  list: () => apiFetch<SocialAccount[]>('/api/v1/social-accounts'),
 };
 
 // ── Projects API ──────────────────────────────────────────────────────────────

@@ -141,7 +141,7 @@ export async function buildApp() {
         return reply.code(404).send({ error: 'NotFound', message: 'Видео не найдено' });
       }
 
-      // Если видео уже завершено — отдаём финальное событие и закрываем
+      // ── 1. Already terminal — send final event and close immediately ────
       if (video.status === 'completed' || video.status === 'failed') {
         reply.hijack();
         const raw = reply.raw;
@@ -156,11 +156,23 @@ export async function buildApp() {
             status: video.status,
             progress: video.status === 'completed' ? 100 : 0,
             message: null,
+            isComplete: true,
             timestamp: new Date().toISOString(),
           })}\n\n`,
         );
         raw.end();
         return;
+      }
+
+      // ── 2. Limit: 1 SSE connection per videoId per tenant ───────────────
+      const redis = getRedis();
+      const lockKey = `sse:lock:${tenantId}:${id}`;
+      const acquired = await redis.set(lockKey, '1', 'EX', 300, 'NX');
+      if (!acquired) {
+        return reply.code(429).send({
+          error: 'TooManyConnections',
+          message: 'SSE connection already active for this video',
+        });
       }
 
       reply.hijack();
@@ -172,26 +184,45 @@ export async function buildApp() {
         'X-Accel-Buffering': 'no',
       });
 
-      // Отдельное Redis-подключение для subscribe
-      const sub = getRedis().duplicate();
+      // ── 3. Subscribe to Redis pub/sub ───────────────────────────────────
+      const sub = redis.duplicate();
       const channel = `video:progress:${tenantId}:${id}`;
+      let closed = false;
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        redis.del(lockKey).catch(() => {});
+        sub.unsubscribe(channel).then(() => sub.disconnect()).catch(() => {});
+      };
 
       await sub.subscribe(channel);
 
       const onMessage = (_ch: string, message: string) => {
         raw.write(`data: ${message}\n\n`);
+
+        // Close connection on terminal events
+        try {
+          const parsed = JSON.parse(message) as { status?: string };
+          if (parsed.status === 'completed' || parsed.status === 'failed') {
+            // Give the client time to read the final event, then close
+            setTimeout(() => {
+              cleanup();
+              raw.end();
+            }, 500);
+          }
+        } catch { /* non-JSON message — ignore */ }
       };
       sub.on('message', onMessage);
 
-      // Heartbeat каждые 15с чтобы соединение не разорвалось
+      // ── 4. Heartbeat every 25s ──────────────────────────────────────────
       const heartbeat = setInterval(() => {
-        raw.write(': heartbeat\n\n');
-      }, 15_000);
+        if (!closed) raw.write(': ping\n\n');
+      }, 25_000);
 
-      req.raw.on('close', () => {
-        clearInterval(heartbeat);
-        sub.unsubscribe(channel).then(() => sub.disconnect()).catch(() => {});
-      });
+      // ── 5. Client disconnect ────────────────────────────────────────────
+      req.raw.on('close', cleanup);
     },
   );
 

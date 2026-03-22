@@ -1,24 +1,6 @@
 version: "3.9"
 
 services:
-  # ─── Dev-only: postgres with exposed port ──────────────────────────────────
-  postgres-dev:
-    extends:
-      service: postgres
-    ports:
-      - "5433:5432"
-    profiles:
-      - dev
-
-  # ─── Dev-only: redis with exposed port ─────────────────────────────────────
-  redis-dev:
-    extends:
-      service: redis
-    ports:
-      - "6379:6379"
-    profiles:
-      - dev
-
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
@@ -61,10 +43,10 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"
       - "9001:9001"
     networks:
       - backend
+      - frontend
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -121,11 +103,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
+          memory: 1g
+          cpus: '1.0'
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   video-processor:
@@ -146,7 +131,10 @@ services:
       resources:
         limits:
           memory: 2g
+          cpus: '2.0'
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
@@ -191,3 +179,6 @@ networks:
     internal: true
   frontend:
     driver: bridge
+  monitoring:
+    driver: bridge
+    internal: true

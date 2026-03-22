@@ -24,15 +24,15 @@ model Tenant {
     createdAt DateTime @default(now()) @map("created_at")
     updatedAt DateTime @updatedAt @map("updated_at")
 
-    users        User[]
-    projects     Project[]
-    products     Product[]
-    jobs         Job[]
-    assets       Asset[]
-    videos       Video[]
-    generations  Generation[]
-    usageRecords UsageRecord[]
-    billingPlans TenantBillingPlan[]
+    users          User[]
+    projects       Project[]
+    products       Product[]
+    jobs           Job[]
+    assets         Asset[]
+    videos         Video[]
+    generations    Generation[]
+    usageRecords   UsageRecord[]
+    billingPlans   TenantBillingPlan[]
     socialAccounts SocialAccount[]
     publishJobs    PublishJob[]
 
@@ -190,13 +190,13 @@ model Video {
     updatedAt     DateTime    @updatedAt @map("updated_at")
     completedAt   DateTime?   @map("completed_at")
 
-    tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project  Project?       @relation(fields: [projectId], references: [id])
-    product  Product?       @relation(fields: [productId], references: [id])
-    creator  User?          @relation(fields: [createdBy], references: [id])
-    job      Job?
-    scenes   Scene[]
-    variants VideoVariant[]
+    tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project     Project?       @relation(fields: [projectId], references: [id])
+    product     Product?       @relation(fields: [productId], references: [id])
+    creator     User?          @relation(fields: [createdBy], references: [id])
+    job         Job?
+    scenes      Scene[]
+    variants    VideoVariant[]
     publishJobs PublishJob[]
 
     @@index([tenantId, status])
@@ -223,7 +223,7 @@ model VideoVariant {
     jobId       String        @map("job_id") @db.Uuid
     videoId     String        @map("video_id") @db.Uuid
     tenantId    String        @map("tenant_id") @db.Uuid
-    preset      String        // dynamic | smooth | minimal
+    preset      String // dynamic | smooth | minimal
     outputKey   String        @map("output_key")
     outputUrl   String?       @map("output_url")
     durationSec Decimal?      @map("duration_sec") @db.Decimal(6, 2)
@@ -239,6 +239,7 @@ model VideoVariant {
     @@unique([videoId, preset])
     @@index([jobId])
     @@index([videoId])
+    @@index([tenantId, status])
     @@map("video_variants")
 }
 
@@ -653,6 +654,7 @@ model SocialAccount {
     publishJobs PublishJob[]
 
     @@unique([tenantId, platform, accountName])
+    @@index([tenantId])
     @@index([tenantId, platform])
     @@map("social_accounts")
 }
@@ -672,21 +674,21 @@ enum PublishStatus {
 }
 
 model PublishJob {
-    id             String        @id @default(uuid()) @db.Uuid
-    videoId        String        @map("video_id") @db.Uuid
-    tenantId       String        @map("tenant_id") @db.Uuid
-    socialAccountId String       @map("social_account_id") @db.Uuid
-    variantId      String?       @map("variant_id") @db.Uuid
-    platform       SocialPlatform
-    status         PublishStatus @default(pending)
-    caption        String?       @db.Text
-    hashtags       String[]      @default([])
-    scheduledAt    DateTime?     @map("scheduled_at")
-    publishedAt    DateTime?     @map("published_at")
-    externalPostId String?       @map("external_post_id")
-    error          String?
-    createdAt      DateTime      @default(now()) @map("created_at")
-    updatedAt      DateTime      @updatedAt @map("updated_at")
+    id              String         @id @default(uuid()) @db.Uuid
+    videoId         String         @map("video_id") @db.Uuid
+    tenantId        String         @map("tenant_id") @db.Uuid
+    socialAccountId String         @map("social_account_id") @db.Uuid
+    variantId       String?        @map("variant_id") @db.Uuid
+    platform        SocialPlatform
+    status          PublishStatus  @default(pending)
+    caption         String?        @db.Text
+    hashtags        String[]       @default([])
+    scheduledAt     DateTime?      @map("scheduled_at")
+    publishedAt     DateTime?      @map("published_at")
+    externalPostId  String?        @map("external_post_id")
+    error           String?
+    createdAt       DateTime       @default(now()) @map("created_at")
+    updatedAt       DateTime       @updatedAt @map("updated_at")
 
     video         Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
     tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)

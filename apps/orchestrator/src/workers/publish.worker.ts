@@ -1,6 +1,10 @@
 /**
- * Publish worker — загружает финальное видео из MinIO и публикует
- * в указанную социальную сеть (TikTok, Instagram, YouTube Shorts).
+ * Publish worker — публикует финальное видео в соцсети.
+ *
+ * TikTok:   скачивает видео из MinIO во temp файл → uploadVideo() → удаляет файл
+ * Instagram: генерирует presigned URL → uploadReel() (Instagram сам скачивает)
+ *
+ * Retry: BullMQ retries (attempts: 3, fixed backoff 30s). При финальном провале → status: failed.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -21,6 +25,8 @@ interface Deps {
   connection: ConnectionOptions;
   tiktokClientKey?: string;
   tiktokClientSecret?: string;
+  instagramAppId?: string;
+  instagramAppSecret?: string;
 }
 
 export function createPublishWorker(deps: Deps): Worker {
@@ -29,13 +35,15 @@ export function createPublishWorker(deps: Deps): Worker {
   const tiktok = deps.tiktokClientKey && deps.tiktokClientSecret
     ? new TikTokClient(deps.tiktokClientKey, deps.tiktokClientSecret)
     : null;
-  const instagram = new InstagramClient();
+  const instagram = deps.instagramAppId && deps.instagramAppSecret
+    ? new InstagramClient(deps.instagramAppId, deps.instagramAppSecret)
+    : null;
 
   return new Worker<PublishJobPayload>(
     QUEUES['publish'].name,
     async (job) => {
       const { publishJobId, videoId, tenantId, platform, socialAccountId } = job.data;
-      logger.info({ publishJobId, platform, videoId }, 'Publish: старт');
+      logger.info({ publishJobId, platform, videoId, attempt: job.attemptsMade + 1 }, 'Publish: старт');
 
       // Mark as uploading
       await db.publishJob.update({
@@ -75,19 +83,19 @@ export function createPublishWorker(deps: Deps): Worker {
         storageKey = video.outputUrl;
       }
 
-      // Download video to temp file
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-'));
-      const tmpFile = path.join(tmpDir, 'video.mp4');
+      let externalPostId: string | undefined;
 
-      try {
-        await storage.downloadFile(storageKey, tmpFile);
-        const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
+      switch (platform) {
+        // ── TikTok: download to temp file → upload ──────────────────────────
+        case 'tiktok': {
+          if (!tiktok) throw new Error('TikTok client not configured (missing client key/secret)');
 
-        let externalPostId: string | undefined;
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-'));
+          const tmpFile = path.join(tmpDir, 'video.mp4');
+          try {
+            await storage.downloadFile(storageKey, tmpFile);
+            const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
-        switch (platform) {
-          case 'tiktok': {
-            if (!tiktok) throw new Error('TikTok client not configured (missing client key/secret)');
             const result = await tiktok.uploadVideo(
               { accessToken: account.accessToken, refreshToken: account.refreshToken ?? '' },
               tmpFile,
@@ -106,51 +114,47 @@ export function createPublishWorker(deps: Deps): Worker {
                 },
               });
             }
-            break;
+          } finally {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
           }
-
-          case 'instagram': {
-            // Instagram needs a public URL — generate presigned URL
-            const presignedUrl = await storage.presignedUrl(storageKey, 3600);
-            // accountName holds the IG user ID for API calls
-            const result = await instagram.uploadReel(
-              account.accessToken,
-              account.accountName,
-              presignedUrl,
-              fullCaption,
-            );
-            externalPostId = result.mediaId;
-            break;
-          }
-
-          case 'youtube_shorts': {
-            // YouTube Shorts — placeholder for future implementation
-            throw new Error('YouTube Shorts publishing not yet implemented');
-          }
-
-          default:
-            throw new Error(`Unknown platform: ${platform}`);
+          break;
         }
 
-        // Mark as published
-        await db.publishJob.update({
-          where: { id: publishJobId },
-          data: {
-            status: 'published',
-            publishedAt: new Date(),
-            externalPostId,
-          },
-        });
+        // ── Instagram: presigned URL (no temp file) ─────────────────────────
+        case 'instagram': {
+          if (!instagram) throw new Error('Instagram client not configured (missing appId/appSecret)');
 
-        logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
-      } finally {
-        // Cleanup temp files
-        try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-          // ignore cleanup failures
+          const presignedUrl = await storage.presignedUrl(storageKey, 3600);
+          const result = await instagram.uploadReel(
+            account.accessToken,
+            account.accountName,
+            presignedUrl,
+            publishJob.caption ?? '',
+            publishJob.hashtags as string[] | undefined,
+          );
+          externalPostId = result.mediaId;
+          break;
         }
+
+        case 'youtube_shorts': {
+          throw new Error('YouTube Shorts publishing not yet implemented');
+        }
+
+        default:
+          throw new Error(`Unknown platform: ${platform}`);
       }
+
+      // Mark as published
+      await db.publishJob.update({
+        where: { id: publishJobId },
+        data: {
+          status: 'published',
+          publishedAt: new Date(),
+          externalPostId,
+        },
+      });
+
+      logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
     },
     {
       connection,

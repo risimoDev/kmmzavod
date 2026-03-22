@@ -75,7 +75,7 @@ export const QUEUE_DEFS = {
     name: 'publish',
     defaultJobOptions: {
       attempts: 3,
-      backoff: { type: 'exponential' as const, delay: 10000 },
+      backoff: { type: 'fixed' as const, delay: 30000 },
       removeOnComplete: { count: 500 },
       removeOnFail: false,
     },

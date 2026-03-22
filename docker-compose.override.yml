@@ -1,0 +1,12 @@
+# Dev overrides — exposes DB/cache ports for local tooling.
+# This file is auto-loaded by `docker compose up` on dev machines.
+# Do NOT deploy this to production.
+
+services:
+  postgres:
+    ports:
+      - "5433:5432"
+
+  redis:
+    ports:
+      - "6379:6379"

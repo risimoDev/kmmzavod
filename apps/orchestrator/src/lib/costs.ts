@@ -1,67 +1,131 @@
 /**
- * AI provider cost estimation.
+ * AI provider cost estimation utilities.
  *
- * All costs in USD.  1 credit = $0.01 USD — use `creditsFromUsd()` to convert.
+ * All helper functions return cost in **USD**.
+ * Use {@link creditsFromUsd} to convert USD → internal platform credits.
+ *
+ * 1 credit = $0.001 USD (i.e. 1 000 credits = $1).
+ *
  * Rates are approximate and should be updated when providers change pricing.
+ *
+ * @module costs
  */
 
-// ── GPTunnel / OpenAI gpt-4o (via GPTunnel proxy) ────────────────────────────
-export const GPTUNNEL_INPUT_PER_1K_TOKENS  = 0.005;  // $5  / 1M input tokens
-export const GPTUNNEL_OUTPUT_PER_1K_TOKENS = 0.015;  // $15 / 1M output tokens
+// ── Rate constants ────────────────────────────────────────────────────────────
 
-// ── OpenAI gpt-4o (legacy, kept for backward compat) ─────────────────────────
-export const OPENAI_INPUT_PER_1K_TOKENS  = 0.005;
-export const OPENAI_OUTPUT_PER_1K_TOKENS = 0.015;
+/** GPTunnel proxy – GPT-4o input: $5 / 1 M tokens → $0.005 / 1 K tokens */
+const GPTUNNEL_INPUT_PER_1K = 0.005;
+/** GPTunnel proxy – GPT-4o output: $15 / 1 M tokens → $0.015 / 1 K tokens */
+const GPTUNNEL_OUTPUT_PER_1K = 0.015;
 
-// ── HeyGen avatar video ───────────────────────────────────────────────────────
-export const HEYGEN_USD_PER_SEC = 0.10;
+/** HeyGen avatar video: ~$0.03 per second */
+const HEYGEN_PER_SEC = 0.03;
+/** HeyGen minimum charge per API call */
+const HEYGEN_MIN_USD = 0.10;
 
-// ── Runway text-to-video ─────────────────────────────────────────────────────
-export const RUNWAY_USD_PER_SEC = 0.05;
+/** Runway Gen-3 Turbo: $0.05 per second (5 s = $0.25, 10 s = $0.50) */
+const RUNWAY_PER_SEC = 0.05;
 
-// ── Kling text-to-video (legacy) ─────────────────────────────────────────────
-export const KLING_USD_PER_SEC = 0.06;
+/** fal.ai flux-pro: $0.055 per image */
+const FAL_PER_IMAGE = 0.055;
+/** Replicate SDXL: $0.006 per image */
+const REPLICATE_PER_IMAGE = 0.006;
+/** ComfyUI (self-hosted): $0 per image */
+const COMFYUI_PER_IMAGE = 0;
 
-// ── Image generation ─────────────────────────────────────────────────────────
-export const IMAGE_COST_RUNWAY    = 0.05;   // Runway per image
-export const IMAGE_COST_FAL       = 0.04;   // fal.ai flux per image
-export const IMAGE_COST_REPLICATE = 0.05;   // Replicate SDXL per image
-export const IMAGE_COST_COMFYUI   = 0.01;   // self-hosted marginal cost
-
-// ── Credit conversion ─────────────────────────────────────────────────────────
-export const CREDITS_PER_USD = 100;         // 1 credit = $0.01
-
-export function creditsFromUsd(costUsd: number): number {
-  return Math.max(1, Math.ceil(costUsd * CREDITS_PER_USD));
-}
+/** Platform credit conversion: 1 credit = $0.001 */
+const USD_PER_CREDIT = 0.001;
 
 // ── Cost calculators ──────────────────────────────────────────────────────────
 
+/**
+ * Estimate cost of a GPT-4o call routed through GPTunnel.
+ *
+ * Pricing (as of 2024-Q4):
+ * - Input:  $0.005 per 1 K tokens ($5 / 1 M)
+ * - Output: $0.015 per 1 K tokens ($15 / 1 M)
+ *
+ * @see https://gptunnel.ru — GPTunnel proxy documentation
+ * @see https://openai.com/api/pricing — OpenAI model pricing
+ *
+ * @param promptTokens     Number of input (prompt) tokens
+ * @param completionTokens Number of output (completion) tokens
+ * @returns Cost in USD
+ */
 export function gptunnelCostUsd(promptTokens: number, completionTokens: number): number {
-  return (promptTokens  / 1_000) * GPTUNNEL_INPUT_PER_1K_TOKENS
-       + (completionTokens / 1_000) * GPTUNNEL_OUTPUT_PER_1K_TOKENS;
+  return (promptTokens / 1_000) * GPTUNNEL_INPUT_PER_1K
+       + (completionTokens / 1_000) * GPTUNNEL_OUTPUT_PER_1K;
 }
 
-export function openAiCostUsd(promptTokens: number, completionTokens: number): number {
-  return (promptTokens  / 1_000) * OPENAI_INPUT_PER_1K_TOKENS
-       + (completionTokens / 1_000) * OPENAI_OUTPUT_PER_1K_TOKENS;
-}
-
+/**
+ * Estimate cost of a HeyGen avatar video render.
+ *
+ * Pricing (approximate, as of 2024-Q4):
+ * - ~$0.03 per second of generated video
+ * - Minimum charge: $0.10 per API call
+ *
+ * @see https://docs.heygen.com — HeyGen API documentation
+ *
+ * @param durationSec Duration of the video in seconds
+ * @returns Cost in USD (at least $0.10)
+ */
 export function heygenCostUsd(durationSec: number): number {
-  return durationSec * HEYGEN_USD_PER_SEC;
+  return Math.max(HEYGEN_MIN_USD, durationSec * HEYGEN_PER_SEC);
 }
 
+/**
+ * Estimate cost of a Runway Gen-3 Turbo video clip.
+ *
+ * Pricing (as of 2024-Q4):
+ * - $0.05 per second (turbo mode)
+ * - 5 s clip = $0.25, 10 s clip = $0.50
+ *
+ * @see https://docs.runwayml.com — Runway API documentation
+ *
+ * @param durationSec Duration of the clip in seconds
+ * @returns Cost in USD
+ */
 export function runwayCostUsd(durationSec: number): number {
-  return durationSec * RUNWAY_USD_PER_SEC;
+  return durationSec * RUNWAY_PER_SEC;
 }
 
-export function klingCostUsd(durationSec: number): number {
-  return durationSec * KLING_USD_PER_SEC;
+/**
+ * Estimate cost of a single image generation call.
+ *
+ * Per-image pricing (as of 2024-Q4):
+ * | Provider   | Model        | Cost / image |
+ * |------------|--------------|-------------|
+ * | fal        | flux-pro     | $0.055      |
+ * | replicate  | SDXL         | $0.006      |
+ * | comfyui    | self-hosted  | $0.000      |
+ * | runway     | (→ fal)      | $0.055      |
+ *
+ * @see https://fal.ai/pricing — fal.ai pricing
+ * @see https://replicate.com/pricing — Replicate pricing
+ *
+ * @param provider Image generation provider identifier
+ * @returns Cost in USD
+ */
+export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'runway'): number {
+  switch (provider) {
+    case 'fal':       return FAL_PER_IMAGE;
+    case 'replicate': return REPLICATE_PER_IMAGE;
+    case 'comfyui':   return COMFYUI_PER_IMAGE;
+    case 'runway':    return FAL_PER_IMAGE; // fallback to fal pricing
+  }
 }
 
-export function imageGenCostUsd(provider: string): number {
-  if (provider === 'runway')    return IMAGE_COST_RUNWAY;
-  if (provider === 'replicate') return IMAGE_COST_REPLICATE;
-  if (provider === 'comfyui')   return IMAGE_COST_COMFYUI;
-  return IMAGE_COST_FAL;
+/**
+ * Convert a USD cost to internal platform credits.
+ *
+ * Conversion rate: **1 credit = $0.001** (1 000 credits = $1).
+ *
+ * Always rounds up (`Math.ceil`) so that every fractional credit is charged.
+ * Returns at least 1 credit for any positive cost.
+ *
+ * @param usd Cost in US dollars
+ * @returns Number of credits (integer, ≥ 1)
+ */
+export function creditsFromUsd(usd: number): number {
+  return Math.max(1, Math.ceil(usd / USD_PER_CREDIT));
 }

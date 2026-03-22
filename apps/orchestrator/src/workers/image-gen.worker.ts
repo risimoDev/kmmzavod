@@ -73,7 +73,7 @@ export function createImageGenWorker(deps: Deps) {
       log.info({ storageKey }, 'Изображение загружено в MinIO');
 
       // ─── 3. Обновляем Scene ───────────────────────────────────────────────
-      const costUsd        = imageGenCostUsd(provider);
+      const costUsd        = imageGenCostUsd(provider as 'fal' | 'replicate' | 'comfyui' | 'runway');
       const creditsCharged = creditsFromUsd(costUsd);
 
       await db.scene.update({
