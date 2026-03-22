@@ -46,6 +46,7 @@ async function authPlugin(app: FastifyInstance) {
       const payload = req.user;
       if (payload.role !== 'admin' && payload.role !== 'owner') {
         reply.code(403).send({ error: 'Forbidden', message: 'Недостаточно прав' });
+        return;
       }
     }
   );

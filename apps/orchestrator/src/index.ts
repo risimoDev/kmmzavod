@@ -24,6 +24,7 @@ import type {
   VideoComposeJobPayload,
   PipelineStateJobPayload,
   PipelineJobPayload,
+  PublishJobPayload,
 } from '@kmmzavod/queue';
 
 import { createGptScriptWorker } from './workers/gpt-script.worker';
@@ -32,6 +33,7 @@ import { createRunwayClipWorker } from './workers/runway-clip.worker';
 import { createImageGenWorker } from './workers/image-gen.worker';
 import { createVideoComposeWorker } from './workers/video-compose.worker';
 import { createPipelineStateWorker } from './workers/pipeline-state.worker';
+import { createPublishWorker } from './workers/publish.worker';
 import { startPipeline } from './pipeline/coordinator';
 
 async function main() {
@@ -52,7 +54,7 @@ async function main() {
   );
 
   const storage = new MinioStorageClient({
-    endpoint: config.MINIO_ENDPOINT,
+    endPoint: config.MINIO_ENDPOINT,
     port: config.MINIO_PORT,
     useSSL: config.MINIO_USE_SSL,
     accessKey: config.MINIO_ACCESS_KEY,
@@ -67,6 +69,7 @@ async function main() {
   const imageGenQueue = new Queue<ImageGenJobPayload>(QUEUES['image-gen'].name, { connection });
   const videoComposeQueue = new Queue<VideoComposeJobPayload>(QUEUES['video-compose'].name, { connection });
   const pipelineStateQueue = new Queue<PipelineStateJobPayload>(QUEUES['pipeline-state'].name, { connection });
+  const publishQueue = new Queue<PublishJobPayload>(QUEUES['publish'].name, { connection });
   const pipelineQueue = new Queue<PipelineJobPayload>(QUEUES['pipeline'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
@@ -116,6 +119,14 @@ async function main() {
     connection,
   });
 
+  const publishWorker = createPublishWorker({
+    db,
+    storage,
+    connection,
+    tiktokClientKey: config.TIKTOK_CLIENT_KEY,
+    tiktokClientSecret: config.TIKTOK_CLIENT_SECRET,
+  });
+
   // Pipeline-worker — точка входа пайплайна (enqueue из API)
   const { Worker } = await import('bullmq');
   const pipelineWorker = new Worker<PipelineJobPayload>(
@@ -123,7 +134,7 @@ async function main() {
     async (job) => {
       const { jobId, tenantId } = job.data;
       logger.info({ jobId, tenantId }, 'Pipeline: старт задачи');
-      await startPipeline(jobId, tenantId, { db, gptQueue: gptScriptQueue });
+      await startPipeline(jobId, tenantId, { db, gptQueue: gptScriptQueue, storage });
     },
     { connection, concurrency: QUEUES['pipeline'].concurrency }
   );
@@ -165,6 +176,7 @@ async function main() {
     imageGenWorker,
     videoComposeWorker,
     pipelineStateWorker,
+    publishWorker,
   ];
 
   // Логируем активные воркеры
@@ -179,6 +191,7 @@ async function main() {
         'image-gen': QUEUES['image-gen'].concurrency,
         'video-compose': QUEUES['video-compose'].concurrency,
         'pipeline-state': QUEUES['pipeline-state'].concurrency,
+        'publish': QUEUES['publish'].concurrency,
       },
     },
     'Все workers запущены'
@@ -196,6 +209,7 @@ async function main() {
       imageGenQueue.close(),
       videoComposeQueue.close(),
       pipelineStateQueue.close(),
+      publishQueue.close(),
       pipelineQueue.close(),
     ]);
     await db.$disconnect();

@@ -47,6 +47,7 @@ export async function projectRoutes(app: FastifyInstance) {
     const project = await db.project.findFirst({
       where: { id, tenantId },
       include: {
+        _count: { select: { videos: true, assets: true } },
         videos: {
           orderBy: { createdAt: 'desc' },
           take: 10,

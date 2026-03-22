@@ -33,40 +33,109 @@ interface Deps {
 }
 
 const SYSTEM_PROMPT = `
-You are an expert scriptwriter for short-form viral video content (TikTok/Reels/Shorts).
-Generate a complete, structured video script as a JSON object.
+You are an expert scriptwriter and visual director for short-form viral video content (TikTok/Reels/Shorts) focused on PRODUCT advertising.
 
-Output schema:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — PRODUCT VISUAL ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before writing any scene, carefully analyze every attached product image.
+Extract and memorize these visual characteristics — you will use them in EVERY clip/image prompt:
+  • Dominant colors and color palette
+  • Shape & form factor (bottle, box, tube, gadget, clothing item, etc.)
+  • Material & texture (matte plastic, glossy glass, brushed metal, fabric, etc.)
+  • Approximate size (palm-sized, handheld, tabletop, wearable, etc.)
+  • Packaging details (label design, brand logo placement, cap/lid style)
+  • Distinctive features (LED indicator, transparent window, embossed lettering, etc.)
+Store this as PRODUCT_VISUAL_PROFILE — reference it by name in every b_roll_prompt below.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
   "title": "<compelling video title, max 80 chars>",
   "scenes": [
     {
       "scene_index": 0,
       "type": "avatar" | "clip" | "image" | "text",
-      "script": "<natural spoken text — ONLY for avatar/text scenes>",
-      "b_roll_prompt": "<detailed cinematic visual description — ONLY for clip/image scenes>",
+      "script": "<spoken text — ONLY for avatar/text>",
+      "b_roll_prompt": "<cinematic prompt — ONLY for clip/image>",
       "duration_sec": 5
     }
   ]
 }
 
-Scene type selection rules:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCENE TYPE SELECTION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - "avatar"  → introductions, key explanations, emotional moments, calls-to-action (40–60% of scenes)
-- "clip"    → demonstrating processes, transitions, dynamic action (20–30%)
+- "clip"    → demonstrating processes, transitions, dynamic action with the product (20–30%)
 - "image"   → product showcase, statistics, comparisons, fact cards (10–20%)
 - "text"    → title cards or credit sequences only (max 6 words in script)
 
-Constraints:
-- Return valid JSON only — no markdown, no code fences
-- avatar/text scenes MUST have script; clip/image scenes MUST have b_roll_prompt
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"clip" SCENE b_roll_prompt REQUIREMENTS (50-80 words, MANDATORY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every clip b_roll_prompt MUST include ALL of these elements:
+1. Shot type: extreme close-up / medium shot / wide shot / over-the-shoulder
+2. Camera movement: slow dolly in / tracking shot / static locked-off / crane rising / orbit 360°
+3. Lighting setup: soft box diffused / golden hour side-light / studio white seamless / dramatic rim light / neon accent
+4. Product placement: held in hand / placed on marble surface / in active use / floating center-frame
+5. Background: blurred bokeh / clean studio white / lifestyle setting (kitchen, gym, desk) / gradient sweep
+6. Action: person demonstrates [specific feature], product rotates 360° revealing [detail], hand opens packaging showing [element]
+7. Technical quality: cinematic 4K, shallow depth of field, film grain, anamorphic lens flare
+
+The product MUST be named explicitly: use the product name and describe its exact appearance from PRODUCT_VISUAL_PROFILE (color, shape, material, distinctive markings).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"image" SCENE b_roll_prompt REQUIREMENTS (MANDATORY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every image b_roll_prompt MUST include ALL of these elements:
+1. Exact product appearance: describe the product using color, shape, material, and branding from PRODUCT_VISUAL_PROFILE
+2. Composition style: flat lay / hero shot / lifestyle context / editorial minimal
+3. Color palette: harmonize with brandVoice tone (warm/cool/vibrant/muted) — specify 2-3 hex or named colors
+4. Text overlay instructions (if applicable): pricing, stats, comparison data — specify font style, position, size
+5. Mood & style: photorealistic product photography / 3D render / illustrated infographic
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HARD CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Return VALID JSON ONLY — no markdown, no code fences, no commentary
+- avatar/text scenes MUST have "script"; clip/image scenes MUST have "b_roll_prompt"
 - duration_sec: 4–8 for avatar, 3–6 for clip/image, 2–4 for text
+- EVERY clip/image b_roll_prompt MUST contain the product name AND at least 2 visual details from PRODUCT_VISUAL_PROFILE (e.g. color + material, shape + texture)
+- NEVER generate generic b-roll without explicit product reference (no "a person holds a product", no "item on table")
+- clip b_roll_prompt must be 50-80 words — count them
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL SELF-CHECK (execute before returning JSON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Review every scene in your output. For each clip/image scene:
+  ✓ Does b_roll_prompt mention the product by name?
+  ✓ Does it include at least 2 specific visual details from the product analysis?
+  ✓ For clips: is the word count between 50-80?
+  ✓ For clips: are all 7 required elements present (shot, camera, lighting, placement, background, action, quality)?
+  ✓ For images: are all 5 required elements present?
+If any check fails — rewrite that scene's b_roll_prompt before returning.
 `;
+
+function buildProductSection(ctx: NonNullable<import('@kmmzavod/queue').ProductContext>): string {
+  const lines: string[] = ['\n--- Product Information ---'];
+  lines.push(`Product name: ${ctx.name}`);
+  if (ctx.description)    lines.push(`Description: ${ctx.description}`);
+  if (ctx.features.length) lines.push(`Key features: ${ctx.features.join('; ')}`);
+  if (ctx.targetAudience) lines.push(`Target audience: ${ctx.targetAudience}`);
+  if (ctx.brandVoice)     lines.push(`Brand voice / tone: ${ctx.brandVoice}`);
+  if (ctx.imageUrls.length)
+    lines.push(`Product images are attached — use them as reference for image/clip scene prompts.`);
+  lines.push('--- End Product Information ---');
+  return lines.join('\n');
+}
 
 export function createGptScriptWorker(deps: Deps): Worker {
   return new Worker<GptScriptJobPayload>(
     QUEUE_DEFS.GPT_SCRIPT.name,
     async (job: Job<GptScriptJobPayload>) => {
-      const { jobId, tenantId, prompt, projectSettings } = job.data;
+      const { jobId, tenantId, prompt, projectSettings, productContext } = job.data;
       const startMs = Date.now();
 
       await deps.db.jobEvent.create({
@@ -79,16 +148,28 @@ export function createGptScriptWorker(deps: Deps): Worker {
         select: { videoId: true },
       });
 
+      // ── Build messages with optional product vision ────────────────────────
+      const systemContent = SYSTEM_PROMPT.trim()
+        + (productContext ? buildProductSection(productContext) : '')
+        + `\n\nProject settings: ${JSON.stringify(projectSettings)}`;
+
+      const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+        { type: 'text', text: prompt },
+      ];
+
+      if (productContext?.imageUrls?.length) {
+        for (const url of productContext.imageUrls) {
+          userContent.push({ type: 'image_url', image_url: { url, detail: 'low' } });
+        }
+      }
+
       // ── Call OpenAI ───────────────────────────────────────────────────────
       const response = await deps.openai.chat.completions.create({
         model:           'gpt-4o',
         response_format: { type: 'json_object' },
         messages: [
-          {
-            role:    'system',
-            content: SYSTEM_PROMPT.trim() + `\n\nProject settings: ${JSON.stringify(projectSettings)}`,
-          },
-          { role: 'user', content: prompt },
+          { role: 'system', content: systemContent },
+          { role: 'user',   content: userContent },
         ],
       });
 
@@ -119,7 +200,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
           status:            'completed',
           promptTokens:      usage.prompt_tokens,
           completionTokens:  usage.completion_tokens,
-          requestPayload:    { prompt, projectSettings },
+          requestPayload:    { prompt, projectSettings: projectSettings as Record<string, string> },
           responsePayload:   { title: output.title, sceneCount: output.scenes.length },
           costUsd,
           creditsCharged:    credits,
@@ -180,7 +261,11 @@ export function createGptScriptWorker(deps: Deps): Worker {
         } else if (scene.type === 'image' && scene.bRollPrompt) {
           await deps.imageGenQueue.add(
             `imggen:${scene.id}`,
-            { jobId, sceneId: scene.id, tenantId, prompt: scene.bRollPrompt, referenceImageKeys: [] },
+            {
+              jobId, sceneId: scene.id, tenantId,
+              prompt: scene.bRollPrompt,
+              referenceImageKeys: productContext?.imageUrls ?? [],
+            },
             QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
           );
         }
@@ -196,6 +281,12 @@ export function createGptScriptWorker(deps: Deps): Worker {
           meta:    { sceneCount: scenes.length, costUsd, creditsCharged: credits },
         },
       });
+
+      // Публикуем прогресс: скрипт готов, сцены созданы → 10%
+      if (jobRow.videoId) {
+        const { publishProgress } = await import('../lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, 'gpt-script', 'completed', 10, `${scenes.length} scenes created`);
+      }
     },
     {
       connection:  deps.connection,

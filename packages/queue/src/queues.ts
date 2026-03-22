@@ -71,6 +71,16 @@ export const QUEUE_DEFS = {
     },
     concurrency: 20,
   },
+  PUBLISH: {
+    name: 'publish',
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'exponential' as const, delay: 10000 },
+      removeOnComplete: { count: 500 },
+      removeOnFail: false,
+    },
+    concurrency: 2,
+  },
 } as const;
 
 export type QueueName = typeof QUEUE_DEFS[keyof typeof QUEUE_DEFS]['name'];
@@ -82,11 +92,21 @@ export interface PipelineJobPayload {
   tenantId: string;
 }
 
+export interface ProductContext {
+  name: string;
+  description?: string;
+  features: string[];
+  targetAudience?: string;
+  brandVoice?: string;
+  imageUrls: string[];
+}
+
 export interface GptScriptJobPayload {
   jobId: string;
   tenantId: string;
   prompt: string;
   projectSettings: Record<string, unknown>;
+  productContext?: ProductContext;
 }
 
 export interface HeygenRenderJobPayload {
@@ -119,6 +139,7 @@ export interface ImageGenJobPayload {
 export interface VideoComposeJobPayload {
   jobId: string;
   tenantId: string;
+  variants?: string[];
 }
 
 export interface PipelineStateJobPayload {
@@ -126,6 +147,15 @@ export interface PipelineStateJobPayload {
   sceneId: string;
   tenantId: string;
   completedStage: 'avatar' | 'clip' | 'image';
+}
+
+export interface PublishJobPayload {
+  publishJobId: string;
+  videoId: string;
+  tenantId: string;
+  platform: 'tiktok' | 'instagram' | 'youtube_shorts';
+  socialAccountId: string;
+  scheduledAt?: string;
 }
 
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
@@ -162,4 +192,5 @@ export const QUEUES: Record<string, QueueEntry> = {
   'image-gen':      flatten(QUEUE_DEFS.IMAGE_GEN),
   'video-compose':  flatten(QUEUE_DEFS.VIDEO_COMPOSE),
   'pipeline-state': flatten(QUEUE_DEFS.PIPELINE_STATE),
+  'publish':        flatten(QUEUE_DEFS.PUBLISH),
 };

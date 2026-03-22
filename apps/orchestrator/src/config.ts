@@ -19,6 +19,10 @@ const schema = z.object({
   IMAGE_GEN_PROVIDER: z.enum(['runway', 'fal', 'replicate', 'comfyui']).default('runway'),
   IMAGE_GEN_API_KEY: z.string(),
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
+
+  // Social publishing (optional — если не заданы, TikTok publishing отключён)
+  TIKTOK_CLIENT_KEY: z.string().optional(),
+  TIKTOK_CLIENT_SECRET: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

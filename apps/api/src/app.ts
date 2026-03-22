@@ -16,6 +16,8 @@ import { videoRoutes } from './routes/videos.routes';
 import { projectRoutes } from './routes/projects.routes';
 import { productRoutes } from './routes/products.routes';
 import { adminRoutes } from './routes/admin.routes';
+import { publishRoutes } from './routes/publish.routes';
+import { getRedis } from './lib/redis';
 
 export async function buildApp() {
   const app = Fastify({
@@ -104,6 +106,94 @@ export async function buildApp() {
   app.register(projectRoutes, { prefix: '/api/v1/projects' });
   app.register(productRoutes, { prefix: '/api/v1/products' });
   app.register(adminRoutes,   { prefix: '/api/v1/admin' });
+  app.register(publishRoutes, { prefix: '/api/v1' });
+
+  // ── SSE: real-time video progress ──────────────────────────────────────
+  app.get<{ Params: { id: string }; Querystring: { token?: string } }>(
+    '/api/v1/videos/:id/progress',
+    {
+      preHandler: async (req, reply) => {
+        // Standard Authorization header
+        if (req.headers.authorization) {
+          try { await req.jwtVerify(); return; } catch {}
+        }
+        // Fallback: ?token= query param (EventSource не поддерживает заголовки)
+        const token = (req.query as { token?: string }).token;
+        if (token) {
+          try {
+            req.user = app.jwt.verify(token);
+            return;
+          } catch {}
+        }
+        reply.code(401).send({ error: 'Unauthorized' });
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params;
+      const { tenantId } = req.user;
+
+      const video = await db.video.findFirst({
+        where: { id, tenantId },
+        select: { id: true, status: true },
+      });
+
+      if (!video) {
+        return reply.code(404).send({ error: 'NotFound', message: 'Видео не найдено' });
+      }
+
+      // Если видео уже завершено — отдаём финальное событие и закрываем
+      if (video.status === 'completed' || video.status === 'failed') {
+        reply.hijack();
+        const raw = reply.raw;
+        raw.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        raw.write(
+          `data: ${JSON.stringify({
+            stage: video.status,
+            status: video.status,
+            progress: video.status === 'completed' ? 100 : 0,
+            message: null,
+            timestamp: new Date().toISOString(),
+          })}\n\n`,
+        );
+        raw.end();
+        return;
+      }
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      // Отдельное Redis-подключение для subscribe
+      const sub = getRedis().duplicate();
+      const channel = `video:progress:${tenantId}:${id}`;
+
+      await sub.subscribe(channel);
+
+      const onMessage = (_ch: string, message: string) => {
+        raw.write(`data: ${message}\n\n`);
+      };
+      sub.on('message', onMessage);
+
+      // Heartbeat каждые 15с чтобы соединение не разорвалось
+      const heartbeat = setInterval(() => {
+        raw.write(': heartbeat\n\n');
+      }, 15_000);
+
+      req.raw.on('close', () => {
+        clearInterval(heartbeat);
+        sub.unsubscribe(channel).then(() => sub.disconnect()).catch(() => {});
+      });
+    },
+  );
 
   // Health check
   app.get('/health', { logLevel: 'warn' }, async () => ({

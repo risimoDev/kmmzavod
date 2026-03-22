@@ -20,9 +20,9 @@ export const heygenQueue = new Queue(QUEUE_DEFS.HEYGEN_RENDER.name, {
   defaultJobOptions: QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
 });
 
-export const klingQueue = new Queue(QUEUE_DEFS.KLING_CLIP.name, {
+export const runwayQueue = new Queue(QUEUE_DEFS.RUNWAY_CLIP.name, {
   connection,
-  defaultJobOptions: QUEUE_DEFS.KLING_CLIP.defaultJobOptions,
+  defaultJobOptions: QUEUE_DEFS.RUNWAY_CLIP.defaultJobOptions,
 });
 
 export const imageGenQueue = new Queue(QUEUE_DEFS.IMAGE_GEN.name, {
@@ -40,13 +40,19 @@ export const pipelineStateQueue = new Queue(QUEUE_DEFS.PIPELINE_STATE.name, {
   defaultJobOptions: QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions,
 });
 
+export const publishQueue = new Queue(QUEUE_DEFS.PUBLISH.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.PUBLISH.defaultJobOptions,
+});
+
 // All queues for unified stats
 export const ALL_QUEUES = {
   pipeline:       pipelineQueue,
   'gpt-script':   gptScriptQueue,
   'heygen-render': heygenQueue,
-  'kling-clip':   klingQueue,
+  'runway-clip':  runwayQueue,
   'image-gen':    imageGenQueue,
   'video-compose': videoComposeQueue,
   'pipeline-state': pipelineStateQueue,
+  'publish':         publishQueue,
 } as const;

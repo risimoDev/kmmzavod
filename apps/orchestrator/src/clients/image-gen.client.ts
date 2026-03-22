@@ -1,6 +1,13 @@
 /**
  * Image generation client — провайдер-агностик.
- * Поддерживает: runway, fal.ai, Replicate, ComfyUI (self-hosted)
+ *
+ * Поддерживает: fal.ai (flux-pro), Replicate (SDXL), ComfyUI (self-hosted).
+ * Provider `'runway'` maps to fal.ai flux-pro as fallback because Runway
+ * does not expose a standalone image-generation API.
+ *
+ * @see https://fal.ai/models/fal-ai/flux-pro          — fal.ai flux-pro model
+ * @see https://docs.dev.runwayml.com/                  — Runway (video-only)
+ * @see https://replicate.com/stability-ai/sdxl          — Replicate SDXL
  */
 import axios from 'axios';
 import { logger } from '../logger';
@@ -26,6 +33,10 @@ export class ImageGenClient {
     private readonly apiKey: string
   ) {}
 
+  /**
+   * Generate an image using the configured provider.
+   * Routes to the appropriate backend.
+   */
   async generate(opts: GenerateImageOpts): Promise<ImageResult> {
     switch (this.provider) {
       case 'runway':
@@ -39,59 +50,56 @@ export class ImageGenClient {
     }
   }
 
-  // ── Runway ─────────────────────────────────────────────────────────────────
+  // ── Runway (fallback → fal.ai flux-pro) ────────────────────────────────────
+  // Runway has no image-generation API; we route to fal.ai flux-pro instead.
+  /**
+   * Generate an image when provider is `'runway'`.
+   * Runway does not offer a standalone image endpoint, so we use
+   * fal.ai **flux-pro** as a drop-in fallback.
+   *
+   * The API key passed to `ImageGenClient` when `provider='runway'` must be
+   * a valid fal.ai key (format: `Key <fal-key>`).
+   *
+   * @see https://fal.ai/models/fal-ai/flux-pro
+   */
   private async generateRunway(opts: GenerateImageOpts): Promise<ImageResult> {
-    const http = axios.create({
-      baseURL: 'https://api.dev.runwayml.com/v1',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'X-Runway-Version': '2024-11-06',
-        'Content-Type': 'application/json',
-      },
-      timeout: 30_000,
-    });
-
-    // Use short video generation as image source (first frame)
-    const create = await http.post('/image_to_video', {
-      model: 'gen3a_turbo',
-      promptText: opts.prompt,
-      duration: 5,
-      ratio: '9:16',
-    });
-
-    const taskId: string = create.data.id;
-
-    for (let i = 0; i < 60; i++) {
-      await sleep(10_000);
-      const poll = await http.get(`/tasks/${taskId}`);
-      const task = poll.data;
-
-      if (task.status === 'SUCCEEDED') {
-        const url = task.output?.[0];
-        if (!url) throw new Error('Runway: пустой ответ при генерации изображения');
-        return { url, contentType: 'image/png' };
-      }
-
-      if (task.status === 'FAILED' || task.status === 'CANCELLED') {
-        throw new Error(`Runway image gen failed: ${task.failure ?? 'unknown'}`);
-      }
-
-      logger.debug({ taskId, attempt: i + 1 }, 'Runway: ожидаем изображение');
-    }
-
-    throw new Error('Runway: timeout генерации изображения');
+    return this.generateFalFluxPro(opts);
   }
 
   // ── Fal.ai ─────────────────────────────────────────────────────────────────
+  /**
+   * Generate an image via fal.ai (flux-dev model).
+   * Used when `provider='fal'`.
+   *
+   * @see https://fal.ai/models/fal-ai/flux/dev
+   */
   private async generateFal(opts: GenerateImageOpts): Promise<ImageResult> {
+    return this.runFalModel('fal-ai/flux/dev', opts);
+  }
+
+  /**
+   * Generate an image via fal.ai **flux-pro** model.
+   * Used as the fallback for `provider='runway'` and can be called directly.
+   *
+   * @see https://fal.ai/models/fal-ai/flux-pro
+   */
+  private async generateFalFluxPro(opts: GenerateImageOpts): Promise<ImageResult> {
+    return this.runFalModel('fal-ai/flux-pro', opts);
+  }
+
+  /**
+   * Shared helper — submit + poll any fal.ai image model.
+   *
+   * @param model  fal model path, e.g. `'fal-ai/flux/dev'` or `'fal-ai/flux-pro'`
+   */
+  private async runFalModel(model: string, opts: GenerateImageOpts): Promise<ImageResult> {
     const http = axios.create({
       baseURL: 'https://queue.fal.run',
       headers: { Authorization: `Key ${this.apiKey}` },
       timeout: 120_000,
     });
 
-    // Submitt задачу
-    const sub = await http.post('/fal-ai/flux/dev', {
+    const sub = await http.post(`/${model}`, {
       prompt: opts.prompt,
       negative_prompt: opts.negativePrompt,
       image_size: { width: opts.width ?? 1080, height: opts.height ?? 1920 },
@@ -100,29 +108,33 @@ export class ImageGenClient {
 
     const requestId: string = sub.data.request_id;
 
-    // Опрос
     for (let i = 0; i < 20; i++) {
       await sleep(5_000);
-      const status = await http.get(`/fal-ai/flux/dev/requests/${requestId}/status`);
+      const status = await http.get(`/${model}/requests/${requestId}/status`);
 
       if (status.data.status === 'COMPLETED') {
-        const result = await http.get(`/fal-ai/flux/dev/requests/${requestId}`);
+        const result = await http.get(`/${model}/requests/${requestId}`);
         const img = result.data.images?.[0];
-        if (!img?.url) throw new Error('fal: пустой ответ');
+        if (!img?.url) throw new Error(`fal (${model}): пустой ответ`);
         return { url: img.url, contentType: img.content_type ?? 'image/jpeg' };
       }
 
       if (status.data.status === 'FAILED') {
-        throw new Error(`fal: задача упала — ${JSON.stringify(status.data.error)}`);
+        throw new Error(`fal (${model}): задача упала — ${JSON.stringify(status.data.error)}`);
       }
 
-      logger.debug({ requestId, attempt: i + 1 }, 'fal: ожидаем изображение');
+      logger.debug({ requestId, model, attempt: i + 1 }, 'fal: ожидаем изображение');
     }
 
-    throw new Error('fal: timeout генерации изображения');
+    throw new Error(`fal (${model}): timeout генерации изображения`);
   }
 
-  // ── Replicate ───────────────────────────────────────────────────────────────
+  // ── Replicate ─────────────────────────────────────────────────────────────
+  /**
+   * Generate an image via Replicate (SDXL model).
+   *
+   * @see https://replicate.com/stability-ai/sdxl
+   */
   private async generateReplicate(opts: GenerateImageOpts): Promise<ImageResult> {
     const http = axios.create({
       baseURL: 'https://api.replicate.com/v1',
@@ -167,6 +179,12 @@ export class ImageGenClient {
   }
 
   // ── ComfyUI (self-hosted) ──────────────────────────────────────────────────
+  /**
+   * Generate an image via a self-hosted ComfyUI instance.
+   * Expects `apiKey` in the format `"http://host:8188|optional_key"`.
+   *
+   * @see https://github.com/comfyanonymous/ComfyUI
+   */
   private async generateComfyUI(opts: GenerateImageOpts): Promise<ImageResult> {
     // COMFYUI_URL берётся из apiKey поля (передаём как "http://host:8188|api_key_if_any")
     const [baseURL, key] = this.apiKey.split('|');

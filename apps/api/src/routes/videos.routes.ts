@@ -39,17 +39,35 @@ export async function videoRoutes(app: FastifyInstance) {
     const body = CreateVideoBody.parse(req.body);
     const { tenantId, userId } = req.user;
 
-    // Проверяем баланс кредитов
+    // ── Оценка стоимости и проверка кредитов ────────────────────────────────
+    const DEFAULT_AVG_CREDITS = 15; // fallback если настройка не задана
+    const DEFAULT_SCENES_COUNT = 5; // типичное кол-во сцен
+
+    let avgCreditsPerScene = DEFAULT_AVG_CREDITS;
+    try {
+      const setting = await db.adminSetting.findUnique({
+        where: { key: 'avg_credits_per_scene' },
+        select: { value: true },
+      });
+      if (setting?.value != null) {
+        const parsed = Number(typeof setting.value === 'object' ? (setting.value as any).value : setting.value);
+        if (parsed > 0) avgCreditsPerScene = parsed;
+      }
+    } catch { /* use default */ }
+
+    const estimatedCredits = DEFAULT_SCENES_COUNT * avgCreditsPerScene;
+
     const tenant = await db.tenant.findUniqueOrThrow({
       where: { id: tenantId },
       select: { credits: true },
     });
 
-    if (tenant.credits < 10) {
+    if (tenant.credits < estimatedCredits) {
       return reply.code(402).send({
-        error: 'PaymentRequired',
-        message: 'Недостаточно кредитов. Пополните баланс.',
-        credits: tenant.credits,
+        error: 'InsufficientCredits',
+        message: 'Недостаточно кредитов для запуска генерации.',
+        available: tenant.credits,
+        required: estimatedCredits,
       });
     }
 
@@ -86,7 +104,7 @@ export async function videoRoutes(app: FastifyInstance) {
       enrichedPrompt = `${productContext}\n\nЗадача: ${body.scriptPrompt}`;
     }
 
-    // Создаём видео + задачу в одной транзакции
+    // Создаём видео + задачу + soft reserve кредитов в одной транзакции
     const { video, job } = await db.$transaction(async (tx) => {
       const video = await tx.video.create({
         data: {
@@ -112,7 +130,26 @@ export async function videoRoutes(app: FastifyInstance) {
             script_prompt: enrichedPrompt,
             avatar_id: body.avatarId,
             settings: body.settings,
+            estimatedCredits,
           },
+        },
+      });
+
+      // Soft reserve: списываем estimated credits заранее
+      const updated = await tx.tenant.update({
+        where: { id: tenantId },
+        data: { credits: { decrement: estimatedCredits } },
+        select: { credits: true },
+      });
+
+      await tx.creditTransaction.create({
+        data: {
+          tenantId,
+          type: 'reserve',
+          amount: -estimatedCredits,
+          balanceAfter: Math.max(0, updated.credits),
+          description: `Reserve for video "${body.title}"`,
+          jobId: job.id,
         },
       });
 
@@ -186,6 +223,19 @@ export async function videoRoutes(app: FastifyInstance) {
     const video = await db.video.findFirst({
       where: { id, tenantId },
       include: {
+        variants: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            preset: true,
+            outputKey: true,
+            durationSec: true,
+            fileSizeMb: true,
+            status: true,
+            selectedAt: true,
+            createdAt: true,
+          },
+        },
         job: {
           include: {
             scenes: {
@@ -214,7 +264,16 @@ export async function videoRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'NotFound', message: 'Видео не найдено' });
     }
 
-    return reply.send(video);
+    // Generate presigned URLs for ready variants
+    const storage = (app as any).storage;
+    const variantsWithUrls = await Promise.all(
+      video.variants.map(async (v) => ({
+        ...v,
+        previewUrl: v.status === 'ready' ? await storage.presignedUrl(v.outputKey, 3600) : null,
+      })),
+    );
+
+    return reply.send({ ...video, variants: variantsWithUrls });
   });
 
   // DELETE /api/v1/videos/:id
@@ -238,6 +297,54 @@ export async function videoRoutes(app: FastifyInstance) {
 
     logger.info({ videoId: id, tenantId }, 'Video cancelled');
     return reply.code(204).send();
+  });
+
+  // PATCH /api/v1/videos/:id/select-variant — выбор варианта монтажа
+  app.patch('/:id/select-variant', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { tenantId } = req.user;
+    const body = z.object({ variantId: z.string().uuid() }).parse(req.body);
+
+    const video = await db.video.findFirst({ where: { id, tenantId } });
+    if (!video) {
+      return reply.code(404).send({ error: 'NotFound', message: 'Видео не найдено' });
+    }
+
+    const variant = await db.videoVariant.findFirst({
+      where: { id: body.variantId, videoId: id, status: 'ready' },
+    });
+    if (!variant) {
+      return reply.code(404).send({ error: 'NotFound', message: 'Вариант не найден или ещё не готов' });
+    }
+
+    await db.$transaction([
+      // Clear previous selection
+      db.videoVariant.updateMany({
+        where: { videoId: id, selectedAt: { not: null } },
+        data: { selectedAt: null },
+      }),
+      // Mark this variant as selected
+      db.videoVariant.update({
+        where: { id: body.variantId },
+        data: { selectedAt: new Date() },
+      }),
+      // Copy outputKey to the video record
+      db.video.update({
+        where: { id },
+        data: { outputUrl: variant.outputKey },
+      }),
+    ]);
+
+    logger.info({ videoId: id, variantId: body.variantId, preset: variant.preset, tenantId }, 'Variant selected');
+
+    return reply.send({
+      videoId: id,
+      selectedVariant: {
+        id: variant.id,
+        preset: variant.preset,
+        outputKey: variant.outputKey,
+      },
+    });
   });
 
   // GET /api/v1/videos/:id/download — presigned URL для скачивания
@@ -319,6 +426,9 @@ export async function videoRoutes(app: FastifyInstance) {
       include: {
         video: { select: { title: true } },
         events: { orderBy: { createdAt: 'desc' }, take: 1 },
+        scenes: {
+          select: { type: true, avatarDone: true, clipDone: true, imageDone: true, status: true },
+        },
       },
     });
 
@@ -336,13 +446,32 @@ export async function videoRoutes(app: FastifyInstance) {
         videos: Number(r.count),
       })),
       recentVideos,
-      activeJobs: activeJobsList.map((j) => ({
-        id: j.id,
-        title: j.video?.title ?? 'Без названия',
-        status: j.status,
-        stage: j.events[0]?.stage ?? j.status,
-        progress: j.events[0]?.stage === 'composing' ? 80 : j.events[0]?.stage === 'processing' ? 50 : 20,
-      })),
+      activeJobs: activeJobsList.map((j) => {
+        // Реальный прогресс: считаем завершённые этапы сцен
+        let progress = 5;
+        if (j.scenes.length > 0) {
+          const done = j.scenes.filter((s) =>
+            (s.type === 'avatar' && s.avatarDone) ||
+            (s.type === 'clip' && s.clipDone) ||
+            (s.type === 'image' && s.imageDone) ||
+            s.status === 'completed' || s.status === 'failed'
+          ).length;
+          if (j.status === 'composing') {
+            progress = 85 + Math.round((done / j.scenes.length) * 15);
+          } else {
+            progress = 10 + Math.round((done / j.scenes.length) * 75);
+          }
+        } else if (j.events[0]?.stage === 'gpt-script') {
+          progress = j.events[0]?.status === 'completed' ? 10 : 5;
+        }
+        return {
+          id: j.id,
+          title: j.video?.title ?? 'Без названия',
+          status: j.status,
+          stage: j.events[0]?.stage ?? j.status,
+          progress,
+        };
+      }),
     });
   });
 }

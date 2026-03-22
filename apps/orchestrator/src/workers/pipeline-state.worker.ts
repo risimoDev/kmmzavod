@@ -4,6 +4,8 @@
 import { Worker, Queue, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type PipelineStateJobPayload, type VideoComposeJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
+import { publishProgress, calcSceneProgress } from '../lib/progress';
+import { refundReserve } from '../lib/credits';
 
 interface Deps {
   db:                PrismaClient;
@@ -33,21 +35,38 @@ export function createPipelineStateWorker(deps: Deps): Worker {
         select: { type: true, avatarDone: true, clipDone: true, imageDone: true, status: true },
       });
 
-      const allDone = scenes.every((s) => {
+      type SceneRow = typeof scenes[number];
+      const allDone = scenes.every((s: SceneRow) => {
         if (s.type === 'avatar') return s.avatarDone || s.status === 'failed';
         if (s.type === 'clip')   return s.clipDone   || s.status === 'failed';
         if (s.type === 'image')  return s.imageDone  || s.status === 'failed';
         return true; // text/unknown scenes need no processing
       });
 
+      // Публикуем промежуточный прогресс при каждом обновлении сцены
+      const jobRow0 = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true } });
+      if (jobRow0?.videoId) {
+        const pct = calcSceneProgress(scenes);
+        const doneCount = scenes.filter((s: SceneRow) =>
+          (s.type === 'avatar' && s.avatarDone) ||
+          (s.type === 'clip' && s.clipDone) ||
+          (s.type === 'image' && s.imageDone) ||
+          s.status === 'completed' || s.status === 'failed'
+        ).length;
+        await publishProgress(
+          tenantId, jobRow0.videoId, 'processing', 'progress',
+          pct, `${doneCount}/${scenes.length} scenes done`,
+        );
+      }
+
       if (!allDone) return; // wait for remaining scenes
 
-      const anyFailed = scenes.some((s) => s.status === 'failed');
+      const anyFailed = scenes.some((s: SceneRow) => s.status === 'failed');
 
       // Look up videoId so we can update Video.status
       const jobRow = await db.job.findUnique({
         where:  { id: jobId },
-        select: { videoId: true },
+        select: { videoId: true, payload: true },
       });
 
       if (anyFailed) {
@@ -62,6 +81,17 @@ export function createPipelineStateWorker(deps: Deps): Worker {
         await db.jobEvent.create({
           data: { jobId, tenantId, stage: 'pipeline-state', status: 'failed', message: 'One or more scenes failed' },
         });
+
+        if (jobRow?.videoId) {
+          await publishProgress(tenantId, jobRow.videoId, 'pipeline', 'failed', 0, 'One or more scenes failed');
+        }
+
+        // Refund reserved credits on failure
+        const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+        const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+        if (reserved > 0) {
+          await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+        }
         return;
       }
 
@@ -76,6 +106,10 @@ export function createPipelineStateWorker(deps: Deps): Worker {
       await db.jobEvent.create({
         data: { jobId, tenantId, stage: 'pipeline-state', status: 'completed', message: 'All scenes done, composing' },
       });
+
+      if (jobRow?.videoId) {
+        await publishProgress(tenantId, jobRow.videoId, 'composing', 'started', 87, 'All scenes done, composing video');
+      }
 
       const payload: VideoComposeJobPayload = { jobId, tenantId };
       await videoComposeQueue.add(
