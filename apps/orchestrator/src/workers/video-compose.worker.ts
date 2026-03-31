@@ -33,17 +33,51 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       const payload = jobRow.payload as Record<string, unknown>;
 
-      // Reconstruct subtitle list from avatar scene scripts
+      // Build accurate subtitles using Whisper transcription of avatar scenes
       type SceneRow = typeof scenes[number];
-      let cursor = 0;
-      const subtitles = scenes
-        .filter((s: SceneRow) => s.type === 'avatar' && s.script)
-        .map((s: SceneRow) => {
-          const start = cursor;
-          const end   = start + Number(s.durationSec ?? 5);
-          cursor = end;
-          return { start_sec: start, end_sec: end, text: s.script! };
-        });
+
+      // Compute scene offsets (where each scene starts in the final timeline)
+      const sceneOffsets: number[] = [];
+      let offset = 0;
+      for (const s of scenes) {
+        sceneOffsets.push(offset);
+        offset += Number(s.durationSec ?? 5);
+      }
+
+      // Transcribe each avatar scene via Whisper for accurate word-level timing
+      let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
+      const avatarScenes = scenes.filter((s: SceneRow) => s.type === 'avatar' && s.script && s.avatarUrl);
+
+      for (const scene of avatarScenes) {
+        const sceneIdx = scenes.indexOf(scene);
+        const sceneOffset = sceneOffsets[sceneIdx];
+        try {
+          const transcribeRes = await axios.post(`${videoProcessorUrl}/transcribe`, {
+            storage_key: scene.avatarUrl,
+            language: 'ru',
+            max_words_per_chunk: 12,
+          }, { timeout: 120_000 });
+
+          const whisperSubs = transcribeRes.data.subtitles as Array<{ start_sec: number; end_sec: number; text: string }>;
+          // Offset timestamps to global timeline position
+          for (const sub of whisperSubs) {
+            subtitles.push({
+              start_sec: +(sub.start_sec + sceneOffset).toFixed(2),
+              end_sec: +(sub.end_sec + sceneOffset).toFixed(2),
+              text: sub.text,
+            });
+          }
+          logger.info({ jobId, sceneId: scene.id, subs: whisperSubs.length }, 'Whisper transcription OK for scene');
+        } catch (err: any) {
+          // Fallback: use scene duration + script as single block
+          logger.warn({ jobId, sceneId: scene.id, err: err.message }, 'Whisper failed for scene, using fallback');
+          subtitles.push({
+            start_sec: sceneOffset,
+            end_sec: sceneOffset + Number(scene.durationSec ?? 5),
+            text: scene.script!,
+          });
+        }
+      }
 
       // Create VideoVariant rows upfront (status=rendering)
       if (jobRow.videoId) {

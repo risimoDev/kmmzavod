@@ -23,14 +23,16 @@ const HEYGEN_PER_SEC = 0.03;
 /** HeyGen minimum charge per API call */
 const HEYGEN_MIN_USD = 0.10;
 
-/** Runway Gen-3 Turbo: $0.05 per second (5 s = $0.25, 10 s = $0.50) */
-const RUNWAY_PER_SEC = 0.05;
+/** Runway Gen-4.5: $0.12 per second (1 credit = $0.01, 12 credits/sec) */
+const RUNWAY_PER_SEC = 0.12;
 
 /** Kling v1 Standard: $0.028 per second */
 const KLING_PER_SEC = 0.028;
 
 /** fal.ai flux-pro: $0.055 per image */
 const FAL_PER_IMAGE = 0.055;
+/** Runway gen4_image_turbo: 2 credits/image → $0.02 per image */
+const RUNWAY_IMAGE_PER_IMAGE = 0.02;
 /** Replicate SDXL: $0.006 per image */
 const REPLICATE_PER_IMAGE = 0.006;
 /** ComfyUI (self-hosted): $0 per image */
@@ -77,13 +79,13 @@ export function heygenCostUsd(durationSec: number): number {
 }
 
 /**
- * Estimate cost of a Runway Gen-3 Turbo video clip.
+ * Estimate cost of a Runway Gen-4.5 video clip.
  *
- * Pricing (as of 2024-Q4):
- * - $0.05 per second (turbo mode)
- * - 5 s clip = $0.25, 10 s clip = $0.50
+ * Pricing (1 credit = $0.01):
+ * - 12 credits/sec → $0.12 per second
+ * - 5 s clip = $0.60, 10 s clip = $1.20
  *
- * @see https://docs.runwayml.com — Runway API documentation
+ * @see https://docs.dev.runwayml.com/guides/pricing — Runway pricing
  *
  * @param durationSec Duration of the clip in seconds
  * @returns Cost in USD
@@ -115,7 +117,7 @@ export function klingCostUsd(durationSec: number): number {
  * | fal        | flux-pro     | $0.055      |
  * | replicate  | SDXL         | $0.006      |
  * | comfyui    | self-hosted  | $0.000      |
- * | runway     | (→ fal)      | $0.055      |
+ * | runway     | gen4_image_turbo | $0.02   |
  *
  * @see https://fal.ai/pricing — fal.ai pricing
  * @see https://replicate.com/pricing — Replicate pricing
@@ -128,7 +130,7 @@ export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'run
     case 'fal':       return FAL_PER_IMAGE;
     case 'replicate': return REPLICATE_PER_IMAGE;
     case 'comfyui':   return COMFYUI_PER_IMAGE;
-    case 'runway':    return FAL_PER_IMAGE; // fallback to fal pricing
+    case 'runway':    return RUNWAY_IMAGE_PER_IMAGE;
   }
 }
 

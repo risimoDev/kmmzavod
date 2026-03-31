@@ -114,6 +114,7 @@ export interface HeygenRenderJobPayload {
   sceneId: string;
   tenantId: string;
   avatarId: string;
+  voiceId: string;
   script: string;
 }
 

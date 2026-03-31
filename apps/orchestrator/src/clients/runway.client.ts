@@ -1,13 +1,13 @@
 /**
- * Runway API client — video generation via Gen-3 Alpha Turbo.
+ * Runway API client — video generation via Gen-4.5.
  *
- * Provides text/image-to-video clip generation for b-roll scenes.
- * NOTE: Runway does NOT offer a standalone image-generation endpoint.
- * Image generation is handled by {@link ImageGenClient} (fal.ai flux-pro fallback).
+ * Provides text-to-video clip generation for b-roll scenes.
+ * NOTE: Runway does NOT offer a standalone image-generation endpoint (use text_to_image instead).
+ * Image generation is handled by {@link ImageGenClient}.
  *
- * @see https://docs.dev.runwayml.com/guides/creating-tasks — task lifecycle
- * @see https://docs.dev.runwayml.com/reference/create-image-to-video — image_to_video endpoint
- * @see https://docs.dev.runwayml.com/reference/retrieve-task — polling / task status
+ * @see https://docs.dev.runwayml.com/guides/using-the-api — getting started
+ * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_video/post — text_to_video endpoint
+ * @see https://docs.dev.runwayml.com/api#tag/Task-management/paths/~1v1~1tasks~1{id}/get — polling / task status
  */
 import axios, { type AxiosInstance } from 'axios';
 import { logger } from '../logger';
@@ -41,30 +41,36 @@ export class RunwayClient {
   }
 
   /**
-   * Create a text-to-video (or image-to-video) task via Runway Gen-3 Alpha Turbo.
+   * Create a text-to-video task via Runway Gen-4.5.
    *
-   * The Runway API accepts `promptText` for text guidance. When no `promptImage`
-   * is supplied the model generates purely from text.
+   * Uses the dedicated `/text_to_video` endpoint for prompt-only generation
+   * (no input image required).
    *
    * @param opts.prompt       — cinematic description of the clip
-   * @param opts.durationSec  — desired length: 5 or 10 (Runway only supports these two)
-   * @param opts.aspectRatio  — e.g. "9:16" (vertical) or "16:9"
+   * @param opts.durationSec  — desired length: 2–10 (integer)
+   * @param opts.aspectRatio  — e.g. "720:1280" (vertical) or "1280:720" (horizontal)
    * @returns Runway task ID for polling
    *
-   * @see https://docs.dev.runwayml.com/reference/create-image-to-video
+   * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_video/post
    */
   async createClip(opts: {
     prompt: string;
     durationSec?: number;
     aspectRatio?: string;
   }): Promise<string> {
-    const duration = opts.durationSec && opts.durationSec >= 10 ? 10 : 5;
+    const duration = Math.max(2, Math.min(opts.durationSec ?? 5, 10));
 
-    const res = await this.http.post<{ id: string }>('/image_to_video', {
-      model: 'gen3a_turbo',
+    // Convert legacy aspect-ratio strings to Runway pixel-dimension format
+    let ratio = opts.aspectRatio ?? '720:1280';
+    if (ratio === '9:16') ratio = '720:1280';
+    else if (ratio === '16:9') ratio = '1280:720';
+    else if (ratio === '1:1') ratio = '960:960';
+
+    const res = await this.http.post<{ id: string }>('/text_to_video', {
+      model: 'gen4.5',
       promptText: opts.prompt,
       duration,
-      ratio: opts.aspectRatio ?? '9:16',
+      ratio,
     });
 
     return res.data.id;

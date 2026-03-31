@@ -88,7 +88,7 @@ export function createRunwayClipWorker(deps: Deps) {
           jobId,
           sceneId,
           provider:        'runway',
-          model:           'gen3a_turbo',
+          model:           'gen4.5',
           status:          'completed',
           externalTaskId:  taskId,
           requestPayload:  { prompt, durationSec },

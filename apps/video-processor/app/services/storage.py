@@ -1,18 +1,20 @@
 """MinIO/S3 storage client wrapper for video-processor."""
 
-import aioboto3
 import os
+
+import aioboto3
+from botocore.config import Config
+
+from app.config import settings
 
 
 class StorageClient:
     def __init__(self):
-        endpoint = os.environ["MINIO_ENDPOINT"]
-        secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-        scheme = "https" if secure else "http"
-        self._endpoint_url = f"{scheme}://{endpoint}"
-        self._access_key = os.environ["MINIO_ACCESS_KEY"]
-        self._secret_key = os.environ["MINIO_SECRET_KEY"]
-        self._bucket = os.environ.get("MINIO_BUCKET", "kmmzavod")
+        scheme = "https" if settings.minio_secure else "http"
+        self._endpoint_url = f"{scheme}://{settings.minio_endpoint}"
+        self._access_key = settings.minio_access_key
+        self._secret_key = settings.minio_secret_key
+        self._bucket = settings.minio_bucket
 
     def _session(self):
         return aioboto3.Session().client(
@@ -20,6 +22,10 @@ class StorageClient:
             endpoint_url=self._endpoint_url,
             aws_access_key_id=self._access_key,
             aws_secret_access_key=self._secret_key,
+            config=Config(
+                signature_version="s3v4",
+                proxies={},
+            ),
         )
 
     async def download(self, key: str, local_path: str) -> None:

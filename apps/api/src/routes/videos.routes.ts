@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { getRedisSubscriber } from '../lib/redis';
+import { getRedis } from '../lib/redis';
 import { pipelineQueue } from '../lib/queues';
 import { logger } from '../logger';
+import { config } from '../config';
 import type { PipelineJobPayload } from '@kmmzavod/queue';
 
 const CreateVideoBody = z.object({
@@ -12,7 +13,9 @@ const CreateVideoBody = z.object({
   projectId: z.string().uuid().optional(),
   productId: z.string().uuid().optional(),
   scriptPrompt: z.string().min(10).max(2000),
-  avatarId: z.string().default('default'),
+  avatarId: z.string().default('Anna_public_20240108'),
+  voiceId: z.string().default('70856236390f4d0392d00187143d3900'),
+  durationSec: z.number().int().min(15).max(90).default(30),
   settings: z
     .object({
       resolution: z.string().default('1080x1920'),
@@ -20,6 +23,10 @@ const CreateVideoBody = z.object({
       language: z.string().default('ru'),
     })
     .default({}),
+  audioTrack: z.object({
+    storage_key: z.string().min(1),
+    volume: z.number().min(0).max(1).default(0.12),
+  }).optional(),
 });
 
 const ListVideosQuery = z.object({
@@ -32,83 +39,198 @@ const ListVideosQuery = z.object({
 });
 
 export async function videoRoutes(app: FastifyInstance) {
-  // Все маршруты требуют авторизации (кроме SSE — использует ?token=)
-  app.addHook('preHandler', app.authenticate);
+  // SSE endpoint — isolated encapsulation scope so the global auth hook below
+  // does NOT apply. EventSource cannot set Authorization header, so we use ?token=.
+  app.register(async function sseScope(sse) {
+    sse.get('/:id/progress', {
+      preHandler: async (req, reply) => {
+        const { token } = req.query as { token?: string };
+        if (!token) return reply.code(401).send({ error: 'Unauthorized' });
+        try {
+          const decoded = app.jwt.verify(token);
+          req.user = decoded as typeof req.user;
+        } catch {
+          return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+        }
+      },
+    }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { tenantId } = req.user;
 
-  // GET /api/v1/videos/:id/progress — SSE endpoint для отслеживания прогресса
-  // NOTE: Registered BEFORE the /:id catch-all route to avoid conflict.
-  // Uses ?token= query param because EventSource cannot set Authorization header.
-  app.get('/:id/progress', {
-    // Manual auth — EventSource can't send headers
-    preHandler: async (req, reply) => {
-      const { token } = req.query as { token?: string };
-      if (!token) return reply.code(401).send({ error: 'Unauthorized' });
-      try {
-        const decoded = app.jwt.verify(token);
-        req.user = decoded as typeof req.user;
-      } catch {
-        return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+      const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true, error: true } });
+      if (!video) return reply.code(404).send({ error: 'NotFound' });
+
+      // Already terminal — send single event and close
+      if (video.status === 'completed' || video.status === 'failed') {
+        reply.raw.setHeader('Content-Type', 'text/event-stream');
+        reply.raw.setHeader('Cache-Control', 'no-cache');
+        reply.raw.setHeader('Connection', 'keep-alive');
+        reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: video.status === 'completed' ? 100 : 0, isComplete: true, status: video.status, error: video.error ?? null, timestamp: new Date().toISOString() })}\n\n`);
+        reply.raw.end();
+        return;
       }
-    },
-  }, async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const { tenantId } = req.user;
 
-    const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true } });
-    if (!video) return reply.code(404).send({ error: 'NotFound' });
-
-    // Already terminal — send single event and close
-    if (video.status === 'completed' || video.status === 'failed') {
+      // SSE headers
       reply.raw.setHeader('Content-Type', 'text/event-stream');
       reply.raw.setHeader('Cache-Control', 'no-cache');
       reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: 100, isComplete: true, status: video.status, timestamp: new Date().toISOString() })}\n\n`);
-      reply.raw.end();
-      return;
+      reply.raw.setHeader('X-Accel-Buffering', 'no');
+      reply.raw.flushHeaders();
+
+      // Heartbeat
+      let closed = false;
+      const heartbeat = setInterval(() => {
+        if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
+      }, 25_000);
+
+      // Redis pub/sub — dedicated connection per SSE client
+      const sub = getRedis().duplicate();
+      const channel = `video:progress:${tenantId}:${id}`;
+      await sub.subscribe(channel);
+
+      const onMessage = (ch: string, message: string) => {
+        if (ch !== channel || closed || reply.raw.writableEnded) return;
+        try {
+          const event = JSON.parse(message);
+          reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+          if (event.status === 'completed' || event.status === 'failed' || event.isComplete) {
+            setTimeout(() => {
+              if (!reply.raw.writableEnded) reply.raw.end();
+            }, 500);
+          }
+        } catch { /* ignore parse errors */ }
+      };
+      sub.on('message', onMessage);
+
+      // Cleanup — unsubscribe and disconnect the per-request connection
+      const cleanup = async () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        sub.removeListener('message', onMessage);
+        try { await sub.unsubscribe(channel); } catch { /* ignore */ }
+        sub.disconnect();
+      };
+      reply.raw.on('close', cleanup);
+      reply.raw.on('error', cleanup);
+    });
+  });
+
+  // Все остальные маршруты требуют авторизации через Authorization header
+  app.addHook('preHandler', app.authenticate);
+
+  // GET /api/v1/videos/avatars — список HeyGen аватаров с превью
+  app.get('/avatars', async (req, reply) => {
+    const apiKey = config.HEYGEN_API_KEY;
+    if (!apiKey) {
+      // Fallback: return hardcoded avatar list without images
+      return reply.send({
+        avatars: [
+          { avatar_id: 'Anna_public_20240108', avatar_name: 'Анна', preview_image_url: null, gender: 'female' },
+          { avatar_id: 'Adrian_public_2_20240312', avatar_name: 'Адриан', preview_image_url: null, gender: 'male' },
+          { avatar_id: 'Kristin_public_3_20240108', avatar_name: 'Кристин', preview_image_url: null, gender: 'female' },
+        ],
+      });
     }
 
-    // SSE headers
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-cache');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no');
-    reply.raw.flushHeaders();
+    // Check Redis cache first (1 hour TTL)
+    const redis = getRedis();
+    const cacheKey = 'heygen:avatars';
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return reply.send(JSON.parse(cached));
+    }
 
-    // Heartbeat
-    let closed = false;
-    const heartbeat = setInterval(() => {
-      if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
-    }, 25_000);
+    try {
+      const res = await fetch('https://api.heygen.com/v2/avatars', {
+        headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      });
 
-    // Redis pub/sub
-    const sub = getRedisSubscriber();
-    const channel = `video:progress:${tenantId}:${id}`;
-    await sub.subscribe(channel);
+      if (!res.ok) throw new Error(`HeyGen API ${res.status}`);
+      const data = (await res.json()) as any;
 
-    const onMessage = (ch: string, message: string) => {
-      if (ch !== channel || closed || reply.raw.writableEnded) return;
-      try {
-        const event = JSON.parse(message);
-        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-        if (event.status === 'completed' || event.status === 'failed' || event.isComplete) {
-          setTimeout(() => {
-            if (!reply.raw.writableEnded) reply.raw.end();
-          }, 500);
-        }
-      } catch { /* ignore parse errors */ }
-    };
-    sub.on('message', onMessage);
+      const avatars = (data.data?.avatars ?? [])
+        .filter((a: any) => a.avatar_id && a.avatar_name)
+        .map((a: any) => ({
+          avatar_id: a.avatar_id,
+          avatar_name: a.avatar_name,
+          preview_image_url: a.preview_image_url ?? a.thumbnail_image_url ?? null,
+          gender: a.gender ?? null,
+        }));
 
-    // Cleanup
-    const cleanup = async () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(heartbeat);
-      sub.removeListener('message', onMessage);
-      try { await sub.unsubscribe(channel); } catch { /* ignore */ }
-    };
-    reply.raw.on('close', cleanup);
-    reply.raw.on('error', cleanup);
+      const result = { avatars };
+      await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+      return reply.send(result);
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'Не удалось получить аватары из HeyGen');
+      // Return hardcoded fallback
+      return reply.send({
+        avatars: [
+          { avatar_id: 'Anna_public_20240108', avatar_name: 'Анна', preview_image_url: null, gender: 'female' },
+          { avatar_id: 'Adrian_public_2_20240312', avatar_name: 'Адриан', preview_image_url: null, gender: 'male' },
+          { avatar_id: 'Kristin_public_3_20240108', avatar_name: 'Кристин', preview_image_url: null, gender: 'female' },
+        ],
+      });
+    }
+  });
+
+  // GET /api/v1/videos/voices — список HeyGen голосов с превью
+  app.get('/voices', async (req, reply) => {
+    const apiKey = config.HEYGEN_API_KEY;
+    if (!apiKey) {
+      return reply.send({ data: [], has_more: false });
+    }
+
+    const query = req.query as Record<string, string | undefined>;
+    const language = query.language ?? undefined;
+    const gender = query.gender ?? undefined;
+    const limit = Math.min(Number(query.limit) || 50, 100);
+    const token = query.token ?? undefined;
+
+    // Build cache key from query parameters
+    const redis = getRedis();
+    const cacheKey = `heygen:voices:${language ?? 'all'}:${gender ?? 'all'}:${limit}:${token ?? 'first'}`;
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return reply.send(JSON.parse(cached));
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set('type', 'public');
+      params.set('limit', String(limit));
+      if (language) params.set('language', language);
+      if (gender) params.set('gender', gender);
+      if (token) params.set('token', token);
+
+      const res = await fetch(`https://api.heygen.com/v1/audio/voices?${params}`, {
+        headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!res.ok) throw new Error(`HeyGen Voices API ${res.status}`);
+      const raw = (await res.json()) as any;
+
+      const result = {
+        data: (raw.data ?? []).map((v: any) => ({
+          voice_id: v.voice_id,
+          name: v.name,
+          gender: v.gender ?? null,
+          language: v.language ?? null,
+          preview_audio_url: v.preview_audio_url ?? null,
+          support_locale: v.support_locale ?? false,
+        })),
+        has_more: raw.has_more ?? false,
+        next_token: raw.next_token ?? null,
+      };
+
+      await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+      return reply.send(result);
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'Не удалось получить голоса из HeyGen');
+      return reply.send({ data: [], has_more: false });
+    }
   });
 
   // POST /api/v1/videos — создать видео и запустить пайплайн
@@ -206,7 +328,17 @@ export async function videoRoutes(app: FastifyInstance) {
           payload: {
             script_prompt: enrichedPrompt,
             avatar_id: body.avatarId,
-            settings: body.settings,
+            voice_id: body.voiceId,
+            settings: {
+              ...body.settings,
+              durationSec: body.durationSec,
+              audio_track: body.audioTrack ? {
+                storage_key: body.audioTrack.storage_key,
+                volume: body.audioTrack.volume,
+                fade_in_sec: 1.5,
+                fade_out_sec: 2.0,
+              } : undefined,
+            },
             estimatedCredits,
           },
         },
@@ -309,6 +441,7 @@ export async function videoRoutes(app: FastifyInstance) {
             durationSec: true,
             fileSizeMb: true,
             status: true,
+            error: true,
             selectedAt: true,
             createdAt: true,
           },
@@ -326,6 +459,7 @@ export async function videoRoutes(app: FastifyInstance) {
                 avatarDone: true,
                 clipDone: true,
                 imageDone: true,
+                error: true,
               },
             },
             events: {
@@ -486,11 +620,11 @@ export async function videoRoutes(app: FastifyInstance) {
           '1 day'
         ) AS d
         LEFT JOIN (
-          SELECT DATE("createdAt") AS dt, COUNT(*)::bigint AS cnt
-          FROM "Video"
-          WHERE "tenantId" = ${tenantId}
-            AND "createdAt" >= (NOW() - INTERVAL '6 days')::date
-          GROUP BY DATE("createdAt")
+          SELECT DATE("created_at") AS dt, COUNT(*)::bigint AS cnt
+          FROM "videos"
+          WHERE "tenant_id" = ${tenantId}::uuid
+            AND "created_at" >= (NOW() - INTERVAL '6 days')::date
+          GROUP BY DATE("created_at")
         ) c ON c.dt = d::date
         ORDER BY d
       `,

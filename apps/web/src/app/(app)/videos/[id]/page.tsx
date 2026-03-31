@@ -258,6 +258,74 @@ export default function VideoDetailPage() {
           </Card>
         </div>
 
+        {/* ── Error section (visible when failed) ─────────────────────────── */}
+        {video.status === "failed" && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-red-400 text-lg">❌</span>
+              <p className="text-sm font-semibold text-red-400">
+                Ошибка генерации видео
+              </p>
+            </div>
+            {(video.error || video.job?.error) && (
+              <p className="text-sm text-text-secondary bg-surface-2 rounded-lg p-3 font-mono break-all">
+                {video.error || video.job?.error}
+              </p>
+            )}
+            {/* Show failed scenes with their errors */}
+            {scenes.filter((s) => s.status === "failed" && s.error).length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
+                  Ошибки по сценам
+                </p>
+                {scenes
+                  .filter((s) => s.status === "failed" && s.error)
+                  .map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-start gap-3 text-xs bg-surface-2 rounded-lg p-3"
+                    >
+                      <span className="text-red-400 font-medium whitespace-nowrap">
+                        Сцена {s.sceneIndex + 1} ({s.type})
+                      </span>
+                      <span className="text-text-secondary font-mono break-all">
+                        {s.error}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            )}
+            {/* Show failed events */}
+            {dbEvents.filter((e) => e.status === "failed").length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
+                  Журнал ошибок
+                </p>
+                {dbEvents
+                  .filter((e) => e.status === "failed")
+                  .map((e) => (
+                    <div
+                      key={e.id}
+                      className="flex items-start gap-3 text-xs bg-surface-2 rounded-lg p-3"
+                    >
+                      <span className="text-text-tertiary whitespace-nowrap">
+                        {new Date(e.createdAt).toLocaleTimeString("ru-RU")}
+                      </span>
+                      <span className="text-red-400 font-medium">
+                        {STAGE_META[e.stage]?.label ?? e.stage}
+                      </span>
+                      {e.message && (
+                        <span className="text-text-secondary font-mono break-all">
+                          {e.message}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Progress section (hidden when completed) ────────────────────── */}
         {!isCompleted && (isProcessing || scenes.length > 0) && (
           <div className="rounded-xl border border-border bg-surface-1 p-5">
@@ -478,6 +546,7 @@ export default function VideoDetailPage() {
                     <th className="text-left py-2.5 px-4 font-medium">Тип</th>
                     <th className="text-left py-2.5 px-4 font-medium">Статус</th>
                     <th className="text-left py-2.5 px-4 font-medium">Длит.</th>
+                    <th className="text-left py-2.5 px-4 font-medium">Ошибка</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -492,6 +561,9 @@ export default function VideoDetailPage() {
                       </td>
                       <td className="py-2.5 px-4 text-text-secondary">
                         {s.durationSec ? `${s.durationSec}с` : "\u2014"}
+                      </td>
+                      <td className="py-2.5 px-4 text-red-400 text-xs max-w-xs truncate" title={s.error ?? undefined}>
+                        {s.error ?? "\u2014"}
                       </td>
                     </tr>
                   ))}

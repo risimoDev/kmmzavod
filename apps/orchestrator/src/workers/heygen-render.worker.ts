@@ -39,7 +39,7 @@ export function createHeygenRenderWorker(deps: Deps) {
   return new Worker<HeygenRenderJobPayload>(
     QUEUES['heygen-render'].name,
     async (job) => {
-      const { jobId, sceneId, tenantId, avatarId, script } = job.data;
+      const { jobId, sceneId, tenantId, avatarId, voiceId, script } = job.data;
       const log     = logger.child({ jobId, sceneId, worker: 'heygen-render' });
       const startMs = Date.now();
 
@@ -50,7 +50,7 @@ export function createHeygenRenderWorker(deps: Deps) {
       });
 
       // ─── 1. Создаём задачу в HeyGen ──────────────────────────────────────
-      const heygenVideoId = await heygen.createAvatarVideo({ avatarId, script });
+      const heygenVideoId = await heygen.createAvatarVideo({ avatarId, voiceId, script });
       log.info({ heygenVideoId }, 'HeyGen: задача создана, ожидаем рендер');
 
       await db.scene.update({

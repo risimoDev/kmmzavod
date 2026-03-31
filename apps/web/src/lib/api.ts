@@ -52,26 +52,30 @@ export function getStoredTenant(): AuthTenant | null {
 // ── Fetch wrapper with auto-refresh ──────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${getAccessToken()}`,
+    ...(init.headers as Record<string, string> ?? {}),
+  };
+  if (init.body) headers['Content-Type'] = 'application/json';
+
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${getAccessToken()}`,
-      ...(init.headers ?? {}),
-    },
+    headers,
   });
 
   // Token expired — try refresh
   if (res.status === 401 && getRefreshToken()) {
     const refreshed = await refreshTokens();
     if (refreshed) {
+      const retryHeaders: Record<string, string> = {
+        Authorization: `Bearer ${getAccessToken()}`,
+        ...(init.headers as Record<string, string> ?? {}),
+      };
+      if (init.body) retryHeaders['Content-Type'] = 'application/json';
+
       const retry = await fetch(`${BASE}${path}`, {
         ...init,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getAccessToken()}`,
-          ...(init.headers ?? {}),
-        },
+        headers: retryHeaders,
       });
       if (retry.ok) {
         if (retry.status === 204) return undefined as T;
@@ -88,7 +92,8 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body as any).message ?? `HTTP ${res.status}`);
+    const msg = (body as any).message;
+    throw new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
   }
 
   if (res.status === 204) return undefined as T;
@@ -140,12 +145,14 @@ export interface Video {
 export interface VideoDetail extends Video {
   description: string | null;
   outputUrl: string | null;
+  error: string | null;
   metadata: Record<string, unknown>;
   variants: VideoVariant[];
   publishJobs: PublishJob[];
   job: {
     id: string;
     status: string;
+    error: string | null;
     scenes: Array<{
       id: string;
       sceneIndex: number;
@@ -155,6 +162,7 @@ export interface VideoDetail extends Video {
       avatarDone: boolean;
       clipDone: boolean;
       imageDone: boolean;
+      error: string | null;
     }>;
     events: Array<{
       id: number;
@@ -292,6 +300,36 @@ export const videosApi = {
 
   get: (id: string) => apiFetch<VideoDetail>(`/api/v1/videos/${id}`),
 
+  avatars: () =>
+    apiFetch<{
+      avatars: Array<{
+        avatar_id: string;
+        avatar_name: string;
+        preview_image_url: string | null;
+        gender: string | null;
+      }>;
+    }>('/api/v1/videos/avatars'),
+
+  voices: (params: { language?: string; gender?: string; limit?: number; token?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.language) q.set('language', params.language);
+    if (params.gender) q.set('gender', params.gender);
+    if (params.limit) q.set('limit', String(params.limit));
+    if (params.token) q.set('token', params.token);
+    return apiFetch<{
+      data: Array<{
+        voice_id: string;
+        name: string;
+        gender: string | null;
+        language: string | null;
+        preview_audio_url: string | null;
+        support_locale: boolean;
+      }>;
+      has_more: boolean;
+      next_token: string | null;
+    }>(`/api/v1/videos/voices?${q}`);
+  },
+
   create: (body: {
     title: string;
     scriptPrompt: string;
@@ -299,7 +337,10 @@ export const videosApi = {
     productId?: string;
     description?: string;
     avatarId?: string;
+    voiceId?: string;
+    durationSec?: number;
     settings?: { resolution?: string; fps?: number; language?: string };
+    audioTrack?: { storage_key: string; volume: number };
   }) =>
     apiFetch<{ video: { id: string; title: string; status: string; createdAt: string }; jobId: string }>(
       '/api/v1/videos',
@@ -420,4 +461,31 @@ export const productsApi = {
 
   delete: (id: string) =>
     apiFetch<void>(`/api/v1/products/${id}`, { method: 'DELETE' }),
+
+  uploadImage: async (file: File): Promise<{ key: string; url: string }> => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE}/api/v1/products/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAccessToken()}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
+  scrapeWb: (url: string) =>
+    apiFetch<{
+      articleId: string;
+      name: string;
+      description: string;
+      price: string | null;
+      brand: string;
+      characteristics: string[];
+      imageUrls: string[];
+      sourceUrl: string;
+    }>('/api/v1/products/scrape-wb', { method: 'POST', body: JSON.stringify({ url }) }),
 };

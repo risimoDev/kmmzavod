@@ -6,13 +6,15 @@ import { cn } from "@/lib/utils";
 import { TopBar } from "@/components/layout/AppShell";
 
 const ADMIN_TABS: readonly { href: string; label: string; exact?: boolean }[] = [
-  { href: "/admin",         label: "Обзор",      exact: true },
-  { href: "/admin/users",   label: "Пользователи" },
-  { href: "/admin/tenants", label: "Тенанты" },
-  { href: "/admin/videos",  label: "Видео" },
-  { href: "/admin/jobs",    label: "Задачи" },
-  { href: "/admin/usage",   label: "Затраты" },
-  { href: "/admin/settings",label: "Настройки" },
+  { href: "/admin",               label: "Обзор",          exact: true },
+  { href: "/admin/users",         label: "Пользователи" },
+  { href: "/admin/tenants",       label: "Тенанты" },
+  { href: "/admin/videos",        label: "Видео" },
+  { href: "/admin/jobs",          label: "Задачи" },
+  { href: "/admin/pipeline-test", label: "Тест пайплайна" },
+  { href: "/admin/usage",         label: "Затраты" },
+  { href: "/admin/services",      label: "Сервисы" },
+  { href: "/admin/settings",      label: "Настройки" },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

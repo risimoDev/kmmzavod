@@ -39,7 +39,7 @@ export function createImageGenWorker(deps: Deps) {
   return new Worker<ImageGenJobPayload>(
     QUEUES['image-gen'].name,
     async (job) => {
-      const { jobId, sceneId, tenantId, prompt } = job.data;
+      const { jobId, sceneId, tenantId, prompt, referenceImageKeys } = job.data;
       const log     = logger.child({ jobId, sceneId, worker: 'image-gen' });
       const startMs = Date.now();
 
@@ -60,6 +60,7 @@ export function createImageGenWorker(deps: Deps) {
         negativePrompt: 'ugly, blurry, distorted, lowres',
         width:  1080,
         height: 1920,
+        referenceImageUrls: referenceImageKeys,
       });
       log.info({ imageUrl }, 'Изображение сгенерировано');
 

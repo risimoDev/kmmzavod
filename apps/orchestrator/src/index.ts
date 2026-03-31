@@ -4,7 +4,6 @@
  *
  * Порядок завершения: SIGTERM → graceful close workers → закрыть Redis/DB
  */
-import 'dotenv/config';
 import { Queue } from 'bullmq';
 import OpenAI from 'openai';
 
@@ -48,9 +47,12 @@ async function main() {
   });
   const heygen = new HeyGenClient(config.HEYGEN_API_KEY);
   const runway = new RunwayClient(config.RUNWAY_API_KEY);
+  const imageGenApiKey = config.IMAGE_GEN_PROVIDER === 'runway'
+    ? config.RUNWAY_API_KEY
+    : config.IMAGE_GEN_API_KEY;
   const imageGen = new ImageGenClient(
     config.IMAGE_GEN_PROVIDER as ImageGenProvider,
-    config.IMAGE_GEN_API_KEY
+    imageGenApiKey
   );
 
   const storage = new MinioStorageClient({
@@ -150,21 +152,130 @@ async function main() {
     if (!bullJob) return;
     const { jobId, sceneId, tenantId } = bullJob.data;
     try {
-      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true } });
+      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
+      const errorMsg = err.message || 'Unknown error';
       await db.$transaction([
-        db.scene.update({ where: { id: sceneId }, data: { status: 'failed', error: err.message } }),
-        db.job.update({ where: { id: jobId }, data: { status: 'failed' } }),
+        db.scene.update({ where: { id: sceneId }, data: { status: 'failed', error: errorMsg } }),
+        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
         ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed' } }),
+          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[${stage}] ${errorMsg}` } }),
         ] : []),
       ]);
       await db.jobEvent.create({
-        data: { jobId, tenantId, stage, status: 'failed', message: err.message },
+        data: { jobId, tenantId, stage, status: 'failed', message: errorMsg },
       });
+      // Publish failure via SSE
+      if (jobRow?.videoId) {
+        const { publishProgress } = await import('./lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, stage, 'failed', 0, errorMsg);
+      }
+      // Refund reserved credits
+      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+      if (reserved > 0) {
+        const { refundReserve } = await import('./lib/credits');
+        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+      }
     } catch (dbErr) {
       logger.error({ dbErr, jobId, sceneId }, 'handleSceneFailure: DB error');
     }
   };
+
+  // Pipeline worker failure — startPipeline threw (bad job data, DB error, etc.)
+  pipelineWorker.on('failed', async (j, err) => {
+    if (!j) return;
+    const { jobId, tenantId } = j.data;
+    const errorMsg = err.message || 'Pipeline start failed';
+    try {
+      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
+      await db.$transaction([
+        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
+        ...(jobRow?.videoId ? [
+          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[pipeline] ${errorMsg}` } }),
+        ] : []),
+      ]);
+      await db.jobEvent.create({
+        data: { jobId, tenantId, stage: 'pipeline', status: 'failed', message: errorMsg },
+      });
+      if (jobRow?.videoId) {
+        const { publishProgress } = await import('./lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, 'pipeline', 'failed', 0, errorMsg);
+      }
+      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+      if (reserved > 0) {
+        const { refundReserve } = await import('./lib/credits');
+        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+      }
+      logger.error({ jobId, tenantId, err: errorMsg }, 'Pipeline: final failure after retries');
+    } catch (dbErr) {
+      logger.error({ dbErr, jobId }, 'Pipeline failed handler: DB error');
+    }
+  });
+
+  // GPT script worker failure — OpenAI returned garbage, timeout, etc.
+  gptWorker.on('failed', async (j, err) => {
+    if (!j) return;
+    const { jobId, tenantId } = j.data;
+    const errorMsg = err.message || 'GPT script generation failed';
+    try {
+      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
+      await db.$transaction([
+        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
+        ...(jobRow?.videoId ? [
+          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[gpt-script] ${errorMsg}` } }),
+        ] : []),
+      ]);
+      await db.jobEvent.create({
+        data: { jobId, tenantId, stage: 'gpt-script', status: 'failed', message: errorMsg },
+      });
+      if (jobRow?.videoId) {
+        const { publishProgress } = await import('./lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, 'gpt-script', 'failed', 0, errorMsg);
+      }
+      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+      if (reserved > 0) {
+        const { refundReserve } = await import('./lib/credits');
+        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+      }
+      logger.error({ jobId, tenantId, err: errorMsg }, 'GPT script: final failure after retries');
+    } catch (dbErr) {
+      logger.error({ dbErr, jobId }, 'GPT script failed handler: DB error');
+    }
+  });
+
+  // Video compose worker failure — all variant renders failed
+  videoComposeWorker.on('failed', async (j, err) => {
+    if (!j) return;
+    const { jobId, tenantId } = j.data;
+    const errorMsg = err.message || 'Video composition failed';
+    try {
+      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true, creditsUsed: true } });
+      await db.$transaction([
+        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
+        ...(jobRow?.videoId ? [
+          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[video-compose] ${errorMsg}` } }),
+        ] : []),
+      ]);
+      await db.jobEvent.create({
+        data: { jobId, tenantId, stage: 'video-compose', status: 'failed', message: errorMsg },
+      });
+      if (jobRow?.videoId) {
+        const { publishProgress } = await import('./lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, 'video-compose', 'failed', 0, errorMsg);
+      }
+      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+      if (reserved > 0) {
+        const { refundReserve } = await import('./lib/credits');
+        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+      }
+      logger.error({ jobId, tenantId, err: errorMsg }, 'Video compose: final failure after retries');
+    } catch (dbErr) {
+      logger.error({ dbErr, jobId }, 'Video compose failed handler: DB error');
+    }
+  });
 
   heygenWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'heygen-render'));
   runwayWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'runway-clip'));
@@ -213,9 +324,42 @@ async function main() {
     'Все workers запущены'
   );
 
+  // ── Heartbeat: write TTL key every 15s ──────────────────────────────────
+  const HEARTBEAT_KEY = 'kmmzavod:heartbeat:orchestrator';
+  const sendHeartbeat = () => {
+    connection.set(HEARTBEAT_KEY, JSON.stringify({
+      pid: process.pid,
+      uptime: process.uptime(),
+      workers: allWorkers.length,
+      timestamp: new Date().toISOString(),
+    }), 'EX', 30).catch(() => {});
+  };
+  sendHeartbeat();
+  const hbTimer = setInterval(sendHeartbeat, 15_000);
+
+  // ── Restart listener via Redis pub/sub ──────────────────────────────────
+  const { default: Redis } = await import('ioredis');
+  const restartSub = new Redis({
+    host: config.REDIS_HOST,
+    port: config.REDIS_PORT,
+    password: config.REDIS_PASSWORD,
+    maxRetriesPerRequest: null,
+  });
+  await restartSub.subscribe('kmmzavod:service:restart');
+  restartSub.on('message', (_ch, msg) => {
+    try {
+      const cmd = JSON.parse(msg);
+      if (cmd.service === 'orchestrator' || cmd.service === 'all') {
+        logger.info({ cmd }, 'Получена команда перезапуска, закрываемся...');
+        shutdown('restart');
+      }
+    } catch {}
+  });
+
   // ── Graceful shutdown ─────────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Получен сигнал завершения, закрываем workers...');
+    clearInterval(hbTimer);
 
     await Promise.all(allWorkers.map((w) => w.close()));
     await Promise.all([
@@ -229,6 +373,8 @@ async function main() {
       pipelineQueue.close(),
     ]);
     await db.$disconnect();
+    try { await connection.del(HEARTBEAT_KEY); } catch {}
+    try { await restartSub.unsubscribe('kmmzavod:service:restart'); restartSub.disconnect(); } catch {}
     connection.disconnect();
 
     logger.info('Orchestrator остановлен');

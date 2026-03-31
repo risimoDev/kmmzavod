@@ -76,11 +76,16 @@ export async function startPipeline(jobId: string, tenantId: string, deps: Deps)
     }
   }
 
+  const settings = (payload['settings'] as Record<string, unknown>) ?? {};
   const gptPayload: GptScriptJobPayload = {
     jobId,
     tenantId,
     prompt:          (payload['script_prompt'] as string) ?? '',
-    projectSettings: (payload['settings']      as Record<string, unknown>) ?? {},
+    projectSettings: {
+      ...settings,
+      avatar_id: payload['avatar_id'] ?? settings['avatar_id'],
+      voice_id:  payload['voice_id']  ?? settings['voice_id'],
+    },
     productContext,
   };
 

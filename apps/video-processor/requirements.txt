@@ -12,5 +12,8 @@ aioboto3==13.1.1
 # System metrics (used in /metrics endpoint)
 psutil==6.0.0
 
+# Speech-to-text for subtitle synchronisation
+faster-whisper==1.1.0
+
 # CLI
 click==8.1.7

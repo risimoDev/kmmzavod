@@ -7,8 +7,8 @@ import { logger } from '../logger';
 
 interface HeyGenScene {
   avatarId: string;
+  voiceId: string;
   script: string;
-  voice?: { type: 'text'; input_text: string; voice_id: string };
 }
 
 interface CreateVideoResponse {
@@ -19,7 +19,7 @@ interface CreateVideoResponse {
 interface VideoStatusResponse {
   data: {
     video_id: string;
-    status: 'pending' | 'processing' | 'completed' | 'failed';
+    status: 'waiting' | 'pending' | 'processing' | 'completed' | 'failed';
     video_url?: string;
     duration?: number;
     error?: string;
@@ -29,14 +29,22 @@ interface VideoStatusResponse {
 
 export class HeyGenClient {
   private http: AxiosInstance;
+  /** Separate instance for v1 endpoints (e.g. video_status) */
+  private httpV1: AxiosInstance;
 
   constructor(apiKey: string) {
+    const headers = {
+      'X-Api-Key': apiKey,
+      'Content-Type': 'application/json',
+    };
     this.http = axios.create({
       baseURL: 'https://api.heygen.com/v2',
-      headers: {
-        'X-Api-Key': apiKey,
-        'Content-Type': 'application/json',
-      },
+      headers,
+      timeout: 30_000,
+    });
+    this.httpV1 = axios.create({
+      baseURL: 'https://api.heygen.com/v1',
+      headers,
       timeout: 30_000,
     });
   }
@@ -53,9 +61,9 @@ export class HeyGenClient {
           voice: {
             type: 'text',
             input_text: scene.script,
-            voice_id: scene.voice?.voice_id ?? 'default',
+            voice_id: scene.voiceId,
           },
-          background: { type: 'color', value: '#ffffff' },
+          background: { type: 'color', value: '#000000' },
         },
       ],
       dimension: { width: 1080, height: 1920 },
@@ -65,7 +73,10 @@ export class HeyGenClient {
     const res = await this.http.post<CreateVideoResponse>('/video/generate', payload);
 
     if (res.data.error) {
-      throw new Error(`HeyGen create error: ${res.data.error}`);
+      const errMsg = typeof res.data.error === 'string'
+        ? res.data.error
+        : ((res.data.error as any)?.message ?? JSON.stringify(res.data.error));
+      throw new Error(`HeyGen create error: ${errMsg}`);
     }
 
     return res.data.data.video_id;
@@ -77,13 +88,18 @@ export class HeyGenClient {
    */
   async pollUntilDone(
     videoId: string,
-    opts = { maxAttempts: 40, baseDelayMs: 15_000 }
+    opts = { maxAttempts: 80, baseDelayMs: 15_000 }
   ): Promise<{ videoUrl: string; duration: number }> {
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
-      const res = await this.http.get<VideoStatusResponse>(`/video/${videoId}`);
+      const res = await this.httpV1.get<VideoStatusResponse>('/video_status.get', {
+        params: { video_id: videoId },
+      });
 
       if (res.data.error) {
-        throw new Error(`HeyGen poll error: ${res.data.error}`);
+        const errMsg = typeof res.data.error === 'string'
+          ? res.data.error
+          : ((res.data.error as any)?.message ?? JSON.stringify(res.data.error));
+        throw new Error(`HeyGen poll error: ${errMsg}`);
       }
 
       const { status, video_url, duration, error } = res.data.data;

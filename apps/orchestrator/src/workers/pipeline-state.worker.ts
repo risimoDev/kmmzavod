@@ -71,10 +71,20 @@ export function createPipelineStateWorker(deps: Deps): Worker {
 
       if (anyFailed) {
         // Some scenes permanently failed — mark the whole job/video as failed
+        const failedScenes = scenes.filter((s: SceneRow) => s.status === 'failed');
+        const failedSceneDetails = await db.scene.findMany({
+          where: { jobId, status: 'failed' },
+          select: { sceneIndex: true, type: true, error: true },
+        });
+        const errorSummary = failedSceneDetails
+          .map((s) => `Scene ${s.sceneIndex} (${s.type}): ${s.error || 'unknown error'}`)
+          .join('; ');
+        const errorMsg = `${failedScenes.length} scene(s) failed: ${errorSummary}`;
+
         await db.$transaction([
-          db.job.update({ where: { id: jobId }, data: { status: 'failed' } }),
+          db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
           ...(jobRow?.videoId ? [
-            db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed' } }),
+            db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: errorMsg } }),
           ] : []),
         ]);
 

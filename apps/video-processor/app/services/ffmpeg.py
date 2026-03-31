@@ -26,9 +26,17 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.config import settings
 from app.models import KenBurnsPreset, TransitionType
 
 logger = logging.getLogger(__name__)
+
+
+def _bin(name: str) -> str:
+    """Return full path to an FFmpeg binary (ffmpeg / ffprobe)."""
+    if settings.ffmpeg_bin_dir:
+        return os.path.join(settings.ffmpeg_bin_dir, name)
+    return name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +107,7 @@ def _ken_burns_preset_for_index(index: int) -> KenBurnsPreset:
 def probe(path: str) -> ProbeInfo:
     """Run ffprobe and return stream metadata."""
     cmd = [
-        "ffprobe", "-v", "quiet",
+        _bin("ffprobe"), "-v", "quiet",
         "-print_format", "json",
         "-show_streams", "-show_format",
         path,
@@ -146,9 +154,17 @@ def normalize_video_clip(
 
     • Letterboxes (black bars) if aspect ratio doesn't match.
     • Ensures stereo AAC audio; inserts silence if the source has none.
+    • If source is shorter than duration → loops the clip.
+    • If source is longer → trims from the beginning.
     • Uses ``ultrafast`` preset since this is an intermediate file.
     """
     info = probe(input_path)
+
+    # If source is shorter than needed, use stream_loop to extend it
+    loop_args: list[str] = []
+    if info.duration > 0 and info.duration < duration - 0.1:
+        loops_needed = int(duration / info.duration) + 1
+        loop_args = ["-stream_loop", str(loops_needed)]
 
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -173,7 +189,9 @@ def normalize_video_clip(
     map_args += ["-map", "[a]"]
 
     cmd = (
-        ["ffmpeg", "-y", "-i", input_path]
+        [_bin("ffmpeg"), "-y"]
+        + loop_args
+        + ["-i", input_path]
         + extra_inputs
         + ["-filter_complex", ";".join(fc_parts)]
         + map_args
@@ -253,8 +271,7 @@ def image_to_clip(
             f"w='{sw}-{mw}*min(t/{d},1)':"
             f"h='{sh}-{mh}*min(t/{d},1)':"
             f"x='{mw}*min(t/{d},1)/2':"
-            f"y='{mh}*min(t/{d},1)/2':"
-            f"eval=frame"
+            f"y='{mh}*min(t/{d},1)/2'"
         )
 
     elif preset is KenBurnsPreset.ZOOM_OUT:
@@ -264,8 +281,7 @@ def image_to_clip(
             f"w='{width}+{mw}*min(t/{d},1)':"
             f"h='{height}+{mh}*min(t/{d},1)':"
             f"x='{mw}*(1-min(t/{d},1))/2':"
-            f"y='{mh}*(1-min(t/{d},1))/2':"
-            f"eval=frame"
+            f"y='{mh}*(1-min(t/{d},1))/2'"
         )
 
     elif preset is KenBurnsPreset.PAN_LR:
@@ -274,8 +290,7 @@ def image_to_clip(
             f"crop="
             f"w={width}:h={height}:"
             f"x='{mw}*min(t/{d},1)':"
-            f"y='{mh//2}':"
-            f"eval=frame"
+            f"y='{mh//2}'"
         )
 
     elif preset is KenBurnsPreset.PAN_RL:
@@ -284,8 +299,7 @@ def image_to_clip(
             f"crop="
             f"w={width}:h={height}:"
             f"x='{mw}*(1-min(t/{d},1))':"
-            f"y='{mh//2}':"
-            f"eval=frame"
+            f"y='{mh//2}'"
         )
 
     else:  # PAN_TB
@@ -294,8 +308,7 @@ def image_to_clip(
             f"crop="
             f"w={width}:h={height}:"
             f"x='{mw//2}':"
-            f"y='{mh}*min(t/{d},1)':"
-            f"eval=frame"
+            f"y='{mh}*min(t/{d},1)'"
         )
 
     scale_back = f"scale={width}:{height}:flags=lanczos"
@@ -305,7 +318,7 @@ def image_to_clip(
     silent_audio = f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={duration}"
 
     cmd = [
-        "ffmpeg", "-y",
+        _bin("ffmpeg"), "-y",
         "-loop", "1", "-framerate", str(fps),
         "-i", input_path,
         "-filter_complex", f"[0:v]{vf}[v];{silent_audio}[a]",
@@ -345,10 +358,10 @@ def concat_with_transitions(
     n = len(clips)
 
     if n == 1:
-        _run(["ffmpeg", "-y", "-i", clips[0].path, "-c", "copy", output], "single_clip_copy")
+        _run([_bin("ffmpeg"), "-y", "-i", clips[0].path, "-c", "copy", output], "single_clip_copy")
         return
 
-    cmd = ["ffmpeg", "-y"]
+    cmd = [_bin("ffmpeg"), "-y"]
     for c in clips:
         cmd += ["-i", c.path]
 
@@ -398,7 +411,7 @@ def concat_with_transitions(
         "-filter_complex", ";".join(fc_parts),
         "-map", "[v_end]",
         "-map", "[a_end]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
         "-c:a", "aac", "-b:a", "128k",
         "-t", str(total_duration),
         "-threads", str(threads),
@@ -444,7 +457,7 @@ def mix_bgm(
     )
 
     cmd = [
-        "ffmpeg", "-y",
+        _bin("ffmpeg"), "-y",
         "-i", video_path,
         "-i", bgm_path,
         "-filter_complex", fc,
@@ -473,7 +486,7 @@ def burn_subtitles(
     safe_ass = _safe_filter_path(ass_path)
 
     cmd = [
-        "ffmpeg", "-y",
+        _bin("ffmpeg"), "-y",
         "-i", input_path,
         "-vf", f"ass='{safe_ass}'",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
@@ -490,11 +503,11 @@ def final_encode(
     width: int,
     height: int,
     fps: int,
-    crf: int = 23,
-    preset: str = "fast",
-    audio_bitrate: str = "128k",
-    max_bitrate: str = "4M",
-    bufsize: str = "8M",
+    crf: int = 21,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+    max_bitrate: str = "6M",
+    bufsize: str = "12M",
     threads: int = 0,
 ) -> None:
     """
@@ -506,7 +519,8 @@ def final_encode(
     • ``-profile:v high -level 4.1`` — broad decoder compatibility.
     • ``-maxrate / -bufsize`` — caps peak bitrate to avoid upload rejections.
     • ``-pix_fmt yuv420p`` — required by most platforms.
-    • AAC-LC stereo at 128 kbps — universally supported.
+    • AAC-LC stereo — universally supported.
+    • ``loudnorm`` — EBU R128 audio normalisation for consistent volume.
     """
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -515,10 +529,14 @@ def final_encode(
         f"format=yuv420p"
     )
 
+    # Audio normalization: EBU R128 loudness standard for social media
+    af = "loudnorm=I=-16:LRA=11:TP=-1.5"
+
     cmd = [
-        "ffmpeg", "-y",
+        _bin("ffmpeg"), "-y",
         "-i", input_path,
         "-vf", vf,
+        "-af", af,
         "-c:v", "libx264",
         "-preset", preset,
         "-crf", str(crf),
@@ -536,6 +554,140 @@ def final_encode(
         output_path,
     ]
     _run(cmd, "final_encode")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layout composition — chroma-key avatar overlaid on backgrounds
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pip_xy(
+    layout: str, width: int, height: int, pip_w: int, pip_h: int, margin: int,
+) -> tuple[int, int]:
+    """Calculate overlay X,Y for a PIP layout position."""
+    if layout == "pip_br":
+        return (width - pip_w - margin, height - pip_h - margin)
+    if layout == "pip_tl":
+        return (margin, margin)
+    if layout == "pip_tr":
+        return (width - pip_w - margin, margin)
+    # pip_bl (default)
+    return (margin, height - pip_h - margin)
+
+
+def compose_layout_segment(
+    avatar_path: str,
+    bg_clip_path: str,
+    output_path: str,
+    start_sec: float,
+    duration: float,
+    layout: str,
+    width: int,
+    height: int,
+    pip_scale: float = 0.30,
+    pip_margin: int = 30,
+    chroma_color: str = "0x000000",
+    chroma_similarity: float = 0.15,
+    chroma_blend: float = 0.05,
+    threads: int = 0,
+) -> None:
+    """
+    Compose a single layout segment: overlay avatar (on black background) onto
+    a prepared background clip.
+
+    Uses ``lumakey`` filter to generate a proper alpha channel from the black
+    background based on pixel luminance. This is superior to colorkey/chromakey
+    for black backgrounds because:
+      - It operates in luminance space, not RGB or chroma
+      - Pure black (luma=0) becomes fully transparent
+      - Dark hair/clothing (higher luma) is preserved
+      - Smooth edge blending via ``softness`` avoids hard fringe artifacts
+
+    The ``chroma_color`` / ``chroma_similarity`` / ``chroma_blend`` parameters
+    are kept for backward compatibility but are not used.
+
+    Layout types:
+        fullscreen  — avatar overlaid at full frame on top of background
+        pip_bl/br/tl/tr — avatar scaled to ``pip_scale`` and placed in a corner
+        voiceover   — background video only; avatar audio used as voice-over
+    """
+    info = probe(avatar_path)
+    has_audio = info.has_audio
+
+    fc_parts: list[str] = []
+    map_args: list[str] = []
+
+    # lumakey parameters tuned for HeyGen black background
+    luma_threshold = 0.08
+    luma_tolerance = 0.15
+    luma_softness = 0.2
+
+    if layout == "voiceover":
+        # No avatar visible — use background video + avatar audio
+        fc_parts.append("[1:v]format=yuv420p[v]")
+        map_args += ["-map", "[v]"]
+        if has_audio:
+            fc_parts.append("[0:a]aformat=channel_layouts=stereo:sample_rates=44100[a]")
+            map_args += ["-map", "[a]"]
+        else:
+            fc_parts.append(
+                f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={duration}[a]"
+            )
+            map_args += ["-map", "[a]"]
+
+    elif layout == "fullscreen":
+        # Alpha via lumakey at full frame, overlay on background
+        fc_parts.append(
+            f"[0:v]format=yuva420p,"
+            f"lumakey=threshold={luma_threshold}"
+            f":tolerance={luma_tolerance}:softness={luma_softness}[ak]"
+        )
+        fc_parts.append("[1:v][ak]overlay=0:0:format=auto,format=yuv420p[v]")
+        map_args += ["-map", "[v]"]
+        if has_audio:
+            fc_parts.append("[0:a]aformat=channel_layouts=stereo:sample_rates=44100[a]")
+        else:
+            fc_parts.append(
+                f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={duration}[a]"
+            )
+        map_args += ["-map", "[a]"]
+
+    else:
+        # PIP layouts (pip_bl, pip_br, pip_tl, pip_tr)
+        pip_w = int(width * pip_scale)
+        pip_h = int(height * pip_scale)
+        x, y = _pip_xy(layout, width, height, pip_w, pip_h, pip_margin)
+
+        fc_parts.append(
+            f"[0:v]format=yuva420p,"
+            f"lumakey=threshold={luma_threshold}"
+            f":tolerance={luma_tolerance}:softness={luma_softness},"
+            f"scale={pip_w}:{pip_h}:flags=lanczos[ak_pip]"
+        )
+        fc_parts.append(
+            f"[1:v][ak_pip]overlay={x}:{y}:format=auto,format=yuv420p[v]"
+        )
+        map_args += ["-map", "[v]"]
+        if has_audio:
+            fc_parts.append("[0:a]aformat=channel_layouts=stereo:sample_rates=44100[a]")
+        else:
+            fc_parts.append(
+                f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={duration}[a]"
+            )
+        map_args += ["-map", "[a]"]
+
+    cmd = [
+        _bin("ffmpeg"), "-y",
+        "-ss", str(start_sec), "-t", str(duration), "-i", avatar_path,
+        "-i", bg_clip_path,
+        "-filter_complex", ";".join(fc_parts),
+    ] + map_args + [
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-t", str(duration),
+        "-threads", str(threads),
+        output_path,
+    ]
+    _run(cmd, f"compose_segment_{layout}")
 
 
 # ── Legacy helpers kept for backward compatibility ─────────────────────────

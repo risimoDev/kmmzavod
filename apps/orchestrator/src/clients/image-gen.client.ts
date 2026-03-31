@@ -1,12 +1,11 @@
 /**
  * Image generation client — провайдер-агностик.
  *
- * Поддерживает: fal.ai (flux-pro), Replicate (SDXL), ComfyUI (self-hosted).
- * Provider `'runway'` maps to fal.ai flux-pro as fallback because Runway
- * does not expose a standalone image-generation API.
+ * Поддерживает: Runway (gen4_image_turbo), fal.ai (flux-pro/dev), Replicate (SDXL), ComfyUI (self-hosted).
+ * Provider `'runway'` uses Runway's native text_to_image endpoint (gen4_image_turbo).
  *
+ * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_image/post — Runway image gen
  * @see https://fal.ai/models/fal-ai/flux-pro          — fal.ai flux-pro model
- * @see https://docs.dev.runwayml.com/                  — Runway (video-only)
  * @see https://replicate.com/stability-ai/sdxl          — Replicate SDXL
  */
 import axios from 'axios';
@@ -19,6 +18,8 @@ interface GenerateImageOpts {
   negativePrompt?: string;
   width?: number;
   height?: number;
+  /** Publicly accessible reference image URLs (required for Runway provider). */
+  referenceImageUrls?: string[];
 }
 
 interface ImageResult {
@@ -50,20 +51,73 @@ export class ImageGenClient {
     }
   }
 
-  // ── Runway (fallback → fal.ai flux-pro) ────────────────────────────────────
-  // Runway has no image-generation API; we route to fal.ai flux-pro instead.
+  // ── Runway (native text_to_image) ────────────────────────────────────────
+  // Uses Runway's gen4_image_turbo model via /v1/text_to_image endpoint.
   /**
    * Generate an image when provider is `'runway'`.
-   * Runway does not offer a standalone image endpoint, so we use
-   * fal.ai **flux-pro** as a drop-in fallback.
+   * Uses Runway's native `/v1/text_to_image` with `gen4_image_turbo` model
+   * (2 credits per image at any resolution).
    *
-   * The API key passed to `ImageGenClient` when `provider='runway'` must be
-   * a valid fal.ai key (format: `Key <fal-key>`).
-   *
-   * @see https://fal.ai/models/fal-ai/flux-pro
+   * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_image/post
    */
   private async generateRunway(opts: GenerateImageOpts): Promise<ImageResult> {
-    return this.generateFalFluxPro(opts);
+    const http = axios.create({
+      baseURL: 'https://api.dev.runwayml.com/v1',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'X-Runway-Version': '2024-11-06',
+        'Content-Type': 'application/json',
+      },
+      timeout: 120_000,
+    });
+
+    // Determine Runway-compatible ratio from dimensions
+    const w = opts.width ?? 1080;
+    const h = opts.height ?? 1920;
+    const ratio = h > w ? '1080:1920' : w > h ? '1920:1080' : '1080:1080';
+
+    // Create task
+    const referenceImages = (opts.referenceImageUrls ?? [])
+      .filter(Boolean)
+      .map((uri) => ({ uri, relevance: 0.5 }));
+
+    if (referenceImages.length === 0) {
+      throw new Error('runway text_to_image requires at least 1 reference image — upload product images');
+    }
+
+    const createRes = await http.post<{ id: string }>('/text_to_image', {
+      model: 'gen4_image_turbo',
+      promptText: opts.prompt,
+      ratio,
+      referenceImages,
+    });
+
+    const taskId = createRes.data.id;
+
+    // Poll until done
+    for (let i = 0; i < 30; i++) {
+      await sleep(5_000);
+      const poll = await http.get<{
+        id: string;
+        status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+        output?: string[];
+        failure?: string;
+      }>(`/tasks/${taskId}`);
+
+      if (poll.data.status === 'SUCCEEDED') {
+        const url = poll.data.output?.[0];
+        if (!url) throw new Error('runway text_to_image: task succeeded but no output URL');
+        return { url, contentType: 'image/png' };
+      }
+
+      if (poll.data.status === 'FAILED' || poll.data.status === 'CANCELLED') {
+        throw new Error(`runway text_to_image ${poll.data.status}: ${poll.data.failure ?? 'unknown'}`);
+      }
+
+      logger.debug({ taskId, attempt: i + 1 }, 'runway text_to_image: ожидаем изображение');
+    }
+
+    throw new Error('runway text_to_image: timeout генерации изображения');
   }
 
   // ── Fal.ai ─────────────────────────────────────────────────────────────────

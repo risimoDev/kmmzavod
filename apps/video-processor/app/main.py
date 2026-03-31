@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.api.compose import create_router as compose_router
+from app.api.transcribe import create_router as transcribe_router
 from app.config import settings
 
 logging.basicConfig(
@@ -24,6 +25,7 @@ app = FastAPI(
     description="FFmpeg-based video composition service with Ken Burns, xfade, and subtitle support.",
 )
 app.include_router(compose_router())
+app.include_router(transcribe_router())
 
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")

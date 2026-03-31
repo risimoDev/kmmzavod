@@ -1,4 +1,6 @@
-# Dev overrides — exposes DB/cache ports for local tooling.
+# Dev overrides — only infrastructure runs in Docker.
+# App services (api, orchestrator, web, video-processor, nginx) are disabled
+# because they run locally via `pnpm dev`.
 # This file is auto-loaded by `docker compose up` on dev machines.
 # Do NOT deploy this to production.
 
@@ -10,3 +12,24 @@ services:
   redis:
     ports:
       - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  # ── Disable app services for local dev ─────────────────────────────────
+  api:
+    profiles: ["server"]
+
+  orchestrator:
+    profiles: ["server"]
+
+  video-processor:
+    profiles: ["server"]
+
+  web:
+    profiles: ["server"]
+
+  nginx:
+    profiles: ["server"]

@@ -4,7 +4,7 @@
 export interface ComposePreset {
   name: string;
   label: string;
-  transition_type: 'fade' | 'smoothleft' | 'dissolve' | 'cut';
+  transition_type: 'fade' | 'smoothleft' | 'smoothright' | 'cut';
   transition_duration: number;
   subtitle_style: {
     font_color: string;
@@ -41,7 +41,7 @@ export const COMPOSE_PRESETS: Record<string, ComposePreset> = {
   smooth: {
     name: 'smooth',
     label: 'Плавный',
-    transition_type: 'dissolve',
+    transition_type: 'smoothleft',
     transition_duration: 0.5,
     subtitle_style: {
       font_color: '#F0F0F0',

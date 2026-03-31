@@ -1,3 +1,9 @@
+// Prisma returns BigInt for autoincrement IDs and large integer columns.
+// JSON.stringify doesn't know how to serialize BigInt natively, so we add toJSON.
+(BigInt.prototype as any).toJSON = function () {
+  return Number(this);
+};
+
 import Fastify from 'fastify';
 import fastifyJwt from '@fastify/jwt';
 import fastifyCors from '@fastify/cors';
@@ -17,7 +23,6 @@ import { projectRoutes } from './routes/projects.routes';
 import { productRoutes } from './routes/products.routes';
 import { adminRoutes } from './routes/admin.routes';
 import { publishRoutes } from './routes/publish.routes';
-import { getRedis } from './lib/redis';
 
 export async function buildApp() {
   const app = Fastify({
@@ -66,6 +71,9 @@ export async function buildApp() {
   });
   app.decorate('storage', storage);
 
+  // Ensure MinIO bucket exists on startup
+  await storage.ensureBucket();
+
   // ── Глобальный обработчик ошибок ─────────────────────────────────────────
   app.setErrorHandler((err, req, reply) => {
     // Zod validation errors
@@ -108,124 +116,6 @@ export async function buildApp() {
   app.register(adminRoutes,   { prefix: '/api/v1/admin' });
   app.register(publishRoutes, { prefix: '/api/v1' });
 
-  // ── SSE: real-time video progress ──────────────────────────────────────
-  app.get<{ Params: { id: string }; Querystring: { token?: string } }>(
-    '/api/v1/videos/:id/progress',
-    {
-      preHandler: async (req, reply) => {
-        // Standard Authorization header
-        if (req.headers.authorization) {
-          try { await req.jwtVerify(); return; } catch {}
-        }
-        // Fallback: ?token= query param (EventSource не поддерживает заголовки)
-        const token = (req.query as { token?: string }).token;
-        if (token) {
-          try {
-            req.user = app.jwt.verify(token);
-            return;
-          } catch {}
-        }
-        reply.code(401).send({ error: 'Unauthorized' });
-      },
-    },
-    async (req, reply) => {
-      const { id } = req.params;
-      const { tenantId } = req.user;
-
-      const video = await db.video.findFirst({
-        where: { id, tenantId },
-        select: { id: true, status: true },
-      });
-
-      if (!video) {
-        return reply.code(404).send({ error: 'NotFound', message: 'Видео не найдено' });
-      }
-
-      // ── 1. Already terminal — send final event and close immediately ────
-      if (video.status === 'completed' || video.status === 'failed') {
-        reply.hijack();
-        const raw = reply.raw;
-        raw.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        raw.write(
-          `data: ${JSON.stringify({
-            stage: video.status,
-            status: video.status,
-            progress: video.status === 'completed' ? 100 : 0,
-            message: null,
-            isComplete: true,
-            timestamp: new Date().toISOString(),
-          })}\n\n`,
-        );
-        raw.end();
-        return;
-      }
-
-      // ── 2. Limit: 1 SSE connection per videoId per tenant ───────────────
-      const redis = getRedis();
-      const lockKey = `sse:lock:${tenantId}:${id}`;
-      const acquired = await redis.set(lockKey, '1', 'EX', 300, 'NX');
-      if (!acquired) {
-        return reply.code(429).send({
-          error: 'TooManyConnections',
-          message: 'SSE connection already active for this video',
-        });
-      }
-
-      reply.hijack();
-      const raw = reply.raw;
-      raw.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-
-      // ── 3. Subscribe to Redis pub/sub ───────────────────────────────────
-      const sub = redis.duplicate();
-      const channel = `video:progress:${tenantId}:${id}`;
-      let closed = false;
-
-      const cleanup = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        redis.del(lockKey).catch(() => {});
-        sub.unsubscribe(channel).then(() => sub.disconnect()).catch(() => {});
-      };
-
-      await sub.subscribe(channel);
-
-      const onMessage = (_ch: string, message: string) => {
-        raw.write(`data: ${message}\n\n`);
-
-        // Close connection on terminal events
-        try {
-          const parsed = JSON.parse(message) as { status?: string };
-          if (parsed.status === 'completed' || parsed.status === 'failed') {
-            // Give the client time to read the final event, then close
-            setTimeout(() => {
-              cleanup();
-              raw.end();
-            }, 500);
-          }
-        } catch { /* non-JSON message — ignore */ }
-      };
-      sub.on('message', onMessage);
-
-      // ── 4. Heartbeat every 25s ──────────────────────────────────────────
-      const heartbeat = setInterval(() => {
-        if (!closed) raw.write(': ping\n\n');
-      }, 25_000);
-
-      // ── 5. Client disconnect ────────────────────────────────────────────
-      req.raw.on('close', cleanup);
-    },
-  );
-
   // Health check
   app.get('/health', { logLevel: 'warn' }, async () => ({
     status: 'ok',
@@ -244,4 +134,11 @@ export async function buildApp() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   return app;
+}
+
+// Type declaration for storage decorator
+declare module 'fastify' {
+  interface FastifyInstance {
+    storage: import('@kmmzavod/storage').IStorageClient;
+  }
 }

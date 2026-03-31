@@ -5,25 +5,66 @@
  * Base URL is read from NEXT_PUBLIC_API_URL env var.
  */
 
+import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './api';
+
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
 
-function getToken(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem('access_token') ?? '';
+async function refreshTokens(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/api/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: getRefreshToken() }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    setTokens(data.accessToken, data.refreshToken);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${getAccessToken()}`,
+    ...(init.headers as Record<string, string> ?? {}),
+  };
+  if (init.body) headers['Content-Type'] = 'application/json';
+
   const res = await fetch(`${BASE}/api/v1/admin${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`,
-      ...(init.headers ?? {}),
-    },
+    headers,
   });
+
+  // Token expired — try refresh
+  if (res.status === 401 && getRefreshToken()) {
+    const refreshed = await refreshTokens();
+    if (refreshed) {
+      const retryHeaders: Record<string, string> = {
+        Authorization: `Bearer ${getAccessToken()}`,
+        ...(init.headers as Record<string, string> ?? {}),
+      };
+      if (init.body) retryHeaders['Content-Type'] = 'application/json';
+
+      const retry = await fetch(`${BASE}/api/v1/admin${path}`, {
+        ...init,
+        headers: retryHeaders,
+      });
+      if (retry.ok) {
+        if (retry.status === 204) return undefined as T;
+        return retry.json() as Promise<T>;
+      }
+    }
+    clearTokens();
+    if (typeof window !== 'undefined') window.location.href = '/login';
+    throw new Error('Session expired');
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body as any).message ?? `HTTP ${res.status}`);
+    const msg = (body as any).message;
+    throw new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -194,6 +235,25 @@ export interface AuditEntry {
   admin: { id: string; email: string; displayName: string | null };
 }
 
+export interface ServiceHealth {
+  name: string;
+  status: 'online' | 'offline';
+  details: {
+    pid: number;
+    uptime: number;
+    workers?: number;
+    timestamp: string;
+  } | null;
+}
+
+export interface ApiCheckResult {
+  name: string;
+  status: 'ok' | 'error';
+  latencyMs: number;
+  error?: string;
+  info?: string;
+}
+
 // ── API methods ───────────────────────────────────────────────────────────────
 
 export const adminApi = {
@@ -312,4 +372,203 @@ export const adminApi = {
     Object.entries(params).forEach(([k, v]) => { if (v !== undefined) q.set(k, String(v)); });
     return apiFetch<{ data: AuditEntry[]; pagination: Pagination }>(`/audit?${q}`);
   },
+
+  // ── Services ────────────────────────────────────────────────────────────
+  getServicesHealth: () =>
+    apiFetch<{ services: ServiceHealth[] }>('/services/health'),
+
+  restartService: (name: string) =>
+    apiFetch<{ ok: boolean; service: string; message: string }>(`/services/${name}/restart`, { method: 'POST' }),
+
+  // ── AI API Checks ──────────────────────────────────────────────────────
+  checkApis: () =>
+    apiFetch<{ checks: ApiCheckResult[] }>('/api-checks'),
+
+  // ── Test Compose ──────────────────────────────────────────────────────
+  testCompose: (params: {
+    preset?: 'dynamic' | 'smooth' | 'minimal';
+    scene_count?: number;
+    scene_duration?: number;
+    with_subtitles?: boolean;
+    scene_keys?: string[];
+  } = {}) =>
+    apiFetch<{
+      test_id: string;
+      preset: string;
+      compose_result: {
+        output_key: string;
+        duration_sec: number;
+        file_size_bytes: number;
+        width: number;
+        height: number;
+        scene_count: number;
+      };
+      output_url: string;
+      elapsed_ms: number;
+    }>('/test-compose', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  // ── Pipeline Test (step-by-step) ─────────────────────────────────────────
+
+  pipelineTestScript: (params: {
+    productName: string;
+    productDescription?: string;
+    features?: string[];
+    targetAudience?: string;
+    brandVoice?: string;
+    prompt: string;
+    language?: string;
+    imageKeys?: string[];
+  }) =>
+    apiFetch<{
+      title: string;
+      scenes: Array<{
+        scene_index: number;
+        type: 'avatar' | 'clip' | 'image' | 'text';
+        script?: string;
+        b_roll_prompt?: string;
+        duration_sec: number;
+      }>;
+      usage: { prompt_tokens: number; completion_tokens: number };
+    }>('/pipeline-test/script', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  pipelineTestUploadScene: async (file: File): Promise<{ key: string; url: string; size: number; mimetype: string }> => {
+    const form = new FormData();
+    form.append('file', file);
+
+    const doUpload = (token: string) =>
+      fetch(`${BASE}/api/v1/admin/pipeline-test/upload-scene`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+
+    let res = await doUpload(getAccessToken());
+
+    // Token expired — try refresh
+    if (res.status === 401 && getRefreshToken()) {
+      const refreshed = await refreshTokens();
+      if (refreshed) {
+        res = await doUpload(getAccessToken());
+      } else {
+        clearTokens();
+        if (typeof window !== 'undefined') window.location.href = '/login';
+        throw new Error('Session expired');
+      }
+    }
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
+  pipelineTestCompose: (params: {
+    scenes: Array<{
+      type: 'avatar' | 'clip' | 'image' | 'text';
+      storage_key: string;
+      duration_sec: number;
+      script?: string;
+    }>;
+    preset?: 'dynamic' | 'smooth' | 'minimal';
+    with_subtitles?: boolean;
+    subtitle_style?: 'tiktok' | 'cinematic' | 'minimal' | 'default';
+  }) =>
+    apiFetch<{
+      test_id: string;
+      preset: string;
+      compose_result: {
+        output_key: string;
+        duration_sec: number;
+        file_size_bytes: number;
+        width: number;
+        height: number;
+        scene_count: number;
+      };
+      output_url: string;
+      elapsed_ms: number;
+    }>('/pipeline-test/compose', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  pipelineTestGenerateAvatar: (params: {
+    script: string;
+    avatar_id: string;
+    voice_id: string;
+    bg_color?: string;
+    target_duration?: number;
+  }) =>
+    apiFetch<{
+      key: string;
+      url: string;
+      duration_sec: number;
+      heygen_video_id: string;
+    }>('/pipeline-test/generate-avatar', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  // ── Layout mode ───────────────────────────────────────────────────────────
+
+  pipelineTestLayoutTemplates: () =>
+    apiFetch<Record<string, {
+      name: string;
+      description: string;
+      segments: Array<{ layout: string; weight: number; bg_type: string }>;
+    }>>('/pipeline-test/layout-templates'),
+
+  pipelineTestGenerateScriptLayout: (params: {
+    productName: string;
+    productDescription?: string;
+    features: string[];
+    targetAudience?: string;
+    brandVoice?: string;
+    prompt: string;
+    language: string;
+    imageKeys: string[];
+    targetDuration?: number;
+    gender?: 'male' | 'female';
+  }) =>
+    apiFetch<{
+      title: string;
+      full_script: string;
+      b_roll_prompts: Array<{ type: string; prompt: string }>;
+    }>('/pipeline-test/generate-script-layout', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  pipelineTestComposeLayout: (params: {
+    avatar_storage_key: string;
+    backgrounds: Array<{ storage_key: string; type: string }>;
+    layout_template: string;
+    with_subtitles: boolean;
+    subtitle_style: string;
+    full_script?: string;
+    audio_track?: { storage_key: string; volume: number };
+  }) =>
+    apiFetch<{
+      test_id: string;
+      layout_template: string;
+      compose_result: {
+        output_key: string;
+        duration_sec: number;
+        file_size_bytes: number;
+        width: number;
+        height: number;
+        scene_count: number;
+      };
+      output_url: string;
+      elapsed_ms: number;
+    }>('/pipeline-test/compose-layout', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
 };

@@ -24,6 +24,14 @@ export class MinioStorageClient implements IStorageClient {
     this.bucket = opts.bucket;
   }
 
+  /** Ensure the configured bucket exists (call once at startup). */
+  async ensureBucket(): Promise<void> {
+    const exists = await this.client.bucketExists(this.bucket);
+    if (!exists) {
+      await this.client.makeBucket(this.bucket);
+    }
+  }
+
   async uploadFile(key: string, localPath: string, opts?: UploadOptions): Promise<void> {
     await this.client.fPutObject(this.bucket, key, localPath, {
       'Content-Type': opts?.contentType ?? 'application/octet-stream',

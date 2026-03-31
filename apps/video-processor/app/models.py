@@ -84,11 +84,11 @@ class CompositionSettings(BaseModel):
     width: int = 1080
     height: int = 1920
     fps: int = Field(default=30, ge=15, le=60)
-    crf: int = Field(default=23, ge=16, le=35)
-    preset: str = "fast"
-    audio_bitrate: str = "128k"
-    max_bitrate: str = "4M"
-    bufsize: str = "8M"
+    crf: int = Field(default=21, ge=16, le=35)
+    preset: str = "medium"
+    audio_bitrate: str = "192k"
+    max_bitrate: str = "6M"
+    bufsize: str = "12M"
     subtitle_style: SubtitleStyle = SubtitleStyle.TIKTOK
 
 
@@ -111,3 +111,45 @@ class ComposeResponse(BaseModel):
     width: int
     height: int
     scene_count: int
+
+
+# ── Layout composition ────────────────────────────────────────────────────────
+
+class LayoutType(str, Enum):
+    FULLSCREEN = "fullscreen"   # Avatar full frame on background (chroma-keyed)
+    PIP_BL = "pip_bl"           # Avatar PIP bottom-left
+    PIP_BR = "pip_br"           # Avatar PIP bottom-right
+    PIP_TL = "pip_tl"           # Avatar PIP top-left
+    PIP_TR = "pip_tr"           # Avatar PIP top-right
+    VOICEOVER = "voiceover"     # No avatar visible, only voice over product footage
+
+
+class LayoutSegment(BaseModel):
+    layout: LayoutType
+    bg_index: int = Field(ge=0, description="Index into backgrounds array")
+    weight: float = Field(gt=0, le=1.0, description="Relative duration (fraction of total)")
+
+
+class BackgroundAsset(BaseModel):
+    storage_key: str
+    type: Literal["image", "video"]
+
+
+class LayoutComposeRequest(BaseModel):
+    job_id: str
+    tenant_id: str
+    output_key: str
+
+    avatar_storage_key: str
+    backgrounds: list[BackgroundAsset] = Field(min_length=1)
+    segments: list[LayoutSegment] = Field(min_length=2)
+
+    subtitles: list[SubtitleEntry] = []
+    audio_track: AudioTrack | None = None
+    settings: CompositionSettings = CompositionSettings()
+
+    chroma_color: str = "#000000"
+    pip_scale: float = Field(default=0.30, ge=0.15, le=0.60)
+    pip_margin: int = Field(default=30, ge=0, le=100)
+    transition: TransitionType = TransitionType.FADE
+    transition_duration: float = Field(default=0.3, ge=0.0, le=1.0)

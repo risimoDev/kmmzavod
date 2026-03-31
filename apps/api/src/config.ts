@@ -22,13 +22,21 @@ const schema = z.object({
 
   MINIO_ENDPOINT: z.string().default('localhost'),
   MINIO_PORT: z.coerce.number().default(9000),
-  MINIO_USE_SSL: z.coerce.boolean().default(false),
+  MINIO_USE_SSL: z.string().default('false').transform(v => v === 'true' || v === '1'),
   MINIO_ACCESS_KEY: z.string(),
   MINIO_SECRET_KEY: z.string(),
   MINIO_BUCKET: z.string().default('kmmzavod'),
 
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+
+  VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
+
+  // AI API keys (optional — used for admin health checks)
+  HEYGEN_API_KEY: z.string().optional(),
+  RUNWAY_API_KEY: z.string().optional(),
+  GPTUNNEL_API_KEY: z.string().optional(),
+  GPTUNNEL_BASE_URL: z.string().url().default('https://gptunnel.ru/v1'),
 });
 
 const parsed = schema.safeParse(process.env);
