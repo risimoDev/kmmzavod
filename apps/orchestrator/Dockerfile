@@ -1,5 +1,5 @@
 FROM node:22-alpine AS base
-RUN corepack enable pnpm
+RUN npm install -g pnpm@9.15.0
 
 # ── Зависимости ───────────────────────────────────────────────────────────────
 FROM base AS deps
@@ -24,7 +24,6 @@ RUN pnpm --filter @kmmzavod/orchestrator build
 
 # ── Продакшн образ ────────────────────────────────────────────────────────────
 FROM node:22-alpine AS runner
-RUN corepack enable pnpm
 WORKDIR /app
 
 ENV NODE_ENV=production
