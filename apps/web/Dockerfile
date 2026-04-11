@@ -1,6 +1,6 @@
 FROM node:22-alpine AS base
 RUN npm install -g pnpm@9.15.0
-RUN apk add --no-cache python3 make g++ libc6-compat
+RUN apk add --no-cache python3 make g++ libc6-compat openssl
 
 # ── Dependencies ───────────────────────────────────────────────────────────
 FROM base AS deps
@@ -14,6 +14,7 @@ COPY apps/video-processor/package.json ./apps/video-processor/
 COPY packages/queue/package.json ./packages/queue/
 COPY packages/storage/package.json ./packages/storage/
 COPY packages/db/package.json ./packages/db/
+COPY packages/db/prisma/schema.prisma ./packages/db/prisma/
 RUN pnpm install --frozen-lockfile --filter @kmmzavod/web
 
 # ── Builder ────────────────────────────────────────────────────────────────
