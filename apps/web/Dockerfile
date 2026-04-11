@@ -7,6 +7,12 @@ WORKDIR /app
 COPY pnpm-workspace.yaml turbo.json ./
 COPY package.json pnpm-lock.yaml .npmrc* ./
 COPY apps/web/package.json ./apps/web/
+COPY apps/api/package.json ./apps/api/
+COPY apps/orchestrator/package.json ./apps/orchestrator/
+COPY apps/video-processor/package.json ./apps/video-processor/
+COPY packages/queue/package.json ./packages/queue/
+COPY packages/storage/package.json ./packages/storage/
+COPY packages/db/package.json ./packages/db/
 RUN pnpm install --frozen-lockfile --filter @kmmzavod/web
 
 # ── Builder ────────────────────────────────────────────────────────────────

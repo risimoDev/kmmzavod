@@ -10,6 +10,9 @@ COPY packages/queue/package.json ./packages/queue/
 COPY packages/storage/package.json ./packages/storage/
 COPY packages/db/package.json ./packages/db/
 COPY apps/api/package.json ./apps/api/
+COPY apps/orchestrator/package.json ./apps/orchestrator/
+COPY apps/web/package.json ./apps/web/
+COPY apps/video-processor/package.json ./apps/video-processor/
 RUN pnpm install --frozen-lockfile --filter @kmmzavod/api...
 
 # ── Сборка ────────────────────────────────────────────────────────────────────
