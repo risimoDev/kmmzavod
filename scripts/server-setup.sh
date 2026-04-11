@@ -262,8 +262,8 @@ header "7/10 · Сборка и запуск сервисов"
 
 cd "$APP_DIR"
 
-info "Сборка Docker-образов (5-10 минут)..."
-docker compose build --no-cache --progress=plain 2>&1 | tee /tmp/kmmzavod-build.log
+info "Сборка Docker-образов (5-15 минут)..."
+docker compose build --progress=plain 2>&1 | tee /tmp/kmmzavod-build.log
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
   echo ""
   error "Сборка образов не удалась. Полный лог: /tmp/kmmzavod-build.log"
