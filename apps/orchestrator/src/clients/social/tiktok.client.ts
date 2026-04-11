@@ -13,6 +13,7 @@
  */
 import fs from 'node:fs';
 import { logger as rootLogger } from '../../logger';
+import { proxyFetch } from '../../lib/proxy';
 
 const log = rootLogger.child({ client: 'tiktok' });
 
@@ -42,6 +43,8 @@ export interface TikTokUploadResult {
 export class TikTokClient {
   private clientKey: string;
   private clientSecret: string;
+  /** Per-account proxy URL override. Set before calling uploadVideo/pollPublishStatus. */
+  proxyUrl: string | null = null;
 
   constructor(clientKey: string, clientSecret: string) {
     this.clientKey = clientKey;
@@ -60,7 +63,7 @@ export class TikTokClient {
   }> {
     log.debug('Refreshing TikTok access token');
 
-    const res = await fetch(`${TIKTOK_API}/oauth/token/`, {
+    const res = await proxyFetch(`${TIKTOK_API}/oauth/token/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -69,7 +72,7 @@ export class TikTokClient {
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
       }),
-    });
+    }, this.proxyUrl);
 
     if (!res.ok) {
       const body = await res.text();
@@ -112,7 +115,7 @@ export class TikTokClient {
     // ── Step 1: Init publish with post_info + FILE_UPLOAD source ──────────
     log.info({ fileSize, privacyLevel }, 'TikTok: initializing video upload');
 
-    const initRes = await fetch(`${TIKTOK_API}/post/publish/video/init/`, {
+    const initRes = await proxyFetch(`${TIKTOK_API}/post/publish/video/init/`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${tokens.accessToken}`,
@@ -133,7 +136,7 @@ export class TikTokClient {
           total_chunk_count: 1,
         },
       }),
-    });
+    }, this.proxyUrl);
 
     if (!initRes.ok) {
       const body = await initRes.text();
@@ -150,7 +153,7 @@ export class TikTokClient {
     // ── Step 2: Upload raw video bytes (single chunk) ────────────────────
     const videoBuffer = fs.readFileSync(videoPath);
 
-    const uploadRes = await fetch(upload_url, {
+    const uploadRes = await proxyFetch(upload_url, {
       method: 'PUT',
       headers: {
         'Content-Type': 'video/mp4',
@@ -158,7 +161,7 @@ export class TikTokClient {
         'Content-Length': String(fileSize),
       },
       body: videoBuffer,
-    });
+    }, this.proxyUrl);
 
     // TikTok returns 201 Created or 206 Partial Content on successful chunk upload
     if (!uploadRes.ok && uploadRes.status !== 206) {
@@ -210,14 +213,14 @@ export class TikTokClient {
     status: string;
     failReason?: string;
   }> {
-    const res = await fetch(`${TIKTOK_API}/post/publish/status/fetch/`, {
+    const res = await proxyFetch(`${TIKTOK_API}/post/publish/status/fetch/`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json; charset=UTF-8',
       },
       body: JSON.stringify({ publish_id: publishId }),
-    });
+    }, this.proxyUrl);
 
     if (!res.ok) {
       const body = await res.text();

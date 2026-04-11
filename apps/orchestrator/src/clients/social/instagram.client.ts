@@ -15,6 +15,7 @@
  * @see https://developers.facebook.com/docs/instagram-api/reference/ig-user/media_publish
  */
 import { logger as rootLogger } from '../../logger';
+import { proxyFetch } from '../../lib/proxy';
 
 const log = rootLogger.child({ client: 'instagram' });
 
@@ -30,6 +31,8 @@ const MAX_CAPTION_LENGTH = 2_200;
 export class InstagramClient {
   private appId: string;
   private appSecret: string;
+  /** Per-account proxy URL override. Set before calling uploadReel/checkPublishStatus. */
+  proxyUrl: string | null = null;
 
   constructor(appId: string, appSecret: string) {
     this.appId = appId;
@@ -60,7 +63,7 @@ export class InstagramClient {
 
     log.debug('Refreshing Instagram access token');
 
-    const res = await fetch(url.toString());
+    const res = await proxyFetch(url.toString(), undefined, this.proxyUrl);
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`Instagram token refresh failed (${res.status}): ${body}`);
@@ -116,7 +119,7 @@ export class InstagramClient {
 
     log.info({ igUserId }, 'Creating Instagram Reels media container');
 
-    const createRes = await fetch(createUrl.toString(), { method: 'POST' });
+    const createRes = await proxyFetch(createUrl.toString(), { method: 'POST' }, this.proxyUrl);
     if (!createRes.ok) {
       const body = await createRes.text();
       throw new Error(`Instagram create container failed (${createRes.status}): ${body}`);
@@ -135,7 +138,7 @@ export class InstagramClient {
 
     log.info({ creationId }, 'Publishing Instagram Reel');
 
-    const publishRes = await fetch(publishUrl.toString(), { method: 'POST' });
+    const publishRes = await proxyFetch(publishUrl.toString(), { method: 'POST' }, this.proxyUrl);
     if (!publishRes.ok) {
       const body = await publishRes.text();
       throw new Error(`Instagram publish failed (${publishRes.status}): ${body}`);
@@ -170,7 +173,7 @@ export class InstagramClient {
     url.searchParams.set('fields', 'status_code,status');
     url.searchParams.set('access_token', accessToken);
 
-    const res = await fetch(url.toString());
+    const res = await proxyFetch(url.toString(), undefined, this.proxyUrl);
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`Instagram status check failed (${res.status}): ${body}`);

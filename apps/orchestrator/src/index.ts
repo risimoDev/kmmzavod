@@ -35,9 +35,13 @@ import { createPipelineStateWorker } from './workers/pipeline-state.worker';
 import { createPublishWorker } from './workers/publish.worker';
 import { createSchedulerWorker } from './workers/scheduler.worker';
 import { startPipeline } from './pipeline/coordinator';
+import { loadProxyConfig } from './lib/proxy';
 
 async function main() {
   logger.info('Orchestrator запускается...');
+
+  // ── Загрузка прокси из AdminSetting (с фоновым обновлением каждые 60с) ──
+  await loadProxyConfig();
 
   // ── Внешние зависимости ───────────────────────────────────────────────────
   const connection = getRedisConnection();

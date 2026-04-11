@@ -10,6 +10,7 @@
  */
 import axios from 'axios';
 import { logger } from '../logger';
+import { axiosProxyConfig } from '../lib/proxy';
 
 export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui' | 'gemini';
 
@@ -88,6 +89,7 @@ export class ImageGenClient {
         'Content-Type': 'application/json',
       },
       timeout: 120_000,
+      ...axiosProxyConfig(),
     });
 
     // Determine Runway-compatible ratio from dimensions
@@ -170,6 +172,7 @@ export class ImageGenClient {
       baseURL: 'https://queue.fal.run',
       headers: { Authorization: `Key ${this.apiKey}` },
       timeout: 120_000,
+      ...axiosProxyConfig(),
     });
 
     const sub = await http.post(`/${model}`, {
@@ -216,6 +219,7 @@ export class ImageGenClient {
         'Content-Type': 'application/json',
       },
       timeout: 120_000,
+      ...axiosProxyConfig(),
     });
 
     // stable-diffusion-xl-base-1.0 (публичная модель)
@@ -260,7 +264,7 @@ export class ImageGenClient {
    */
   private async generateGemini(opts: GenerateImageOpts, overrideKey?: string): Promise<ImageResult> {
     const key = overrideKey ?? this.apiKey;
-    const http = axios.create({ timeout: 120_000 });
+    const http = axios.create({ timeout: 120_000, ...axiosProxyConfig() });
 
     const res = await http.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${key}`,
@@ -302,6 +306,7 @@ export class ImageGenClient {
       baseURL,
       headers: key ? { Authorization: `Bearer ${key}` } : {},
       timeout: 180_000,
+      ...axiosProxyConfig(),
     });
 
     const prompt = buildComfyWorkflow(opts.prompt, opts.negativePrompt, opts.width, opts.height);

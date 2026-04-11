@@ -766,6 +766,7 @@ model SocialAccount {
     expiresAt    DateTime?      @map("expires_at")
     accountName  String         @map("account_name")
     igUserId     String?        @map("ig_user_id")
+    proxyUrl     String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
     isActive     Boolean        @default(true) @map("is_active")
     createdAt    DateTime       @default(now()) @map("created_at")
     updatedAt    DateTime       @updatedAt @map("updated_at")

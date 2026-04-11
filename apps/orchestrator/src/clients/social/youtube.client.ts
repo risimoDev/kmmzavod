@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import axios from 'axios';
 import { logger as rootLogger } from '../../logger';
+import { axiosProxyConfig } from '../../lib/proxy';
 
 const logger = rootLogger.child({ client: 'youtube' });
 
@@ -23,6 +24,9 @@ export interface YouTubeUploadResult {
 }
 
 export class YouTubeClient {
+  /** Per-account proxy URL override. Set before calling uploadShort/refreshToken. */
+  proxyUrl: string | null = null;
+
   /**
    * Upload a video to YouTube as a Short.
    *
@@ -75,6 +79,7 @@ export class YouTubeClient {
           part: 'snippet,status',
         },
         timeout: 30_000,
+        ...axiosProxyConfig(this.proxyUrl),
       },
     );
 
@@ -94,6 +99,7 @@ export class YouTubeClient {
       },
       maxBodyLength: Infinity,
       timeout: 600_000,
+      ...axiosProxyConfig(this.proxyUrl),
     });
 
     const videoId = uploadRes.data?.id;
@@ -118,7 +124,7 @@ export class YouTubeClient {
       client_secret: clientSecret,
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
-    });
+    }, axiosProxyConfig(this.proxyUrl));
 
     return {
       accessToken: res.data.access_token,

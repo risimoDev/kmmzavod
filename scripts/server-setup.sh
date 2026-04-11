@@ -219,6 +219,10 @@ POST_BRIDGE_API_KEY=
 YOUTUBE_CLIENT_ID=
 YOUTUBE_CLIENT_SECRET=
 
+# ── AI Proxy (для российских серверов — обход гео-блокировок AI API) ──────────
+# http://user:pass@proxy.example.com:8080  или  socks5://user:pass@host:1080
+AI_PROXY_URL=
+
 # ── Public URLs ───────────────────────────────────────────────────────────────
 PUBLIC_API_URL=http://${SERVER_IP}:3000
 NEXT_PUBLIC_API_URL=http://${SERVER_IP}:3000

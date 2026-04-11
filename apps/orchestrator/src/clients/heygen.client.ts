@@ -4,6 +4,7 @@
  */
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../logger';
+import { axiosProxyConfig } from '../lib/proxy';
 
 interface HeyGenScene {
   avatarId: string;
@@ -41,11 +42,13 @@ export class HeyGenClient {
       baseURL: 'https://api.heygen.com/v2',
       headers,
       timeout: 30_000,
+      ...axiosProxyConfig(),
     });
     this.httpV1 = axios.create({
       baseURL: 'https://api.heygen.com/v1',
       headers,
       timeout: 30_000,
+      ...axiosProxyConfig(),
     });
   }
 

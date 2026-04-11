@@ -5,6 +5,7 @@
 import axios, { AxiosInstance } from 'axios';
 import crypto from 'crypto';
 import { logger } from '../logger';
+import { axiosProxyConfig } from '../lib/proxy';
 
 interface CreateClipOpts {
   prompt: string;
@@ -41,6 +42,7 @@ export class KlingClient {
     this.http = axios.create({
       baseURL: 'https://api.klingai.com/v1',
       timeout: 30_000,
+      ...axiosProxyConfig(),
     });
 
     // Добавляем HMAC JWT ко всем запросам

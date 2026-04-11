@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import axios, { type AxiosInstance } from 'axios';
 import { logger as rootLogger } from '../../logger';
+import { axiosProxyConfig } from '../../lib/proxy';
 
 const logger = rootLogger.child({ client: 'postbridge' });
 
@@ -27,7 +28,9 @@ export interface PostBridgePostResult {
 }
 
 export class PostBridgeClient {
-  private readonly http: AxiosInstance;
+  private http: AxiosInstance;
+  /** Per-account proxy URL override. Set before calling upload/post methods. */
+  proxyUrl: string | null = null;
 
   constructor(private readonly apiKey: string) {
     this.http = axios.create({
@@ -37,6 +40,21 @@ export class PostBridgeClient {
         'Content-Type': 'application/json',
       },
       timeout: 60_000,
+      ...axiosProxyConfig(),
+    });
+  }
+
+  /** Rebuild the axios instance with an overridden proxy URL. Call before API methods. */
+  private ensureProxy(): void {
+    if (!this.proxyUrl) return;
+    this.http = axios.create({
+      baseURL: API_BASE,
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 60_000,
+      ...axiosProxyConfig(this.proxyUrl),
     });
   }
 
@@ -103,6 +121,7 @@ export class PostBridgeClient {
       headers: { 'Content-Type': mimeType },
       maxBodyLength: Infinity,
       timeout: 600_000,
+      ...axiosProxyConfig(this.proxyUrl),
     });
 
     logger.info({ mediaId: upload.media_id }, 'PostBridge: media uploaded');
@@ -142,6 +161,7 @@ export class PostBridgeClient {
     opts?: { data?: unknown; params?: unknown },
     maxRetries = 3,
   ): Promise<T> {
+    this.ensureProxy();
     let lastErr: Error | undefined;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {

@@ -18,6 +18,7 @@ const CreateSocialAccountBody = z.object({
   expiresAt: z.string().datetime().optional(),
   accountName: z.string().min(1).max(200),
   igUserId: z.string().regex(/^\d+$/, 'Must be a numeric Instagram Business Account ID').optional(),
+  proxyUrl: z.string().url().optional(),
 });
 
 const PublishVideoBody = z.object({
@@ -55,6 +56,7 @@ export async function publishRoutes(app: FastifyInstance) {
         expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
         accountName: body.accountName,
         igUserId: body.igUserId,
+        proxyUrl: body.proxyUrl,
       },
     });
 
@@ -82,6 +84,7 @@ export async function publishRoutes(app: FastifyInstance) {
         accountName: true,
         isActive: true,
         expiresAt: true,
+        proxyUrl: true,
         createdAt: true,
         _count: { select: { publishJobs: true } },
       },

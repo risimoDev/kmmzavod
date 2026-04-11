@@ -69,6 +69,18 @@ export function createPublishWorker(deps: Deps): Worker {
         throw new Error(`Social account ${socialAccountId} is disabled`);
       }
 
+      // Set per-account proxy on all social clients (isolation: each tenant uses their own IP)
+      const accountProxy = account.proxyUrl ?? null;
+      if (tiktok) tiktok.proxyUrl = accountProxy;
+      if (instagram) instagram.proxyUrl = accountProxy;
+      youtube.proxyUrl = accountProxy;
+      if (postbridge) postbridge.proxyUrl = accountProxy;
+
+      if (accountProxy) {
+        const safeProxy = accountProxy.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
+        logger.info({ socialAccountId, proxy: safeProxy }, 'Publish: using per-account proxy');
+      }
+
       // Load publish job for caption/hashtags + determine video storage key
       const publishJob = await db.publishJob.findUniqueOrThrow({
         where: { id: publishJobId },

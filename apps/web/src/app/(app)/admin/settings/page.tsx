@@ -18,6 +18,7 @@ function maskValue(value: string) {
 }
 
 const SETTING_GROUPS: Record<string, string[]> = {
+  "Прокси":             ["AI_PROXY_URL"],
   "Лимиты генерации": ["MAX_CONCURRENT_JOBS", "MAX_SCENES_PER_VIDEO", "MAX_VIDEOS_PER_TENANT_DAY", "JOB_TIMEOUT_SECONDS"],
   "Кредиты & Биллинг": ["CREDIT_COST_PER_SEC_AVATAR", "CREDIT_COST_PER_SEC_CLIP", "CREDIT_COST_PER_IMAGE", "STARTER_CREDITS", "PRO_CREDITS"],
   "Провайдеры AI":     ["IMAGE_GEN_PROVIDER", "HEYGEN_DEFAULT_VOICE", "KLING_DEFAULT_ASPECT", "GPT_MODEL"],

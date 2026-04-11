@@ -200,6 +200,10 @@ export interface SocialAccount {
   platform: string;
   accountName: string;
   isActive: boolean;
+  expiresAt: string | null;
+  proxyUrl: string | null;
+  createdAt: string;
+  _count?: { publishJobs: number };
 }
 
 export interface Project {
@@ -369,7 +373,24 @@ export const videosApi = {
 // ── Social Accounts API ───────────────────────────────────────────────────────
 
 export const socialAccountsApi = {
-  list: () => apiFetch<SocialAccount[]>('/api/v1/social-accounts'),
+  list: () => apiFetch<{ data: SocialAccount[] }>('/api/v1/social-accounts').then(r => r.data),
+
+  create: (body: {
+    platform: string;
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: string;
+    accountName: string;
+    igUserId?: string;
+    proxyUrl?: string;
+  }) =>
+    apiFetch<SocialAccount>('/api/v1/social-accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  delete: (id: string) =>
+    apiFetch<{ success: boolean }>(`/api/v1/social-accounts/${id}`, { method: 'DELETE' }),
 };
 
 // ── Projects API ──────────────────────────────────────────────────────────────

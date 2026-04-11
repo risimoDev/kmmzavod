@@ -12,6 +12,7 @@
  */
 import axios, { type AxiosInstance } from 'axios';
 import { logger } from '../logger';
+import { axiosProxyConfig } from '../lib/proxy';
 
 const RUNWAY_BASE_URL = 'https://api.dev.runwayml.com/v1';
 const RUNWAY_API_VERSION = '2024-11-06';
@@ -40,6 +41,7 @@ export class RunwayClient {
         'Content-Type': 'application/json',
       },
       timeout: 30_000,
+      ...axiosProxyConfig(),
     });
   }
 
