@@ -263,7 +263,11 @@ header "7/10 · Сборка и запуск сервисов"
 cd "$APP_DIR"
 
 info "Сборка Docker-образов (5-10 минут)..."
-docker compose build --no-cache 2>&1 | tail -5
+docker compose build --no-cache --progress=plain 2>&1 | tee /tmp/kmmzavod-build.log
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+  echo ""
+  error "Сборка образов не удалась. Полный лог: /tmp/kmmzavod-build.log"
+fi
 
 info "Запуск инфраструктуры (postgres, redis, minio)..."
 docker compose up -d postgres redis minio
