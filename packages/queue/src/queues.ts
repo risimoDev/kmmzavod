@@ -81,6 +81,15 @@ export const QUEUE_DEFS = {
     },
     concurrency: 2,
   },
+  SCHEDULER: {
+    name: 'scheduler',
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 100 },
+    },
+    concurrency: 1,
+  },
 } as const;
 
 export type QueueName = typeof QUEUE_DEFS[keyof typeof QUEUE_DEFS]['name'];
@@ -107,6 +116,10 @@ export interface GptScriptJobPayload {
   prompt: string;
   projectSettings: Record<string, unknown>;
   productContext?: ProductContext;
+  /** VideoPreset ID — enables idea deduplication and preset-aware generation */
+  presetId?: string;
+  /** Hashes of previously used ideas (from preset.usedIdeaHashes) */
+  usedIdeaHashes?: string[];
 }
 
 export interface HeygenRenderJobPayload {
@@ -124,6 +137,8 @@ export interface RunwayClipJobPayload {
   tenantId: string;
   prompt: string;
   durationSec: number;
+  /** Presigned HTTPS URL of a product image for image-to-video mode. If set, uses cheaper gen4_turbo. */
+  referenceImageUrl?: string;
 }
 
 /** @deprecated Use RunwayClipJobPayload */
@@ -135,6 +150,10 @@ export interface ImageGenJobPayload {
   tenantId: string;
   prompt: string;
   referenceImageKeys: string[];
+  /** Purpose of image generation */
+  purpose?: 'scene-image' | 'runway-frame';
+  /** Duration for runway clip (only when purpose=runway-frame) */
+  clipDurationSec?: number;
 }
 
 export interface VideoComposeJobPayload {
@@ -154,9 +173,14 @@ export interface PublishJobPayload {
   publishJobId: string;
   videoId: string;
   tenantId: string;
-  platform: 'tiktok' | 'instagram' | 'youtube_shorts';
+  platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
   socialAccountId: string;
   scheduledAt?: string;
+}
+
+/** Scheduler tick payload — the repeatable job fires this every minute */
+export interface SchedulerTickPayload {
+  tick: number;
 }
 
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
@@ -194,4 +218,5 @@ export const QUEUES: Record<string, QueueEntry> = {
   'video-compose':  flatten(QUEUE_DEFS.VIDEO_COMPOSE),
   'pipeline-state': flatten(QUEUE_DEFS.PIPELINE_STATE),
   'publish':        flatten(QUEUE_DEFS.PUBLISH),
+  'scheduler':      flatten(QUEUE_DEFS.SCHEDULER),
 };

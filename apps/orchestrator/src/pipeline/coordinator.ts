@@ -1,5 +1,6 @@
 // Pipeline coordinator — converts a single job into fan-out BullMQ tasks
 // Called by: pipeline worker in index.ts
+// Supports both direct video creation and VideoPreset-driven generation.
 
 import { Queue } from 'bullmq';
 import { QUEUE_DEFS, type GptScriptJobPayload, type ProductContext } from '@kmmzavod/queue';
@@ -44,6 +45,26 @@ export async function startPipeline(jobId: string, tenantId: string, deps: Deps)
 
   const payload = job.payload as Record<string, unknown>;
 
+  // ── Load preset context if video is linked to a preset ────────────────────
+  let presetId: string | undefined;
+  let usedIdeaHashes: string[] = [];
+
+  if (job.videoId) {
+    const video = await deps.db.video.findUnique({
+      where:  { id: job.videoId },
+      select: { presetId: true, productId: true },
+    });
+
+    if (video?.presetId) {
+      presetId = video.presetId;
+      const preset = await deps.db.videoPreset.findUnique({
+        where: { id: presetId },
+        select: { usedIdeaHashes: true },
+      });
+      usedIdeaHashes = preset?.usedIdeaHashes ?? [];
+    }
+  }
+
   // ── Load product context if video has a linked product ───────────────────
   let productContext: ProductContext | undefined;
 
@@ -87,6 +108,8 @@ export async function startPipeline(jobId: string, tenantId: string, deps: Deps)
       voice_id:  payload['voice_id']  ?? settings['voice_id'],
     },
     productContext,
+    presetId,
+    usedIdeaHashes,
   };
 
   await deps.gptQueue.add(`gpt:${jobId}`, gptPayload, QUEUE_DEFS.GPT_SCRIPT.defaultJobOptions);

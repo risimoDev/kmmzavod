@@ -31,6 +31,7 @@ from app.models import (
     LayoutComposeRequest,
     LayoutType,
     SceneItem,
+    SubtitleEntry,
     SubtitleStyle,
     TransitionType,
 )
@@ -246,8 +247,12 @@ class CompositionPipeline:
             else:
                 # avatar, clip, text
                 info = fx.probe(src_path)
-                # Trim to requested duration (don't extend beyond source)
-                duration = min(scene.duration_sec, info.duration) if info.duration > 0 else scene.duration_sec
+                # For avatar scenes: use actual source duration so voice is never cut
+                # For clip scenes: trim to requested duration
+                if scene.type == "avatar" and info.duration > 0:
+                    duration = info.duration
+                else:
+                    duration = min(scene.duration_sec, info.duration) if info.duration > 0 else scene.duration_sec
                 fx.normalize_video_clip(
                     input_path=src_path,
                     output_path=out_path,
@@ -466,6 +471,49 @@ class LayoutCompositionPipeline:
         await asyncio.get_event_loop().run_in_executor(
             None, fx.concat_with_transitions, clips, combined, self.threads,
         )
+
+        # Adjust subtitle timings for xfade overlap.
+        # xfade transitions shorten the video: each transition_duration between
+        # segments consumes time from both clips. We need to shift subtitle
+        # timestamps so they stay aligned with the shorter output.
+        if self.req.subtitles and len(clips) > 1:
+            # Build a map: at each segment boundary in the original avatar timeline,
+            # the cumulative transition overlap increases.
+            seg_boundaries: list[tuple[float, float]] = []  # (avatar_time, overlap_so_far)
+            cum_avatar = 0.0
+            cum_overlap = 0.0
+            for i, clip in enumerate(clips):
+                cum_avatar += clip.duration
+                if i < len(clips) - 1:
+                    td = clip.transition_duration
+                    if clip.transition != TransitionType.CUT and td > 0:
+                        cum_overlap += td
+                seg_boundaries.append((cum_avatar, cum_overlap))
+
+            if cum_overlap > 0:
+                def _adjust_time(t: float) -> float:
+                    """Shift a subtitle timestamp to account for transition overlap."""
+                    overlap = 0.0
+                    for boundary_time, boundary_overlap in seg_boundaries:
+                        if t <= boundary_time:
+                            # Interpolate overlap within this segment
+                            overlap = boundary_overlap
+                            break
+                        overlap = boundary_overlap
+                    return max(0.0, t - overlap)
+
+                adjusted_subs = []
+                for sub in self.req.subtitles:
+                    adjusted_subs.append(SubtitleEntry(
+                        start_sec=round(_adjust_time(sub.start_sec), 2),
+                        end_sec=round(_adjust_time(sub.end_sec), 2),
+                        text=sub.text,
+                    ))
+                self.req.subtitles = adjusted_subs
+                logger.info(
+                    "Adjusted %d subtitle timings for %.2fs total xfade overlap",
+                    len(adjusted_subs), cum_overlap,
+                )
 
         # ── Stage 6: Burn subtitles ───────────────────────────────────────
         current = combined

@@ -23,6 +23,8 @@ import { projectRoutes } from './routes/projects.routes';
 import { productRoutes } from './routes/products.routes';
 import { adminRoutes } from './routes/admin.routes';
 import { publishRoutes } from './routes/publish.routes';
+import { scheduleRoutes } from './routes/schedules.routes';
+import { presetRoutes } from './routes/presets.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -44,7 +46,9 @@ export async function buildApp() {
 
   // ── Plugins ──────────────────────────────────────────────────────────────
   await app.register(fastifyCors, {
-    origin: config.NODE_ENV === 'production' ? false : true,
+    origin: config.NODE_ENV === 'production'
+      ? [/\.kmmzavod\.ru$/, /^https?:\/\/localhost(:\d+)?$/]
+      : true,
     credentials: true,
   });
 
@@ -115,12 +119,40 @@ export async function buildApp() {
   app.register(productRoutes, { prefix: '/api/v1/products' });
   app.register(adminRoutes,   { prefix: '/api/v1/admin' });
   app.register(publishRoutes, { prefix: '/api/v1' });
+  app.register(scheduleRoutes, { prefix: '/api/v1/schedules' });
+  app.register(presetRoutes,   { prefix: '/api/v1/presets' });
 
-  // Health check
-  app.get('/health', { logLevel: 'warn' }, async () => ({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  }));
+  // Health check — includes Redis and DB liveness
+  app.get('/health', { logLevel: 'warn' }, async (_req, reply) => {
+    const checks: Record<string, string> = {};
+    let healthy = true;
+
+    // DB check
+    try {
+      await db.$queryRaw`SELECT 1`;
+      checks.db = 'ok';
+    } catch {
+      checks.db = 'error';
+      healthy = false;
+    }
+
+    // Redis check
+    try {
+      const { getRedis } = await import('./lib/redis');
+      const pong = await getRedis().ping();
+      checks.redis = pong === 'PONG' ? 'ok' : 'error';
+    } catch {
+      checks.redis = 'error';
+      healthy = false;
+    }
+
+    const status = healthy ? 'ok' : 'degraded';
+    return reply.code(healthy ? 200 : 503).send({
+      status,
+      checks,
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {

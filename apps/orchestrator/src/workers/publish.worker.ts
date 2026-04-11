@@ -15,6 +15,8 @@ import type { PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { TikTokClient } from '../clients/social/tiktok.client';
 import { InstagramClient } from '../clients/social/instagram.client';
+import { PostBridgeClient } from '../clients/social/postbridge.client';
+import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
 
 const logger = rootLogger.child({ worker: 'publish' });
@@ -27,6 +29,9 @@ interface Deps {
   tiktokClientSecret?: string;
   instagramAppId?: string;
   instagramAppSecret?: string;
+  postBridgeApiKey?: string;
+  youtubeClientId?: string;
+  youtubeClientSecret?: string;
 }
 
 export function createPublishWorker(deps: Deps): Worker {
@@ -38,6 +43,10 @@ export function createPublishWorker(deps: Deps): Worker {
   const instagram = deps.instagramAppId && deps.instagramAppSecret
     ? new InstagramClient(deps.instagramAppId, deps.instagramAppSecret)
     : null;
+  const postbridge = deps.postBridgeApiKey
+    ? new PostBridgeClient(deps.postBridgeApiKey)
+    : null;
+  const youtube = new YouTubeClient();
 
   return new Worker<PublishJobPayload>(
     QUEUES['publish'].name,
@@ -138,7 +147,86 @@ export function createPublishWorker(deps: Deps): Worker {
         }
 
         case 'youtube_shorts': {
-          throw new Error('YouTube Shorts publishing not yet implemented');
+          if (!deps.youtubeClientId || !deps.youtubeClientSecret) {
+            throw new Error('YouTube client not configured (missing YOUTUBE_CLIENT_ID/SECRET)');
+          }
+          if (!account.refreshToken) {
+            throw new Error(`Social account ${socialAccountId} is missing refreshToken for YouTube OAuth`);
+          }
+
+          // Refresh OAuth2 token
+          const tokenResult = await youtube.refreshToken(
+            deps.youtubeClientId,
+            deps.youtubeClientSecret,
+            account.refreshToken,
+          );
+
+          // Persist refreshed access token
+          await db.socialAccount.update({
+            where: { id: socialAccountId },
+            data: {
+              accessToken: tokenResult.accessToken,
+              expiresAt: new Date(Date.now() + tokenResult.expiresIn * 1000),
+            },
+          });
+
+          // Download video to temp file and upload
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-yt-'));
+          const tmpFile = path.join(tmpDir, 'video.mp4');
+          try {
+            await storage.downloadFile(storageKey, tmpFile);
+            const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
+
+            // Load video metadata for title/description
+            const video = await db.video.findUnique({
+              where: { id: videoId },
+              select: { title: true, description: true, metadata: true },
+            });
+
+            const socialMeta = (video?.metadata as any)?.socialMetadata;
+            const title = video?.title ?? 'Video';
+            const description = socialMeta?.description ?? fullCaption;
+            const hashtags: string[] = socialMeta?.hashtags ?? publishJob.hashtags ?? [];
+
+            const result = await youtube.uploadShort(
+              tokenResult.accessToken,
+              tmpFile,
+              title,
+              description,
+              hashtags,
+            );
+            externalPostId = result.videoId;
+          } finally {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+          }
+          break;
+        }
+
+        // ── PostBridge: download to temp → upload to PostBridge → cross-post ──
+        case 'postbridge': {
+          if (!postbridge) throw new Error('PostBridge client not configured (missing POST_BRIDGE_API_KEY)');
+
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-pb-'));
+          const tmpFile = path.join(tmpDir, 'video.mp4');
+          try {
+            await storage.downloadFile(storageKey, tmpFile);
+            const mediaId = await postbridge.uploadMedia(tmpFile);
+            const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
+
+            // Use PostBridge account ID stored in socialAccount.accountName (numeric)
+            const pbAccountId = parseInt(account.accountName, 10);
+            if (isNaN(pbAccountId)) throw new Error(`Invalid PostBridge account ID: ${account.accountName}`);
+
+            const result = await postbridge.createPost({
+              caption: fullCaption,
+              socialAccountIds: [pbAccountId],
+              mediaIds: [mediaId],
+            });
+            externalPostId = result.id;
+          } finally {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+          }
+          break;
         }
 
         default:

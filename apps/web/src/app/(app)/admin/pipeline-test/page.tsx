@@ -112,6 +112,9 @@ export default function PipelineTestPage() {
   const [layoutTemplates, setLayoutTemplates] = useState<Record<string, LayoutTemplate>>({});
   const [selectedTemplate, setSelectedTemplate] = useState("presenter");
 
+  // HeyGen existing video shortcut
+  const [heygenExistingId, setHeygenExistingId] = useState("");
+
   // Step 2: media
   const [title, setTitle] = useState("");
   const [fullScript, setFullScript] = useState("");
@@ -145,6 +148,23 @@ export default function PipelineTestPage() {
     elapsed_ms: number;
   } | null>(null);
 
+  // Test history
+  const [testRuns, setTestRuns] = useState<Array<{
+    id: string;
+    productName: string;
+    title: string | null;
+    layoutTemplate: string;
+    targetDuration: number;
+    outputUrl: string | null;
+    durationSec: number | null;
+    status: string;
+    createdAt: string;
+  }>>([]);
+  const [testRunsTotal, setTestRunsTotal] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
+
   // Refs
   const bgFileRef = useRef<HTMLInputElement>(null);
   const bgmFileRef = useRef<HTMLInputElement>(null);
@@ -152,26 +172,27 @@ export default function PipelineTestPage() {
 
   // ── Load avatars & layout templates ──────────────────────────────────────
   useEffect(() => {
-    videosApi.avatars().then((res) => setAvatars(res.avatars)).catch(() => {});
-    adminApi.pipelineTestLayoutTemplates().then(setLayoutTemplates).catch(() => {});
+    videosApi.avatars()
+      .then((res) => setAvatars(res.avatars))
+      .catch((err) => console.error('[pipeline-test] Ошибка загрузки аватаров:', err));
+    adminApi.pipelineTestLayoutTemplates()
+      .then(setLayoutTemplates)
+      .catch((err) => console.error('[pipeline-test] Ошибка загрузки шаблонов:', err));
   }, []);
 
   // ── Load HeyGen voices ─────────────────────────────────────────────────
-  const fetchVoices = useCallback(async (lang: string, gender?: string, token?: string) => {
+  const fetchVoices = useCallback(async (lang: string, gender?: string) => {
     setVoicesLoading(true);
     try {
-      const params: Record<string, string | number> = { language: lang, limit: 100 };
+      const params: Record<string, string> = { language: lang };
       if (gender && gender !== "all") params.gender = gender;
-      if (token) params.token = token;
       const res = await videosApi.voices(params as any);
-      if (token) {
-        setHeygenVoices((prev) => [...prev, ...res.data]);
-      } else {
-        setHeygenVoices(res.data);
-      }
-      setVoiceHasMore(res.has_more);
-      setVoiceNextToken(res.next_token);
-    } catch { /* keep existing */ }
+      setHeygenVoices(res.data);
+      setVoiceHasMore(false);
+      setVoiceNextToken(null);
+    } catch (err) {
+      console.error('[pipeline-test] Ошибка загрузки голосов:', err);
+    }
     setVoicesLoading(false);
   }, []);
 
@@ -181,9 +202,7 @@ export default function PipelineTestPage() {
   }, [voiceLangFilter, voiceGenderFilter, fetchVoices]);
 
   const loadMoreVoices = () => {
-    if (voiceNextToken && voiceHasMore) {
-      fetchVoices(voiceLangFilter, voiceGenderFilter === "all" ? undefined : voiceGenderFilter, voiceNextToken);
-    }
+    // v2 API возвращает все голоса за один запрос, пагинация не нужна
   };
 
   const playVoicePreview = (voice: HeyGenVoice) => {
@@ -223,6 +242,97 @@ export default function PipelineTestPage() {
     setBrandVoice(p.brandVoice ?? "professional");
     setImageKeys(p.images ?? []);
     setShowProductPicker(false);
+  };
+
+  // ── Test history ─────────────────────────────────────────────────────────
+  const loadTestRuns = async () => {
+    setHistoryLoading(true);
+    try {
+      const resp = await adminApi.pipelineTestListRuns(20, 0);
+      setTestRuns(resp.data);
+      setTestRunsTotal(resp.total);
+    } catch { /* ignore */ }
+    setHistoryLoading(false);
+  };
+
+  const loadTestRun = async (id: string) => {
+    setLoadingRunId(id);
+    try {
+      const run = await adminApi.pipelineTestLoadRun(id);
+      const p = run.params ?? {};
+      setProductName(run.productName);
+      setProductDesc(p.productDesc ?? "");
+      setFeatures(p.features ?? "");
+      setTargetAudience(p.targetAudience ?? "");
+      setBrandVoice(p.brandVoice ?? "professional");
+      setPrompt(run.prompt);
+      setLanguage(run.language);
+      setImageKeys(p.imageKeys ?? []);
+      setAvatarId(run.avatarId);
+      setVoiceId(run.voiceId);
+      setTargetDuration(run.targetDuration);
+      setSelectedTemplate(run.layoutTemplate);
+      setTitle(run.title ?? "");
+      setFullScript(run.fullScript ?? "");
+      setBRollPrompts(p.bRollPrompts ?? []);
+      setSubtitleStyle(run.subtitleStyle as any ?? "tiktok");
+      setWithSubtitles(p.withSubtitles ?? true);
+      setBgmKey(p.bgmKey ?? "");
+      setBgmName(p.bgmName ?? "");
+      setBgmEnabled(p.bgmEnabled ?? false);
+      setBgmVolume(p.bgmVolume ?? 0.12);
+      // Restore avatar
+      if (p.avatarKey) {
+        setAvatarKey(p.avatarKey);
+        setAvatarUrl(p.avatarUrl ?? "");
+        setAvatarDuration(p.avatarDuration ?? 0);
+        setAvatarGen({ status: "done", elapsed: 0 });
+        avatarAutoStarted.current = true;
+      } else {
+        setAvatarKey("");
+        setAvatarUrl("");
+        setAvatarGen({ status: "idle" });
+        avatarAutoStarted.current = false;
+      }
+      // Restore backgrounds
+      setBackgrounds(p.backgrounds ?? []);
+      setResult(null);
+      setShowHistory(false);
+      setStep("compose");
+    } catch (err: any) {
+      setError(err.message ?? "Ошибка загрузки теста");
+    }
+    setLoadingRunId(null);
+  };
+
+  const saveTestRun = async (composeResult: typeof result) => {
+    if (!composeResult) return;
+    try {
+      await adminApi.pipelineTestSaveRun({
+        productName,
+        prompt,
+        language,
+        avatarId,
+        voiceId,
+        layoutTemplate: selectedTemplate,
+        targetDuration,
+        subtitleStyle,
+        title,
+        fullScript,
+        outputUrl: composeResult.output_url,
+        outputKey: composeResult.compose_result.output_key,
+        durationSec: composeResult.compose_result.duration_sec,
+        fileSizeBytes: composeResult.compose_result.file_size_bytes,
+        elapsedMs: composeResult.elapsed_ms,
+        params: {
+          productDesc, features, targetAudience, brandVoice,
+          imageKeys, bRollPrompts,
+          avatarKey, avatarUrl, avatarDuration,
+          backgrounds,
+          withSubtitles, bgmKey, bgmName, bgmEnabled, bgmVolume,
+        },
+      });
+    } catch { /* non-critical */ }
   };
 
   // ── Step 1: Generate layout script ───────────────────────────────────────
@@ -265,35 +375,75 @@ export default function PipelineTestPage() {
     setLoading(false);
   };
 
-  // ── Generate ONE avatar (black background) ───────────────────────────────────
+  // ── Generate ONE avatar (black background) — async start + client-side poll ──
+  const heygenVideoIdRef = useRef("");
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+  }, []);
+
+  const startPolling = useCallback((videoId: string, startedAt: number) => {
+    stopPolling();
+    heygenVideoIdRef.current = videoId;
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const res = await adminApi.pipelineTestAvatarStatus(videoId);
+        if (res.status === "completed" && res.url) {
+          stopPolling();
+          setAvatarKey(res.key ?? "");
+          setAvatarUrl(res.url);
+          setAvatarDuration(res.duration_sec ?? 0);
+          setAvatarGen({ status: "done", elapsed: Date.now() - startedAt });
+        } else if (res.status === "failed") {
+          stopPolling();
+          setAvatarGen({ status: "error", error: res.error ?? "HeyGen: ошибка рендера", elapsed: Date.now() - startedAt });
+        }
+        // else still processing — keep polling
+      } catch {
+        // network hiccup — keep polling, don't fail
+      }
+    }, 10_000);
+  }, [stopPolling]);
+
+  // Cleanup on unmount
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
   const generateAvatar = useCallback(async () => {
     if (!fullScript.trim()) return;
     const now = Date.now();
     setAvatarGen({ status: "generating", startedAt: now, elapsed: 0 });
 
     try {
-      const resp = await adminApi.pipelineTestGenerateAvatar({
+      const resp = await adminApi.pipelineTestStartAvatar({
         script: fullScript,
         avatar_id: avatarId,
         voice_id: voiceId,
-        bg_color: "#000000",
+        bg_color: "#00FF00",
         target_duration: targetDuration,
       });
-      setAvatarKey(resp.key);
-      setAvatarUrl(resp.url);
-      setAvatarDuration(resp.duration_sec);
-      setAvatarGen({ status: "done", elapsed: Date.now() - now });
+      startPolling(resp.heygen_video_id, now);
     } catch (err: any) {
       setAvatarGen({ status: "error", error: err.message ?? "Ошибка", elapsed: Date.now() - now });
     }
-  }, [fullScript, avatarId, voiceId]);
+  }, [fullScript, avatarId, voiceId, targetDuration, startPolling]);
 
-  // Auto-start avatar generation when entering media step
+  // Manual HeyGen video ID — poll existing video
+  const [manualVideoId, setManualVideoId] = useState("");
+  const pollManualVideoId = useCallback(async (overrideId?: string) => {
+    const vid = (overrideId ?? manualVideoId).trim();
+    if (!vid) return;
+    const now = Date.now();
+    setAvatarGen({ status: "generating", startedAt: now, elapsed: 0 });
+    startPolling(vid, now);
+  }, [manualVideoId, startPolling]);
+
+  // Auto-start avatar generation when entering media step (skip if avatar already exists)
   useEffect(() => {
-    if (step !== "media" || avatarAutoStarted.current || !fullScript.trim()) return;
+    if (step !== "media" || avatarAutoStarted.current || !fullScript.trim() || avatarKey) return;
     avatarAutoStarted.current = true;
     generateAvatar();
-  }, [step, fullScript, generateAvatar]);
+  }, [step, fullScript, generateAvatar, avatarKey]);
 
   // Reset auto-start when going back
   useEffect(() => {
@@ -373,6 +523,8 @@ export default function PipelineTestPage() {
       });
       setResult(resp);
       setStep("result");
+      // Save to history (fire & forget)
+      saveTestRun(resp);
     } catch (err: any) {
       setError(err.message ?? "Ошибка монтажа");
     }
@@ -394,32 +546,93 @@ export default function PipelineTestPage() {
       <input ref={bgFileRef} type="file" accept="image/*,video/*" className="hidden" onChange={handleBgUpload} />
       <input ref={bgmFileRef} type="file" accept="audio/*" className="hidden" onChange={handleBgmUpload} />
 
-      {/* Steps indicator */}
-      <div className="flex items-center gap-2 text-sm">
-        {(["input", "media", "compose", "result"] as const).map((s, i) => {
-          const labels = ["1. Продукт и промпт", "2. Аватар и фоны", "3. Монтаж", "4. Результат"];
-          const active = s === step;
-          const done =
-            (s === "input" && step !== "input") ||
-            (s === "media" && (step === "compose" || step === "result")) ||
-            (s === "compose" && step === "result");
-          return (
-            <span key={s} className="flex items-center gap-1.5">
-              {i > 0 && <span className="text-text-tertiary">→</span>}
-              <span
-                className={cn(
-                  "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
-                  active && "bg-brand-500/20 text-brand-400",
-                  done && "bg-green-500/20 text-green-400",
-                  !active && !done && "bg-surface-2 text-text-tertiary"
-                )}
-              >
-                {labels[i]}
+      {/* Header with history button */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm">
+          {(["input", "media", "compose", "result"] as const).map((s, i) => {
+            const labels = ["1. Продукт и промпт", "2. Аватар и фоны", "3. Монтаж", "4. Результат"];
+            const active = s === step;
+            const done =
+              (s === "input" && step !== "input") ||
+              (s === "media" && (step === "compose" || step === "result")) ||
+              (s === "compose" && step === "result");
+            return (
+              <span key={s} className="flex items-center gap-1.5">
+                {i > 0 && <span className="text-text-tertiary">→</span>}
+                <span
+                  className={cn(
+                    "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
+                    active && "bg-brand-500/20 text-brand-400",
+                    done && "bg-green-500/20 text-green-400",
+                    !active && !done && "bg-surface-2 text-text-tertiary"
+                  )}
+                >
+                  {labels[i]}
+                </span>
               </span>
-            </span>
-          );
-        })}
+            );
+          })}
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => { setShowHistory(!showHistory); if (!showHistory) loadTestRuns(); }}
+        >
+          {showHistory ? "Скрыть историю" : "История тестов"}
+        </Button>
       </div>
+
+      {/* Test history panel */}
+      {showHistory && (
+        <Card>
+          <CardContent className="pt-5 pb-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-text-primary">Предыдущие тесты</h3>
+              <span className="text-xs text-text-tertiary">{testRunsTotal} всего</span>
+            </div>
+            {historyLoading ? (
+              <div className="flex justify-center py-4"><LoadingSpinner size={20} /></div>
+            ) : testRuns.length === 0 ? (
+              <p className="text-xs text-text-tertiary text-center py-4">Нет сохранённых тестов</p>
+            ) : (
+              <div className="space-y-2">
+                {testRuns.map((run) => (
+                  <button
+                    key={run.id}
+                    onClick={() => loadTestRun(run.id)}
+                    disabled={loadingRunId === run.id}
+                    className="w-full text-left rounded-lg border border-border bg-surface-1 p-3 hover:border-brand-500/40 transition-all group disabled:opacity-60"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-text-primary group-hover:text-brand-400 truncate">
+                          {run.title || run.productName}
+                        </p>
+                        <div className="flex items-center gap-3 mt-1">
+                          <span className="text-[10px] text-text-tertiary">{run.productName}</span>
+                          <span className="text-[10px] text-text-tertiary">{run.targetDuration}с</span>
+                          <span className="text-[10px] text-text-tertiary">
+                            {new Date(run.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {run.durationSec && (
+                          <Badge variant="outline" className="text-[10px]">{run.durationSec.toFixed(1)}с</Badge>
+                        )}
+                        <Badge variant={run.status === "completed" ? "success" : "danger"} dot className="text-[10px]">
+                          {run.status === "completed" ? "OK" : "Ошибка"}
+                        </Badge>
+                        {loadingRunId === run.id && <LoadingSpinner size={14} />}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {error && (
         <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
@@ -786,15 +999,48 @@ export default function PipelineTestPage() {
               </div>
             )}
 
-            <Button
-              variant="primary"
-              onClick={handleGenerateScript}
-              disabled={loading || !productName.trim() || prompt.trim().length < 10}
-              className="w-full"
-            >
-              {loading ? <LoadingSpinner size={16} className="mr-2" /> : null}
-              {loading ? "Генерируем сценарий..." : "Сгенерировать сценарий (GPT-4o)"}
-            </Button>
+            {/* HeyGen existing video ID */}
+            <div className="border-t border-border pt-4 space-y-2">
+              <label className="text-xs font-medium text-text-secondary">ID видео из HeyGen (необязательно)</label>
+              <Input
+                value={heygenExistingId}
+                onChange={(e) => setHeygenExistingId(e.target.value)}
+                placeholder="Вставьте video_id из HeyGen если аватар уже сгенерирован"
+                className="font-mono text-xs"
+              />
+              {heygenExistingId.trim() && (
+                <p className="text-[10px] text-brand-400">Сценарий генерироваться не будет — видео будет загружено по ID из HeyGen</p>
+              )}
+            </div>
+
+            {heygenExistingId.trim() ? (
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setTitle(productName || "Тест с готовым видео");
+                  setFullScript("");
+                  setBRollPrompts([]);
+                  setAvatarGen({ status: "generating", startedAt: Date.now(), elapsed: 0 });
+                  avatarAutoStarted.current = true;
+                  setStep("media");
+                  startPolling(heygenExistingId.trim(), Date.now());
+                }}
+                disabled={!productName.trim()}
+                className="w-full"
+              >
+                Загрузить видео HeyGen и перейти к медиа →
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                onClick={handleGenerateScript}
+                disabled={loading || !productName.trim() || prompt.trim().length < 10}
+                className="w-full"
+              >
+                {loading ? <LoadingSpinner size={16} className="mr-2" /> : null}
+                {loading ? "Генерируем сценарий..." : "Сгенерировать сценарий (GPT-4o)"}
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
@@ -853,13 +1099,33 @@ export default function PipelineTestPage() {
                   </div>
                   <Progress value={Math.min(95, Math.round((avatarGen.elapsed ?? 0) / 1800))} className="h-1.5" />
                   <p className="text-xs text-text-tertiary">Генерируется одно длинное видео. Обычно 3-5 минут.</p>
+                  {heygenVideoIdRef.current && (
+                    <p className="text-[10px] text-text-tertiary font-mono">ID: {heygenVideoIdRef.current}</p>
+                  )}
                 </div>
               )}
 
               {avatarGen.status === "error" && (
                 <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 space-y-2">
                   <p className="text-xs text-red-400">Ошибка: {avatarGen.error}</p>
-                  <Button variant="secondary" size="sm" onClick={generateAvatar} className="w-full">Повторить</Button>
+                  <div className="flex gap-2">
+                    <Button variant="secondary" size="sm" onClick={generateAvatar} className="flex-1">Повторить</Button>
+                  </div>
+                  {heygenVideoIdRef.current && (
+                    <div className="border-t border-border pt-2 mt-2">
+                      <p className="text-[10px] text-text-tertiary mb-1">Если видео создано в HeyGen — вставьте ID:</p>
+                      <div className="flex gap-2">
+                        <Input
+                          value={manualVideoId || heygenVideoIdRef.current}
+                          onChange={(e) => setManualVideoId(e.target.value)}
+                          className="text-xs flex-1"
+                        />
+                        <Button variant="secondary" size="sm" onClick={() => { const vid = manualVideoId || heygenVideoIdRef.current; setManualVideoId(vid); pollManualVideoId(vid); }}>
+                          Проверить
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -870,13 +1136,32 @@ export default function PipelineTestPage() {
                     <span className="text-xs text-green-400">Аватар сгенерирован за {fmtTime(avatarGen.elapsed)}</span>
                   </div>
                   <video src={avatarUrl} controls className="max-h-48 rounded-lg" />
+                  <Button variant="secondary" size="sm" onClick={generateAvatar} className="w-full">
+                    Перегенерировать аватар
+                  </Button>
                 </div>
               )}
 
               {avatarGen.status === "idle" && (
-                <Button variant="secondary" size="sm" onClick={generateAvatar} className="w-full">
-                  Генерировать аватар
-                </Button>
+                <div className="space-y-3">
+                  <Button variant="secondary" size="sm" onClick={generateAvatar} className="w-full">
+                    Генерировать аватар
+                  </Button>
+                  <div className="border-t border-border pt-3">
+                    <p className="text-[10px] text-text-tertiary mb-1.5 uppercase tracking-wider">Или вставьте ID видео из HeyGen</p>
+                    <div className="flex gap-2">
+                      <Input
+                        value={manualVideoId}
+                        onChange={(e) => setManualVideoId(e.target.value)}
+                        placeholder="HeyGen video ID"
+                        className="text-xs flex-1"
+                      />
+                      <Button variant="secondary" size="sm" onClick={() => pollManualVideoId()} disabled={!manualVideoId.trim()}>
+                        Загрузить
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -1149,6 +1434,37 @@ export default function PipelineTestPage() {
                 >
                   Новый тест
                 </Button>
+              </div>
+
+              {/* Re-edit shortcuts */}
+              <div className="border-t border-border pt-4 space-y-3">
+                <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider">Внести правки и пересобрать</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => { setResult(null); setStep("input"); }}
+                    className="rounded-lg border border-border bg-surface-1 px-3 py-2.5 text-left hover:border-brand-500/40 transition-all group"
+                  >
+                    <p className="text-xs font-medium text-text-primary group-hover:text-brand-400">1. Скрипт и промпт</p>
+                    <p className="text-[10px] text-text-tertiary mt-0.5">Изменить текст, голос, аватар</p>
+                  </button>
+                  <button
+                    onClick={() => { setResult(null); setStep("media"); }}
+                    className="rounded-lg border border-border bg-surface-1 px-3 py-2.5 text-left hover:border-brand-500/40 transition-all group"
+                  >
+                    <p className="text-xs font-medium text-text-primary group-hover:text-brand-400">2. Медиа и фоны</p>
+                    <p className="text-[10px] text-text-tertiary mt-0.5">Заменить фоны, пересоздать аватар</p>
+                  </button>
+                  <button
+                    onClick={() => { setResult(null); setStep("compose"); }}
+                    className="rounded-lg border border-border bg-surface-1 px-3 py-2.5 text-left hover:border-brand-500/40 transition-all group"
+                  >
+                    <p className="text-xs font-medium text-text-primary group-hover:text-brand-400">3. Монтаж</p>
+                    <p className="text-[10px] text-text-tertiary mt-0.5">Субтитры, музыка, шаблон</p>
+                  </button>
+                </div>
+                <p className="text-[10px] text-text-tertiary">
+                  Аватар и фоны сохранены — пересборка монтажа не требует повторной генерации HeyGen
+                </p>
               </div>
             </CardContent>
           </Card>

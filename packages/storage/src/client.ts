@@ -20,4 +20,6 @@ export interface IStorageClient {
   exists(key: string): Promise<boolean>;
   /** Delete an object */
   delete(key: string): Promise<void>;
+  /** List object keys under a prefix */
+  listPrefix(prefix: string): Promise<string[]>;
 }

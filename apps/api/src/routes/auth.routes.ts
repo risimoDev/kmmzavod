@@ -61,7 +61,7 @@ export async function authRoutes(app: FastifyInstance) {
     const user = tenant.users[0]!;
     const tokens = generateTokens(app, user, tenant.id);
 
-    await saveRefreshToken(user.id, tokens.refreshToken);
+    await saveRefreshToken(user.id, tokens.refreshToken, req);
 
     logger.info({ userId: user.id, tenantId: tenant.id }, 'New user registered');
 
@@ -104,7 +104,7 @@ export async function authRoutes(app: FastifyInstance) {
     });
 
     const tokens = generateTokens(app, user, user.tenant.id);
-    await saveRefreshToken(user.id, tokens.refreshToken);
+    await saveRefreshToken(user.id, tokens.refreshToken, req);
 
     logger.info({ userId: user.id, tenantId: user.tenantId }, 'User logged in');
 
@@ -140,7 +140,7 @@ export async function authRoutes(app: FastifyInstance) {
     // Ротация: удаляем старый, выдаём новый
     await db.userSession.delete({ where: { id: session.id } });
     const tokens = generateTokens(app, session.user, session.user.tenant.id);
-    await saveRefreshToken(session.user.id, tokens.refreshToken);
+    await saveRefreshToken(session.user.id, tokens.refreshToken, req);
 
     return reply.send(tokens);
   });
@@ -175,9 +175,15 @@ function generateTokens(
   return { accessToken, refreshToken };
 }
 
-async function saveRefreshToken(userId: string, refreshToken: string) {
+async function saveRefreshToken(userId: string, refreshToken: string, req?: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await db.userSession.create({
-    data: { userId, refreshToken, expiresAt },
+    data: {
+      userId,
+      refreshToken,
+      expiresAt,
+      ipAddress: req?.ip,
+      userAgent: typeof req?.headers?.['user-agent'] === 'string' ? req.headers['user-agent'].slice(0, 500) : undefined,
+    },
   });
 }

@@ -24,17 +24,20 @@ model Tenant {
     createdAt DateTime @default(now()) @map("created_at")
     updatedAt DateTime @updatedAt @map("updated_at")
 
-    users          User[]
-    projects       Project[]
-    products       Product[]
-    jobs           Job[]
-    assets         Asset[]
-    videos         Video[]
-    generations    Generation[]
-    usageRecords   UsageRecord[]
-    billingPlans   TenantBillingPlan[]
-    socialAccounts SocialAccount[]
-    publishJobs    PublishJob[]
+    users              User[]
+    projects           Project[]
+    products           Product[]
+    videoPresets       VideoPreset[]
+    jobs               Job[]
+    assets             Asset[]
+    videos             Video[]
+    generations        Generation[]
+    usageRecords       UsageRecord[]
+    billingPlans       TenantBillingPlan[]
+    socialAccounts     SocialAccount[]
+    publishJobs        PublishJob[]
+    creditTransactions CreditTransaction[]
+    notifications      Notification[]
 
     @@map("tenants")
 }
@@ -66,11 +69,12 @@ model User {
     createdAt       DateTime  @default(now()) @map("created_at")
     updatedAt       DateTime  @updatedAt @map("updated_at")
 
-    tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    jobs        Job[]
-    videos      Video[]
-    generations Generation[]
-    sessions    UserSession[]
+    tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    jobs             Job[]
+    videos           Video[]
+    generations      Generation[]
+    sessions         UserSession[]
+    pipelineTestRuns PipelineTestRun[]
 
     @@index([tenantId])
     @@index([email])
@@ -142,13 +146,73 @@ model Product {
     createdAt      DateTime @default(now()) @map("created_at")
     updatedAt      DateTime @updatedAt @map("updated_at")
 
-    tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project Project? @relation(fields: [projectId], references: [id])
+    tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project Project?      @relation(fields: [projectId], references: [id])
     videos  Video[]
+    presets VideoPreset[]
 
     @@index([tenantId])
     @@index([tenantId, isArchived])
     @@map("products")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIDEO PRESETS (шаблоны настроек генерации — «завод»)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum PresetStatus {
+    draft // создан, ещё не генерировал превью
+    preview // превью сгенерировано, ждёт одобрения
+    active // завод запущен, генерирует по расписанию
+    paused // завод приостановлен
+
+    @@map("preset_status")
+}
+
+model VideoPreset {
+    id                String           @id @default(uuid()) @db.Uuid
+    tenantId          String           @map("tenant_id") @db.Uuid
+    productId         String           @map("product_id") @db.Uuid
+    createdBy         String?          @map("created_by") @db.Uuid
+    name              String
+    status            PresetStatus     @default(draft)
+    // Настройки генерации
+    heygenAvatarId    String           @default("Anna_public_20240108") @map("heygen_avatar_id")
+    heygenVoiceId     String           @default("70856236390f4d0392d00187143d3900") @map("heygen_voice_id")
+    editStyle         String           @default("dynamic") @map("edit_style") // dynamic | smooth | minimal | random
+    targetDurationSec Int              @default(30) @map("target_duration_sec")
+    customPrompt      String?          @map("custom_prompt") @db.Text
+    language          String           @default("ru")
+    bgmEnabled        Boolean          @default(true) @map("bgm_enabled")
+    // Расписание завода
+    cronExpression    String?          @map("cron_expression")
+    timezone          String           @default("Europe/Moscow")
+    // Автопубликация
+    autoPublish       Boolean          @default(false) @map("auto_publish")
+    publishPlatforms  SocialPlatform[] @map("publish_platforms")
+    socialAccountIds  String[]         @map("social_account_ids") @db.Uuid
+    // Превью
+    previewVideoId    String?          @unique @map("preview_video_id") @db.Uuid
+    // Антиповтор идей: хеши уже использованных creative angles
+    usedIdeaHashes    String[]         @default([]) @map("used_idea_hashes")
+    // Статистика
+    totalRuns         Int              @default(0) @map("total_runs")
+    lastRunAt         DateTime?        @map("last_run_at")
+    nextRunAt         DateTime?        @map("next_run_at")
+    //
+    isArchived        Boolean          @default(false) @map("is_archived")
+    createdAt         DateTime         @default(now()) @map("created_at")
+    updatedAt         DateTime         @updatedAt @map("updated_at")
+
+    tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    product      Product @relation(fields: [productId], references: [id])
+    previewVideo Video?  @relation("PresetPreview", fields: [previewVideoId], references: [id])
+    videos       Video[] @relation("PresetVideos")
+
+    @@index([tenantId, status])
+    @@index([tenantId, isArchived])
+    @@index([nextRunAt])
+    @@map("video_presets")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,41 +232,48 @@ enum VideoStatus {
 }
 
 model Video {
-    id            String      @id @default(uuid()) @db.Uuid
-    tenantId      String      @map("tenant_id") @db.Uuid
-    projectId     String?     @map("project_id") @db.Uuid
-    productId     String?     @map("product_id") @db.Uuid
-    createdBy     String?     @map("created_by") @db.Uuid
-    title         String
-    description   String?
-    status        VideoStatus @default(draft)
-    outputUrl     String?     @map("output_url") // ключ в MinIO/S3
-    thumbnailUrl  String?     @map("thumbnail_url")
-    durationSec   Decimal?    @map("duration_sec") @db.Decimal(6, 2)
-    fileSizeBytes BigInt?     @map("file_size_bytes")
-    resolution    String? // 1080x1920
-    fps           Int?        @default(30) @db.SmallInt
-    error         String?
-    creditsUsed   Int         @default(0) @map("credits_used")
-    metadata      Json        @default("{}") // любые дополнительные данные
-    publishedAt   DateTime?   @map("published_at")
-    createdAt     DateTime    @default(now()) @map("created_at")
-    updatedAt     DateTime    @updatedAt @map("updated_at")
-    completedAt   DateTime?   @map("completed_at")
+    id              String      @id @default(uuid()) @db.Uuid
+    tenantId        String      @map("tenant_id") @db.Uuid
+    projectId       String?     @map("project_id") @db.Uuid
+    productId       String?     @map("product_id") @db.Uuid
+    presetId        String?     @map("preset_id") @db.Uuid
+    createdBy       String?     @map("created_by") @db.Uuid
+    title           String
+    description     String?
+    status          VideoStatus @default(draft)
+    // Идея и фингерпринт (антиповтор)
+    ideaText        String?     @map("idea_text") @db.Text
+    ideaFingerprint String?     @map("idea_fingerprint")
+    outputUrl       String?     @map("output_url") // ключ в MinIO/S3
+    thumbnailUrl    String?     @map("thumbnail_url")
+    durationSec     Decimal?    @map("duration_sec") @db.Decimal(6, 2)
+    fileSizeBytes   BigInt?     @map("file_size_bytes")
+    resolution      String? // 1080x1920
+    fps             Int?        @default(30) @db.SmallInt
+    error           String?
+    creditsUsed     Int         @default(0) @map("credits_used")
+    metadata        Json        @default("{}") // любые дополнительные данные
+    publishedAt     DateTime?   @map("published_at")
+    createdAt       DateTime    @default(now()) @map("created_at")
+    updatedAt       DateTime    @updatedAt @map("updated_at")
+    completedAt     DateTime?   @map("completed_at")
 
-    tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project     Project?       @relation(fields: [projectId], references: [id])
-    product     Product?       @relation(fields: [productId], references: [id])
-    creator     User?          @relation(fields: [createdBy], references: [id])
-    job         Job?
-    scenes      Scene[]
-    variants    VideoVariant[]
-    publishJobs PublishJob[]
+    tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project       Project?       @relation(fields: [projectId], references: [id])
+    product       Product?       @relation(fields: [productId], references: [id])
+    preset        VideoPreset?   @relation("PresetVideos", fields: [presetId], references: [id])
+    creator       User?          @relation(fields: [createdBy], references: [id])
+    presetPreview VideoPreset?   @relation("PresetPreview")
+    job           Job?
+    scenes        Scene[]
+    variants      VideoVariant[]
+    publishJobs   PublishJob[]
 
     @@index([tenantId, status])
     @@index([tenantId, createdAt(sort: Desc)])
     @@index([projectId])
     @@index([productId])
+    @@index([presetId])
     @@map("videos")
 }
 
@@ -346,6 +417,7 @@ model Scene {
     avatarUrl      String?     @map("avatar_url")
     clipUrl        String?     @map("clip_url")
     imageUrl       String?     @map("image_url")
+    frameUrl       String?     @map("frame_url") // сгенерированный кадр-фрейм для image→video
     // Внешние ID провайдеров
     heygenVideoId  String?     @map("heygen_video_id")
     klingTaskId    String?     @map("kling_task_id")
@@ -421,6 +493,7 @@ enum GenerationProvider {
     replicate
     comfyui
     elevenlabs
+    gemini
 
     @@map("generation_provider")
 }
@@ -535,6 +608,8 @@ model CreditTransaction {
     invoiceId    String?      @map("invoice_id")
     createdAt    DateTime     @default(now()) @map("created_at")
 
+    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
     @@index([tenantId, createdAt(sort: Desc)])
     @@index([tenantId, type])
     @@map("credit_transactions")
@@ -598,6 +673,47 @@ model AdminAuditLog {
     @@map("admin_audit_logs")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PIPELINE TEST RUNS (история тестового пайплайна в админке)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PipelineTestRun {
+    id             String  @id @default(uuid()) @db.Uuid
+    createdById    String  @map("created_by_id") @db.Uuid
+    productName    String  @map("product_name")
+    prompt         String
+    language       String  @default("ru")
+    avatarId       String  @map("avatar_id")
+    voiceId        String  @map("voice_id")
+    layoutTemplate String  @map("layout_template")
+    targetDuration Int     @default(30) @map("target_duration")
+    subtitleStyle  String? @map("subtitle_style")
+
+    // Generated content
+    title      String?
+    fullScript String? @map("full_script")
+
+    // Result
+    outputUrl     String? @map("output_url")
+    outputKey     String? @map("output_key")
+    durationSec   Float?  @map("duration_sec")
+    fileSizeBytes Int?    @map("file_size_bytes")
+    elapsedMs     Int?    @map("elapsed_ms")
+
+    // Full params snapshot for re-creation
+    params Json @default("{}")
+
+    status String  @default("completed") // completed | failed
+    error  String?
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    createdBy User @relation(fields: [createdById], references: [id])
+
+    @@index([createdById, createdAt(sort: Desc)])
+    @@map("pipeline_test_runs")
+}
+
 // Уведомления (системные + от провайдеров)
 enum NotificationType {
     system
@@ -621,6 +737,8 @@ model Notification {
     createdAt DateTime         @default(now()) @map("created_at")
     readAt    DateTime?        @map("read_at")
 
+    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
     @@index([tenantId, isRead, createdAt(sort: Desc)])
     @@index([userId, isRead])
     @@map("notifications")
@@ -634,6 +752,7 @@ enum SocialPlatform {
     tiktok
     instagram
     youtube_shorts
+    postbridge
 
     @@map("social_platform")
 }
@@ -699,4 +818,37 @@ model PublishJob {
     @@index([tenantId, status])
     @@index([scheduledAt])
     @@map("publish_jobs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIDEO SCHEDULES (CRON автогенерация + автопубликация)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model VideoSchedule {
+    id               String           @id @default(uuid()) @db.Uuid
+    tenantId         String           @map("tenant_id") @db.Uuid
+    productId        String           @map("product_id") @db.Uuid
+    name             String           @default("Auto-schedule")
+    cronExpression   String           @map("cron_expression") // e.g. "0 10 * * 1,3,5" = Mon/Wed/Fri at 10:00
+    timezone         String           @default("Europe/Moscow")
+    isActive         Boolean          @default(true) @map("is_active")
+    autoPublish      Boolean          @default(false) @map("auto_publish")
+    publishPlatforms SocialPlatform[] @map("publish_platforms") // platforms to auto-publish to
+    socialAccountIds String[]         @map("social_account_ids") @db.Uuid // IDs of SocialAccount to publish to
+    // Generation settings (same as create page)
+    avatarId         String?          @map("avatar_id")
+    voiceId          String?          @map("voice_id")
+    durationSec      Int              @default(30) @map("duration_sec")
+    language         String           @default("ru")
+    bgmEnabled       Boolean          @default(true) @map("bgm_enabled")
+    // Stats
+    lastRunAt        DateTime?        @map("last_run_at")
+    nextRunAt        DateTime?        @map("next_run_at")
+    totalRuns        Int              @default(0) @map("total_runs")
+    createdAt        DateTime         @default(now()) @map("created_at")
+    updatedAt        DateTime         @updatedAt @map("updated_at")
+
+    @@index([tenantId, isActive])
+    @@index([nextRunAt])
+    @@map("video_schedules")
 }

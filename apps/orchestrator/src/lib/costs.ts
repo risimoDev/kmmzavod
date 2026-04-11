@@ -24,7 +24,9 @@ const HEYGEN_PER_SEC = 0.03;
 const HEYGEN_MIN_USD = 0.10;
 
 /** Runway Gen-4.5: $0.12 per second (1 credit = $0.01, 12 credits/sec) */
-const RUNWAY_PER_SEC = 0.12;
+const RUNWAY_GEN45_PER_SEC = 0.12;
+/** Runway Gen-4 Turbo: $0.05 per second (5 credits/sec) — image-to-video */
+const RUNWAY_GEN4_TURBO_PER_SEC = 0.05;
 
 /** Kling v1 Standard: $0.028 per second */
 const KLING_PER_SEC = 0.028;
@@ -37,6 +39,8 @@ const RUNWAY_IMAGE_PER_IMAGE = 0.02;
 const REPLICATE_PER_IMAGE = 0.006;
 /** ComfyUI (self-hosted): $0 per image */
 const COMFYUI_PER_IMAGE = 0;
+/** Gemini (free tier): $0 per image */
+const GEMINI_PER_IMAGE = 0;
 
 /** Platform credit conversion: 1 credit = $0.001 */
 const USD_PER_CREDIT = 0.001;
@@ -82,16 +86,18 @@ export function heygenCostUsd(durationSec: number): number {
  * Estimate cost of a Runway Gen-4.5 video clip.
  *
  * Pricing (1 credit = $0.01):
- * - 12 credits/sec → $0.12 per second
- * - 5 s clip = $0.60, 10 s clip = $1.20
+ * - gen4.5:     12 credits/sec → $0.12/sec (text-to-video, highest quality)
+ * - gen4_turbo:  5 credits/sec → $0.05/sec (image-to-video, 2.4× cheaper)
  *
  * @see https://docs.dev.runwayml.com/guides/pricing — Runway pricing
  *
  * @param durationSec Duration of the clip in seconds
+ * @param model       Runway model: 'gen4.5' or 'gen4_turbo' (default)
  * @returns Cost in USD
  */
-export function runwayCostUsd(durationSec: number): number {
-  return durationSec * RUNWAY_PER_SEC;
+export function runwayCostUsd(durationSec: number, model: 'gen4.5' | 'gen4_turbo' = 'gen4_turbo'): number {
+  const rate = model === 'gen4_turbo' ? RUNWAY_GEN4_TURBO_PER_SEC : RUNWAY_GEN45_PER_SEC;
+  return durationSec * rate;
 }
 
 /**
@@ -125,12 +131,13 @@ export function klingCostUsd(durationSec: number): number {
  * @param provider Image generation provider identifier
  * @returns Cost in USD
  */
-export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'runway'): number {
+export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini'): number {
   switch (provider) {
     case 'fal':       return FAL_PER_IMAGE;
     case 'replicate': return REPLICATE_PER_IMAGE;
     case 'comfyui':   return COMFYUI_PER_IMAGE;
     case 'runway':    return RUNWAY_IMAGE_PER_IMAGE;
+    case 'gemini':    return GEMINI_PER_IMAGE;
   }
 }
 

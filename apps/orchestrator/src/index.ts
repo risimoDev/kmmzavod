@@ -33,6 +33,7 @@ import { createImageGenWorker } from './workers/image-gen.worker';
 import { createVideoComposeWorker } from './workers/video-compose.worker';
 import { createPipelineStateWorker } from './workers/pipeline-state.worker';
 import { createPublishWorker } from './workers/publish.worker';
+import { createSchedulerWorker } from './workers/scheduler.worker';
 import { startPipeline } from './pipeline/coordinator';
 
 async function main() {
@@ -49,10 +50,13 @@ async function main() {
   const runway = new RunwayClient(config.RUNWAY_API_KEY);
   const imageGenApiKey = config.IMAGE_GEN_PROVIDER === 'runway'
     ? config.RUNWAY_API_KEY
+    : config.IMAGE_GEN_PROVIDER === 'gemini'
+    ? (config.GEMINI_API_KEY ?? config.IMAGE_GEN_API_KEY)
     : config.IMAGE_GEN_API_KEY;
   const imageGen = new ImageGenClient(
     config.IMAGE_GEN_PROVIDER as ImageGenProvider,
-    imageGenApiKey
+    imageGenApiKey,
+    config.GEMINI_API_KEY, // fallback key for any provider
   );
 
   const storage = new MinioStorageClient({
@@ -73,6 +77,7 @@ async function main() {
   const pipelineStateQueue = new Queue<PipelineStateJobPayload>(QUEUES['pipeline-state'].name, { connection });
   const publishQueue = new Queue<PublishJobPayload>(QUEUES['publish'].name, { connection });
   const pipelineQueue = new Queue<PipelineJobPayload>(QUEUES['pipeline'].name, { connection });
+  const schedulerQueue = new Queue(QUEUES['scheduler'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -98,6 +103,7 @@ async function main() {
     storage,
     pipelineStateQueue,
     connection,
+    defaultModel: config.RUNWAY_VIDEO_MODEL,
   });
 
   const imageGenWorker = createImageGenWorker({
@@ -105,6 +111,7 @@ async function main() {
     imageGen,
     storage,
     pipelineStateQueue,
+    runwayQueue,
     connection,
     provider: config.IMAGE_GEN_PROVIDER,
   });
@@ -113,6 +120,7 @@ async function main() {
     db,
     videoProcessorUrl: config.VIDEO_PROCESSOR_URL,
     connection,
+    storage,
   });
 
   const pipelineStateWorker = createPipelineStateWorker({
@@ -129,7 +137,24 @@ async function main() {
     tiktokClientSecret: config.TIKTOK_CLIENT_SECRET,
     instagramAppId: config.INSTAGRAM_APP_ID,
     instagramAppSecret: config.INSTAGRAM_APP_SECRET,
+    postBridgeApiKey: config.POST_BRIDGE_API_KEY,
+    youtubeClientId: config.YOUTUBE_CLIENT_ID,
+    youtubeClientSecret: config.YOUTUBE_CLIENT_SECRET,
   });
+
+  // Scheduler worker — fires every 60 seconds, checks for due VideoSchedule rows
+  const schedulerWorker = createSchedulerWorker({
+    db,
+    pipelineQueue,
+    connection,
+  });
+
+  // Register repeatable scheduler tick (every 60s)
+  await schedulerQueue.upsertJobScheduler(
+    'scheduler-tick',
+    { every: 60_000 },
+    { data: { tick: Date.now() } },
+  );
 
   // Pipeline-worker — точка входа пайплайна (enqueue из API)
   const { Worker } = await import('bullmq');
@@ -144,6 +169,43 @@ async function main() {
   );
 
   // ── Failed event handlers — permanent failure after all retries exhausted ─
+  // Generic handler for job-level failures (pipeline, gpt-script, video-compose)
+  const handleJobFailure = async (
+    bullJob: { data: { jobId: string; tenantId: string } } | undefined,
+    err:     Error,
+    stage:   string,
+  ) => {
+    if (!bullJob) return;
+    const { jobId, tenantId } = bullJob.data;
+    const errorMsg = err.message || `${stage} failed`;
+    try {
+      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
+      await db.$transaction([
+        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
+        ...(jobRow?.videoId ? [
+          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[${stage}] ${errorMsg}` } }),
+        ] : []),
+      ]);
+      await db.jobEvent.create({
+        data: { jobId, tenantId, stage, status: 'failed', message: errorMsg },
+      });
+      if (jobRow?.videoId) {
+        const { publishProgress } = await import('./lib/progress');
+        await publishProgress(tenantId, jobRow.videoId, stage, 'failed', 0, errorMsg);
+      }
+      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
+      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
+      if (reserved > 0) {
+        const { refundReserve } = await import('./lib/credits');
+        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
+      }
+      logger.error({ jobId, tenantId, err: errorMsg }, `${stage}: final failure after retries`);
+    } catch (dbErr) {
+      logger.error({ dbErr, jobId }, `${stage} failed handler: DB error`);
+    }
+  };
+
+  // Scene-level failure handler (heygen, runway, image-gen)
   const handleSceneFailure = async (
     bullJob: { data: { jobId: string; sceneId: string; tenantId: string } } | undefined,
     err:     Error,
@@ -164,12 +226,10 @@ async function main() {
       await db.jobEvent.create({
         data: { jobId, tenantId, stage, status: 'failed', message: errorMsg },
       });
-      // Publish failure via SSE
       if (jobRow?.videoId) {
         const { publishProgress } = await import('./lib/progress');
         await publishProgress(tenantId, jobRow.videoId, stage, 'failed', 0, errorMsg);
       }
-      // Refund reserved credits
       const jobPayload = jobRow?.payload as Record<string, unknown> | null;
       const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
       if (reserved > 0) {
@@ -181,105 +241,12 @@ async function main() {
     }
   };
 
-  // Pipeline worker failure — startPipeline threw (bad job data, DB error, etc.)
-  pipelineWorker.on('failed', async (j, err) => {
-    if (!j) return;
-    const { jobId, tenantId } = j.data;
-    const errorMsg = err.message || 'Pipeline start failed';
-    try {
-      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
-      await db.$transaction([
-        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[pipeline] ${errorMsg}` } }),
-        ] : []),
-      ]);
-      await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'pipeline', status: 'failed', message: errorMsg },
-      });
-      if (jobRow?.videoId) {
-        const { publishProgress } = await import('./lib/progress');
-        await publishProgress(tenantId, jobRow.videoId, 'pipeline', 'failed', 0, errorMsg);
-      }
-      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
-      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
-      if (reserved > 0) {
-        const { refundReserve } = await import('./lib/credits');
-        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
-      }
-      logger.error({ jobId, tenantId, err: errorMsg }, 'Pipeline: final failure after retries');
-    } catch (dbErr) {
-      logger.error({ dbErr, jobId }, 'Pipeline failed handler: DB error');
-    }
-  });
-
-  // GPT script worker failure — OpenAI returned garbage, timeout, etc.
-  gptWorker.on('failed', async (j, err) => {
-    if (!j) return;
-    const { jobId, tenantId } = j.data;
-    const errorMsg = err.message || 'GPT script generation failed';
-    try {
-      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
-      await db.$transaction([
-        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[gpt-script] ${errorMsg}` } }),
-        ] : []),
-      ]);
-      await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'gpt-script', status: 'failed', message: errorMsg },
-      });
-      if (jobRow?.videoId) {
-        const { publishProgress } = await import('./lib/progress');
-        await publishProgress(tenantId, jobRow.videoId, 'gpt-script', 'failed', 0, errorMsg);
-      }
-      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
-      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
-      if (reserved > 0) {
-        const { refundReserve } = await import('./lib/credits');
-        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
-      }
-      logger.error({ jobId, tenantId, err: errorMsg }, 'GPT script: final failure after retries');
-    } catch (dbErr) {
-      logger.error({ dbErr, jobId }, 'GPT script failed handler: DB error');
-    }
-  });
-
-  // Video compose worker failure — all variant renders failed
-  videoComposeWorker.on('failed', async (j, err) => {
-    if (!j) return;
-    const { jobId, tenantId } = j.data;
-    const errorMsg = err.message || 'Video composition failed';
-    try {
-      const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true, creditsUsed: true } });
-      await db.$transaction([
-        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[video-compose] ${errorMsg}` } }),
-        ] : []),
-      ]);
-      await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'video-compose', status: 'failed', message: errorMsg },
-      });
-      if (jobRow?.videoId) {
-        const { publishProgress } = await import('./lib/progress');
-        await publishProgress(tenantId, jobRow.videoId, 'video-compose', 'failed', 0, errorMsg);
-      }
-      const jobPayload = jobRow?.payload as Record<string, unknown> | null;
-      const reserved = typeof jobPayload?.estimatedCredits === 'number' ? jobPayload.estimatedCredits : 0;
-      if (reserved > 0) {
-        const { refundReserve } = await import('./lib/credits');
-        await refundReserve(db, { tenantId, jobId, reservedCredits: reserved });
-      }
-      logger.error({ jobId, tenantId, err: errorMsg }, 'Video compose: final failure after retries');
-    } catch (dbErr) {
-      logger.error({ dbErr, jobId }, 'Video compose failed handler: DB error');
-    }
-  });
-
-  heygenWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'heygen-render'));
-  runwayWorker.on('failed',   (j, err) => handleSceneFailure(j, err, 'runway-clip'));
-  imageGenWorker.on('failed', (j, err) => handleSceneFailure(j, err, 'image-gen'));
+  pipelineWorker.on('failed',       (j, err) => handleJobFailure(j, err, 'pipeline'));
+  gptWorker.on('failed',            (j, err) => handleJobFailure(j, err, 'gpt-script'));
+  videoComposeWorker.on('failed',   (j, err) => handleJobFailure(j, err, 'video-compose'));
+  heygenWorker.on('failed',         (j, err) => handleSceneFailure(j, err, 'heygen-render'));
+  runwayWorker.on('failed',         (j, err) => handleSceneFailure(j, err, 'runway-clip'));
+  imageGenWorker.on('failed',       (j, err) => handleSceneFailure(j, err, 'image-gen'));
 
   publishWorker.on('failed', async (j, err) => {
     if (!j) return;

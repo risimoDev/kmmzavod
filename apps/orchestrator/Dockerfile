@@ -38,6 +38,6 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
 HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=3 \
-    CMD node -e "require('ioredis').createClient(process.env.REDIS_URL).ping().then(()=>process.exit(0)).catch(()=>process.exit(1))"
+    CMD node -e "const R=require('ioredis');const r=new R({host:process.env.REDIS_HOST||'localhost',port:parseInt(process.env.REDIS_PORT||'6379'),password:process.env.REDIS_PASSWORD});r.ping().then(()=>{r.disconnect();process.exit(0)}).catch(()=>process.exit(1))"
 
 CMD ["node", "apps/orchestrator/dist/index.js"]

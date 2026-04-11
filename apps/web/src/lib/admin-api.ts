@@ -498,22 +498,76 @@ export const adminApi = {
       body: JSON.stringify(params),
     }),
 
-  pipelineTestGenerateAvatar: (params: {
+  pipelineTestStartAvatar: (params: {
     script: string;
     avatar_id: string;
     voice_id: string;
     bg_color?: string;
     target_duration?: number;
   }) =>
-    apiFetch<{
-      key: string;
-      url: string;
-      duration_sec: number;
-      heygen_video_id: string;
-    }>('/pipeline-test/generate-avatar', {
+    apiFetch<{ heygen_video_id: string }>('/pipeline-test/start-avatar', {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+
+  pipelineTestAvatarStatus: (videoId: string) =>
+    apiFetch<{
+      status: string;
+      key?: string;
+      url?: string;
+      duration_sec?: number;
+      error?: string;
+    }>(`/pipeline-test/avatar-status/${encodeURIComponent(videoId)}`),
+
+  // ── Test run history ────────────────────────────────────────────────────
+  pipelineTestSaveRun: (params: Record<string, any>) =>
+    apiFetch<{ id: string }>('/pipeline-test/runs', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  pipelineTestListRuns: (limit = 20, offset = 0) =>
+    apiFetch<{
+      data: Array<{
+        id: string;
+        productName: string;
+        title: string | null;
+        layoutTemplate: string;
+        targetDuration: number;
+        outputUrl: string | null;
+        durationSec: number | null;
+        status: string;
+        createdAt: string;
+        avatarId: string;
+        voiceId: string;
+      }>;
+      total: number;
+    }>(`/pipeline-test/runs?limit=${limit}&offset=${offset}`),
+
+  pipelineTestLoadRun: (id: string) =>
+    apiFetch<{
+      id: string;
+      productName: string;
+      prompt: string;
+      language: string;
+      avatarId: string;
+      voiceId: string;
+      layoutTemplate: string;
+      targetDuration: number;
+      subtitleStyle: string | null;
+      title: string | null;
+      fullScript: string | null;
+      outputUrl: string | null;
+      outputKey: string | null;
+      durationSec: number | null;
+      fileSizeBytes: number | null;
+      elapsedMs: number | null;
+      params: Record<string, any>;
+      status: string;
+    }>(`/pipeline-test/runs/${encodeURIComponent(id)}`),
+
+  pipelineTestDeleteRun: (id: string) =>
+    apiFetch<void>(`/pipeline-test/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // ── Layout mode ───────────────────────────────────────────────────────────
 

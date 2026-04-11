@@ -332,14 +332,14 @@ export const videosApi = {
 
   create: (body: {
     title: string;
-    scriptPrompt: string;
+    scriptPrompt?: string;
     projectId?: string;
     productId?: string;
     description?: string;
     avatarId?: string;
     voiceId?: string;
     durationSec?: number;
-    settings?: { resolution?: string; fps?: number; language?: string };
+    settings?: { resolution?: string; fps?: number; language?: string; bgm_enabled?: boolean; video_format?: string; [key: string]: unknown };
     audioTrack?: { storage_key: string; volume: number };
   }) =>
     apiFetch<{ video: { id: string; title: string; status: string; createdAt: string }; jobId: string }>(

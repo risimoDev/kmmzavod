@@ -1,17 +1,20 @@
 /**
- * Runway clip worker — text-to-video b-roll generation for "clip" scenes.
- * Replaces the previous Kling clip worker.
+ * Runway clip worker — video generation for "clip" scenes.
+ *
+ * Supports two modes:
+ *  A. **image-to-video** (gen4_turbo, 5 credits/sec) — when referenceImageUrl is provided.
+ *     Takes a product image and animates it. Cheaper, more relevant to the product.
+ *  B. **text-to-video** (gen4.5, 12 credits/sec) — fallback when no reference image.
+ *     Generates b-roll purely from text prompt.
  *
  * Flow:
- *  1. Create Runway text-to-video task
+ *  1. Create Runway task (image-to-video or text-to-video)
  *  2. Poll until clip ready
  *  3. Download clip → upload to MinIO
  *  4. Update Scene record (clipUrl, clipDone, status, costUsd)
  *  5. Create Generation record for cost audit
  *  6. Deduct credits
  *  7. Notify pipeline-state
- *
- * Errors throw → BullMQ retries.  index.ts 'failed' handler marks job/video failed.
  */
 import { Worker, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
@@ -20,7 +23,7 @@ import { logger } from '../logger';
 import { StoragePaths } from '@kmmzavod/storage';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { Queue } from 'bullmq';
-import type { RunwayClient } from '../clients/runway.client';
+import type { RunwayClient, RunwayVideoModel } from '../clients/runway.client';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { runwayCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
@@ -31,27 +34,48 @@ interface Deps {
   storage:            IStorageClient;
   pipelineStateQueue: Queue<PipelineStateJobPayload>;
   connection:         ConnectionOptions;
+  /** Default model for video generation. Overridden to gen4_turbo when referenceImageUrl is present. */
+  defaultModel:       RunwayVideoModel;
 }
 
 export function createRunwayClipWorker(deps: Deps) {
-  const { db, runway, storage, pipelineStateQueue, connection } = deps;
+  const { db, runway, storage, pipelineStateQueue, connection, defaultModel } = deps;
 
   return new Worker<RunwayClipJobPayload>(
     QUEUES['runway-clip'].name,
     async (job) => {
-      const { jobId, sceneId, tenantId, prompt, durationSec } = job.data;
+      const { jobId, sceneId, tenantId, prompt, durationSec, referenceImageUrl } = job.data;
       const log     = logger.child({ jobId, sceneId, worker: 'runway-clip' });
       const startMs = Date.now();
 
-      log.info('Runway: начало генерации клипа');
+      // Determine mode: image-to-video (cheaper) when we have a product image
+      const useImageToVideo = !!referenceImageUrl;
+      const model: RunwayVideoModel = useImageToVideo ? 'gen4_turbo' : (defaultModel === 'gen4_turbo' ? 'gen4.5' : defaultModel);
+      const mode = useImageToVideo ? 'image-to-video' : 'text-to-video';
+
+      log.info({ mode, model, referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
 
       await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'runway-clip', status: 'started', meta: { sceneId } },
+        data: { jobId, tenantId, stage: 'runway-clip', status: 'started', meta: { sceneId, mode, model } },
       });
 
       // ─── 1. Создаём задачу в Runway ──────────────────────────────────────
-      const taskId = await runway.createClip({ prompt, durationSec: durationSec ?? 5 });
-      log.info({ taskId }, 'Runway: задача создана, ожидаем клип');
+      let taskId: string;
+      if (useImageToVideo) {
+        taskId = await runway.createImageToVideo({
+          promptImage: referenceImageUrl,
+          prompt,
+          durationSec: durationSec ?? 5,
+          model: 'gen4_turbo',
+        });
+      } else {
+        taskId = await runway.createClip({
+          prompt,
+          durationSec: durationSec ?? 5,
+          model: 'gen4.5',
+        });
+      }
+      log.info({ taskId, mode }, 'Runway: задача создана, ожидаем клип');
 
       await db.scene.update({
         where: { id: sceneId },
@@ -61,7 +85,7 @@ export function createRunwayClipWorker(deps: Deps) {
       // ─── 2. Polling ───────────────────────────────────────────────────────
       const { outputUrl, duration } = await runway.pollUntilDone(taskId);
       const actualDuration = duration > 0 ? duration : (durationSec ?? 5);
-      log.info({ outputUrl, actualDuration }, 'Runway: клип готов');
+      log.info({ outputUrl, actualDuration, mode }, 'Runway: клип готов');
 
       // ─── 3. Скачиваем → MinIO ─────────────────────────────────────────────
       const storageKey = StoragePaths.sceneClip(tenantId, sceneId);
@@ -73,7 +97,8 @@ export function createRunwayClipWorker(deps: Deps) {
       log.info({ storageKey }, 'Runway: клип загружен в MinIO');
 
       // ─── 4. Обновляем Scene ───────────────────────────────────────────────
-      const costUsd        = runwayCostUsd(actualDuration);
+      const actualModel = useImageToVideo ? 'gen4_turbo' : 'gen4.5';
+      const costUsd        = runwayCostUsd(actualDuration, actualModel);
       const creditsCharged = creditsFromUsd(costUsd);
 
       await db.scene.update({
@@ -88,10 +113,10 @@ export function createRunwayClipWorker(deps: Deps) {
           jobId,
           sceneId,
           provider:        'runway',
-          model:           'gen4.5',
+          model:           actualModel,
           status:          'completed',
           externalTaskId:  taskId,
-          requestPayload:  { prompt, durationSec },
+          requestPayload:  { prompt, durationSec, mode, referenceImageUrl: referenceImageUrl?.slice(0, 200) },
           responsePayload: { storageKey, durationSec: actualDuration },
           costUsd,
           creditsCharged,
@@ -104,7 +129,7 @@ export function createRunwayClipWorker(deps: Deps) {
       // ─── 6. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
         tenantId, jobId, credits: creditsCharged,
-        description: `Runway clip — scene ${sceneId.slice(0, 8)}`,
+        description: `Runway ${mode} (${actualModel}) — scene ${sceneId.slice(0, 8)}`,
       });
 
       await db.jobEvent.create({
@@ -112,8 +137,8 @@ export function createRunwayClipWorker(deps: Deps) {
           jobId, tenantId,
           stage:   'runway-clip',
           status:  'completed',
-          message: `${actualDuration.toFixed(1)}s — $${costUsd.toFixed(4)}`,
-          meta:    { sceneId, storageKey, costUsd, creditsCharged },
+          message: `${mode} ${actualDuration.toFixed(1)}s (${actualModel}) — $${costUsd.toFixed(4)}`,
+          meta:    { sceneId, storageKey, costUsd, creditsCharged, mode, model: actualModel },
         },
       });
 
@@ -124,7 +149,7 @@ export function createRunwayClipWorker(deps: Deps) {
         { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state:${sceneId}:clip` },
       );
 
-      log.info({ costUsd, creditsCharged }, 'Runway клип успешно обработан');
+      log.info({ costUsd, creditsCharged, mode, model: actualModel }, 'Runway клип успешно обработан');
     },
     { connection, concurrency: QUEUES['runway-clip'].concurrency },
   );

@@ -83,8 +83,9 @@ export function createHeygenRenderWorker(deps: Deps) {
 
       await db.scene.update({
         where: { id: sceneId },
-        data:  { avatarUrl: storageKey, avatarDone: true, status: 'completed', costUsd },
+        data:  { avatarUrl: storageKey, avatarDone: true, status: 'completed', costUsd, durationSec: durationSec },
       });
+      log.info({ sceneId, durationSec }, 'HeyGen: durationSec обновлён в БД (реальная длительность голоса)');
 
       // ─── 5. Generation record ─────────────────────────────────────────────
       await db.generation.create({

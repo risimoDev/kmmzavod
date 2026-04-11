@@ -40,8 +40,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
-    ports:
-      - "9001:9001"
     networks:
       - backend
       - frontend
@@ -56,19 +54,36 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    ports:
+      - "3000:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
     environment:
+      NODE_ENV: production
       DATABASE_URL: postgresql://kmmzavod:${POSTGRES_PASSWORD}@postgres:5432/kmmzavod
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-kmmzavod}
       JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       PORT: 3000
-      HEYGEN_API_KEY: ${HEYGEN_API_KEY}
-      RUNWAY_API_KEY: ${RUNWAY_API_KEY}
+      VIDEO_PROCESSOR_URL: http://video-processor:8000
+      HEYGEN_API_KEY: ${HEYGEN_API_KEY:-}
+      RUNWAY_API_KEY: ${RUNWAY_API_KEY:-}
       GPTUNNEL_API_KEY: ${GPTUNNEL_API_KEY}
       GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
     networks:
@@ -84,24 +99,41 @@ services:
       context: .
       dockerfile: apps/orchestrator/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
+      NODE_ENV: production
       DATABASE_URL: postgresql://kmmzavod:${POSTGRES_PASSWORD}@postgres:5432/kmmzavod
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-kmmzavod}
       GPTUNNEL_API_KEY: ${GPTUNNEL_API_KEY}
       GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
       HEYGEN_API_KEY: ${HEYGEN_API_KEY}
       RUNWAY_API_KEY: ${RUNWAY_API_KEY}
-      KLING_ACCESS_KEY: ${KLING_ACCESS_KEY}
-      KLING_SECRET_KEY: ${KLING_SECRET_KEY}
+      RUNWAY_VIDEO_MODEL: ${RUNWAY_VIDEO_MODEL:-gen4_turbo}
+      KLING_ACCESS_KEY: ${KLING_ACCESS_KEY:-}
+      KLING_SECRET_KEY: ${KLING_SECRET_KEY:-}
       IMAGE_GEN_API_KEY: ${IMAGE_GEN_API_KEY}
       IMAGE_GEN_PROVIDER: ${IMAGE_GEN_PROVIDER:-runway}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       VIDEO_PROCESSOR_URL: http://video-processor:8000
+      TIKTOK_CLIENT_KEY: ${TIKTOK_CLIENT_KEY:-}
+      TIKTOK_CLIENT_SECRET: ${TIKTOK_CLIENT_SECRET:-}
+      INSTAGRAM_APP_ID: ${INSTAGRAM_APP_ID:-}
+      INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
+      POST_BRIDGE_API_KEY: ${POST_BRIDGE_API_KEY:-}
+      YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
+      YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
     networks:
       - backend
     deploy:
@@ -122,6 +154,11 @@ services:
       context: apps/video-processor
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
@@ -148,8 +185,19 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000}
     restart: unless-stopped
+    ports:
+      - "3001:3001"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
+      NODE_ENV: production
+      HOSTNAME: "0.0.0.0"
       NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${JWT_SECRET}
     networks:

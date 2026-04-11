@@ -11,7 +11,7 @@
 import axios from 'axios';
 import { logger } from '../logger';
 
-export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui';
+export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui' | 'gemini';
 
 interface GenerateImageOpts {
   prompt: string;
@@ -26,12 +26,15 @@ interface ImageResult {
   url: string;
   /** MIME type */
   contentType: string;
+  /** Raw image buffer (e.g. Gemini inline base64 response — avoids extra download) */
+  buffer?: Buffer;
 }
 
 export class ImageGenClient {
   constructor(
     private readonly provider: ImageGenProvider,
-    private readonly apiKey: string
+    private readonly apiKey: string,
+    private readonly geminiApiKey?: string,
   ) {}
 
   /**
@@ -48,6 +51,22 @@ export class ImageGenClient {
         return this.generateReplicate(opts);
       case 'comfyui':
         return this.generateComfyUI(opts);
+      case 'gemini':
+        return this.generateGemini(opts);
+    }
+  }
+
+  /**
+   * Generate with automatic fallback to Gemini if primary provider fails.
+   */
+  async generateWithFallback(opts: GenerateImageOpts): Promise<ImageResult> {
+    try {
+      return await this.generate(opts);
+    } catch (primaryErr) {
+      const key = this.geminiApiKey ?? (this.provider === 'gemini' ? this.apiKey : undefined);
+      if (!key || this.provider === 'gemini') throw primaryErr;
+      logger.warn({ provider: this.provider, err: (primaryErr as Error).message }, 'Primary image gen failed, falling back to Gemini');
+      return this.generateGemini(opts, key);
     }
   }
 
@@ -230,6 +249,43 @@ export class ImageGenClient {
     }
 
     throw new Error('replicate: timeout генерации изображения');
+  }
+
+  // ── Gemini (Google AI — free tier) ─────────────────────────────────────────
+  /**
+   * Generate an image via Google Gemini (gemini-2.0-flash-exp image generation).
+   * Free tier: 15 RPM / 1500 RPD.
+   *
+   * @see https://ai.google.dev/gemini-api/docs/image-generation
+   */
+  private async generateGemini(opts: GenerateImageOpts, overrideKey?: string): Promise<ImageResult> {
+    const key = overrideKey ?? this.apiKey;
+    const http = axios.create({ timeout: 120_000 });
+
+    const res = await http.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${key}`,
+      {
+        contents: [{ parts: [{ text: opts.prompt }] }],
+        generationConfig: {
+          responseModalities: ['TEXT', 'IMAGE'],
+        },
+      },
+      { headers: { 'Content-Type': 'application/json' } },
+    );
+
+    const parts: any[] = res.data?.candidates?.[0]?.content?.parts ?? [];
+    const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));
+    if (!imagePart) throw new Error('gemini: no image in response');
+
+    const mimeType: string = imagePart.inlineData.mimeType;
+    const base64: string = imagePart.inlineData.data;
+    const buffer = Buffer.from(base64, 'base64');
+
+    return {
+      url: `data:${mimeType};base64,${base64.slice(0, 64)}`, // placeholder — worker uses buffer
+      contentType: mimeType,
+      buffer,
+    };
   }
 
   // ── ComfyUI (self-hosted) ──────────────────────────────────────────────────

@@ -1,12 +1,13 @@
 /**
- * Runway API client — video generation via Gen-4.5.
+ * Runway API client — video generation via Gen-4.5 / Gen-4 Turbo + image-to-video.
  *
- * Provides text-to-video clip generation for b-roll scenes.
- * NOTE: Runway does NOT offer a standalone image-generation endpoint (use text_to_image instead).
- * Image generation is handled by {@link ImageGenClient}.
+ * Provides:
+ * - text-to-video clip generation for b-roll scenes
+ * - image-to-video generation from product images (cheaper, more relevant)
  *
  * @see https://docs.dev.runwayml.com/guides/using-the-api — getting started
- * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_video/post — text_to_video endpoint
+ * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_video/post — text_to_video
+ * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1image_to_video/post — image_to_video
  * @see https://docs.dev.runwayml.com/api#tag/Task-management/paths/~1v1~1tasks~1{id}/get — polling / task status
  */
 import axios, { type AxiosInstance } from 'axios';
@@ -14,6 +15,8 @@ import { logger } from '../logger';
 
 const RUNWAY_BASE_URL = 'https://api.dev.runwayml.com/v1';
 const RUNWAY_API_VERSION = '2024-11-06';
+
+export type RunwayVideoModel = 'gen4.5' | 'gen4_turbo';
 
 interface RunwayTaskResponse {
   id: string;
@@ -41,33 +44,75 @@ export class RunwayClient {
   }
 
   /**
-   * Create a text-to-video task via Runway Gen-4.5.
-   *
-   * Uses the dedicated `/text_to_video` endpoint for prompt-only generation
-   * (no input image required).
+   * Create a text-to-video task.
    *
    * @param opts.prompt       — cinematic description of the clip
    * @param opts.durationSec  — desired length: 2–10 (integer)
    * @param opts.aspectRatio  — e.g. "720:1280" (vertical) or "1280:720" (horizontal)
+   * @param opts.model        — "gen4.5" (12 credits/sec) or "gen4_turbo" (5 credits/sec)
    * @returns Runway task ID for polling
-   *
-   * @see https://docs.dev.runwayml.com/api#tag/Start-generating/paths/~1v1~1text_to_video/post
    */
   async createClip(opts: {
     prompt: string;
     durationSec?: number;
     aspectRatio?: string;
+    model?: RunwayVideoModel;
   }): Promise<string> {
     const duration = Math.max(2, Math.min(opts.durationSec ?? 5, 10));
+    const model = opts.model ?? 'gen4_turbo';
 
-    // Convert legacy aspect-ratio strings to Runway pixel-dimension format
     let ratio = opts.aspectRatio ?? '720:1280';
     if (ratio === '9:16') ratio = '720:1280';
     else if (ratio === '16:9') ratio = '1280:720';
     else if (ratio === '1:1') ratio = '960:960';
 
+    // gen4_turbo doesn't support text_to_video — only gen4.5 does
+    if (model === 'gen4_turbo') {
+      throw new Error('gen4_turbo does not support text-to-video; use createImageToVideo() or gen4.5');
+    }
+
     const res = await this.http.post<{ id: string }>('/text_to_video', {
-      model: 'gen4.5',
+      model,
+      promptText: opts.prompt,
+      duration,
+      ratio,
+    });
+
+    return res.data.id;
+  }
+
+  /**
+   * Create an image-to-video task.
+   * Takes a source image (e.g. generated product shot) and animates it.
+   *
+   * gen4_turbo: 5 credits/sec ($0.05/sec) — 2.4× cheaper than gen4.5
+   * gen4.5:    12 credits/sec ($0.12/sec) — higher quality
+   *
+   * @param opts.promptImage  — HTTPS URL or data URI of the source image
+   * @param opts.prompt       — motion/animation description
+   * @param opts.durationSec  — 2–10 seconds
+   * @param opts.aspectRatio  — pixel ratio (e.g. "720:1280")
+   * @param opts.model        — gen4_turbo (default, cheap) or gen4.5
+   * @returns Runway task ID for polling
+   */
+  async createImageToVideo(opts: {
+    promptImage: string;
+    prompt: string;
+    durationSec?: number;
+    aspectRatio?: string;
+    model?: RunwayVideoModel;
+  }): Promise<string> {
+    const duration = Math.max(2, Math.min(opts.durationSec ?? 5, 10));
+    const model = opts.model ?? 'gen4_turbo';
+
+    let ratio = opts.aspectRatio ?? '720:1280';
+    if (ratio === '9:16') ratio = '720:1280';
+    else if (ratio === '16:9') ratio = '1280:720';
+    else if (ratio === '1:1') ratio = '960:960';
+
+    const res = await this.http.post<{ id: string }>('/image_to_video', {
+      model,
+      promptImage: [{ uri: opts.promptImage, position: 'first' }],
       promptText: opts.prompt,
       duration,
       ratio,

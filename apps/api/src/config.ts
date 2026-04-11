@@ -30,6 +30,9 @@ const schema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
 
+  // Encryption key for social tokens at rest (32 hex bytes = 64 chars)
+  ENCRYPTION_KEY: z.string().length(64).regex(/^[0-9a-fA-F]+$/).optional(),
+
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
 
   // AI API keys (optional — used for admin health checks)

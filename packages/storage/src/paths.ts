@@ -27,4 +27,7 @@ export const StoragePaths = {
   /** Ephemeral working files — auto-purged by MinIO lifecycle rule (TTL 24h) */
   temp: (tenantId: string, jobId: string, filename: string) =>
     `tenants/${tenantId}/temp/${jobId}/${filename}`,
+
+  /** Global BGM library prefix (admin-uploaded background music tracks) */
+  bgmPrefix: () => 'bgm/',
 } as const;

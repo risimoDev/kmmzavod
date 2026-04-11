@@ -12,7 +12,8 @@ const CreateVideoBody = z.object({
   description: z.string().max(1000).optional(),
   projectId: z.string().uuid().optional(),
   productId: z.string().uuid().optional(),
-  scriptPrompt: z.string().min(10).max(2000),
+  presetId: z.string().uuid().optional(),
+  scriptPrompt: z.string().max(2000).optional().default(''),
   avatarId: z.string().default('Anna_public_20240108'),
   voiceId: z.string().default('70856236390f4d0392d00187143d3900'),
   durationSec: z.number().int().min(15).max(90).default(30),
@@ -183,28 +184,19 @@ export async function videoRoutes(app: FastifyInstance) {
     }
 
     const query = req.query as Record<string, string | undefined>;
-    const language = query.language ?? undefined;
-    const gender = query.gender ?? undefined;
-    const limit = Math.min(Number(query.limit) || 50, 100);
-    const token = query.token ?? undefined;
+    const language = query.language?.toLowerCase() ?? undefined;
+    const gender = query.gender?.toLowerCase() ?? undefined;
 
     // Build cache key from query parameters
     const redis = getRedis();
-    const cacheKey = `heygen:voices:${language ?? 'all'}:${gender ?? 'all'}:${limit}:${token ?? 'first'}`;
+    const cacheKey = `heygen:voices:v2:${language ?? 'all'}:${gender ?? 'all'}`;
     const cached = await redis.get(cacheKey);
     if (cached) {
       return reply.send(JSON.parse(cached));
     }
 
     try {
-      const params = new URLSearchParams();
-      params.set('type', 'public');
-      params.set('limit', String(limit));
-      if (language) params.set('language', language);
-      if (gender) params.set('gender', gender);
-      if (token) params.set('token', token);
-
-      const res = await fetch(`https://api.heygen.com/v1/audio/voices?${params}`, {
+      const res = await fetch('https://api.heygen.com/v2/voices', {
         headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
         signal: AbortSignal.timeout(15_000),
       });
@@ -212,17 +204,34 @@ export async function videoRoutes(app: FastifyInstance) {
       if (!res.ok) throw new Error(`HeyGen Voices API ${res.status}`);
       const raw = (await res.json()) as any;
 
+      // v2 response: { data: { voices: [...] } }
+      const allVoices: any[] = raw.data?.voices ?? raw.data ?? [];
+
+      let voices = allVoices.map((v: any) => ({
+        voice_id: v.voice_id,
+        name: v.name ?? v.display_name ?? '',
+        gender: v.gender ?? null,
+        language: v.language ?? null,
+        preview_audio_url: v.preview_audio ?? v.preview_audio_url ?? null,
+        support_locale: v.support_locale ?? false,
+      }));
+
+      // Server-side filtering (v2 doesn't support query params)
+      if (language) {
+        voices = voices.filter((v: any) =>
+          v.language && v.language.toLowerCase().includes(language)
+        );
+      }
+      if (gender) {
+        voices = voices.filter((v: any) =>
+          v.gender && v.gender.toLowerCase() === gender
+        );
+      }
+
       const result = {
-        data: (raw.data ?? []).map((v: any) => ({
-          voice_id: v.voice_id,
-          name: v.name,
-          gender: v.gender ?? null,
-          language: v.language ?? null,
-          preview_audio_url: v.preview_audio_url ?? null,
-          support_locale: v.support_locale ?? false,
-        })),
-        has_more: raw.has_more ?? false,
-        next_token: raw.next_token ?? null,
+        data: voices,
+        has_more: false,
+        next_token: null,
       };
 
       await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
@@ -255,20 +264,6 @@ export async function videoRoutes(app: FastifyInstance) {
     } catch { /* use default */ }
 
     const estimatedCredits = DEFAULT_SCENES_COUNT * avgCreditsPerScene;
-
-    const tenant = await db.tenant.findUniqueOrThrow({
-      where: { id: tenantId },
-      select: { credits: true },
-    });
-
-    if (tenant.credits < estimatedCredits) {
-      return reply.code(402).send({
-        error: 'InsufficientCredits',
-        message: 'Недостаточно кредитов для запуска генерации.',
-        available: tenant.credits,
-        required: estimatedCredits,
-      });
-    }
 
     // Проверяем projectId если передан
     if (body.projectId) {
@@ -304,12 +299,28 @@ export async function videoRoutes(app: FastifyInstance) {
     }
 
     // Создаём видео + задачу + soft reserve кредитов в одной транзакции
-    const { video, job } = await db.$transaction(async (tx) => {
+    // Credit check is inside the transaction to prevent race conditions
+    const result = await db.$transaction(async (tx) => {
+      // Atomic credit check — SELECT FOR UPDATE via Prisma interactive transaction
+      const tenant = await tx.tenant.findUniqueOrThrow({
+        where: { id: tenantId },
+        select: { credits: true },
+      });
+
+      if (tenant.credits < estimatedCredits) {
+        throw Object.assign(new Error('InsufficientCredits'), {
+          statusCode: 402,
+          available: tenant.credits,
+          required: estimatedCredits,
+        });
+      }
+
       const video = await tx.video.create({
         data: {
           tenantId,
           projectId: body.projectId ?? null,
           productId: body.productId ?? null,
+          presetId: body.presetId ?? null,
           createdBy: userId,
           title: body.title,
           description: body.description ?? null,
@@ -363,7 +374,21 @@ export async function videoRoutes(app: FastifyInstance) {
       });
 
       return { video, job };
+    }).catch((err: any) => {
+      if (err.message === 'InsufficientCredits') {
+        return reply.code(402).send({
+          error: 'InsufficientCredits',
+          message: 'Недостаточно кредитов для запуска генерации.',
+          available: err.available,
+          required: err.required,
+        });
+      }
+      throw err;
     });
+
+    // If reply was already sent (insufficient credits), return
+    if (!result || reply.sent) return;
+    const { video, job } = result;
 
     // Ставим задачу в очередь BullMQ
     const payload: PipelineJobPayload = { jobId: job.id, tenantId };

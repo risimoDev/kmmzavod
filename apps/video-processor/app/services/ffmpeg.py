@@ -371,6 +371,8 @@ def concat_with_transitions(
     v_prev = "[0:v]"
     cum_duration = 0.0
     cum_transition = 0.0
+    # Collect transition params for audio crossfade sync
+    transition_params: list[tuple[float, bool]] = []  # (duration, is_xfade)
 
     for i in range(1, n):
         td = clips[i - 1].transition_duration
@@ -385,6 +387,7 @@ def concat_with_transitions(
             fc_parts.append(f"{v_prev}[{i}:v]concat=n=2:v=1:a=0{v_next}")
             cum_duration += clips[i - 1].duration
             cum_transition += 0.0
+            transition_params.append((0.0, False))
         else:
             cum_duration += clips[i - 1].duration
             cum_transition += td
@@ -395,12 +398,29 @@ def concat_with_transitions(
                 f"{v_prev}[{i}:v]xfade=transition={tr}"
                 f":duration={td:.4f}:offset={offset:.4f}{v_next}"
             )
+            transition_params.append((td, True))
 
         v_prev = v_next
 
-    # ── Audio concat (hard) ────────────────────────────────────────────────
-    audio_inputs = "".join(f"[{i}:a]" for i in range(n))
-    fc_parts.append(f"{audio_inputs}concat=n={n}:v=0:a=1[a_end]")
+    # ── Audio crossfade chain (synced with video xfade) ────────────────────
+    # Use acrossfade with same durations as video xfade to keep audio/video
+    # in sync. This prevents the audio from running longer than the video.
+    has_xfade = any(is_xf for _, is_xf in transition_params)
+    if has_xfade and n > 1:
+        a_prev = "[0:a]"
+        for i in range(1, n):
+            td, is_xf = transition_params[i - 1]
+            a_next = "[a_end]" if i == n - 1 else f"[a{i}]"
+            if is_xf and td > 0:
+                fc_parts.append(
+                    f"{a_prev}[{i}:a]acrossfade=d={td:.4f}:c1=tri:c2=tri{a_next}"
+                )
+            else:
+                fc_parts.append(f"{a_prev}[{i}:a]concat=n=2:v=0:a=1{a_next}")
+            a_prev = a_next
+    else:
+        audio_inputs = "".join(f"[{i}:a]" for i in range(n))
+        fc_parts.append(f"{audio_inputs}concat=n={n}:v=0:a=1[a_end]")
 
     total_duration = sum(c.duration for c in clips) - sum(
         c.transition_duration for c in clips[:-1]
@@ -585,25 +605,18 @@ def compose_layout_segment(
     height: int,
     pip_scale: float = 0.30,
     pip_margin: int = 30,
-    chroma_color: str = "0x000000",
+    chroma_color: str = "0x00FF00",
     chroma_similarity: float = 0.15,
-    chroma_blend: float = 0.05,
+    chroma_blend: float = 0.08,
     threads: int = 0,
 ) -> None:
     """
-    Compose a single layout segment: overlay avatar (on black background) onto
-    a prepared background clip.
+    Compose a single layout segment: overlay avatar (on green-screen background)
+    onto a prepared background clip.
 
-    Uses ``lumakey`` filter to generate a proper alpha channel from the black
-    background based on pixel luminance. This is superior to colorkey/chromakey
-    for black backgrounds because:
-      - It operates in luminance space, not RGB or chroma
-      - Pure black (luma=0) becomes fully transparent
-      - Dark hair/clothing (higher luma) is preserved
-      - Smooth edge blending via ``softness`` avoids hard fringe artifacts
-
-    The ``chroma_color`` / ``chroma_similarity`` / ``chroma_blend`` parameters
-    are kept for backward compatibility but are not used.
+    Uses ``chromakey`` filter (YUV-space) to remove the green-screen background.
+    Green-screen keying is far more reliable than black keying because green
+    does not appear naturally in human skin, hair, or typical clothing.
 
     Layout types:
         fullscreen  — avatar overlaid at full frame on top of background
@@ -616,10 +629,10 @@ def compose_layout_segment(
     fc_parts: list[str] = []
     map_args: list[str] = []
 
-    # lumakey parameters tuned for HeyGen black background
-    luma_threshold = 0.08
-    luma_tolerance = 0.15
-    luma_softness = 0.2
+    # chromakey params for green-screen removal
+    ck_color = chroma_color   # "0x00FF00"
+    ck_similarity = 0.15      # green-screen tolerance
+    ck_blend = 0.08           # smooth alpha edges
 
     if layout == "voiceover":
         # No avatar visible — use background video + avatar audio
@@ -635,11 +648,12 @@ def compose_layout_segment(
             map_args += ["-map", "[a]"]
 
     elif layout == "fullscreen":
-        # Alpha via lumakey at full frame, overlay on background
+        # Chromakey avatar at full frame, overlay on background
+        # despill removes green colour contamination from edges
         fc_parts.append(
-            f"[0:v]format=yuva420p,"
-            f"lumakey=threshold={luma_threshold}"
-            f":tolerance={luma_tolerance}:softness={luma_softness}[ak]"
+            f"[0:v]chromakey=color={ck_color}"
+            f":similarity={ck_similarity}:blend={ck_blend},"
+            f"despill=type=green:mix=0.5:expand=0[ak]"
         )
         fc_parts.append("[1:v][ak]overlay=0:0:format=auto,format=yuv420p[v]")
         map_args += ["-map", "[v]"]
@@ -658,9 +672,9 @@ def compose_layout_segment(
         x, y = _pip_xy(layout, width, height, pip_w, pip_h, pip_margin)
 
         fc_parts.append(
-            f"[0:v]format=yuva420p,"
-            f"lumakey=threshold={luma_threshold}"
-            f":tolerance={luma_tolerance}:softness={luma_softness},"
+            f"[0:v]chromakey=color={ck_color}"
+            f":similarity={ck_similarity}:blend={ck_blend},"
+            f"despill=type=green:mix=0.5:expand=0,"
             f"scale={pip_w}:{pip_h}:flags=lanczos[ak_pip]"
         )
         fc_parts.append(

@@ -8,10 +8,16 @@ services:
   postgres:
     ports:
       - "5433:5432"
+    networks:
+      - backend
+      - frontend
 
   redis:
     ports:
       - "6379:6379"
+    networks:
+      - backend
+      - frontend
 
   minio:
     ports:

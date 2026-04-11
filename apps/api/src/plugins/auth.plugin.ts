@@ -29,6 +29,20 @@ async function authPlugin(app: FastifyInstance) {
         await req.jwtVerify();
       } catch (err) {
         reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
+        return;
+      }
+      // Verify user and tenant are still active (token may outlive a ban)
+      const user = await db.user.findUnique({
+        where: { id: req.user.userId },
+        select: { isActive: true, tenant: { select: { isActive: true } } },
+      });
+      if (!user || !user.isActive) {
+        reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
+        return;
+      }
+      if (!user.tenant.isActive) {
+        reply.code(403).send({ error: 'Forbidden', message: 'Организация заблокирована' });
+        return;
       }
     }
   );
@@ -46,6 +60,15 @@ async function authPlugin(app: FastifyInstance) {
       const payload = req.user;
       if (payload.role !== 'admin' && payload.role !== 'owner') {
         reply.code(403).send({ error: 'Forbidden', message: 'Недостаточно прав' });
+        return;
+      }
+      // Verify user is still active
+      const user = await db.user.findUnique({
+        where: { id: payload.userId },
+        select: { isActive: true, tenant: { select: { isActive: true } } },
+      });
+      if (!user || !user.isActive || !user.tenant.isActive) {
+        reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
         return;
       }
     }

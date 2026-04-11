@@ -63,7 +63,7 @@ export class HeyGenClient {
             input_text: scene.script,
             voice_id: scene.voiceId,
           },
-          background: { type: 'color', value: '#000000' },
+          background: { type: 'color', value: '#00FF00' },
         },
       ],
       dimension: { width: 1080, height: 1920 },

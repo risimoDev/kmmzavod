@@ -1,8 +1,12 @@
-// GPT script worker — generates structured scene plan via GPTunnel (OpenAI-compatible)
-// Output: N scene rows in DB + fan-out to heygen/runway/image queues
+// GPT script worker — generates UNIQUE idea + structured scene plan via GPTunnel (OpenAI-compatible)
+// Two-step process:
+//   Step 1: Generate unique creative IDEA (with dedup check against preset.usedIdeaHashes)
+//   Step 2: Generate full SCRIPT from the approved idea
+// Fan-out: clip scenes → image-gen (purpose=runway-frame) → runway-clip (chained)
 
 import { Worker, type Job } from 'bullmq';
 import OpenAI from 'openai';
+import { createHash } from 'crypto';
 import { QUEUE_DEFS, type GptScriptJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { Queue } from 'bullmq';
@@ -21,6 +25,16 @@ interface SceneOutput {
 interface GptOutput {
   title: string;
   scenes: SceneOutput[];
+  social_metadata?: {
+    description: string;
+    hashtags: string[];
+  };
+}
+
+interface IdeaOutput {
+  idea: string;
+  hook_technique: string;
+  creative_angle: string;
 }
 
 interface Deps {
@@ -32,8 +46,42 @@ interface Deps {
   connection:     ConnectionOptions;
 }
 
-const SYSTEM_PROMPT = `
+/** Hash an idea string for dedup comparison */
+function hashIdea(idea: string): string {
+  return createHash('sha256').update(idea.toLowerCase().trim()).digest('hex').slice(0, 16);
+}
+
+const IDEA_SYSTEM_PROMPT = `
+You are a top-tier Russian-language creative director for short-form viral video (TikTok/Reels/Shorts).
+Your job: generate ONE unique creative idea/concept for a product advertisement video.
+
+REQUIREMENTS:
+- The idea must be HIGHLY SPECIFIC and ORIGINAL — not a generic "show the product".
+- Include: creative_angle (1 line), hook_technique (which hook pattern to use), idea (3-5 sentences describing the full creative concept).
+- The concept must naturally showcase the product's benefits while entertaining the viewer.
+- Think like a top TikTok creator, not an ad agency.
+
+RESPONSE FORMAT (JSON only, no markdown):
+{
+  "creative_angle": "<краткий угол подачи, 5-10 слов>",
+  "hook_technique": "<тип хука: провокация/шок-факт/личная_история/запрет/загадка/вызов/боль/контринтуитив>",
+  "idea": "<Полное описание идеи на русском: что происходит, какая история, какой поворот, какая эмоция. 3-5 предложений.>"
+}
+
+ANTI-REPEAT: The following creative angles have ALREADY been used. You MUST create something COMPLETELY DIFFERENT:
+{{USED_IDEAS}}
+
+VARIETY SEED: {{SEED}}
+`;
+
+const SCRIPT_SYSTEM_PROMPT = `
 You are a top-tier Russian-language copywriter and visual director for short-form viral video (TikTok/Reels/Shorts). You write scripts that sound like a real person sharing a discovery with a friend, NOT like an ad agency.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+CREATIVE BRIEF
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+You MUST follow this pre-approved creative idea EXACTLY:
+{{IDEA}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1 — PRODUCT VISUAL ANALYSIS
@@ -46,15 +94,7 @@ Reference in every b_roll_prompt.
 SCENE NARRATIVE ARC (STRICT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. HOOK (scene 0, avatar/text, 3-5 sec) — the MOST CRITICAL moment. Pattern interrupt.
-   Pick ONE technique per video (VARY across videos):
-   • Провокация: "Вам врали всё это время" / "Забудьте всё, что знали о..."
-   • Шок-факт: "90% людей делают эту ошибку каждый день"
-   • Личная история: "Три месяца назад я был в отчаянии..." / "Я потратил 200 тысяч, прежде чем нашёл это"
-   • Запрет: "Никогда не покупайте [категория], пока не узнаете это"
-   • Загадка: "Есть один приём, о котором молчат производители..."
-   • Вызов: "Спорим, вы этого не знали?" / "Держу пари, вы делаете это неправильно"
-   • Боль: "Устали от [конкретная проблема]? Я тоже — пока не попробовал вот это"
-   • Контринтуитив: "Чем дороже крем, тем хуже он работает. Вот доказательство."
+   Use the hook technique specified in the creative brief.
    Product MUST be mentioned in first 3 seconds.
 
 2. PRODUCT REVEAL (scene 1, clip/image) — cinematic hero shot.
@@ -81,7 +121,11 @@ OUTPUT SCHEMA
       "b_roll_prompt": "<промпт — ТОЛЬКО для clip/image>",
       "duration_sec": 5
     }
-  ]
+  ],
+  "social_metadata": {
+    "description": "<описание для соцсетей, 100-200 символов, живым языком, с CTA>",
+    "hashtags": ["хештег1", "хештег2", "...", "максимум 15 хештегов"]
+  }
 }
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -94,6 +138,10 @@ SCENE TYPE RULES
 - "clip" (20–30%) — b_roll_prompt 50-80 words. ВСЕ 7 элементов:
   1. Shot type  2. Camera movement  3. Lighting  4. Product placement
   5. Background  6. Action  7. Technical quality (4K, shallow DOF)
+  ВАЖНО: clip-сцены будут сгенерированы как кадр → анимация через Runway.
+  Описывай ДВИЖЕНИЕ и АНИМАЦИЮ: "camera slowly orbits around",
+  "zoom in revealing texture", "product rotates on turntable with light sweep",
+  "water droplets splash around the product", "golden hour light shifts across surface".
 - "image" (10–20%) — b_roll_prompt 30-50 words.
   Product appearance, composition, palette, mood.
 - "text" (<5%) — max 6 words.
@@ -104,14 +152,13 @@ SCENE TYPE RULES
 Write SPOKEN Russian, not written. As if talking to a friend on camera.
 
 ГЕНДЕР СПИКЕРА: {{SPEAKER_GENDER}}
-- Если женщина: женские формы глаголов ("я попробовала", "я нашла", "я была в шоке", "моя подруга рассказала").
-- Если мужчина: мужские формы ("я попробовал", "я нашёл", "я был в шоке", "мой друг рассказал").
-- Все личные примеры и истории должны соответствовать полу спикера.
+- Если женщина: женские формы глаголов ("я попробовала", "я нашла", "я была в шоке").
+- Если мужчина: мужские формы ("я попробовал", "я нашёл", "я был в шоке").
 
 ПРОИЗНОШЕНИЕ И УДАРЕНИЯ (КРИТИЧЕСКИ ВАЖНО):
 - Пиши слова так, как они ПРОИЗНОСЯТСЯ в разговорной русской речи.
 - НЕ ставь знаки ударения. TTS движок сам расставит ударения.
-- Числа пиши СЛОВАМИ: "сто пятьдесят" вместо "150", "сорок процентов" вместо "40%".
+- Числа пиши СЛОВАМИ: "сто пятьдесят" вместо "150".
 - Аббревиатуры раскрывай: "эс пэ эф" вместо "SPF".
 
 ЗАПРЕЩЁННЫЕ СЛОВА (НИКОГДА):
@@ -170,36 +217,146 @@ export function createGptScriptWorker(deps: Deps): Worker {
   return new Worker<GptScriptJobPayload>(
     QUEUE_DEFS.GPT_SCRIPT.name,
     async (job: Job<GptScriptJobPayload>) => {
-      const { jobId, tenantId, prompt, projectSettings, productContext } = job.data;
+      const { jobId, tenantId, prompt, projectSettings, productContext, presetId, usedIdeaHashes } = job.data;
       const startMs = Date.now();
 
       await deps.db.jobEvent.create({
         data: { jobId, tenantId, stage: 'gpt-script', status: 'started' },
       });
 
-      // ── Look up job for videoId ───────────────────────────────────────────
       const jobRow = await deps.db.job.findUniqueOrThrow({
         where:  { id: jobId },
         select: { videoId: true },
       });
 
-      // ── Build messages with optional product vision ────────────────────────
-      const targetDuration = (projectSettings as any)?.durationSec ?? 30;
+      // ── Resolve speaker gender ─────────────────────────────────────────────
       const voiceIdForGender = (projectSettings as any)?.voice_id ?? '';
-      // Determine gender from voice_id: known female voices — Лариса, Дарья
       const FEMALE_VOICE_IDS = [
-        '70856236390f4d0392d00187143d3900', // Лариса
-        'bc69c9589d6747028dc5ec4aec2b43c3', // Дарья
+        '70856236390f4d0392d00187143d3900',
+        'bc69c9589d6747028dc5ec4aec2b43c3',
       ];
       const speakerGender = FEMALE_VOICE_IDS.includes(voiceIdForGender) ? 'Женщина' : 'Мужчина';
+      const targetDuration = (projectSettings as any)?.durationSec ?? 30;
 
-      const systemContent = SYSTEM_PROMPT.trim()
+      // ══════════════════════════════════════════════════════════════════════
+      // STEP 1: Generate unique IDEA (with dedup)
+      // ══════════════════════════════════════════════════════════════════════
+      const usedHashes = new Set(usedIdeaHashes ?? []);
+      let approvedIdea: IdeaOutput | null = null;
+      let ideaHash = '';
+      let ideaTotalCostUsd = 0;
+      let ideaTotalPromptTokens = 0;
+      let ideaTotalCompletionTokens = 0;
+      const MAX_IDEA_ATTEMPTS = 5;
+
+      const productInfo = productContext
+        ? `\nProduct: ${productContext.name}${productContext.description ? ` — ${productContext.description}` : ''}`
+        : '';
+      const userPromptNote = prompt && prompt.trim().length >= 5
+        ? `\nUser direction: ${prompt}`
+        : '\nUser gave NO specific direction — come up with a completely original concept.';
+
+      for (let attempt = 0; attempt < MAX_IDEA_ATTEMPTS; attempt++) {
+        const seed = Math.random().toString(36).slice(2, 10);
+        const usedIdeasText = usedHashes.size > 0
+          ? [...usedHashes].slice(-20).join(', ')
+          : 'None yet — be the first!';
+
+        const ideaSystem = IDEA_SYSTEM_PROMPT
+          .replace('{{USED_IDEAS}}', usedIdeasText)
+          .replace('{{SEED}}', seed);
+
+        const ideaResponse = await deps.openai.chat.completions.create({
+          model: 'gpt-4o',
+          response_format: { type: 'json_object' },
+          temperature: 1.2,
+          messages: [
+            { role: 'system', content: ideaSystem + productInfo },
+            { role: 'user', content: `Generate a unique creative idea for a ${targetDuration}-second product video.${userPromptNote}` },
+          ],
+        });
+
+        const ideaRaw = ideaResponse.choices[0]?.message?.content;
+        if (!ideaRaw) continue;
+
+        const usage = ideaResponse.usage!;
+        ideaTotalCostUsd += gptunnelCostUsd(usage.prompt_tokens, usage.completion_tokens);
+        ideaTotalPromptTokens += usage.prompt_tokens;
+        ideaTotalCompletionTokens += usage.completion_tokens;
+
+        try {
+          const parsed = JSON.parse(ideaRaw) as IdeaOutput;
+          const h = hashIdea(parsed.idea);
+
+          if (!usedHashes.has(h)) {
+            approvedIdea = parsed;
+            ideaHash = h;
+            break;
+          }
+          // Duplicate — retry with new seed
+        } catch {
+          // Parse error — retry
+        }
+      }
+
+      if (!approvedIdea) {
+        throw new Error('Failed to generate unique idea after max attempts — all ideas duplicated');
+      }
+
+      // ── Track idea generation cost ─────────────────────────────────────────
+      const ideaCredits = creditsFromUsd(ideaTotalCostUsd);
+      await deps.db.generation.create({
+        data: {
+          tenantId, jobId,
+          provider: 'gptunnel', model: 'gpt-4o', status: 'completed',
+          promptTokens: ideaTotalPromptTokens,
+          completionTokens: ideaTotalCompletionTokens,
+          requestPayload: { step: 'idea', productName: productContext?.name },
+          responsePayload: { idea: approvedIdea.idea, hash: ideaHash },
+          costUsd: ideaTotalCostUsd,
+          creditsCharged: ideaCredits,
+          latencyMs: Date.now() - startMs,
+          startedAt: new Date(startMs),
+          completedAt: new Date(),
+        },
+      });
+      await chargeCredits(deps.db, { tenantId, jobId, credits: ideaCredits, description: 'GPT idea generation' });
+
+      // ── Save idea to video + update preset usedIdeaHashes ──────────────────
+      if (jobRow.videoId) {
+        await deps.db.video.update({
+          where: { id: jobRow.videoId },
+          data: { ideaText: approvedIdea.idea, ideaFingerprint: ideaHash },
+        });
+      }
+      if (presetId) {
+        await deps.db.videoPreset.update({
+          where: { id: presetId },
+          data: { usedIdeaHashes: { push: ideaHash } },
+        });
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // STEP 2: Generate SCRIPT from approved idea
+      // ══════════════════════════════════════════════════════════════════════
+      const scriptStartMs = Date.now();
+      const hasProductImages = (productContext?.imageUrls?.length ?? 0) > 0;
+
+      const ideaBlock = `Творческий угол: ${approvedIdea.creative_angle}\nТехника хука: ${approvedIdea.hook_technique}\nИдея: ${approvedIdea.idea}`;
+
+      const videoFormat = (projectSettings as any)?.video_format ?? 'standard';
+      const slideshowInstruction = videoFormat === 'slideshow'
+        ? `\n\n━━━ ФОРМАТ: СЛАЙДШОУ ━━━\nСоздай видео БЕЗ АВАТАРА. Все сцены — type "image" (или "text"). type "avatar" ЗАПРЕЩЁН.\nДлительность сцен: 3-5 секунд каждая.`
+        : '';
+
+      const scriptSystem = SCRIPT_SYSTEM_PROMPT
+        .replace('{{IDEA}}', ideaBlock)
         .replace('{{SPEAKER_GENDER}}', speakerGender)
         + (productContext ? buildProductSection(productContext) : '')
         + `\n\nProject settings: ${JSON.stringify(projectSettings)}`
-        + `\n\nTarget video duration: ${targetDuration} seconds. Total scene durations must sum to ~${targetDuration}s. Do NOT exceed ${targetDuration} seconds.`;
-
-      const hasProductImages = (productContext?.imageUrls?.length ?? 0) > 0;
+        + `\nTarget video duration: ${targetDuration} seconds. Total scene durations must sum to ~${targetDuration}s.`
+        + `\nIMPORTANT: HeyGen TTS speaks Russian at ~2 words per second. For an avatar scene of N seconds, write NO MORE than N*2 words.`
+        + slideshowInstruction;
 
       const userMessage: OpenAI.Chat.Completions.ChatCompletionUserMessageParam = hasProductImages
         ? {
@@ -209,17 +366,17 @@ export function createGptScriptWorker(deps: Deps): Worker {
                 type: 'image_url' as const,
                 image_url: { url, detail: 'high' as const },
               })),
-              { type: 'text' as const, text: `Product: ${productContext!.name}\n\n${prompt}` },
+              { type: 'text' as const, text: `Product: ${productContext!.name}\n\nWrite the full script following the creative brief above.` },
             ],
           }
-        : { role: 'user', content: prompt };
+        : { role: 'user', content: `Product: ${productContext?.name ?? 'неизвестный продукт'}.\n\nWrite the full script following the creative brief above.` };
 
-      // ── Call OpenAI ───────────────────────────────────────────────────────
       const response = await deps.openai.chat.completions.create({
-        model:           'gpt-4o',
+        model: 'gpt-4o',
         response_format: { type: 'json_object' },
+        temperature: 1.0,
         messages: [
-          { role: 'system', content: systemContent },
+          { role: 'system', content: scriptSystem },
           userMessage,
         ],
       });
@@ -236,32 +393,28 @@ export function createGptScriptWorker(deps: Deps): Worker {
         throw new Error('OpenAI: scenes array is empty or missing');
       }
 
-      // ── Track cost ───────────────────────────────────────────────────────
+      // ── Track script cost ──────────────────────────────────────────────────
       const usage       = response.usage!;
-      const costUsd     = gptunnelCostUsd(usage.prompt_tokens, usage.completion_tokens);
-      const credits     = creditsFromUsd(costUsd);
-      const latencyMs   = Date.now() - startMs;
+      const scriptCostUsd = gptunnelCostUsd(usage.prompt_tokens, usage.completion_tokens);
+      const scriptCredits = creditsFromUsd(scriptCostUsd);
+      const scriptLatencyMs = Date.now() - scriptStartMs;
 
       await deps.db.generation.create({
         data: {
-          tenantId,
-          jobId,
-          provider:          'gptunnel',
-          model:             'gpt-4o',
-          status:            'completed',
-          promptTokens:      usage.prompt_tokens,
-          completionTokens:  usage.completion_tokens,
-          requestPayload:    { prompt, projectSettings: projectSettings as Record<string, string> },
-          responsePayload:   { title: output.title, sceneCount: output.scenes.length },
-          costUsd,
-          creditsCharged:    credits,
-          latencyMs,
-          startedAt:         new Date(startMs),
-          completedAt:       new Date(),
+          tenantId, jobId,
+          provider: 'gptunnel', model: 'gpt-4o', status: 'completed',
+          promptTokens: usage.prompt_tokens,
+          completionTokens: usage.completion_tokens,
+          requestPayload: { step: 'script', idea: approvedIdea.creative_angle },
+          responsePayload: { title: output.title, sceneCount: output.scenes.length },
+          costUsd: scriptCostUsd,
+          creditsCharged: scriptCredits,
+          latencyMs: scriptLatencyMs,
+          startedAt: new Date(scriptStartMs),
+          completedAt: new Date(),
         },
       });
-
-      await chargeCredits(deps.db, { tenantId, jobId, credits, description: 'GPTunnel script generation' });
+      await chargeCredits(deps.db, { tenantId, jobId, credits: scriptCredits, description: 'GPT script generation' });
 
       // ── Persist scenes ────────────────────────────────────────────────────
       await deps.db.$transaction(
@@ -281,59 +434,83 @@ export function createGptScriptWorker(deps: Deps): Worker {
         )
       );
 
-      // ── Update job + video title ──────────────────────────────────────────
       await deps.db.job.update({ where: { id: jobId }, data: { status: 'scenes_ready' } });
 
       if (jobRow.videoId && output.title) {
+        const socialMeta = output.social_metadata;
         await deps.db.video.update({
           where: { id: jobRow.videoId },
-          data:  { title: output.title },
+          data: {
+            title: output.title,
+            description: socialMeta?.description ?? null,
+            metadata: {
+              ...(await deps.db.video.findUnique({ where: { id: jobRow.videoId }, select: { metadata: true } }))?.metadata as Record<string, unknown> ?? {},
+              socialMetadata: socialMeta
+                ? { description: socialMeta.description, hashtags: socialMeta.hashtags }
+                : undefined,
+            },
+          },
         });
       }
 
-      // ── Fan-out to per-scene provider queues ──────────────────────────────
+      // ══════════════════════════════════════════════════════════════════════
+      // FAN-OUT: distribute scenes to provider queues
+      // ══════════════════════════════════════════════════════════════════════
       const scenes     = await deps.db.scene.findMany({ where: { jobId } });
       const avatarId   = (projectSettings['avatar_id'] as string | undefined) ?? 'default';
       const voiceId    = (projectSettings['voice_id']  as string | undefined) ?? '70856236390f4d0392d00187143d3900';
+      const productImageUrls = productContext?.imageUrls ?? [];
 
       for (const scene of scenes) {
         if (scene.type === 'avatar' && scene.script) {
+          // Avatar → HeyGen (parallel with image generation)
           await deps.heygenQueue.add(
             `heygen:${scene.id}`,
             { jobId, sceneId: scene.id, tenantId, avatarId, voiceId, script: scene.script },
             QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
           );
         } else if (scene.type === 'clip' && scene.bRollPrompt) {
-          await deps.runwayQueue.add(
-            `runway:${scene.id}`,
-            { jobId, sceneId: scene.id, tenantId, prompt: scene.bRollPrompt, durationSec: Number(scene.durationSec ?? 5) },
-            QUEUE_DEFS.RUNWAY_CLIP.defaultJobOptions,
+          // Clip → image-gen (purpose=runway-frame) → then image-gen chains to runway-clip
+          await deps.imageGenQueue.add(
+            `imggen-frame:${scene.id}`,
+            {
+              jobId, sceneId: scene.id, tenantId,
+              prompt: scene.bRollPrompt,
+              referenceImageKeys: productImageUrls,
+              purpose: 'runway-frame',
+              clipDurationSec: Number(scene.durationSec ?? 5),
+            },
+            QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
           );
         } else if (scene.type === 'image' && scene.bRollPrompt) {
+          // Static image → image-gen (purpose=scene-image)
           await deps.imageGenQueue.add(
             `imggen:${scene.id}`,
             {
               jobId, sceneId: scene.id, tenantId,
               prompt: scene.bRollPrompt,
-              referenceImageKeys: productContext?.imageUrls ?? [],
+              referenceImageKeys: productImageUrls,
+              purpose: 'scene-image',
             },
             QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
           );
         }
-        // text scenes: no external generation needed — handled at compose time
+        // text scenes: no external generation needed
       }
+
+      const totalCostUsd = ideaTotalCostUsd + scriptCostUsd;
+      const totalCredits = ideaCredits + scriptCredits;
 
       await deps.db.jobEvent.create({
         data: {
           jobId, tenantId,
           stage:   'gpt-script',
           status:  'completed',
-          message: `${scenes.length} scenes created — $${costUsd.toFixed(4)}`,
-          meta:    { sceneCount: scenes.length, costUsd, creditsCharged: credits },
+          message: `${scenes.length} scenes, idea: "${approvedIdea.creative_angle}" — $${totalCostUsd.toFixed(4)}`,
+          meta:    { sceneCount: scenes.length, costUsd: totalCostUsd, creditsCharged: totalCredits, ideaHash },
         },
       });
 
-      // Публикуем прогресс: скрипт готов, сцены созданы → 10%
       if (jobRow.videoId) {
         const { publishProgress } = await import('../lib/progress');
         await publishProgress(tenantId, jobRow.videoId, 'gpt-script', 'completed', 10, `${scenes.length} scenes created`);

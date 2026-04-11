@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
+import { encrypt } from '../lib/crypto';
 import { publishQueue } from '../lib/queues';
 import { logger } from '../logger';
 import type { PublishJobPayload } from '@kmmzavod/queue';
@@ -49,8 +50,8 @@ export async function publishRoutes(app: FastifyInstance) {
       data: {
         tenantId,
         platform: body.platform,
-        accessToken: body.accessToken,
-        refreshToken: body.refreshToken,
+        accessToken: encrypt(body.accessToken),
+        refreshToken: body.refreshToken ? encrypt(body.refreshToken) : undefined,
         expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
         accountName: body.accountName,
         igUserId: body.igUserId,

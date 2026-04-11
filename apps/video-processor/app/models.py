@@ -148,7 +148,7 @@ class LayoutComposeRequest(BaseModel):
     audio_track: AudioTrack | None = None
     settings: CompositionSettings = CompositionSettings()
 
-    chroma_color: str = "#000000"
+    chroma_color: str = "#00FF00"
     pip_scale: float = Field(default=0.30, ge=0.15, le=0.60)
     pip_margin: int = Field(default=30, ge=0, le=100)
     transition: TransitionType = TransitionType.FADE

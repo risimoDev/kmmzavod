@@ -2,6 +2,7 @@ import { buildApp } from './app';
 import { config } from './config';
 import { logger } from './logger';
 import { getRedis } from './lib/redis';
+import { db } from './lib/db';
 import Redis from 'ioredis';
 
 const SERVICE_NAME = 'api';
@@ -32,6 +33,20 @@ async function main() {
   sendHeartbeat();
   const hbTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
 
+  // ── Expired session cleanup: runs every 6 hours ─────────────────────────
+  const cleanExpiredSessions = async () => {
+    try {
+      const { count } = await db.userSession.deleteMany({
+        where: { expiresAt: { lt: new Date() } },
+      });
+      if (count > 0) logger.info({ count }, 'Cleaned expired sessions');
+    } catch (err) {
+      logger.error({ err }, 'Failed to clean expired sessions');
+    }
+  };
+  await cleanExpiredSessions();
+  const sessionCleanupTimer = setInterval(cleanExpiredSessions, 6 * 60 * 60 * 1000);
+
   // ── Restart listener via Redis pub/sub ──────────────────────────────────
   const sub = new Redis({
     host: config.REDIS_HOST,
@@ -56,6 +71,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(hbTimer);
+    clearInterval(sessionCleanupTimer);
     try {
       await redis.del(HEARTBEAT_KEY);
       await sub.unsubscribe(RESTART_CHANNEL);

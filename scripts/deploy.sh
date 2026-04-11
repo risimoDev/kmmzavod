@@ -166,10 +166,8 @@ if $DO_BUILD; then
     docker compose build --no-cache "$SINGLE_SERVICE"
   else
     info "Сборка всех сервисов..."
-    # Параллельная сборка для скорости
-    docker compose build --no-cache --parallel 2>&1 | \
-      grep -E '(Step|Successfully|ERROR|error|warning|--->)' || \
-    docker compose build --no-cache 2>&1 | tail -10
+    # Compose V2 собирает параллельно по умолчанию
+    docker compose build --no-cache 2>&1 | tail -20
   fi
   success "Образы собраны"
 else
@@ -226,7 +224,6 @@ if $DO_MIGRATE; then
 
   # Вариант 2: локально через pnpm если установлен
   if ! $MIGRATED && command -v pnpm &>/dev/null && [ -f packages/db/package.json ]; then
-    PGHOST=$(grep -E "^POSTGRES_PASSWORD=" .env | cut -d= -f2)
     info "Мигрируем локально через pnpm..."
     cd packages/db && pnpm migrate:deploy && cd "$REPO_ROOT" && MIGRATED=true || true
   fi

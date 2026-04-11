@@ -38,6 +38,8 @@ type FormData = {
   durationSec: number;
   subtitlesEnabled: boolean;
   subtitleStyle: string;
+  bgmEnabled: boolean;
+  videoFormat: "standard" | "slideshow";
   // Step 3 — Запуск
 };
 
@@ -60,6 +62,8 @@ const DEFAULT: FormData = {
   durationSec: 30,
   subtitlesEnabled: true,
   subtitleStyle: "tiktok",
+  bgmEnabled: true,
+  videoFormat: "standard",
 };
 
 const STEPS = [
@@ -172,7 +176,7 @@ function CreatePageInner() {
 
   const canNext = () => {
     if (step === 1) return form.productName.trim().length > 0;
-    if (step === 2) return form.videoIdea.trim().length >= 10;
+    if (step === 2) return true;
     return true;
   };
 
@@ -207,7 +211,7 @@ function CreatePageInner() {
       setLaunchProgress(50);
       const result = await videosApi.create({
         title: `${form.productName} — видео`,
-        scriptPrompt: form.videoIdea,
+        scriptPrompt: form.videoIdea.trim() || undefined,
         productId: productId!,
         avatarId: form.avatar,
         voiceId: form.voice,
@@ -216,6 +220,8 @@ function CreatePageInner() {
           resolution: "1080x1920",
           fps: 30,
           language: form.language,
+          bgm_enabled: form.bgmEnabled,
+          video_format: form.videoFormat,
         },
       });
 
@@ -677,17 +683,42 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
         <SectionHeader step={2} title="Настройки видео" subtitle="Опишите идею для видео — AI автоматически создаст сценарий, промты и сцены" />
 
         <Textarea
-          label="Идея / задача для видео *"
-          placeholder="Создай рекламный ролик для TikTok, покажи основные фишки продукта, начни с крючка-вопроса…"
+          label="Идея / задача для видео"
+          placeholder="Оставьте пустым — AI сам придумает уникальную идею. Или опишите свою: «Покажи основные фишки, начни с крючка-вопроса…»"
           rows={4}
           value={form.videoIdea}
           onChange={(e) => set("videoIdea", e.target.value)}
-          hint="Минимум 10 символов. AI сгенерирует подробный сценарий и промты на основе данных продукта"
+          hint="Необязательное поле. Если оставить пустым, AI автоматически придумает уникальную креативную идею на основе данных продукта"
         />
 
         <div className="grid grid-cols-2 gap-4">
           <RadixSelect label="Язык" value={form.language} options={LANGUAGES} onValueChange={(v) => set("language", v)} />
           <RadixSelect label="Стиль подачи" value={form.style} options={STYLES} onValueChange={(v) => set("style", v)} />
+        </div>
+
+        {/* Video format selector */}
+        <div>
+          <p className="text-xs font-medium text-text-secondary mb-2">Формат видео</p>
+          <div className="flex gap-2">
+            {[
+              { value: "standard" as const, label: "Стандарт", desc: "Аватар + клипы + изображения" },
+              { value: "slideshow" as const, label: "Слайдшоу", desc: "Только изображения + музыка" },
+            ].map((f) => (
+              <button
+                key={f.value}
+                onClick={() => set("videoFormat", f.value)}
+                className={cn(
+                  "flex-1 rounded-xl border px-4 py-3 text-center transition-all",
+                  form.videoFormat === f.value
+                    ? "border-brand-500 bg-brand-500/10 ring-1 ring-brand-500/30 text-brand-400"
+                    : "border-border bg-surface-2 text-text-secondary hover:border-brand-500/40"
+                )}
+              >
+                <span className="font-medium text-sm">{f.label}</span>
+                <p className="text-[11px] text-text-tertiary mt-0.5">{f.desc}</p>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Duration selector */}
@@ -935,6 +966,14 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
 
         <div className="flex items-center justify-between">
           <div>
+            <p className="text-sm font-medium text-text-primary">Фоновая музыка</p>
+            <p className="text-xs text-text-tertiary mt-0.5">Случайный трек из библиотеки BGM</p>
+          </div>
+          <SwitchToggle checked={form.bgmEnabled} onCheckedChange={(v) => set("bgmEnabled", v)} />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
             <p className="text-sm font-medium text-text-primary">Субтитры</p>
             <p className="text-xs text-text-tertiary mt-0.5">Автоматические субтитры на видео</p>
           </div>
@@ -1000,13 +1039,15 @@ function Step3Launch({ form, launching, progress, error, avatars }: {
           <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider mb-2">Видео</p>
           <ul className="space-y-1.5 text-sm">
             {[
-              ["Идея",     form.videoIdea?.slice(0, 80) + (form.videoIdea.length > 80 ? "…" : "") || "(не задана)"],
+              ["Идея",     form.videoIdea?.trim() ? (form.videoIdea.slice(0, 80) + (form.videoIdea.length > 80 ? "…" : "")) : "🤖 AI сгенерирует автоматически"],
               ["Длительность", `${form.durationSec} сек`],
               ["Язык",     LANGUAGES.find(l => l.value === form.language)?.label ?? ""],
               ["Стиль",    STYLES.find(s => s.value === form.style)?.label ?? ""],
               ["Аватар",   avatars.find(a => a.value === form.avatar)?.label ?? form.avatar],
               ["Голос",    VOICES.find(v => v.value === form.voice)?.label ?? form.voice.slice(0, 12) + "…"],
               ["Субтитры", form.subtitlesEnabled ? SUB_STYLES.find(s => s.value === form.subtitleStyle)?.label ?? "" : "Нет"],
+              ["Фоновая музыка", form.bgmEnabled ? "Авто (случайный трек)" : "Нет"],
+              ["Формат", form.videoFormat === "slideshow" ? "Слайдшоу" : "Стандарт"],
             ].map(([k, v]) => (
               <li key={k as string} className="flex items-start justify-between gap-2 py-1 border-b border-border/50 last:border-0">
                 <span className="text-text-tertiary">{k}</span>

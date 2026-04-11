@@ -147,10 +147,7 @@ success "Миграции применены"
 # =============================================================================
 # 6. Создание администратора
 # =============================================================================
-header "6/6 · Создание администратора"
-
-# Определяем порт PostgreSQL из .env или docker-compose
-PG_PORT=$(grep -E "^[^#]*5433:" docker-compose.yml 2>/dev/null | grep -o '5433' | head -1 || echo "5433")
+header "6/7 · Создание администратора"
 
 # Проверяем существует ли уже admin
 ADMIN_COUNT=$(docker compose exec -T postgres psql -U kmmzavod -tAc \
@@ -161,43 +158,56 @@ if [ "${ADMIN_COUNT:-0}" -gt 0 ]; then
 else
   echo ""
   echo -e "  ${CYAN}Создание первого администратора${RESET}"
-  read -rp "  Email администратора [admin@kmmzavod.ru]: " ADMIN_EMAIL
-  ADMIN_EMAIL="${ADMIN_EMAIL:-admin@kmmzavod.ru}"
-
-  read -rsp "  Пароль (мин. 8 символов): " ADMIN_PASS
+  echo -e "  ${YELLOW}Администратор создаётся после запуска API (pnpm dev).${RESET}"
+  echo -e "  ${YELLOW}Запустите API в отдельном терминале, затем выполните:${RESET}"
   echo ""
-  [ ${#ADMIN_PASS} -lt 8 ] && error "Пароль слишком короткий (мин. 8 символов)"
-
-  API_URL=$(grep -E "^NEXT_PUBLIC_API_URL=" .env | cut -d= -f2- | tr -d '"')
-  API_URL="${API_URL:-http://localhost:3000}"
-
-  # Регистрация через API (нужен запущенный api сервис)
-  info "Запускаем API сервис временно..."
-  docker compose up -d api 2>/dev/null || true
-  sleep 5
-
-  HTTP_STATUS=$(curl -s -o /tmp/kmmzavod_reg.json -w "%{http_code}" \
-    -X POST "${API_URL}/api/v1/auth/register" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"email\": \"${ADMIN_EMAIL}\",
-      \"password\": \"${ADMIN_PASS}\",
-      \"displayName\": \"Admin\",
-      \"tenantName\": \"Platform Admin\"
-    }" 2>/dev/null || echo "000")
-
-  if [[ "$HTTP_STATUS" == "201" ]] || [[ "$HTTP_STATUS" == "409" ]]; then
-    # Повысить роль до admin через БД
-    docker compose exec -T postgres psql -U kmmzavod -c \
-      "UPDATE \"User\" SET role='admin' WHERE email='${ADMIN_EMAIL}';" 2>/dev/null
-    success "Администратор создан: ${BOLD}$ADMIN_EMAIL${RESET}"
-  else
-    warn "Не удалось создать через API (статус $HTTP_STATUS). Попробуйте вручную:"
-    echo -e "  ${CYAN}curl -X POST http://localhost:3000/api/v1/auth/register \\
-    -H 'Content-Type: application/json' \\
-    -d '{\"email\":\"admin@you.com\",\"password\":\"pass\",\"displayName\":\"Admin\",\"tenantName\":\"Admin Org\"}'${RESET}"
-  fi
+  echo -e "  ${CYAN}curl -X POST http://localhost:3000/api/v1/auth/register \\"
+  echo -e "    -H 'Content-Type: application/json' \\"
+  echo -e "    -d '{\"email\":\"admin@kmmzavod.ru\",\"password\":\"yourpass\",\"displayName\":\"Admin\",\"tenantName\":\"Admin Org\"}'${RESET}"
+  echo ""
+  echo -e "  Затем повысьте роль:"
+  echo -e "  ${CYAN}docker compose exec postgres psql -U kmmzavod -c \\"
+  echo -e "    \"UPDATE \\\\\"User\\\\\" SET role='admin' WHERE email='admin@kmmzavod.ru';\"${RESET}"
 fi
+
+# =============================================================================
+# 7. Python-окружение для video-processor
+# =============================================================================
+header "7/7 · Python-окружение (video-processor)"
+
+if command -v python3 &>/dev/null; then
+  if [ ! -d "apps/video-processor/.venv" ]; then
+    info "Создаём виртуальное окружение Python..."
+    python3 -m venv apps/video-processor/.venv
+    info "Устанавливаем зависимости..."
+    apps/video-processor/.venv/bin/pip install -q -r apps/video-processor/requirements.txt
+    success "Python venv создан: apps/video-processor/.venv"
+  else
+    success "Python venv уже существует"
+  fi
+else
+  warn "Python3 не найден — video-processor будет работать только в Docker"
+fi
+
+# =============================================================================
+# Итог
+# =============================================================================
+header "Готово!"
+
+echo ""
+echo -e "${BOLD}${GREEN}Среда разработки настроена!${RESET}"
+echo ""
+echo -e "  ${BOLD}Запуск инфраструктуры:${RESET}"
+echo -e "    ${CYAN}docker compose up -d${RESET}"
+echo ""
+echo -e "  ${BOLD}Запуск в режиме разработки:${RESET}"
+echo -e "    ${CYAN}pnpm dev${RESET}"
+echo ""
+echo -e "  ${BOLD}Полезные ссылки:${RESET}"
+echo -e "    API:            ${CYAN}http://localhost:3000${RESET}"
+echo -e "    Web:            ${CYAN}http://localhost:3001${RESET}"
+echo -e "    MinIO Console:  ${CYAN}http://localhost:9001${RESET}"
+echo ""
 
 # =============================================================================
 # Итоговое сообщение

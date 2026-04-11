@@ -102,13 +102,13 @@ const UsersQuery = Pagination.extend({
   search:   z.string().optional(),
   tenantId: z.string().uuid().optional(),
   role:     z.enum(['owner', 'admin', 'member', 'viewer']).optional(),
-  active:   z.coerce.boolean().optional(),
+  active:   z.string().optional().transform(v => v === undefined ? undefined : v === 'true' || v === '1'),
 });
 
 const TenantsQuery = Pagination.extend({
   search: z.string().optional(),
   plan:   z.enum(['starter', 'pro', 'enterprise']).optional(),
-  active: z.coerce.boolean().optional(),
+  active: z.string().optional().transform(v => v === undefined ? undefined : v === 'true' || v === '1'),
 });
 
 const VideoQuery = Pagination.extend({
@@ -1134,27 +1134,23 @@ HARD CONSTRAINTS
     return reply.send({ key, url, size: buffer.length, mimetype: file.mimetype });
   });
 
-  // ── Generate avatar video via HeyGen ──────────────────────────────────────
-  const GenerateAvatarBody = z.object({
+  // ── Start avatar video generation via HeyGen (async — returns video_id immediately) ──
+  const StartAvatarBody = z.object({
     script: z.string().min(1).max(5000),
     avatar_id: z.string().min(1),
     voice_id: z.string().min(1),
-    bg_color: z.string().default('#000000'),
+    bg_color: z.string().default('#00FF00'),
     target_duration: z.number().int().min(15).max(90).optional(),
   });
 
-  app.post('/pipeline-test/generate-avatar', async (req, reply) => {
-    const body = GenerateAvatarBody.parse(req.body);
+  app.post('/pipeline-test/start-avatar', async (req, reply) => {
+    const body = StartAvatarBody.parse(req.body);
     const apiKey = config.HEYGEN_API_KEY;
     if (!apiKey) {
       return reply.code(400).send({ error: 'NoApiKey', message: 'HEYGEN_API_KEY не настроен' });
     }
 
-    const storage = (app as any).storage;
-    const testId = crypto.randomUUID().slice(0, 8);
-
     try {
-      // 1. Create video task on HeyGen
       const createRes = await fetch('https://api.heygen.com/v2/video/generate', {
         method: 'POST',
         headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
@@ -1187,57 +1183,75 @@ HARD CONSTRAINTS
         return reply.code(502).send({ error: 'HeyGenCreateFailed', message: 'No video_id returned' });
       }
 
-      logger.info({ videoId, testId }, 'HeyGen avatar: задача создана, ожидаем рендер');
+      logger.info({ videoId }, 'HeyGen avatar: задача создана');
 
-      // 2. Poll until ready (max ~20 minutes)
-      let videoUrl: string | undefined;
-      let duration = 0;
-      for (let attempt = 1; attempt <= 80; attempt++) {
-        await new Promise((r) => setTimeout(r, attempt <= 4 ? 10_000 : 15_000));
-
-        const statusRes = await fetch(`https://api.heygen.com/v1/video_status.get?video_id=${encodeURIComponent(videoId)}`, {
-          headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
-          signal: AbortSignal.timeout(15_000),
-        });
-
-        if (!statusRes.ok) continue;
-        const statusData = (await statusRes.json()) as any;
-        const status = statusData.data?.status;
-
-        if (status === 'completed' && statusData.data?.video_url) {
-          videoUrl = statusData.data.video_url;
-          duration = statusData.data.duration ?? 0;
-          break;
-        }
-        if (status === 'failed') {
-          return reply.code(502).send({ error: 'HeyGenFailed', message: statusData.data?.error ?? 'Avatar rendering failed' });
-        }
-        logger.debug({ videoId, status, attempt }, 'HeyGen: ожидаем видео');
-      }
-
-      if (!videoUrl) {
-        return reply.code(504).send({ error: 'HeyGenTimeout', message: 'Видео не готово после 20 минут ожидания' });
-      }
-
-      // 3. Download video and upload to MinIO
-      const dlRes = await fetch(videoUrl, { signal: AbortSignal.timeout(120_000) });
-      if (!dlRes.ok) {
-        return reply.code(502).send({ error: 'DownloadFailed', message: `Не удалось скачать видео: HTTP ${dlRes.status}` });
-      }
-      const videoBuffer = Buffer.from(await dlRes.arrayBuffer());
-      const key = `test/pipeline/${testId}/avatar_heygen.mp4`;
-      await storage.uploadBuffer(key, videoBuffer, { contentType: 'video/mp4' });
-      const url = await storage.presignedUrl(key, 86400);
-
-      logger.info({ videoId, key, duration }, 'HeyGen avatar: видео загружено в MinIO');
-
-      await audit(req.user.userId, 'pipeline-test.generate-avatar', 'system', testId, req.ip, {
-        after: { videoId, avatarId: body.avatar_id, voiceId: body.voice_id, duration },
+      await audit(req.user.userId, 'pipeline-test.start-avatar', 'system', videoId, req.ip, {
+        after: { videoId, avatarId: body.avatar_id, voiceId: body.voice_id },
       });
 
-      return reply.send({ key, url, duration_sec: duration, heygen_video_id: videoId });
+      return reply.send({ heygen_video_id: videoId });
     } catch (e: any) {
-      logger.error({ err: e.message }, 'HeyGen avatar generation failed');
+      logger.error({ err: e.message }, 'HeyGen start-avatar failed');
+      return reply.code(500).send({ error: 'HeyGenError', message: e.message });
+    }
+  });
+
+  // ── Poll avatar status (single check, no server-side loop) ──────────────
+  app.get('/pipeline-test/avatar-status/:videoId', async (req, reply) => {
+    const { videoId } = req.params as { videoId: string };
+    const apiKey = config.HEYGEN_API_KEY;
+    if (!apiKey) {
+      return reply.code(400).send({ error: 'NoApiKey', message: 'HEYGEN_API_KEY не настроен' });
+    }
+
+    try {
+      const statusRes = await fetch(
+        `https://api.heygen.com/v1/video_status.get?video_id=${encodeURIComponent(videoId)}`,
+        { headers: { 'X-Api-Key': apiKey, Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) },
+      );
+
+      if (!statusRes.ok) {
+        return reply.code(502).send({ error: 'HeyGenStatusFailed', message: `HTTP ${statusRes.status}` });
+      }
+
+      const data = (await statusRes.json()) as any;
+      const status = data.data?.status ?? 'unknown';
+      const videoUrl = data.data?.video_url ?? null;
+      const duration = data.data?.duration ?? 0;
+      const error = data.data?.error ?? null;
+
+      // If completed — download and upload to MinIO
+      if (status === 'completed' && videoUrl) {
+        const storage = (app as any).storage;
+        const testId = crypto.randomUUID().slice(0, 8);
+
+        try {
+          const dlRes = await fetch(videoUrl, {
+            signal: AbortSignal.timeout(120_000),
+            redirect: 'follow',
+          });
+          if (!dlRes.ok) {
+            logger.warn({ videoId, httpStatus: dlRes.status }, 'HeyGen download failed, returning direct URL');
+            return reply.send({ status: 'completed', url: videoUrl, duration_sec: duration, direct: true });
+          }
+          const videoBuffer = Buffer.from(await dlRes.arrayBuffer());
+          const key = `test/pipeline/${testId}/avatar_heygen.mp4`;
+          await storage.uploadBuffer(key, videoBuffer, { contentType: 'video/mp4' });
+          const url = await storage.presignedUrl(key, 86400);
+
+          logger.info({ videoId, key, duration }, 'HeyGen avatar: видео загружено в MinIO');
+
+          return reply.send({ status: 'completed', key, url, duration_sec: duration });
+        } catch (dlErr: any) {
+          // Download/upload failed — return HeyGen URL directly as fallback
+          logger.warn({ videoId, err: dlErr.message }, 'HeyGen download to MinIO failed, returning direct URL');
+          return reply.send({ status: 'completed', url: videoUrl, duration_sec: duration, direct: true });
+        }
+      }
+
+      return reply.send({ status, error, duration_sec: duration });
+    } catch (e: any) {
+      logger.error({ err: e.message, videoId }, 'HeyGen avatar-status failed');
       return reply.code(500).send({ error: 'HeyGenError', message: e.message });
     }
   });
@@ -1487,7 +1501,8 @@ Reference it in every b_roll_prompt.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR TASK
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-Write ONE continuous, natural SPOKEN script for a talking-head avatar. Target duration: {{TARGET_DURATION}} seconds ({{WORD_MIN}}–{{WORD_MAX}} words). NEVER exceed {{TARGET_DURATION}} seconds.
+Write ONE continuous, natural SPOKEN script for a talking-head avatar. Target duration: {{TARGET_DURATION}} seconds ({{WORD_MIN}}–{{WORD_MAX}} words). NEVER exceed {{WORD_MAX}} words — that is a HARD LIMIT.
+HeyGen TTS speaks Russian at ~2 words per second. If you write more words than the limit, the avatar video WILL be longer than the target and will get CUT OFF mid-sentence.
 The script must sound like a real person speaking on camera — NOT like a ChatGPT-generated ad.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1594,12 +1609,17 @@ OUTPUT (VALID JSON ONLY)
       body.brandVoice ? `Tone: ${body.brandVoice}` : '',
     ].filter(Boolean).join('\n');
 
+    // HeyGen TTS speaks Russian at ~2 words/sec. Use conservative limits.
+    const wordsPerSec = 2.0;
+    const wordMin = Math.round(body.targetDuration * (wordsPerSec * 0.85));
+    const wordMax = Math.round(body.targetDuration * wordsPerSec);
+
     const systemContent = LAYOUT_SYSTEM_PROMPT
       .replace(/\{\{TARGET_DURATION\}\}/g, String(body.targetDuration))
-      .replace('{{WORD_MIN}}', String(Math.round(body.targetDuration * 2.5)))
-      .replace('{{WORD_MAX}}', String(Math.round(body.targetDuration * 4)))
+      .replace('{{WORD_MIN}}', String(wordMin))
+      .replace('{{WORD_MAX}}', String(wordMax))
       .replace('{{SPEAKER_GENDER}}', body.gender === 'female' ? 'Женщина' : 'Мужчина')
-      + productSection + `\n\nLanguage: ${body.language}\nTarget video duration: ${body.targetDuration} seconds. Do NOT exceed this.`;
+      + productSection + `\n\nLanguage: ${body.language}\nTarget video duration: ${body.targetDuration} seconds. HARD LIMIT: ${wordMax} words maximum. Do NOT exceed this word count.`;
 
     const userMessage: any = imageUrls.length > 0
       ? {
@@ -1644,7 +1664,7 @@ OUTPUT (VALID JSON ONLY)
     const words = script.split(/\s+/).filter(Boolean);
     const chunkSize = 12;
     const totalChunks = Math.ceil(words.length / chunkSize);
-    const estimatedDuration = words.length / 2.5;
+    const estimatedDuration = words.length / 2.0;  // HeyGen TTS ~2 words/sec for Russian
     const perChunk = estimatedDuration / Math.max(totalChunks, 1);
     const subs: Array<{ start_sec: number; end_sec: number; text: string }> = [];
     for (let c = 0; c < totalChunks; c++) {
@@ -1780,7 +1800,7 @@ OUTPUT (VALID JSON ONLY)
             fade_out_sec: 2.0,
           } : undefined,
           settings: { subtitle_style: body.subtitle_style },
-          chroma_color: '#000000',
+          chroma_color: '#00FF00',
           pip_scale: 0.30,
           pip_margin: 30,
           transition: 'fade',
@@ -1812,6 +1832,116 @@ OUTPUT (VALID JSON ONLY)
     } catch (e: any) {
       return reply.code(500).send({ error: 'LayoutComposeError', message: e.message });
     }
+  });
+
+  // ── Pipeline test runs — save / list / load / delete ────────────────────
+  const SaveTestRunBody = z.object({
+    productName: z.string().min(1),
+    prompt: z.string().default(''),
+    language: z.string().default('ru'),
+    avatarId: z.string().min(1),
+    voiceId: z.string().min(1),
+    layoutTemplate: z.string().min(1),
+    targetDuration: z.number().int().default(30),
+    subtitleStyle: z.string().optional(),
+    title: z.string().optional(),
+    fullScript: z.string().optional(),
+    outputUrl: z.string().optional(),
+    outputKey: z.string().optional(),
+    durationSec: z.number().optional(),
+    fileSizeBytes: z.number().int().optional(),
+    elapsedMs: z.number().int().optional(),
+    params: z.record(z.any()).default({}),
+    status: z.enum(['completed', 'failed']).default('completed'),
+    error: z.string().optional(),
+  });
+
+  app.post('/pipeline-test/runs', async (req, reply) => {
+    const body = SaveTestRunBody.parse(req.body);
+    const run = await db.pipelineTestRun.create({
+      data: {
+        createdById: req.user.userId,
+        productName: body.productName,
+        prompt: body.prompt,
+        language: body.language,
+        avatarId: body.avatarId,
+        voiceId: body.voiceId,
+        layoutTemplate: body.layoutTemplate,
+        targetDuration: body.targetDuration,
+        subtitleStyle: body.subtitleStyle,
+        title: body.title,
+        fullScript: body.fullScript,
+        outputUrl: body.outputUrl,
+        outputKey: body.outputKey,
+        durationSec: body.durationSec,
+        fileSizeBytes: body.fileSizeBytes,
+        elapsedMs: body.elapsedMs,
+        params: body.params,
+        status: body.status,
+        error: body.error,
+      },
+    });
+    return reply.send(run);
+  });
+
+  app.get('/pipeline-test/runs', async (req, reply) => {
+    const { limit = '20', offset = '0' } = req.query as Record<string, string>;
+    const [runs, total] = await Promise.all([
+      db.pipelineTestRun.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(Number(limit) || 20, 100),
+        skip: Number(offset) || 0,
+        select: {
+          id: true,
+          productName: true,
+          title: true,
+          layoutTemplate: true,
+          targetDuration: true,
+          outputUrl: true,
+          durationSec: true,
+          status: true,
+          createdAt: true,
+          avatarId: true,
+          voiceId: true,
+        },
+      }),
+      db.pipelineTestRun.count(),
+    ]);
+    return reply.send({ data: runs, total });
+  });
+
+  app.get('/pipeline-test/runs/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = await db.pipelineTestRun.findUnique({ where: { id } });
+    if (!run) return reply.code(404).send({ error: 'NotFound', message: 'Тест не найден' });
+
+    // Refresh presigned URLs from params if keys exist
+    const storage = (app as any).storage;
+    const params = (run.params as any) ?? {};
+    if (params.avatarKey) {
+      try { params.avatarUrl = await storage.presignedUrl(params.avatarKey, 86400); } catch {}
+    }
+    if (params.backgrounds) {
+      for (const bg of params.backgrounds) {
+        if (bg.storage_key) {
+          try { bg.url = await storage.presignedUrl(bg.storage_key, 86400); } catch {}
+        }
+      }
+    }
+    if (run.outputKey) {
+      try { (run as any).outputUrl = await storage.presignedUrl(run.outputKey, 86400); } catch {}
+    }
+    if (params.bgmKey) {
+      try { params.bgmUrl = await storage.presignedUrl(params.bgmKey, 86400); } catch {}
+    }
+
+    return reply.send({ ...run, params });
+  });
+
+  app.delete('/pipeline-test/runs/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    await db.pipelineTestRun.delete({ where: { id } }).catch(() => null);
+    return reply.code(204).send();
   });
 
   // ── TEST COMPOSE ───────────────────────────────────────────────────────────

@@ -66,4 +66,14 @@ export class MinioStorageClient implements IStorageClient {
   async delete(key: string): Promise<void> {
     await this.client.removeObject(this.bucket, key);
   }
+
+  async listPrefix(prefix: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const keys: string[] = [];
+      const stream = this.client.listObjectsV2(this.bucket, prefix, true);
+      stream.on('data', (obj) => { if (obj.name) keys.push(obj.name); });
+      stream.on('error', reject);
+      stream.on('end', () => resolve(keys));
+    });
+  }
 }
