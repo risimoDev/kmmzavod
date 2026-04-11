@@ -40,7 +40,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-COPY --from=builder /app/apps/web/public        ./apps/web/public
+RUN mkdir -p ./apps/web/public
+COPY --from=builder /app/apps/web/public/       ./apps/web/public/
 COPY --from=builder --chown=appuser:appgroup /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=appuser:appgroup /app/apps/web/.next/static ./apps/web/.next/static
 
