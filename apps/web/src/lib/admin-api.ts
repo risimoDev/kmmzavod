@@ -254,6 +254,12 @@ export interface ApiCheckResult {
   info?: string;
 }
 
+export interface DualApiCheck {
+  name: string;
+  direct: ApiCheckResult;
+  proxy: ApiCheckResult | null;
+}
+
 // ── API methods ───────────────────────────────────────────────────────────────
 
 export const adminApi = {
@@ -382,7 +388,7 @@ export const adminApi = {
 
   // ── AI API Checks ──────────────────────────────────────────────────────
   checkApis: () =>
-    apiFetch<{ checks: ApiCheckResult[] }>('/api-checks'),
+    apiFetch<{ checks: DualApiCheck[]; proxyUrl: string | null }>('/api-checks'),
 
   // ── Test Compose ──────────────────────────────────────────────────────
   testCompose: (params: {

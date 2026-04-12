@@ -48,6 +48,7 @@ import { getRedis } from '../lib/redis';
 import { pipelineQueue, videoComposeQueue, ALL_QUEUES } from '../lib/queues';
 import { logger } from '../logger';
 import { config } from '../config';
+import { getProxyUrl, proxyFetch } from '../lib/proxy';
 
 // ── Minimal PNG generator (no external deps) ─────────────────────────────────
 
@@ -790,77 +791,83 @@ export async function adminRoutes(app: FastifyInstance) {
   // GET /api/v1/admin/api-checks — проверка доступности внешних AI-сервисов
   app.get('/api-checks', async (_req, reply) => {
     type CheckResult = { name: string; status: 'ok' | 'error'; latencyMs: number; error?: string; info?: string };
+    type DualCheck = { name: string; direct: CheckResult; proxy: CheckResult | null };
 
-    const checks: Promise<CheckResult>[] = [];
+    const proxyUrl = await getProxyUrl();
 
-    // HeyGen
-    checks.push((async (): Promise<CheckResult> => {
-      if (!config.HEYGEN_API_KEY) return { name: 'heygen', status: 'error', latencyMs: 0, error: 'API ключ не задан' };
+    async function runCheck(
+      name: string,
+      url: string,
+      init: RequestInit,
+      parseOk: (data: any, latencyMs: number) => CheckResult,
+      fetchFn: typeof globalThis.fetch,
+    ): Promise<CheckResult> {
       const start = Date.now();
       try {
-        const res = await fetch('https://api.heygen.com/v2/user/remaining_quota', {
-          headers: { 'X-Api-Key': config.HEYGEN_API_KEY },
-          signal: AbortSignal.timeout(15_000),
-        });
+        const res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(15_000) });
         const latencyMs = Date.now() - start;
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
-          return { name: 'heygen', status: 'error', latencyMs, error: `HTTP ${res.status}: ${(body as any).message ?? res.statusText}` };
+          const msg = (body as any).message ?? (body as any).error?.message ?? (body as any).error ?? res.statusText;
+          return { name, status: 'error', latencyMs, error: `HTTP ${res.status}: ${msg}` };
         }
-        const data: any = await res.json();
-        const credits = data?.data?.remaining_quota;
-        return { name: 'heygen', status: 'ok', latencyMs, info: credits != null ? `Баланс: ${credits} кредитов` : 'API доступен' };
+        const data: any = await res.json().catch(() => null);
+        return parseOk(data, latencyMs);
       } catch (e: any) {
-        return { name: 'heygen', status: 'error', latencyMs: Date.now() - start, error: e.message };
+        return { name, status: 'error', latencyMs: Date.now() - start, error: e.message };
       }
-    })());
+    }
 
-    // Runway
-    checks.push((async (): Promise<CheckResult> => {
-      if (!config.RUNWAY_API_KEY) return { name: 'runway', status: 'error', latencyMs: 0, error: 'API ключ не задан' };
-      const start = Date.now();
-      try {
-        const res = await fetch('https://api.dev.runwayml.com/v1/organization', {
-          headers: {
-            'Authorization': `Bearer ${config.RUNWAY_API_KEY}`,
-            'X-Runway-Version': '2024-11-06',
-          },
-          signal: AbortSignal.timeout(15_000),
-        });
-        const latencyMs = Date.now() - start;
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { name: 'runway', status: 'error', latencyMs, error: `HTTP ${res.status}: ${(body as any).message ?? (body as any).error ?? res.statusText}` };
-        }
-        const data: any = await res.json();
-        return { name: 'runway', status: 'ok', latencyMs, info: data.name ? `Орг: ${data.name}` : 'API доступен' };
-      } catch (e: any) {
-        return { name: 'runway', status: 'error', latencyMs: Date.now() - start, error: e.message };
+    const services: {
+      name: string;
+      skip?: string;
+      url: string;
+      init: RequestInit;
+      parseOk: (data: any, latencyMs: number) => CheckResult;
+    }[] = [
+      {
+        name: 'heygen',
+        skip: config.HEYGEN_API_KEY ? undefined : 'API ключ не задан',
+        url: 'https://api.heygen.com/v2/user/remaining_quota',
+        init: { headers: { 'X-Api-Key': config.HEYGEN_API_KEY ?? '' } },
+        parseOk: (data, latencyMs) => {
+          const credits = data?.data?.remaining_quota;
+          return { name: 'heygen', status: 'ok', latencyMs, info: credits != null ? `Баланс: ${credits} кредитов` : 'API доступен' };
+        },
+      },
+      {
+        name: 'runway',
+        skip: config.RUNWAY_API_KEY ? undefined : 'API ключ не задан',
+        url: 'https://api.dev.runwayml.com/v1/organization',
+        init: { headers: { 'Authorization': `Bearer ${config.RUNWAY_API_KEY ?? ''}`, 'X-Runway-Version': '2024-11-06' } },
+        parseOk: (data, latencyMs) => ({ name: 'runway', status: 'ok', latencyMs, info: data?.name ? `Орг: ${data.name}` : 'API доступен' }),
+      },
+      {
+        name: 'gptunnel',
+        skip: config.GPTUNNEL_API_KEY ? undefined : 'API ключ не задан',
+        url: `${config.GPTUNNEL_BASE_URL}/models`,
+        init: { headers: { 'Authorization': `Bearer ${config.GPTUNNEL_API_KEY ?? ''}` } },
+        parseOk: (_data, latencyMs) => ({ name: 'gptunnel', status: 'ok', latencyMs, info: 'Models API доступен' }),
+      },
+    ];
+
+    const dualChecks: Promise<DualCheck>[] = services.map(async (svc) => {
+      if (svc.skip) {
+        const skipped: CheckResult = { name: svc.name, status: 'error', latencyMs: 0, error: svc.skip };
+        return { name: svc.name, direct: skipped, proxy: proxyUrl ? skipped : null };
       }
-    })());
 
-    // GPTunnel (OpenAI-compatible)
-    checks.push((async (): Promise<CheckResult> => {
-      if (!config.GPTUNNEL_API_KEY) return { name: 'gptunnel', status: 'error', latencyMs: 0, error: 'API ключ не задан' };
-      const start = Date.now();
-      try {
-        const res = await fetch(`${config.GPTUNNEL_BASE_URL}/models`, {
-          headers: { 'Authorization': `Bearer ${config.GPTUNNEL_API_KEY}` },
-          signal: AbortSignal.timeout(15_000),
-        });
-        const latencyMs = Date.now() - start;
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { name: 'gptunnel', status: 'error', latencyMs, error: `HTTP ${res.status}: ${(body as any).error?.message ?? res.statusText}` };
-        }
-        return { name: 'gptunnel', status: 'ok', latencyMs, info: 'Models API доступен' };
-      } catch (e: any) {
-        return { name: 'gptunnel', status: 'error', latencyMs: Date.now() - start, error: e.message };
-      }
-    })());
+      const directP = runCheck(svc.name, svc.url, svc.init, svc.parseOk, globalThis.fetch);
+      const proxyP = proxyUrl
+        ? runCheck(svc.name, svc.url, svc.init, svc.parseOk, (url, init) => proxyFetch(String(url), init, proxyUrl))
+        : null;
 
-    const results = await Promise.all(checks);
-    return reply.send({ checks: results });
+      const [direct, proxy] = await Promise.all([directP, proxyP ?? Promise.resolve(null)]);
+      return { name: svc.name, direct, proxy };
+    });
+
+    const results = await Promise.all(dualChecks);
+    return reply.send({ checks: results, proxyUrl: proxyUrl || null });
   });
 
   // ── SERVICES: HEALTH & RESTART ─────────────────────────────────────────────

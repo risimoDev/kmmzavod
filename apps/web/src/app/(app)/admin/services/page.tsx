@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Button, Badge, Card, CardContent } from "@/components/ui/primitives";
-import { adminApi, type ServiceHealth, type ApiCheckResult } from "@/lib/admin-api";
+import { adminApi, type ServiceHealth, type DualApiCheck } from "@/lib/admin-api";
 import { cn } from "@/lib/utils";
 
 type ComposePreset = 'dynamic' | 'smooth' | 'minimal';
@@ -28,8 +28,9 @@ export default function AdminServicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState<Record<string, boolean>>({});
   const [restartMsg, setRestartMsg] = useState<Record<string, string>>({});
-  const [apiChecks, setApiChecks] = useState<ApiCheckResult[]>([]);
+  const [apiChecks, setApiChecks] = useState<DualApiCheck[]>([]);
   const [apiChecking, setApiChecking] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState<string | null>(null);
 
   // Test compose state
   const [composePreset, setComposePreset] = useState<ComposePreset>('dynamic');
@@ -105,8 +106,14 @@ export default function AdminServicesPage() {
     try {
       const res = await adminApi.checkApis();
       setApiChecks(res.checks);
+      setProxyUrl(res.proxyUrl);
     } catch (e: any) {
-      setApiChecks([{ name: 'error', status: 'error', latencyMs: 0, error: e.message }]);
+      setApiChecks([{
+        name: 'error',
+        direct: { name: 'error', status: 'error', latencyMs: 0, error: e.message },
+        proxy: null,
+      }]);
+      setProxyUrl(null);
     } finally {
       setApiChecking(false);
     }
@@ -274,7 +281,11 @@ export default function AdminServicesPage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-text-primary">Проверка AI API</h2>
-            <p className="text-xs text-text-tertiary mt-0.5">Тест доступности внешних сервисов</p>
+            <p className="text-xs text-text-tertiary mt-0.5">
+              Тест доступности внешних сервисов
+              {proxyUrl && <span className="ml-1 text-brand-400">· прокси: {proxyUrl}</span>}
+              {proxyUrl === null && apiChecks.length > 0 && <span className="ml-1 text-text-quaternary">· прокси не задан</span>}
+            </p>
           </div>
           <Button variant="outline" size="sm" onClick={handleCheckApis} disabled={apiChecking}>
             {apiChecking ? "Проверка…" : "Проверить все"}
@@ -290,42 +301,73 @@ export default function AdminServicesPage() {
                 gptunnel: { label: "GPTunnel", desc: "GPT сценарии (OpenAI-совместимый)" },
               };
               const meta = labels[check.name] ?? { label: check.name, desc: "" };
-              const isOk = check.status === "ok";
+              const d = check.direct;
+              const p = check.proxy;
+              const directOk = d.status === "ok";
+              const proxyOk = p?.status === "ok";
 
               return (
-                <Card key={check.name} className={cn("transition-all", !isOk && "border-danger/30 bg-danger/5")}>
+                <Card key={check.name} className={cn("transition-all", !directOk && "border-danger/30 bg-danger/5")}>
                   <CardContent className="p-5 space-y-3">
                     <div className="flex items-start justify-between">
                       <div>
                         <h3 className="text-sm font-semibold text-text-primary">{meta.label}</h3>
                         <p className="text-xs text-text-tertiary mt-0.5">{meta.desc}</p>
                       </div>
-                      <Badge variant={isOk ? "success" : "danger"} dot>
-                        {isOk ? "OK" : "Ошибка"}
+                      <Badge variant={directOk ? "success" : "danger"} dot>
+                        {directOk ? "OK" : "Ошибка"}
                       </Badge>
                     </div>
+
+                    {/* Direct result */}
                     <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wider text-text-quaternary font-medium">Напрямую</p>
                       <div className="flex justify-between text-xs">
                         <span className="text-text-tertiary">Задержка</span>
-                        <span className="text-text-secondary font-mono">{check.latencyMs}мс</span>
+                        <span className="text-text-secondary font-mono">{d.latencyMs}мс</span>
                       </div>
-                      {check.info && (
+                      {d.info && (
                         <div className="flex justify-between text-xs">
                           <span className="text-text-tertiary">Инфо</span>
-                          <span className="text-text-secondary">{check.info}</span>
+                          <span className="text-text-secondary">{d.info}</span>
                         </div>
                       )}
-                      {check.error && (
-                        <p className="text-xs text-danger/80 break-all">{check.error}</p>
+                      {d.error && (
+                        <p className="text-xs text-danger/80 break-all">{d.error}</p>
                       )}
                     </div>
+
+                    {/* Proxy result */}
+                    {p && (
+                      <div className="space-y-1.5 border-t border-border/50 pt-2">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[10px] uppercase tracking-wider text-text-quaternary font-medium">Через прокси</p>
+                          <Badge variant={proxyOk ? "success" : "danger"} className="text-[9px] px-1.5 py-0">
+                            {proxyOk ? "OK" : "Ошибка"}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-text-tertiary">Задержка</span>
+                          <span className="text-text-secondary font-mono">{p.latencyMs}мс</span>
+                        </div>
+                        {p.info && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-text-tertiary">Инфо</span>
+                            <span className="text-text-secondary">{p.info}</span>
+                          </div>
+                        )}
+                        {p.error && (
+                          <p className="text-xs text-danger/80 break-all">{p.error}</p>
+                        )}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               );
             })}
             {apiChecks.find(c => c.name === 'error') && (
               <div className="col-span-full rounded-lg border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
-                Ошибка запроса: {apiChecks.find(c => c.name === 'error')?.error}
+                Ошибка запроса: {apiChecks.find(c => c.name === 'error')?.direct.error}
               </div>
             )}
           </div>
