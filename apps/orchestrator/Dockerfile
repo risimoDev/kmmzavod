@@ -54,6 +54,7 @@ COPY --from=builder /app/packages/db/dist               ./node_modules/@kmmzavod
 COPY --from=builder /app/apps/orchestrator/dist ./apps/orchestrator/dist
 COPY --from=builder /app/apps/orchestrator/package.json ./apps/orchestrator/
 COPY --from=builder /app/packages/db/prisma/schema.prisma ./packages/db/prisma/schema.prisma
+COPY --from=builder /app/packages/db/prisma/migrations ./packages/db/prisma/migrations
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser

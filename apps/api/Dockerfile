@@ -56,6 +56,7 @@ COPY --from=builder /app/packages/db/dist               ./node_modules/@kmmzavod
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/
 COPY --from=builder /app/packages/db/prisma/schema.prisma ./packages/db/prisma/schema.prisma
+COPY --from=builder /app/packages/db/prisma/migrations ./packages/db/prisma/migrations
 
 # Права безопасности — не root
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
