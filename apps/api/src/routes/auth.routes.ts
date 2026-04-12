@@ -159,7 +159,7 @@ export async function authRoutes(app: FastifyInstance) {
 
 function generateTokens(
   app: FastifyInstance,
-  user: { id: string; email: string; role: string },
+  user: { id: string; email: string; role: string; platformRole: string },
   tenantId: string
 ) {
   const payload = {
@@ -167,6 +167,7 @@ function generateTokens(
     tenantId,
     email: user.email,
     role: user.role as 'owner' | 'admin' | 'member' | 'viewer',
+    platformRole: user.platformRole as 'super_admin' | 'user',
   };
 
   const accessToken = app.jwt.sign(payload, { expiresIn: '15m' });

@@ -9,12 +9,14 @@ declare module '@fastify/jwt' {
       userId: string;
       tenantId: string;
       role: 'owner' | 'admin' | 'member' | 'viewer';
+      platformRole: 'super_admin' | 'user';
       email: string;
     };
     user: {
       userId: string;
       tenantId: string;
       role: 'owner' | 'admin' | 'member' | 'viewer';
+      platformRole: 'super_admin' | 'user';
       email: string;
     };
   }
@@ -58,7 +60,7 @@ async function authPlugin(app: FastifyInstance) {
         return;
       }
       const payload = req.user;
-      if (payload.role !== 'admin' && payload.role !== 'owner') {
+      if (payload.platformRole !== 'super_admin') {
         reply.code(403).send({ error: 'Forbidden', message: 'Недостаточно прав' });
         return;
       }
