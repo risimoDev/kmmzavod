@@ -39,6 +39,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+RUN apk add --no-cache openssl
 # Копируем только нужное
 COPY --from=builder /app/node_modules ./node_modules
 
