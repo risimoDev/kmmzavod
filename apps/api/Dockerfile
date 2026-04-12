@@ -41,7 +41,17 @@ ENV NODE_ENV=production
 
 # Копируем только нужное
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/packages ./packages
+
+# Заменяем симлинки pnpm на реальные директории с compiled dist
+# (Docker копирует симлинки как есть — в runner они dangling)
+RUN rm -rf ./node_modules/@kmmzavod
+COPY --from=builder /app/packages/queue/package.json    ./node_modules/@kmmzavod/queue/package.json
+COPY --from=builder /app/packages/queue/dist            ./node_modules/@kmmzavod/queue/dist
+COPY --from=builder /app/packages/storage/package.json  ./node_modules/@kmmzavod/storage/package.json
+COPY --from=builder /app/packages/storage/dist          ./node_modules/@kmmzavod/storage/dist
+COPY --from=builder /app/packages/db/package.json       ./node_modules/@kmmzavod/db/package.json
+COPY --from=builder /app/packages/db/dist               ./node_modules/@kmmzavod/db/dist
+
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/
 
