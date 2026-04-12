@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Button, Badge, Card, CardContent } from "@/components/ui/primitives";
-import { adminApi, type ServiceHealth, type DualApiCheck } from "@/lib/admin-api";
+import { adminApi, type ServiceHealth, type DualApiCheck, type ProxyCheckResult } from "@/lib/admin-api";
 import { cn } from "@/lib/utils";
 
 type ComposePreset = 'dynamic' | 'smooth' | 'minimal';
@@ -31,6 +31,11 @@ export default function AdminServicesPage() {
   const [apiChecks, setApiChecks] = useState<DualApiCheck[]>([]);
   const [apiChecking, setApiChecking] = useState(false);
   const [proxyUrl, setProxyUrl] = useState<string | null>(null);
+
+  // Proxy check state
+  const [proxyCheck, setProxyCheck] = useState<ProxyCheckResult | null>(null);
+  const [proxyChecking, setProxyChecking] = useState(false);
+  const [proxyCheckError, setProxyCheckError] = useState<string | null>(null);
 
   // Test compose state
   const [composePreset, setComposePreset] = useState<ComposePreset>('dynamic');
@@ -116,6 +121,20 @@ export default function AdminServicesPage() {
       setProxyUrl(null);
     } finally {
       setApiChecking(false);
+    }
+  };
+
+  const handleCheckProxy = async () => {
+    if (proxyChecking) return;
+    setProxyChecking(true);
+    setProxyCheckError(null);
+    try {
+      const res = await adminApi.checkProxy();
+      setProxyCheck(res);
+    } catch (e: any) {
+      setProxyCheckError(e.message);
+    } finally {
+      setProxyChecking(false);
     }
   };
 
@@ -370,6 +389,112 @@ export default function AdminServicesPage() {
                 Ошибка запроса: {apiChecks.find(c => c.name === 'error')?.direct.error}
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* Proxy Check */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">Проверка прокси</h2>
+            <p className="text-xs text-text-tertiary mt-0.5">
+              Тест связности прокси — сравнивает внешний IP с прямым запросом
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={handleCheckProxy} disabled={proxyChecking}>
+            {proxyChecking ? "Проверка…" : "Проверить прокси"}
+          </Button>
+        </div>
+
+        {proxyCheckError && (
+          <div className="rounded-lg border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
+            {proxyCheckError}
+          </div>
+        )}
+
+        {proxyCheck && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Direct */}
+            <Card className={cn(!proxyCheck.direct || proxyCheck.direct.status === 'error' ? "border-danger/30 bg-danger/5" : "")}>
+              <CardContent className="p-5 space-y-3">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">Прямое соединение</h3>
+                    <p className="text-xs text-text-tertiary mt-0.5">Без прокси</p>
+                  </div>
+                  <Badge variant={proxyCheck.direct?.status === 'ok' ? "success" : "danger"} dot>
+                    {proxyCheck.direct?.status === 'ok' ? "Доступен" : "Ошибка"}
+                  </Badge>
+                </div>
+                {proxyCheck.direct && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-text-tertiary">Задержка</span>
+                      <span className="text-text-secondary font-mono">{proxyCheck.direct.latencyMs}мс</span>
+                    </div>
+                    {proxyCheck.direct.ip && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-text-tertiary">Внешний IP</span>
+                        <span className="text-text-secondary font-mono">{proxyCheck.direct.ip}</span>
+                      </div>
+                    )}
+                    {proxyCheck.direct.error && (
+                      <p className="text-xs text-danger/80 break-all">{proxyCheck.direct.error}</p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Proxy */}
+            <Card className={cn(
+              !proxyCheck.configured ? "border-border/30 opacity-60" :
+              proxyCheck.proxy?.status === 'error' ? "border-danger/30 bg-danger/5" : ""
+            )}>
+              <CardContent className="p-5 space-y-3">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">Через прокси</h3>
+                    <p className="text-xs text-text-tertiary mt-0.5 break-all">
+                      {proxyCheck.proxyUrl ?? "не настроен"}
+                    </p>
+                  </div>
+                  {!proxyCheck.configured ? (
+                    <Badge variant="default">Не задан</Badge>
+                  ) : (
+                    <Badge variant={proxyCheck.proxy?.status === 'ok' ? "success" : "danger"} dot>
+                      {proxyCheck.proxy?.status === 'ok' ? "Работает" : "Ошибка"}
+                    </Badge>
+                  )}
+                </div>
+                {proxyCheck.proxy && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-text-tertiary">Задержка</span>
+                      <span className="text-text-secondary font-mono">{proxyCheck.proxy.latencyMs}мс</span>
+                    </div>
+                    {proxyCheck.proxy.ip && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-text-tertiary">Внешний IP (прокси)</span>
+                        <span className={cn("font-mono text-xs", proxyCheck.proxy.ip !== proxyCheck.direct?.ip ? "text-brand-400" : "text-text-secondary")}>
+                          {proxyCheck.proxy.ip}
+                          {proxyCheck.proxy.ip !== proxyCheck.direct?.ip && " ✓ другой"}
+                        </span>
+                      </div>
+                    )}
+                    {proxyCheck.proxy.error && (
+                      <p className="text-xs text-danger/80 break-all">{proxyCheck.proxy.error}</p>
+                    )}
+                  </div>
+                )}
+                {!proxyCheck.configured && (
+                  <p className="text-xs text-text-quaternary">
+                    Задайте AI_PROXY_URL в Настройках → Прокси
+                  </p>
+                )}
+              </CardContent>
+            </Card>
           </div>
         )}
       </div>

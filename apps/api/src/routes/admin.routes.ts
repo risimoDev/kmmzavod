@@ -48,7 +48,7 @@ import { getRedis } from '../lib/redis';
 import { pipelineQueue, videoComposeQueue, ALL_QUEUES } from '../lib/queues';
 import { logger } from '../logger';
 import { config } from '../config';
-import { getProxyUrl, proxyFetch } from '../lib/proxy';
+import { getProxyUrl, proxyFetch, proxyFetchStrict } from '../lib/proxy';
 
 // ── Minimal PNG generator (no external deps) ─────────────────────────────────
 
@@ -814,7 +814,9 @@ export async function adminRoutes(app: FastifyInstance) {
         const data: any = await res.json().catch(() => null);
         return parseOk(data, latencyMs);
       } catch (e: any) {
-        return { name, status: 'error', latencyMs: Date.now() - start, error: e.message };
+        const cause = e?.cause;
+        const detail = cause ? (cause.message ?? String(cause)) : e.message;
+        return { name, status: 'error', latencyMs: Date.now() - start, error: detail !== e.message ? `${e.message}: ${detail}` : e.message };
       }
     }
 
@@ -868,6 +870,48 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const results = await Promise.all(dualChecks);
     return reply.send({ checks: results, proxyUrl: proxyUrl || null });
+  });
+
+  // GET /api/v1/admin/proxy-check — проверка прокси-сервера
+  app.get('/proxy-check', async (_req, reply) => {
+    const TEST_URL = 'https://api64.ipify.org?format=json';
+    const TIMEOUT = 10_000;
+
+    const proxyUrl = await getProxyUrl();
+
+    async function checkDirect() {
+      const start = Date.now();
+      try {
+        const res = await globalThis.fetch(TEST_URL, { signal: AbortSignal.timeout(TIMEOUT) });
+        const latencyMs = Date.now() - start;
+        if (!res.ok) return { status: 'error' as const, latencyMs, error: `HTTP ${res.status}` };
+        const data: any = await res.json();
+        return { status: 'ok' as const, latencyMs, ip: data?.ip ?? null };
+      } catch (e: any) {
+        const cause = e?.cause;
+        const detail = cause ? (cause.message ?? String(cause)) : e.message;
+        return { status: 'error' as const, latencyMs: Date.now() - start, error: detail !== e.message ? `${e.message}: ${detail}` : e.message };
+      }
+    }
+
+    async function checkProxy() {
+      if (!proxyUrl) return null;
+      const start = Date.now();
+      try {
+        const res = await proxyFetchStrict(TEST_URL, { signal: AbortSignal.timeout(TIMEOUT) }, proxyUrl);
+        const latencyMs = Date.now() - start;
+        if (!res.ok) return { status: 'error' as const, latencyMs, error: `HTTP ${res.status}` };
+        const data: any = await res.json();
+        return { status: 'ok' as const, latencyMs, ip: data?.ip ?? null };
+      } catch (e: any) {
+        const cause = e?.cause;
+        const detail = cause ? (cause.message ?? String(cause)) : e.message;
+        return { status: 'error' as const, latencyMs: Date.now() - start, error: detail !== e.message ? `${e.message}: ${detail}` : e.message };
+      }
+    }
+
+    const [direct, proxy] = await Promise.all([checkDirect(), checkProxy()]);
+    return reply.send({ configured: !!proxyUrl, proxyUrl: proxyUrl || null, direct, proxy });
   });
 
   // ── SERVICES: HEALTH & RESTART ─────────────────────────────────────────────

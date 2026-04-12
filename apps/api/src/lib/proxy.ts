@@ -40,3 +40,19 @@ export async function proxyFetch(
     return globalThis.fetch(url, init);
   }
 }
+
+/**
+ * Like proxyFetch but NEVER falls back to direct — throws on any proxy error.
+ * Use for explicit proxy connectivity tests.
+ */
+export async function proxyFetchStrict(
+  url: string | URL,
+  init?: RequestInit,
+  proxyUrl?: string,
+): Promise<Response> {
+  const proxy = proxyUrl ?? (await getProxyUrl());
+  if (!proxy) throw new Error('Прокси не настроен');
+  const { ProxyAgent } = require('undici');
+  const dispatcher = new ProxyAgent(proxy);
+  return globalThis.fetch(url as any, { ...init, dispatcher } as any);
+}

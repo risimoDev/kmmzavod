@@ -260,6 +260,20 @@ export interface DualApiCheck {
   proxy: ApiCheckResult | null;
 }
 
+export interface ProxyEndpointResult {
+  status: 'ok' | 'error';
+  latencyMs: number;
+  ip?: string | null;
+  error?: string;
+}
+
+export interface ProxyCheckResult {
+  configured: boolean;
+  proxyUrl: string | null;
+  direct: ProxyEndpointResult;
+  proxy: ProxyEndpointResult | null;
+}
+
 // ── API methods ───────────────────────────────────────────────────────────────
 
 export const adminApi = {
@@ -389,6 +403,9 @@ export const adminApi = {
   // ── AI API Checks ──────────────────────────────────────────────────────
   checkApis: () =>
     apiFetch<{ checks: DualApiCheck[]; proxyUrl: string | null }>('/api-checks'),
+
+  checkProxy: () =>
+    apiFetch<ProxyCheckResult>('/proxy-check'),
 
   // ── Test Compose ──────────────────────────────────────────────────────
   testCompose: (params: {
