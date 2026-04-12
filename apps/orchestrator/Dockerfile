@@ -11,6 +11,9 @@ COPY packages/queue/package.json ./packages/queue/
 COPY packages/storage/package.json ./packages/storage/
 COPY packages/db/package.json ./packages/db/
 COPY packages/db/prisma/schema.prisma ./packages/db/prisma/
+COPY packages/queue/tsconfig.json ./packages/queue/
+COPY packages/storage/tsconfig.json ./packages/storage/
+COPY packages/db/tsconfig.json ./packages/db/
 COPY apps/orchestrator/package.json ./apps/orchestrator/
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
@@ -25,6 +28,9 @@ COPY apps/orchestrator/src ./apps/orchestrator/src
 COPY apps/orchestrator/tsconfig.json ./apps/orchestrator/
 COPY tsconfig.base.json ./
 RUN pnpm --filter @kmmzavod/db exec prisma generate
+RUN pnpm --filter @kmmzavod/queue run build
+RUN pnpm --filter @kmmzavod/storage run build
+RUN pnpm --filter @kmmzavod/db run build
 RUN pnpm --filter @kmmzavod/orchestrator build
 
 # ── Продакшн образ ────────────────────────────────────────────────────────────
