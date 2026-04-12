@@ -33,7 +33,7 @@ export async function proxyFetch(
   if (!proxy) return globalThis.fetch(url, init);
 
   try {
-    const { ProxyAgent } = require('undici');
+    const { ProxyAgent } = require('node:undici');
     const dispatcher = new ProxyAgent(proxy);
     return globalThis.fetch(url as any, { ...init, dispatcher } as any);
   } catch {
@@ -52,7 +52,7 @@ export async function proxyFetchStrict(
 ): Promise<Response> {
   const proxy = proxyUrl ?? (await getProxyUrl());
   if (!proxy) throw new Error('Прокси не настроен');
-  const { ProxyAgent } = require('undici');
+  const { ProxyAgent } = require('node:undici');
   const dispatcher = new ProxyAgent(proxy);
   return globalThis.fetch(url as any, { ...init, dispatcher } as any);
 }
