@@ -224,8 +224,9 @@ YOUTUBE_CLIENT_SECRET=
 AI_PROXY_URL=
 
 # ── Public URLs ───────────────────────────────────────────────────────────────
-PUBLIC_API_URL=http://${SERVER_IP}:3000
-NEXT_PUBLIC_API_URL=http://${SERVER_IP}:3000
+# Трафик идёт через nginx (port 80) — не указываем :3000
+PUBLIC_API_URL=http://${SERVER_IP}
+NEXT_PUBLIC_API_URL=http://${SERVER_IP}
 ENVEOF
 
   chown "$DEPLOY_USER:$DEPLOY_USER" "$APP_DIR/.env"
