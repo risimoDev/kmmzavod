@@ -26,6 +26,7 @@
     "openai": "^4.68.1",
     "pino": "^9.4.0",
     "pino-pretty": "^11.3.0",
+    "undici": "^6.21.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

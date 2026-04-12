@@ -71,6 +71,9 @@ importers:
       pino-pretty:
         specifier: ^11.3.0
         version: 11.3.0
+      undici:
+        specifier: ^6.21.0
+        version: 6.24.1
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -126,6 +129,9 @@ importers:
       proxy-agent:
         specifier: ^8.0.1
         version: 8.0.1
+      undici:
+        specifier: ^6.21.0
+        version: 6.24.1
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -3449,6 +3455,10 @@ packages:
 
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  undici@6.24.1:
+    resolution: {integrity: sha512-sC+b0tB1whOCzbtlx20fx3WgCXwkW627p4EA9uM+/tNNPkSS+eSEld6pAs9nDv7WbY1UUljBMYPtu9BCOrCWKA==}
+    engines: {node: '>=18.17'}
 
   unrs-resolver@1.11.1:
     resolution: {integrity: sha512-bSjt9pjaEBnNiGgc9rUiHGKv5l4/TGzDmYw3RhnkJGtLhbnnA/5qJj7x3dNDCRx/PJxu774LlH8lCOlB4hEfKg==}
@@ -6964,6 +6974,8 @@ snapshots:
   undici-types@5.26.5: {}
 
   undici-types@6.21.0: {}
+
+  undici@6.24.1: {}
 
   unrs-resolver@1.11.1:
     dependencies:

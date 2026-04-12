@@ -107,7 +107,7 @@ export async function proxyFetch(
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { ProxyAgent } = require('node:undici');
+    const { ProxyAgent } = require('undici');
     const dispatcher = new ProxyAgent(proxyUrl);
     return globalThis.fetch(url as any, { ...init, dispatcher } as any);
   } catch {
