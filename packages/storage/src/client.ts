@@ -14,6 +14,9 @@ export interface IStorageClient {
   downloadFile(key: string, localPath: string): Promise<void>;
   /** Generate a pre-signed GET URL (default 1h TTL) */
   presignedUrl(key: string, expirySeconds?: number): Promise<string>;
+
+  /** Build a public URL for a key (no signature, requires bucket read policy). */
+  publicUrl(key: string): string;
   /** Ensure bucket exists (call once at startup). */
   ensureBucket(): Promise<void>;
   /** Check if an object exists */

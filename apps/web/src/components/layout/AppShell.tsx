@@ -91,11 +91,13 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
-  const [user, setUser] = useState<{ email: string; displayName?: string; role: string } | null>(null);
+  const [user, setUser] = useState<{ email: string; displayName?: string; role: string; platformRole?: string } | null>(null);
 
   useEffect(() => {
     setUser(getStoredUser());
   }, []);
+
+  const isSuperAdmin = user?.platformRole === 'super_admin';
 
   return (
     <aside
@@ -143,7 +145,7 @@ export function Sidebar() {
           Система
         </p>
         <ul className="space-y-0.5">
-          {NAV_BOTTOM.map((item) => (
+          {NAV_BOTTOM.filter((item) => item.href !== '/admin' || isSuperAdmin).map((item) => (
             <li key={item.href}>
               <Link
                 href={item.href}

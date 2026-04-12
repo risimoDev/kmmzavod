@@ -122,6 +122,7 @@ export interface AuthUser {
   id: string;
   email: string;
   role: string;
+  platformRole?: string;
   displayName?: string;
 }
 

@@ -5,6 +5,7 @@ import type { IStorageClient, UploadOptions } from './client';
 export class MinioStorageClient implements IStorageClient {
   private client: MinioClient;
   private bucket: string;
+  private _publicBaseUrl: string | undefined;
 
   constructor(opts: {
     endPoint: string;
@@ -13,6 +14,7 @@ export class MinioStorageClient implements IStorageClient {
     accessKey: string;
     secretKey: string;
     bucket: string;
+    publicBaseUrl?: string;
   }) {
     this.client = new MinioClient({
       endPoint: opts.endPoint,
@@ -22,6 +24,7 @@ export class MinioStorageClient implements IStorageClient {
       secretKey: opts.secretKey,
     });
     this.bucket = opts.bucket;
+    this._publicBaseUrl = opts.publicBaseUrl?.replace(/\/+$/, '');
   }
 
   /** Ensure the configured bucket exists (call once at startup). */
@@ -29,6 +32,19 @@ export class MinioStorageClient implements IStorageClient {
     const exists = await this.client.bucketExists(this.bucket);
     if (!exists) {
       await this.client.makeBucket(this.bucket);
+    }
+    // If public proxy is configured, set bucket policy to allow anonymous read
+    if (this._publicBaseUrl) {
+      const policy = JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [{
+          Effect: 'Allow',
+          Principal: { AWS: ['*'] },
+          Action: ['s3:GetObject'],
+          Resource: [`arn:aws:s3:::${this.bucket}/*`],
+        }],
+      });
+      await this.client.setBucketPolicy(this.bucket, policy);
     }
   }
 
@@ -51,7 +67,20 @@ export class MinioStorageClient implements IStorageClient {
   }
 
   async presignedUrl(key: string, expirySeconds = 3600): Promise<string> {
+    // If a public proxy URL is configured, return a clean public URL without signatures.
+    // The proxy (nginx) handles auth to MinIO internally.
+    if (this._publicBaseUrl) {
+      return `${this._publicBaseUrl}/${this.bucket}/${key}`;
+    }
     return this.client.presignedGetObject(this.bucket, key, expirySeconds);
+  }
+
+  /** Public URL for a key (no signature). Requires publicBaseUrl to be configured. */
+  publicUrl(key: string): string {
+    if (!this._publicBaseUrl) {
+      throw new Error('publicBaseUrl is not configured — set MINIO_PUBLIC_URL');
+    }
+    return `${this._publicBaseUrl}/${this.bucket}/${key}`;
   }
 
   async exists(key: string): Promise<boolean> {

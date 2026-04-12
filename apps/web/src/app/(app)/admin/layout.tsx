@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { TopBar } from "@/components/layout/AppShell";
+import { getStoredUser } from "@/lib/api";
 
 const ADMIN_TABS: readonly { href: string; label: string; exact?: boolean }[] = [
   { href: "/admin",               label: "Обзор",          exact: true },
@@ -19,6 +21,25 @@ const ADMIN_TABS: readonly { href: string; label: string; exact?: boolean }[] = 
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const [allowed, setAllowed] = useState(false);
+
+  useEffect(() => {
+    const user = getStoredUser();
+    if (!user || user.platformRole !== 'super_admin') {
+      router.replace('/dashboard');
+    } else {
+      setAllowed(true);
+    }
+  }, [router]);
+
+  if (!allowed) {
+    return (
+      <div className="flex items-center justify-center h-64 text-text-tertiary text-sm">
+        Проверка прав доступа…
+      </div>
+    );
+  }
 
   return (
     <>

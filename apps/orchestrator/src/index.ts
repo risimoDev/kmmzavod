@@ -70,6 +70,7 @@ async function main() {
     accessKey: config.MINIO_ACCESS_KEY,
     secretKey: config.MINIO_SECRET_KEY,
     bucket: config.MINIO_BUCKET,
+    publicBaseUrl: config.MINIO_PUBLIC_URL,
   });
 
   // ── Очереди для fan-out ───────────────────────────────────────────────────

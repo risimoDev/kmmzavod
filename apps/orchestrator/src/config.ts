@@ -16,6 +16,7 @@ const schema = z.object({
   MINIO_ACCESS_KEY: z.string(),
   MINIO_SECRET_KEY: z.string(),
   MINIO_BUCKET: z.string().default('kmmzavod'),
+  MINIO_PUBLIC_URL: z.string().optional(),
   GPTUNNEL_API_KEY: z.string(),
   GPTUNNEL_BASE_URL: z.string().url().default('https://gptunnel.ru/v1'),
   HEYGEN_API_KEY: z.string(),

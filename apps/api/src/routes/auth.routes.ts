@@ -66,7 +66,7 @@ export async function authRoutes(app: FastifyInstance) {
     logger.info({ userId: user.id, tenantId: tenant.id }, 'New user registered');
 
     return reply.code(201).send({
-      user: { id: user.id, email: user.email, role: user.role },
+      user: { id: user.id, email: user.email, role: user.role, platformRole: user.platformRole },
       tenant: { id: tenant.id, slug: tenant.slug },
       ...tokens,
     });
@@ -109,7 +109,7 @@ export async function authRoutes(app: FastifyInstance) {
     logger.info({ userId: user.id, tenantId: user.tenantId }, 'User logged in');
 
     return reply.send({
-      user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+      user: { id: user.id, email: user.email, role: user.role, platformRole: user.platformRole, displayName: user.displayName },
       tenant: { id: user.tenant.id, slug: user.tenant.slug, plan: user.tenant.plan },
       ...tokens,
     });
