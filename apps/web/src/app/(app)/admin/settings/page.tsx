@@ -26,6 +26,16 @@ const SETTING_GROUPS: Record<string, string[]> = {
   "Системные":         [],
 };
 
+const SETTING_DESCRIPTIONS: Record<string, string> = {
+  AI_PROXY_URL: "HTTP/SOCKS5 прокси для AI-запросов (http://user:pass@ip:port или socks5://user:pass@ip:port)",
+  MAX_CONCURRENT_JOBS: "Максимум параллельных задач генерации",
+  MAX_SCENES_PER_VIDEO: "Макс. количество сцен в одном видео",
+  MAX_VIDEOS_PER_TENANT_DAY: "Лимит видео на тенант в день",
+  JOB_TIMEOUT_SECONDS: "Таймаут задачи (сек)",
+  IMAGE_GEN_PROVIDER: "Провайдер генерации изображений (runway/gemini/fal/replicate)",
+  GPT_MODEL: "Модель GPT для сценариев",
+};
+
 export default function AdminSettingsPage() {
   const [settings, setSettings]   = useState<AdminSetting[]>([]);
   const [loading, setLoading]     = useState(true);
@@ -38,7 +48,10 @@ export default function AdminSettingsPage() {
   const [addDesc, setAddDesc]     = useState("");
   const [addOpen, setAddOpen]     = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [quickAddKey, setQuickAddKey] = useState<string | null>(null);
+  const [quickAddVal, setQuickAddVal] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const quickAddRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -85,6 +98,19 @@ export default function AdminSettingsPage() {
     setDeleteTarget(null);
   };
 
+  const handleQuickAdd = async (key: string) => {
+    if (!quickAddVal.trim()) return;
+    setSaving(true);
+    try {
+      await adminApi.upsertSetting(key, quickAddVal.trim(), SETTING_DESCRIPTIONS[key]);
+      setQuickAddKey(null);
+      setQuickAddVal("");
+      load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const toggleMask = (key: string) => {
     setShowMasked(prev => {
       const next = new Set(prev);
@@ -95,11 +121,18 @@ export default function AdminSettingsPage() {
 
   // Group settings
   const known = new Set(Object.values(SETTING_GROUPS).flat());
-  const groups: Record<string, AdminSetting[]> = {};
+  const settingsMap = new Map(settings.map(s => [s.key, s]));
+  const groups: Record<string, { key: string; setting: AdminSetting | null }[]> = {};
   Object.keys(SETTING_GROUPS).forEach(g => {
-    groups[g] = settings.filter(s => SETTING_GROUPS[g].includes(s.key));
+    const keys = SETTING_GROUPS[g];
+    if (keys.length > 0) {
+      groups[g] = keys.map(k => ({ key: k, setting: settingsMap.get(k) ?? null }));
+    }
   });
-  groups["Системные"] = settings.filter(s => !known.has(s.key));
+  // "Системные" = everything not in known groups
+  groups["Системные"] = settings
+    .filter(s => !known.has(s.key))
+    .map(s => ({ key: s.key, setting: s }));
 
   return (
     <div className="p-6 space-y-6">
@@ -128,7 +161,46 @@ export default function AdminSettingsPage() {
                   <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider">{group}</p>
                 </div>
                 <div className="divide-y divide-border/30">
-                  {items.map(s => {
+                  {items.map(({ key, setting: s }) => {
+                    // Setting not yet created — show placeholder with quick-add
+                    if (!s) {
+                      return (
+                        <div key={key} className="px-5 py-3 flex items-start gap-4 group hover:bg-surface-1 transition-colors">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <code className="text-xs font-mono text-text-tertiary">{key}</code>
+                              <Badge variant="default" className="text-[9px] py-0 opacity-50">не задано</Badge>
+                            </div>
+                            {SETTING_DESCRIPTIONS[key] && (
+                              <p className="text-[11px] text-text-tertiary mb-1">{SETTING_DESCRIPTIONS[key]}</p>
+                            )}
+                            {quickAddKey === key ? (
+                              <div className="flex items-center gap-2 mt-1">
+                                <input
+                                  ref={quickAddRef}
+                                  value={quickAddVal}
+                                  onChange={e => setQuickAddVal(e.target.value)}
+                                  onKeyDown={e => { if (e.key === "Enter") handleQuickAdd(key); if (e.key === "Escape") { setQuickAddKey(null); setQuickAddVal(""); } }}
+                                  placeholder={key === "AI_PROXY_URL" ? "http://user:pass@ip:port" : "Значение"}
+                                  className="flex-1 h-7 px-2.5 text-xs rounded-md bg-surface-2 border border-brand-500/50
+                                    text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500/50 font-mono"
+                                />
+                                <Button variant="primary" size="xs" loading={saving} onClick={() => handleQuickAdd(key)}>Сохранить</Button>
+                                <Button variant="ghost" size="xs" onClick={() => { setQuickAddKey(null); setQuickAddVal(""); }}>Отмена</Button>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-text-tertiary italic">Не настроено</p>
+                            )}
+                          </div>
+                          {quickAddKey !== key && (
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                              <Button variant="ghost" size="xs" onClick={() => { setQuickAddKey(key); setQuickAddVal(""); setTimeout(() => quickAddRef.current?.focus(), 50); }}>Задать</Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
                     const sens = isSensitive(s.key);
                     const masked = sens && !showMasked.has(s.key);
                     const displayVal = masked ? maskValue(s.value) : s.value;
