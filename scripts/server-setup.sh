@@ -224,9 +224,13 @@ YOUTUBE_CLIENT_SECRET=
 AI_PROXY_URL=
 
 # ── Public URLs ───────────────────────────────────────────────────────────────
-# Трафик идёт через nginx (port 80) — не указываем :3000
-PUBLIC_API_URL=http://${SERVER_IP}
-NEXT_PUBLIC_API_URL=http://${SERVER_IP}
+# Трафик идёт через nginx — если задан домен, используем HTTPS
+if [ -n "${DOMAIN}" ]; then
+  PUBLIC_API_URL=https://${DOMAIN}
+else
+  PUBLIC_API_URL=http://${SERVER_IP}
+fi
+NEXT_PUBLIC_API_URL=${PUBLIC_API_URL}
 ENVEOF
 
   chown "$DEPLOY_USER:$DEPLOY_USER" "$APP_DIR/.env"
@@ -255,6 +259,41 @@ ufw allow 80/tcp >/dev/null    # Nginx HTTP
 ufw allow 443/tcp >/dev/null   # Nginx HTTPS
 ufw --force enable >/dev/null
 success "UFW: SSH + 80 + 443 открыты. API/Web/MinIO только через nginx"
+
+# =============================================================================
+# 6.5. SSL-сертификат Let's Encrypt (только если задан DOMAIN)
+# =============================================================================
+if [ -n "$DOMAIN" ]; then
+  header "6.5/10 · SSL-сертификат Let's Encrypt для $DOMAIN"
+
+  if ! command -v certbot &>/dev/null; then
+    info "Устанавливаем certbot..."
+    apt-get install -y -qq certbot
+  fi
+
+  if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    success "Сертификат уже существует: /etc/letsencrypt/live/$DOMAIN/"
+  else
+    # certbot --standalone временно занимает порт 80
+    # nginx ещё не запущен (стартует в шаге 7) — порт 80 свободен
+    info "Получаем сертификат (certbot standalone)..."
+    certbot certonly --standalone \
+      --email "admin@$DOMAIN" --agree-tos --no-eff-email \
+      -d "$DOMAIN" -d "www.$DOMAIN" \
+      --non-interactive
+    success "Сертификат получен: /etc/letsencrypt/live/$DOMAIN/"
+  fi
+
+  # Автообновление: останавливаем nginx на время renew, затем поднимаем снова
+  RENEW_HOOK_FILE="/etc/cron.d/certbot-renew-kmmzavod"
+  cat > "$RENEW_HOOK_FILE" <<'CRONEOF'
+0 3 * * * root certbot renew --quiet \
+  --pre-hook  "docker compose -f /opt/kmmzavod/docker-compose.yml stop nginx" \
+  --post-hook "docker compose -f /opt/kmmzavod/docker-compose.yml up -d nginx"
+CRONEOF
+  chmod 644 "$RENEW_HOOK_FILE"
+  success "Автообновление сертификата настроено ($RENEW_HOOK_FILE)"
+fi
 
 # =============================================================================
 # 7. Сборка и запуск Docker-сервисов
