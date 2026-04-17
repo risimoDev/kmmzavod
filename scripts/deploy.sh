@@ -166,8 +166,10 @@ if $DO_BUILD; then
     docker compose build --no-cache "$SINGLE_SERVICE"
   else
     info "Сборка всех сервисов..."
-    # Compose V2 собирает параллельно по умолчанию
-    docker compose build --no-cache 2>&1 | tail -20
+    # Compose V2 собирает параллельно по умолчанию. Показываем прогресс и проверяем код возврата.
+    if ! docker compose build --no-cache; then
+      error "Сборка образов не удалась. Проверьте логи: docker compose build"
+    fi
   fi
   success "Образы собраны"
 else

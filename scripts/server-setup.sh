@@ -49,6 +49,22 @@ echo ""
 header "1/10 · Обновление системы"
 
 export DEBIAN_FRONTEND=noninteractive
+# Wait for any other apt/dpkg processes to finish (avoid locks on cloud images)
+wait_for_apt() {
+  local tries=0
+  while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    tries=$((tries+1))
+    if [ "$tries" -ge 40 ]; then
+      warn "Apt lock persists — proceeding anyway (this may fail)"
+      break
+    fi
+    info "Ожидание освобождения apt/dpkg... ($tries)"
+    sleep 3
+  done
+}
+
+export DEBIAN_FRONTEND=noninteractive
+wait_for_apt
 apt-get update -qq
 apt-get upgrade -y -qq
 apt-get install -y -qq \
@@ -91,15 +107,19 @@ fi
 # =============================================================================
 header "3/10 · Пользователь deploy"
 
-if id "$DEPLOY_USER" &>/dev/null; then
-  success "Пользователь $DEPLOY_USER уже существует"
-else
-  useradd -m -s /bin/bash "$DEPLOY_USER"
-  success "Пользователь $DEPLOY_USER создан"
-fi
+  if id "$DEPLOY_USER" &>/dev/null; then
+    success "Пользователь $DEPLOY_USER уже существует"
+  else
+    useradd -m -s /bin/bash "$DEPLOY_USER"
+    success "Пользователь $DEPLOY_USER создан"
+  fi
 
-usermod -aG docker "$DEPLOY_USER"
-success "$DEPLOY_USER добавлен в группу docker"
+  # Create docker group if missing and add user
+  if ! getent group docker >/dev/null; then
+    groupadd docker || true
+  fi
+  usermod -aG docker "$DEPLOY_USER" || true
+  success "$DEPLOY_USER добавлен в группу docker"
 
 # SSH-ключи: копируем от root → deploy
 DEPLOY_HOME="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
@@ -140,12 +160,12 @@ fi
 
 cd "$APP_DIR"
 
-# Удаляем dev-override — он отключает app-сервисы через profiles
-if [ -f "$APP_DIR/docker-compose.override.yml" ]; then
-  info "Удаляем docker-compose.override.yml (dev-only, мешает на сервере)"
-  rm -f "$APP_DIR/docker-compose.override.yml"
-  success "override удалён — все сервисы будут работать в Docker"
-fi
+  # Удаляем dev-override — он отключает app-сервисы через profiles
+  if [ -f "$APP_DIR/docker-compose.override.yml" ]; then
+    info "Удаляем docker-compose.override.yml (dev-only, мешает на сервере)"
+    rm -f "$APP_DIR/docker-compose.override.yml" || warn "Не удалось удалить override файл"
+    success "override удалён — все сервисы будут работать в Docker"
+  fi
 
 # =============================================================================
 # 5. Настройка .env
@@ -164,7 +184,14 @@ else
   MINIO_PASS="$(gen_secret 24)"
   JWT_SEC="$(gen_secret 48)"
   ENCRYPT_KEY="$(openssl rand -hex 32)"
-  SERVER_IP="$(curl -sf --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  SERVER_IP="$(curl -sf --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}' | awk '{print $1}')"
+
+  # Determine PUBLIC_API_URL now (write static values into .env — do not embed shell logic)
+  if [ -n "$DOMAIN" ]; then
+    PUBLIC_API_URL="https://${DOMAIN}"
+  else
+    PUBLIC_API_URL="http://${SERVER_IP}"
+  fi
 
   # NB: все пароли инлайнятся — .env не поддерживает cross-variable reference
   cat > "$APP_DIR/.env" <<ENVEOF
@@ -224,12 +251,8 @@ YOUTUBE_CLIENT_SECRET=
 AI_PROXY_URL=
 
 # ── Public URLs ───────────────────────────────────────────────────────────────
-# Трафик идёт через nginx — если задан домен, используем HTTPS
-if [ -n "${DOMAIN}" ]; then
-  PUBLIC_API_URL=https://${DOMAIN}
-else
-  PUBLIC_API_URL=http://${SERVER_IP}
-fi
+# Трафик идёт через nginx — PUBLIC_API_URL определён при установке
+PUBLIC_API_URL=${PUBLIC_API_URL}
 NEXT_PUBLIC_API_URL=${PUBLIC_API_URL}
 ENVEOF
 

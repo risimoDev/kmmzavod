@@ -66,7 +66,22 @@ NODE_MAJOR=$(node -e "process.stdout.write(process.version.replace('v','').split
 [ "$NODE_MAJOR" -lt 20 ] && error "Нужен Node.js v20+. Установлен: $(node --version)"
 
 # Проверка Docker daemon
-docker info &>/dev/null 2>&1 || error "Docker daemon не запущен. Запустите Docker Desktop."
+retry_cmd() {
+  local tries=0 max=6 delay=2 cmd
+  cmd="$*"
+  until $cmd; do
+    tries=$((tries+1))
+    if [ "$tries" -ge $max ]; then
+      return 1
+    fi
+    sleep $delay
+  done
+  return 0
+}
+
+if ! retry_cmd docker info &>/dev/null; then
+  error "Docker daemon не запущен или недоступен. Убедитесь, что Docker запущен."
+fi
 
 # =============================================================================
 # 2. Файл окружения (.env)
