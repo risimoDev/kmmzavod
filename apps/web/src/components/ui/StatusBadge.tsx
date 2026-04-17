@@ -10,15 +10,16 @@ const STATUS_MAP: Record<
   Status,
   { label: string; variant: Parameters<typeof Badge>[0]["variant"]; dot?: boolean }
 > = {
-  draft:        { label: "Черновик",    variant: "default",  dot: false },
-  pending:      { label: "В очереди",   variant: "warning",  dot: true  },
-  running:      { label: "Запущен",     variant: "info",     dot: true  },
-  processing:   { label: "Обработка",   variant: "info",     dot: true  },
-  scenes_ready: { label: "Сцены готовы",variant: "info",     dot: true  },
-  composing:    { label: "Монтаж",      variant: "brand",    dot: true  },
-  completed:    { label: "Готово",      variant: "success",  dot: false },
-  failed:       { label: "Ошибка",      variant: "danger",   dot: false },
-  cancelled:    { label: "Отменено",    variant: "outline",  dot: false },
+  
+  pending:      { label: "Queued",      variant: "warning",  dot: true  },
+  running:      { label: "Running",     variant: "info",     dot: true  },
+  processing:   { label: "Processing",  variant: "info",     dot: true  },
+  scenes_ready: { label: "Scenes ready",variant: "info",     dot: true  },
+  composing:    { label: "Composing",    variant: "brand",    dot: true  },
+  completed:    { label: "Completed",    variant: "success",  dot: false },
+  failed:       { label: "Failed",       variant: "danger",   dot: false },
+  cancelled:    { label: "Cancelled",    variant: "outline",  dot: false },
+  draft:        { label: "Draft",        variant: "default",  dot: false },
 };
 
 export function StatusBadge({ status }: { status: string }) {

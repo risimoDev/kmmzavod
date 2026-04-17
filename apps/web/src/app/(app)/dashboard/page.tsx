@@ -57,7 +57,7 @@ export default function DashboardPage() {
       },
     })
       .then(async (res) => {
-        if (!res.ok) throw new Error("Не удалось загрузить данные");
+        if (!res.ok) throw new Error("Failed to load data");
         return res.json();
       })
       .then(setData)
@@ -68,7 +68,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <>
-        <TopBar title="Дашборд" />
+        <TopBar title="Dashboard" />
         <main className="flex-1 flex items-center justify-center">
           <LoadingSpinner size={32} />
         </main>
@@ -79,11 +79,11 @@ export default function DashboardPage() {
   if (error || !data) {
     return (
       <>
-        <TopBar title="Дашборд" />
+        <TopBar title="Dashboard" />
         <main className="flex-1 flex flex-col items-center justify-center gap-4">
-          <p className="text-text-secondary text-sm">{error ?? "Нет данных"}</p>
+          <p className="text-text-secondary text-sm">{error ?? "No data"}</p>
           <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
-            Повторить
+            Retry
           </Button>
         </main>
       </>
@@ -91,19 +91,19 @@ export default function DashboardPage() {
   }
 
   const STATS = [
-    { label: "Видео создано", value: String(data.stats.videosTotal), delta: `${data.stats.videosThisWeek} за неделю`, deltaPositive: true, icon: <VideoIcon /> },
-    { label: "Активных задач", value: String(data.stats.activeJobs), delta: "в обработке", deltaPositive: true, icon: <ActivityIcon /> },
-    { label: "Кредиты", value: String(data.stats.creditsTotal), delta: `Тариф ${data.stats.plan}`, deltaPositive: true, icon: <CreditIcon /> },
+    { label: "Videos created", value: String(data.stats.videosTotal), delta: `${data.stats.videosThisWeek} this week`, deltaPositive: true, icon: <VideoIcon /> },
+    { label: "Active jobs", value: String(data.stats.activeJobs), delta: "in progress", deltaPositive: true, icon: <ActivityIcon /> },
+    { label: "Credits", value: String(data.stats.creditsTotal), delta: `Plan ${data.stats.plan}`, deltaPositive: true, icon: <CreditIcon /> },
   ];
 
   return (
     <>
       <TopBar
-        title="Дашборд"
+        title="Dashboard"
         actions={
           <Link href="/create">
             <Button variant="primary" icon={<PlusIcon />} size="sm">
-              Создать видео
+              Create video
             </Button>
           </Link>
         }
@@ -122,10 +122,10 @@ export default function DashboardPage() {
           <div className="lg:col-span-3 rounded-xl border border-border bg-surface-1 p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <p className="text-sm font-semibold text-text-primary">Создание видео</p>
-                <p className="text-xs text-text-tertiary mt-0.5">Видео за последние 7 дней</p>
+                <p className="text-sm font-semibold text-text-primary">Video creation</p>
+                <p className="text-xs text-text-tertiary mt-0.5">Videos in the last 7 days</p>
               </div>
-              {data.stats.activeJobs > 0 && <Badge variant="success" dot>Активно</Badge>}
+              {data.stats.activeJobs > 0 && <Badge variant="success" dot>Active</Badge>}
             </div>
             {data.chart.length > 0 ? (
               <ResponsiveContainer width="100%" height={160}>
@@ -153,14 +153,14 @@ export default function DashboardPage() {
               </ResponsiveContainer>
             ) : (
               <div className="h-[160px] flex items-center justify-center text-text-tertiary text-sm">
-                Пока нет данных. Создайте первое видео!
+                No data yet. Create your first video!
               </div>
             )}
           </div>
 
           <div className="lg:col-span-2 rounded-xl border border-border bg-surface-1 p-5">
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm font-semibold text-text-primary">Активные задачи</p>
+              <p className="text-sm font-semibold text-text-primary">Active jobs</p>
               <span className="text-xs font-medium text-brand-400 bg-brand-500/10 px-1.5 py-0.5 rounded-md">
                 {data.activeJobs.length}
               </span>
@@ -180,7 +180,7 @@ export default function DashboardPage() {
               </ul>
             ) : (
               <div className="flex items-center justify-center h-24 text-text-tertiary text-sm">
-                Нет активных задач
+                No active jobs
               </div>
             )}
           </div>
@@ -189,9 +189,9 @@ export default function DashboardPage() {
         {/* Recent videos grid */}
         <div>
           <div className="flex items-center justify-between mb-4">
-            <p className="text-sm font-semibold text-text-primary">Последние видео</p>
+            <p className="text-sm font-semibold text-text-primary">Recent videos</p>
             <Link href="/videos" className="text-xs text-brand-400 hover:text-brand-300 transition-colors font-medium">
-              Все видео →
+              All videos →
             </Link>
           </div>
           {data.recentVideos.length > 0 ? (
@@ -210,9 +210,9 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="rounded-xl border border-border bg-surface-1 p-8 text-center">
-              <p className="text-text-tertiary text-sm mb-3">У вас пока нет видео</p>
+              <p className="text-text-tertiary text-sm mb-3">You have no videos yet</p>
               <Link href="/create">
-                <Button variant="primary" size="sm">Создать первое видео</Button>
+                <Button variant="primary" size="sm">Create your first video</Button>
               </Link>
             </div>
           )}
@@ -222,12 +222,12 @@ export default function DashboardPage() {
         <div className="rounded-xl border border-border bg-surface-1 px-5 py-4">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <p className="text-sm font-semibold text-text-primary">Кредиты</p>
-              <p className="text-xs text-text-tertiary mt-0.5">Тариф {data.stats.plan}</p>
+              <p className="text-sm font-semibold text-text-primary">Credits</p>
+              <p className="text-xs text-text-tertiary mt-0.5">Plan {data.stats.plan}</p>
             </div>
           </div>
           <div className="text-2xl font-bold text-text-primary">{data.stats.creditsTotal}</div>
-          <p className="text-xs text-text-tertiary mt-1">доступно кредитов</p>
+          <p className="text-xs text-text-tertiary mt-1">credits available</p>
         </div>
       </main>
     </>

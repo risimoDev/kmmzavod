@@ -20,7 +20,7 @@ export default function LoginPage() {
       await authApi.login(email, password);
       router.push("/dashboard");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Ошибка входа");
+      setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setLoading(false);
     }
@@ -28,12 +28,12 @@ export default function LoginPage() {
 
   return (
     <div className="w-full max-w-sm">
-      <div className="text-center mb-8">
-        <h1 className="text-2xl font-bold text-text-primary">Вход в аккаунт</h1>
+        <div className="text-center mb-8">
+        <h1 className="text-2xl font-bold text-text-primary">Sign in to your account</h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Нет аккаунта?{" "}
+          Don't have an account?{" "}
           <Link href="/register" className="text-brand-500 hover:text-brand-400 font-medium">
-            Зарегистрироваться
+            Sign up
           </Link>
         </p>
       </div>
@@ -63,7 +63,7 @@ export default function LoginPage() {
 
         <div>
           <label htmlFor="password" className="block text-sm font-medium text-text-secondary mb-1.5">
-            Пароль
+            Password
           </label>
           <input
             id="password"
@@ -82,7 +82,7 @@ export default function LoginPage() {
           disabled={loading}
           className="w-full rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {loading ? "Вход..." : "Войти"}
+          {loading ? "Signing in..." : "Sign in"}
         </button>
       </form>
     </div>

@@ -250,7 +250,7 @@ export const authApi = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error((body as any).message ?? 'Ошибка входа');
+      throw new Error((body as any).message ?? 'Login failed');
     }
     const data = await res.json();
     setTokens(data.accessToken, data.refreshToken);
@@ -267,7 +267,7 @@ export const authApi = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error((body as any).message ?? 'Ошибка регистрации');
+      throw new Error((body as any).message ?? 'Registration failed');
     }
     const data = await res.json();
     setTokens(data.accessToken, data.refreshToken);

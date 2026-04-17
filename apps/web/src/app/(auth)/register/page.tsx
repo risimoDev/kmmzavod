@@ -19,10 +19,10 @@ export default function RegisterPage() {
     setError("");
     setLoading(true);
     try {
-      await authApi.register(email, password, tenantName || "Мой проект", displayName || undefined);
+      await authApi.register(email, password, tenantName || "My project", displayName || undefined);
       router.push("/dashboard");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Ошибка регистрации");
+      setError(err instanceof Error ? err.message : "Registration failed");
     } finally {
       setLoading(false);
     }
@@ -30,12 +30,12 @@ export default function RegisterPage() {
 
   return (
     <div className="w-full max-w-sm">
-      <div className="text-center mb-8">
-        <h1 className="text-2xl font-bold text-text-primary">Создать аккаунт</h1>
+        <div className="text-center mb-8">
+        <h1 className="text-2xl font-bold text-text-primary">Create account</h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Уже есть аккаунт?{" "}
+          Already have an account?{" "}
           <Link href="/login" className="text-brand-500 hover:text-brand-400 font-medium">
-            Войти
+            Sign in
           </Link>
         </p>
       </div>
@@ -49,14 +49,14 @@ export default function RegisterPage() {
 
         <div>
           <label htmlFor="displayName" className="block text-sm font-medium text-text-secondary mb-1.5">
-            Имя
+            Name
           </label>
           <input
             id="displayName"
             type="text"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="Иван Иванов"
+            placeholder="John Doe"
             autoComplete="name"
             className="w-full rounded-lg border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition"
           />
@@ -80,7 +80,7 @@ export default function RegisterPage() {
 
         <div>
           <label htmlFor="password" className="block text-sm font-medium text-text-secondary mb-1.5">
-            Пароль
+            Password
           </label>
           <input
             id="password"
@@ -90,21 +90,21 @@ export default function RegisterPage() {
             required
             minLength={6}
             autoComplete="new-password"
-            placeholder="Минимум 6 символов"
+            placeholder="At least 6 characters"
             className="w-full rounded-lg border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition"
           />
         </div>
 
         <div>
           <label htmlFor="tenantName" className="block text-sm font-medium text-text-secondary mb-1.5">
-            Название организации
+            Organization name
           </label>
           <input
             id="tenantName"
             type="text"
             value={tenantName}
             onChange={(e) => setTenantName(e.target.value)}
-            placeholder="Мой проект"
+            placeholder="My project"
             className="w-full rounded-lg border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition"
           />
         </div>
@@ -114,11 +114,11 @@ export default function RegisterPage() {
           disabled={loading}
           className="w-full rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {loading ? "Создание..." : "Создать аккаунт"}
+          {loading ? "Creating..." : "Create account"}
         </button>
 
         <p className="text-xs text-text-tertiary text-center">
-          50 бесплатных кредитов при регистрации
+          50 free credits on signup
         </p>
       </form>
     </div>

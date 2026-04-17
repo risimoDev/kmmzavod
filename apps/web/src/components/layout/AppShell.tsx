@@ -13,7 +13,7 @@ import { getStoredUser, authApi } from "@/lib/api";
 const NAV_ITEMS = [
   {
     href: "/dashboard",
-    label: "Дашборд",
+    label: "Dashboard",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
@@ -23,7 +23,7 @@ const NAV_ITEMS = [
   },
   {
     href: "/projects",
-    label: "Проекты",
+    label: "Projects",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
@@ -32,7 +32,7 @@ const NAV_ITEMS = [
   },
   {
     href: "/videos",
-    label: "Видео",
+    label: "Videos",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <rect x="2" y="4" width="20" height="16" rx="2"/>
@@ -42,7 +42,7 @@ const NAV_ITEMS = [
   },
   {
     href: "/products",
-    label: "Продукты",
+    label: "Products",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
@@ -52,7 +52,7 @@ const NAV_ITEMS = [
   },
   {
     href: "/create",
-    label: "Создать",
+    label: "Create",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>
@@ -65,7 +65,7 @@ const NAV_ITEMS = [
 const NAV_BOTTOM = [
   {
     href: "/admin",
-    label: "Администрирование",
+    label: "Admin",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/>
@@ -74,7 +74,7 @@ const NAV_BOTTOM = [
   },
   {
     href: "/settings",
-    label: "Настройки",
+    label: "Settings",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <circle cx="12" cy="12" r="3"/>
@@ -142,7 +142,7 @@ export function Sidebar() {
         <div className="my-3 h-px bg-border" />
 
         <p className="px-2.5 mb-1 text-2xs font-semibold uppercase tracking-widest text-text-tertiary">
-          Система
+          System
         </p>
         <ul className="space-y-0.5">
           {NAV_BOTTOM.filter((item) => item.href !== '/admin' || isSuperAdmin).map((item) => (
@@ -171,7 +171,7 @@ export function Sidebar() {
           className="w-full flex items-center gap-2 h-8 px-2.5 rounded-md text-sm text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors"
         >
           {resolvedTheme === "dark" ? <SunIcon /> : <MoonIcon />}
-          {resolvedTheme === "dark" ? "Светлая тема" : "Тёмная тема"}
+          {resolvedTheme === "dark" ? "Light theme" : "Dark theme"}
         </button>
 
         <div className="mt-1 flex items-center gap-2 h-9 px-2.5">
@@ -184,7 +184,7 @@ export function Sidebar() {
           </div>
           <button
             onClick={async () => { await authApi.logout(); router.push("/login"); }}
-            title="Выйти"
+            title="Log out"
             className="shrink-0 text-text-tertiary hover:text-text-primary transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>

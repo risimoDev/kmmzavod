@@ -18,7 +18,7 @@ const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
 type UploadedImage = { key: string; url: string; file: File };
 
 type FormData = {
-  // Step 1 — Продукт
+  // Step 1 — Product
   productName: string;
   productDescription: string;
   features: string[];
@@ -29,7 +29,7 @@ type FormData = {
   price: string;
   websiteUrl: string;
   images: UploadedImage[];
-  // Step 2 — Настройки видео
+  // Step 2 — Video settings
   videoIdea: string;
   language: string;
   style: string;
@@ -40,7 +40,7 @@ type FormData = {
   subtitleStyle: string;
   bgmEnabled: boolean;
   videoFormat: "standard" | "slideshow";
-  // Step 3 — Запуск
+  // Step 3 — Launch
 };
 
 const DEFAULT: FormData = {
@@ -67,28 +67,28 @@ const DEFAULT: FormData = {
 };
 
 const STEPS = [
-  { id: 1, label: "Продукт" },
-  { id: 2, label: "Настройки видео" },
-  { id: 3, label: "Запуск" },
+  { id: 1, label: "Product" },
+  { id: 2, label: "Video settings" },
+  { id: 3, label: "Launch" },
 ];
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
-const LANGUAGES   = [{ value: "ru", label: "Русский" }, { value: "en", label: "English" }, { value: "de", label: "Deutsch" }];
-const STYLES      = [{ value: "informative", label: "Информационный" }, { value: "storytelling", label: "Нарратив / история" }, { value: "review", label: "Обзор / рецензия" }, { value: "educational", label: "Обучающий" }, { value: "promo", label: "Рекламный" }];
-const BRAND_VOICES= [{ value: "professional", label: "Профессиональный" }, { value: "friendly", label: "Дружелюбный" }, { value: "expert", label: "Экспертный" }, { value: "casual", label: "Неформальный" }, { value: "luxury", label: "Премиальный" }];
-const CATEGORIES  = [{ value: "none", label: "Не указана" }, { value: "tech", label: "Технологии" }, { value: "beauty", label: "Красота" }, { value: "food", label: "Еда" }, { value: "fashion", label: "Мода" }, { value: "education", label: "Образование" }, { value: "finance", label: "Финансы" }, { value: "health", label: "Здоровье" }, { value: "other", label: "Другое" }];
+const LANGUAGES   = [{ value: "ru", label: "Russian" }, { value: "en", label: "English" }, { value: "de", label: "Deutsch" }];
+const STYLES      = [{ value: "informative", label: "Informative" }, { value: "storytelling", label: "Narrative / Story" }, { value: "review", label: "Review" }, { value: "educational", label: "Educational" }, { value: "promo", label: "Promotional" }];
+const BRAND_VOICES= [{ value: "professional", label: "Professional" }, { value: "friendly", label: "Friendly" }, { value: "expert", label: "Expert" }, { value: "casual", label: "Casual" }, { value: "luxury", label: "Premium" }];
+const CATEGORIES  = [{ value: "none", label: "Not specified" }, { value: "tech", label: "Technology" }, { value: "beauty", label: "Beauty" }, { value: "food", label: "Food" }, { value: "fashion", label: "Fashion" }, { value: "education", label: "Education" }, { value: "finance", label: "Finance" }, { value: "health", label: "Health" }, { value: "other", label: "Other" }];
 const FALLBACK_AVATARS = [
-  { value: "Anna_public_20240108", label: "Анна", desc: "Реалистичный, женский", image: null as string | null },
-  { value: "Adrian_public_2_20240312", label: "Адриан", desc: "Деловой, мужской", image: null as string | null },
-  { value: "Kristin_public_3_20240108", label: "Кристин", desc: "Молодёжный, женский", image: null as string | null },
-  { value: "none", label: "Без аватара", desc: "Только закадровый голос", image: null as string | null },
+  { value: "Anna_public_20240108", label: "Anna", desc: "Realistic, female", image: null as string | null },
+  { value: "Adrian_public_2_20240312", label: "Adrian", desc: "Business, male", image: null as string | null },
+  { value: "Kristin_public_3_20240108", label: "Kristin", desc: "Youthful, female", image: null as string | null },
+  { value: "none", label: "No avatar", desc: "Voice only", image: null as string | null },
 ];
 const VOICES      = [
-  { value: "70856236390f4d0392d00187143d3900", label: "Лариса", lang: "RU", gender: "Женский" },
-  { value: "ba1544b5eae84eae9cb92598f078b6b0", label: "Олег", lang: "RU", gender: "Мужской" },
-  { value: "bc69c9589d6747028dc5ec4aec2b43c3", label: "Дарья", lang: "RU", gender: "Женский" },
-  { value: "81bb7c1a521442f6b812b2294a29acc1", label: "Дмитрий", lang: "RU", gender: "Мужской" },
+  { value: "70856236390f4d0392d00187143d3900", label: "Larisa", lang: "RU", gender: "Female" },
+  { value: "ba1544b5eae84eae9cb92598f078b6b0", label: "Oleg", lang: "RU", gender: "Male" },
+  { value: "bc69c9589d6747028dc5ec4aec2b43c3", label: "Daria", lang: "RU", gender: "Female" },
+  { value: "81bb7c1a521442f6b812b2294a29acc1", label: "Dmitriy", lang: "RU", gender: "Male" },
 ] as const;
 
 type HeyGenVoice = {
@@ -99,8 +99,8 @@ type HeyGenVoice = {
   preview_audio_url: string | null;
 };
 
-const SUB_STYLES  = [{ value: "tiktok", label: "TikTok Bold" }, { value: "cinematic", label: "Кинематографический" }, { value: "minimal", label: "Минимальный" }, { value: "default", label: "Стандартный" }];
-const DURATIONS   = [{ value: 30, label: "30 сек" }, { value: 45, label: "45 сек" }, { value: 60, label: "60 сек" }];
+const SUB_STYLES  = [{ value: "tiktok", label: "TikTok Bold" }, { value: "cinematic", label: "Cinematic" }, { value: "minimal", label: "Minimal" }, { value: "default", label: "Default" }];
+const DURATIONS   = [{ value: 30, label: "30 sec" }, { value: 45, label: "45 sec" }, { value: 60, label: "60 sec" }];
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -129,11 +129,11 @@ function CreatePageInner() {
       const heygenAvatars = res.avatars.map((a) => ({
         value: a.avatar_id,
         label: a.avatar_name,
-        desc: a.gender === 'female' ? 'Женский' : a.gender === 'male' ? 'Мужской' : '',
+        desc: a.gender === 'female' ? 'Female' : a.gender === 'male' ? 'Male' : '',
         image: a.preview_image_url,
       }));
       if (heygenAvatars.length > 0) {
-        setAvatars([...heygenAvatars, { value: "none", label: "Без аватара", desc: "Только закадровый голос", image: null }]);
+        setAvatars([...heygenAvatars, { value: "none", label: "No avatar", desc: "Voice only", image: null }]);
       }
     }).catch(() => {})
   }, []);
@@ -189,7 +189,7 @@ function CreatePageInner() {
       let productId = existingProductId;
 
       if (!productId) {
-        // 1. Создаём продукт
+        // 1. Create product
         setLaunchProgress(20);
         const product = await productsApi.create({
           name: form.productName,
@@ -207,10 +207,10 @@ function CreatePageInner() {
         setLaunchProgress(20);
       }
 
-      // 2. Создаём видео от продукта
+      // 2. Create video from product
       setLaunchProgress(50);
       const result = await videosApi.create({
-        title: `${form.productName} — видео`,
+        title: `${form.productName} — video`,
         scriptPrompt: form.videoIdea.trim() || undefined,
         productId: productId!,
         avatarId: form.avatar,
@@ -228,7 +228,7 @@ function CreatePageInner() {
       setLaunchProgress(100);
       setTimeout(() => router.push(`/videos/${result.video.id}`), 600);
     } catch (err: any) {
-      setError(err.message ?? "Ошибка при создании");
+      setError(err.message ?? "Error creating");
       setLaunching(false);
       setLaunchProgress(0);
     }
@@ -236,7 +236,7 @@ function CreatePageInner() {
 
   return (
     <>
-      <TopBar title="Создать видео" />
+      <TopBar title="Create video" />
 
       <main className="flex-1 p-6">
         {/* Stepper */}
@@ -267,16 +267,16 @@ function CreatePageInner() {
           {!launching && (
             <div className="flex justify-between mt-6">
               <Button variant="ghost" size="sm" disabled={step === 1} onClick={() => setStep((s) => s - 1)}>
-                ← Назад
+                ← Back
               </Button>
               {step < 3 ? (
-                <Button variant="primary" size="sm" disabled={!canNext()} onClick={() => setStep((s) => s + 1)}>
-                  Далее →
+                  <Button variant="primary" size="sm" disabled={!canNext()} onClick={() => setStep((s) => s + 1)}>
+                  Next →
                 </Button>
               ) : (
                 <Button variant="primary" size="sm" onClick={handleLaunch} disabled={!canNext()}>
                   <RocketIcon />
-                  {existingProductId ? "Запустить генерацию" : "Создать продукт и запустить"}
+                  {existingProductId ? "Start generation" : "Create product and start"}
                 </Button>
               )}
             </div>
@@ -364,7 +364,7 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
         set("features", data.characteristics.slice(0, 10));
       }
     } catch (err: any) {
-      setWbError(err.message ?? "Не удалось загрузить данные");
+      setWbError(err.message ?? "Failed to load data");
     } finally {
       setWbLoading(false);
     }
@@ -385,7 +385,7 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
       }
       set("images", [...form.images, ...uploaded]);
     } catch (err: any) {
-      setUploadError(err.message ?? "Не удалось загрузить изображение");
+      setUploadError(err.message ?? "Failed to upload image");
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -399,20 +399,20 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
   return (
     <Card>
       <CardContent className="space-y-5 pt-6 pb-6">
-        <SectionHeader step={1} title="Информация о продукте" subtitle="Опишите продукт — AI создаст идею, сценарий и промты для генерации видео" />
+        <SectionHeader step={1} title="Product information" subtitle="Describe the product — AI will create idea, script and prompts for video generation" />
 
         {/* Select existing product */}
         {existingProductId ? (
           <div className="rounded-xl border border-brand-500/30 bg-brand-500/5 p-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Badge variant="brand">Выбран продукт</Badge>
+              <Badge variant="brand">Product selected</Badge>
               <span className="text-sm font-medium text-text-primary">{form.productName}</span>
             </div>
-            <Button variant="ghost" size="sm" className="text-xs" onClick={clearExisting}>Сбросить</Button>
+            <Button variant="ghost" size="sm" className="text-xs" onClick={clearExisting}>Clear</Button>
           </div>
         ) : (
           <Button variant="secondary" size="sm" onClick={openPicker} className="w-full">
-            📦 Выбрать существующий продукт
+            📦 Choose existing product
           </Button>
         )}
 
@@ -421,17 +421,17 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowPicker(false)}>
             <div className="bg-surface-0 border border-border rounded-2xl w-full max-w-lg mx-4 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
               <div className="p-4 border-b border-border flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-text-primary">Выбрать продукт</h3>
+                <h3 className="text-sm font-semibold text-text-primary">Choose product</h3>
                 <Button variant="ghost" size="sm" onClick={() => setShowPicker(false)}>✕</Button>
               </div>
               <div className="p-3 border-b border-border">
-                <Input placeholder="Поиск…" value={pickerSearch} onChange={(e) => setPickerSearch(e.target.value)} />
+                <Input placeholder="Search..." value={pickerSearch} onChange={(e) => setPickerSearch(e.target.value)} />
               </div>
               <div className="flex-1 overflow-y-auto p-2">
-                {pickerLoading ? (
-                  <div className="flex justify-center py-10"><LoadingSpinner size={24} /></div>
-                ) : pickerFiltered.length === 0 ? (
-                  <p className="text-sm text-text-tertiary text-center py-10">Нет продуктов</p>
+                        {pickerLoading ? (
+                          <div className="flex justify-center py-10"><LoadingSpinner size={24} /></div>
+                        ) : pickerFiltered.length === 0 ? (
+                          <p className="text-sm text-text-tertiary text-center py-10">No products</p>
                 ) : (
                   <div className="space-y-1">
                     {pickerFiltered.map((p) => (
@@ -452,7 +452,7 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
                         )}
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium text-text-primary truncate">{p.name}</p>
-                          <p className="text-xs text-text-tertiary truncate">{p.category ?? "Без категории"}{p.price ? ` · ${p.price}` : ""}</p>
+                          <p className="text-xs text-text-tertiary truncate">{p.category ?? "Uncategorized"}{p.price ? ` · ${p.price}` : ""}</p>
                         </div>
                       </button>
                     ))}
@@ -467,7 +467,7 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
         <div className="rounded-xl border border-border bg-surface-2 p-4 space-y-2">
           <p className="text-xs font-medium text-text-secondary flex items-center gap-1.5">
             <WbIcon />
-            Автозаполнение с Wildberries
+            Auto-fill from Wildberries
           </p>
           <div className="flex gap-2">
             <Input
@@ -486,21 +486,21 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
               {wbLoading ? (
                 <span className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
               ) : (
-                "Загрузить"
+                "Fetch"
               )}
             </Button>
           </div>
           {wbError && <p className="text-xs text-red-400">{wbError}</p>}
-          <p className="text-[10px] text-text-tertiary">Вставьте ссылку на товар — название, описание, цена и характеристики заполнятся автоматически</p>
+          <p className="text-[10px] text-text-tertiary">Paste a product link — title, description, price and features will be filled automatically</p>
         </div>
 
-        <Input label="Название продукта *" placeholder="Умная колонка Galaxy Home 3" value={form.productName} onChange={(e) => set("productName", e.target.value)} hint="Название будет использоваться в сценарии" />
+        <Input label="Product name *" placeholder="Smart speaker Galaxy Home 3" value={form.productName} onChange={(e) => set("productName", e.target.value)} hint="This name will be used in the script" />
 
-        <Textarea label="Описание продукта" placeholder="Подробно опишите продукт: что он делает, для кого, основные преимущества…" rows={4} value={form.productDescription} onChange={(e) => set("productDescription", e.target.value)} hint="Чем подробнее — тем качественнее будет видео" />
+        <Textarea label="Product description" placeholder="Describe the product in detail: what it does, who it's for, main benefits..." rows={4} value={form.productDescription} onChange={(e) => set("productDescription", e.target.value)} hint="The more details — the better the video" />
 
         {/* Image upload */}
         <div>
-          <p className="text-xs font-medium text-text-secondary mb-1.5">Фото продукта ({form.images.length}/5)</p>
+          <p className="text-xs font-medium text-text-secondary mb-1.5">Product photos ({form.images.length}/5)</p>
           <div className="flex flex-wrap gap-3">
             {form.images.map((img, i) => (
               <div key={img.key} className="relative group w-20 h-20 rounded-lg overflow-hidden border border-border bg-surface-2">
@@ -525,12 +525,12 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
                     : "border-border hover:border-brand-500/50 hover:bg-brand-500/5"
                 )}
               >
-                {uploading ? (
+                    {uploading ? (
                   <span className="w-5 h-5 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
                 ) : (
                   <>
                     <CameraIcon />
-                    <span className="text-[10px] text-text-tertiary mt-1">Загрузить</span>
+                    <span className="text-[10px] text-text-tertiary mt-1">Upload</span>
                   </>
                 )}
               </button>
@@ -544,15 +544,15 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
             className="hidden"
             onChange={handleUpload}
           />
-          <p className="text-[10px] text-text-tertiary mt-1.5">JPEG, PNG, WebP, GIF · до 10 МБ · AI использует фото для генерации сцен</p>
+          <p className="text-[10px] text-text-tertiary mt-1.5">JPEG, PNG, WebP, GIF · up to 10 MB · AI uses photos to generate scenes</p>
           {uploadError && <p className="text-xs text-red-400 mt-1">{uploadError}</p>}
         </div>
 
         {/* Features */}
         <div>
-          <p className="text-xs font-medium text-text-secondary mb-1.5">Ключевые характеристики ({form.features.length}/10)</p>
+          <p className="text-xs font-medium text-text-secondary mb-1.5">Key features ({form.features.length}/10)</p>
           <div className="flex gap-2">
-            <Input placeholder="Например: Голосовой помощник AI" value={form.featureInput} onChange={(e) => set("featureInput", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFeature(); } }} />
+            <Input placeholder="e.g.: AI voice assistant" value={form.featureInput} onChange={(e) => set("featureInput", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFeature(); } }} />
             <Button variant="secondary" size="sm" onClick={addFeature} disabled={!form.featureInput.trim() || form.features.length >= 10}>+</Button>
           </div>
           {form.features.length > 0 && (
@@ -571,16 +571,16 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          <Input label="Целевая аудитория" placeholder="Молодёжь 18-35, техноэнтузиасты" value={form.targetAudience} onChange={(e) => set("targetAudience", e.target.value)} />
-          <RadixSelect label="Тон бренда" value={form.brandVoice} options={BRAND_VOICES} onValueChange={(v) => set("brandVoice", v)} />
+          <Input label="Target audience" placeholder="Young adults 18-35, tech enthusiasts" value={form.targetAudience} onChange={(e) => set("targetAudience", e.target.value)} />
+          <RadixSelect label="Brand tone" value={form.brandVoice} options={BRAND_VOICES} onValueChange={(v) => set("brandVoice", v)} />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          <RadixSelect label="Категория" value={form.category} options={CATEGORIES} onValueChange={(v) => set("category", v)} />
-          <Input label="Цена" placeholder="от 9 990 ₽" value={form.price} onChange={(e) => set("price", e.target.value)} />
+          <RadixSelect label="Category" value={form.category} options={CATEGORIES} onValueChange={(v) => set("category", v)} />
+          <Input label="Price" placeholder="e.g., 9,990 ₽" value={form.price} onChange={(e) => set("price", e.target.value)} />
         </div>
 
-        <Input label="Сайт продукта" placeholder="https://example.com/product" value={form.websiteUrl} onChange={(e) => set("websiteUrl", e.target.value)} />
+        <Input label="Product website" placeholder="https://example.com/product" value={form.websiteUrl} onChange={(e) => set("websiteUrl", e.target.value)} />
       </CardContent>
     </Card>
   );
@@ -680,29 +680,29 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
   return (
     <Card>
       <CardContent className="space-y-5 pt-6 pb-6">
-        <SectionHeader step={2} title="Настройки видео" subtitle="Опишите идею для видео — AI автоматически создаст сценарий, промты и сцены" />
+        <SectionHeader step={2} title="Video settings" subtitle="Describe the idea for the video — AI will automatically create script, prompts and scenes" />
 
         <Textarea
-          label="Идея / задача для видео"
-          placeholder="Оставьте пустым — AI сам придумает уникальную идею. Или опишите свою: «Покажи основные фишки, начни с крючка-вопроса…»"
+          label="Idea / brief for the video"
+          placeholder="Leave empty — AI will invent a unique idea. Or describe yours: 'Show main features, start with a hook question...'"
           rows={4}
           value={form.videoIdea}
           onChange={(e) => set("videoIdea", e.target.value)}
-          hint="Необязательное поле. Если оставить пустым, AI автоматически придумает уникальную креативную идею на основе данных продукта"
+          hint="Optional. If empty, AI will generate a unique creative idea based on product data"
         />
 
         <div className="grid grid-cols-2 gap-4">
-          <RadixSelect label="Язык" value={form.language} options={LANGUAGES} onValueChange={(v) => set("language", v)} />
-          <RadixSelect label="Стиль подачи" value={form.style} options={STYLES} onValueChange={(v) => set("style", v)} />
+          <RadixSelect label="Language" value={form.language} options={LANGUAGES} onValueChange={(v) => set("language", v)} />
+          <RadixSelect label="Style" value={form.style} options={STYLES} onValueChange={(v) => set("style", v)} />
         </div>
 
         {/* Video format selector */}
         <div>
-          <p className="text-xs font-medium text-text-secondary mb-2">Формат видео</p>
+          <p className="text-xs font-medium text-text-secondary mb-2">Video format</p>
           <div className="flex gap-2">
             {[
-              { value: "standard" as const, label: "Стандарт", desc: "Аватар + клипы + изображения" },
-              { value: "slideshow" as const, label: "Слайдшоу", desc: "Только изображения + музыка" },
+              { value: "standard" as const, label: "Standard", desc: "Avatar + clips + images" },
+              { value: "slideshow" as const, label: "Slideshow", desc: "Images only + music" },
             ].map((f) => (
               <button
                 key={f.value}
@@ -723,7 +723,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
 
         {/* Duration selector */}
         <div>
-          <p className="text-xs font-medium text-text-secondary mb-2">Длительность видео</p>
+          <p className="text-xs font-medium text-text-secondary mb-2">Video duration</p>
           <div className="flex gap-2">
             {DURATIONS.map((d) => (
               <button
@@ -740,26 +740,26 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
               </button>
             ))}
           </div>
-          <p className="text-[11px] text-text-tertiary mt-1">AI ограничит сценарий и речь аватара до выбранного времени</p>
+          <p className="text-[11px] text-text-tertiary mt-1">AI will limit the script and avatar speech to the selected duration</p>
         </div>
 
         {/* Avatar selection with pagination, sorting, zoom */}
         <div>
           <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-medium text-text-secondary">Аватар</p>
+            <p className="text-xs font-medium text-text-secondary">Avatar</p>
             <div className="flex items-center gap-2">
-              <span className="text-[10px] text-text-tertiary">Сортировка:</span>
+              <span className="text-[10px] text-text-tertiary">Sort:</span>
               <button
                 onClick={() => { setAvatarSort("name"); setAvatarPage(0); }}
                 className={cn("text-[10px] px-2 py-0.5 rounded-full transition-colors", avatarSort === "name" ? "bg-brand-500/15 text-brand-400" : "text-text-tertiary hover:text-text-secondary")}
               >
-                Имя
+                Name
               </button>
               <button
                 onClick={() => { setAvatarSort("gender"); setAvatarPage(0); }}
                 className={cn("text-[10px] px-2 py-0.5 rounded-full transition-colors", avatarSort === "gender" ? "bg-brand-500/15 text-brand-400" : "text-text-tertiary hover:text-text-secondary")}
               >
-                Пол
+                Gender
               </button>
             </div>
           </div>
@@ -786,7 +786,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                     <button
                       onClick={(e) => { e.stopPropagation(); setZoomedAvatar(a.image); }}
                       className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-full"
-                      title="Увеличить"
+                      title="Zoom"
                     >
                       <span className="text-white text-lg">🔍</span>
                     </button>
@@ -811,7 +811,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                 disabled={avatarPage === 0}
                 className="text-xs text-text-tertiary hover:text-text-primary disabled:opacity-30 transition-colors"
               >
-                ← Назад
+                ← Back
               </button>
               <span className="text-xs text-text-tertiary">{avatarPage + 1} / {totalPages}</span>
               <button
@@ -819,7 +819,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                 disabled={avatarPage >= totalPages - 1}
                 className="text-xs text-text-tertiary hover:text-text-primary disabled:opacity-30 transition-colors"
               >
-                Далее →
+                Next →
               </button>
             </div>
           )}
@@ -838,10 +838,10 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
         {/* Voice selection */}
         <div>
           <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-medium text-text-secondary">Голос озвучки</p>
+            <p className="text-xs font-medium text-text-secondary">Voiceover</p>
             {selectedVoice && (
               <span className="text-[10px] text-text-tertiary">
-                Выбран: <span className="text-brand-400 font-medium">{selectedVoiceLabel}</span>
+                Selected: <span className="text-brand-400 font-medium">{selectedVoiceLabel}</span>
               </span>
             )}
           </div>
@@ -853,7 +853,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
               value={voiceLangFilter}
               onChange={(e) => { setVoiceLangFilter(e.target.value); setVoicePage(0); }}
             >
-              <option value="Russian">Русский</option>
+              <option value="Russian">Russian</option>
               <option value="Multilingual">Multilingual</option>
               <option value="English">English</option>
               <option value="Spanish">Spanish</option>
@@ -862,7 +862,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
               <option value="Chinese">Chinese</option>
             </select>
             <div className="flex rounded-lg border border-border overflow-hidden">
-              {(["all", "female", "male"] as const).map((g) => (
+                  {(["all", "female", "male"] as const).map((g) => (
                 <button
                   key={g}
                   onClick={() => { setVoiceFilter(g); setVoicePage(0); }}
@@ -871,13 +871,13 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                     voiceFilter === g ? "bg-brand-500/15 text-brand-400" : "bg-surface-1 text-text-tertiary hover:text-text-secondary"
                   )}
                 >
-                  {g === "all" ? "Все" : g === "female" ? "Жен" : "Муж"}
+                      {g === "all" ? "All" : g === "female" ? "Female" : "Male"}
                 </button>
               ))}
             </div>
             <input
               type="text"
-              placeholder="Поиск по имени…"
+              placeholder="Search by name..."
               className="flex-1 rounded-lg border border-border bg-surface-1 px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary"
               value={voiceSearch}
               onChange={(e) => { setVoiceSearch(e.target.value); setVoicePage(0); }}
@@ -886,9 +886,9 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
 
           {/* Voice list */}
           {voicesLoading && voices.length === 0 ? (
-            <div className="flex items-center justify-center py-8">
+              <div className="flex items-center justify-center py-8">
               <LoadingSpinner size={20} />
-              <span className="ml-2 text-xs text-text-tertiary">Загрузка голосов…</span>
+              <span className="ml-2 text-xs text-text-tertiary">Loading voices…</span>
             </div>
           ) : (
             <>
@@ -921,7 +921,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                           "shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs transition-colors",
                           playingVoiceId === v.voice_id ? "bg-brand-500/20 text-brand-400" : "bg-surface-3 hover:bg-surface-1"
                         )}
-                        title="Прослушать"
+                        title="Listen"
                       >
                         {playingVoiceId === v.voice_id ? "⏸" : "▶"}
                       </button>
@@ -930,13 +930,13 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
                   </button>
                 ))}
                 {pagedVoices.length === 0 && !voicesLoading && (
-                  <p className="text-xs text-text-tertiary text-center py-4">Голоса не найдены</p>
+                  <p className="text-xs text-text-tertiary text-center py-4">No voices found</p>
                 )}
               </div>
 
               {/* Pagination */}
               <div className="flex items-center justify-between mt-3">
-                <span className="text-[10px] text-text-tertiary">{filteredVoices.length} голосов</span>
+                <span className="text-[10px] text-text-tertiary">{filteredVoices.length} voices</span>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setVoicePage((p) => Math.max(0, p - 1))}
@@ -965,18 +965,18 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
         </div>
 
         <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-text-primary">Фоновая музыка</p>
-            <p className="text-xs text-text-tertiary mt-0.5">Случайный трек из библиотеки BGM</p>
-          </div>
+        <div>
+          <p className="text-sm font-medium text-text-primary">Background music</p>
+          <p className="text-xs text-text-tertiary mt-0.5">Random track from BGM library</p>
+        </div>
           <SwitchToggle checked={form.bgmEnabled} onCheckedChange={(v) => set("bgmEnabled", v)} />
         </div>
 
         <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-text-primary">Субтитры</p>
-            <p className="text-xs text-text-tertiary mt-0.5">Автоматические субтитры на видео</p>
-          </div>
+        <div>
+          <p className="text-sm font-medium text-text-primary">Subtitles</p>
+          <p className="text-xs text-text-tertiary mt-0.5">Automatic subtitles on the video</p>
+        </div>
           <SwitchToggle checked={form.subtitlesEnabled} onCheckedChange={(v) => set("subtitlesEnabled", v)} />
         </div>
         {form.subtitlesEnabled && (
@@ -1012,19 +1012,19 @@ function Step3Launch({ form, launching, progress, error, avatars }: {
   return (
     <Card>
       <CardContent className="space-y-5 pt-6 pb-6">
-        <SectionHeader step={3} title="Проверка и запуск" subtitle="Проверьте данные перед созданием" />
+        <SectionHeader step={3} title="Review & launch" subtitle="Review details before creation" />
 
         {/* Product summary */}
         <div>
-          <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider mb-2">Продукт</p>
+          <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider mb-2">Product</p>
           <ul className="space-y-1.5 text-sm">
             {[
-              ["Название",      form.productName || "(не задано)"],
-              ["Категория",     CATEGORIES.find(c => c.value === form.category)?.label ?? "Не указана"],
-              ["Тон бренда",    BRAND_VOICES.find(b => b.value === form.brandVoice)?.label ?? ""],
-              ["Характеристик", form.features.length > 0 ? form.features.join(", ") : "нет"],
-              ["Фото",          form.images.length > 0 ? `${form.images.length} шт.` : "не загружены"],
-              ["Цена",          form.price || "не указана"],
+              ["Name",      form.productName || "(not set)"],
+              ["Category",     CATEGORIES.find(c => c.value === form.category)?.label ?? "Not specified"],
+              ["Brand tone",    BRAND_VOICES.find(b => b.value === form.brandVoice)?.label ?? ""],
+              ["Features", form.features.length > 0 ? form.features.join(", ") : "none"],
+              ["Photos",          form.images.length > 0 ? `${form.images.length}` : "not uploaded"],
+              ["Price",          form.price || "Not specified"],
             ].map(([k, v]) => (
               <li key={k as string} className="flex items-start justify-between gap-2 py-1 border-b border-border/50 last:border-0">
                 <span className="text-text-tertiary">{k}</span>
@@ -1036,18 +1036,18 @@ function Step3Launch({ form, launching, progress, error, avatars }: {
 
         {/* Video summary */}
         <div>
-          <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider mb-2">Видео</p>
+          <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wider mb-2">Video</p>
           <ul className="space-y-1.5 text-sm">
             {[
-              ["Идея",     form.videoIdea?.trim() ? (form.videoIdea.slice(0, 80) + (form.videoIdea.length > 80 ? "…" : "")) : "🤖 AI сгенерирует автоматически"],
-              ["Длительность", `${form.durationSec} сек`],
-              ["Язык",     LANGUAGES.find(l => l.value === form.language)?.label ?? ""],
-              ["Стиль",    STYLES.find(s => s.value === form.style)?.label ?? ""],
-              ["Аватар",   avatars.find(a => a.value === form.avatar)?.label ?? form.avatar],
-              ["Голос",    VOICES.find(v => v.value === form.voice)?.label ?? form.voice.slice(0, 12) + "…"],
-              ["Субтитры", form.subtitlesEnabled ? SUB_STYLES.find(s => s.value === form.subtitleStyle)?.label ?? "" : "Нет"],
-              ["Фоновая музыка", form.bgmEnabled ? "Авто (случайный трек)" : "Нет"],
-              ["Формат", form.videoFormat === "slideshow" ? "Слайдшоу" : "Стандарт"],
+              ["Idea",     form.videoIdea?.trim() ? (form.videoIdea.slice(0, 80) + (form.videoIdea.length > 80 ? "…" : "")) : "🤖 AI will generate automatically"],
+              ["Duration", `${form.durationSec} sec`],
+              ["Language",     LANGUAGES.find(l => l.value === form.language)?.label ?? ""],
+              ["Style",    STYLES.find(s => s.value === form.style)?.label ?? ""],
+              ["Avatar",   avatars.find(a => a.value === form.avatar)?.label ?? form.avatar],
+              ["Voice",    VOICES.find(v => v.value === form.voice)?.label ?? form.voice.slice(0, 12) + "…"],
+              ["Subtitles", form.subtitlesEnabled ? SUB_STYLES.find(s => s.value === form.subtitleStyle)?.label ?? "" : "No"],
+              ["Background music", form.bgmEnabled ? "Auto (random track)" : "No"],
+              ["Format", form.videoFormat === "slideshow" ? "Slideshow" : "Standard"],
             ].map(([k, v]) => (
               <li key={k as string} className="flex items-start justify-between gap-2 py-1 border-b border-border/50 last:border-0">
                 <span className="text-text-tertiary">{k}</span>
@@ -1067,7 +1067,7 @@ function Step3Launch({ form, launching, progress, error, avatars }: {
           <div className="mt-4 space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="text-text-secondary">
-                {progress < 30 ? "Создание продукта…" : progress < 80 ? "Запуск генерации видео…" : "Готово!"}
+                {progress < 30 ? "Creating product…" : progress < 80 ? "Starting video generation…" : "Done!"}
               </span>
               <span className="text-brand-400 font-medium">{Math.round(progress)}%</span>
             </div>
@@ -1106,7 +1106,7 @@ function RadixSelect({
   options: { value: string; label: string }[];
   onValueChange: (v: string) => void;
 }) {
-  const current = options.find((o) => o.value === value)?.label ?? "Выбрать…";
+  const current = options.find((o) => o.value === value)?.label ?? "Select…";
   return (
     <div>
       <p className="text-xs font-medium text-text-secondary mb-1.5">{label}</p>

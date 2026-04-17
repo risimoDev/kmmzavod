@@ -16,10 +16,10 @@ import { videosApi, getAccessToken, type Video, type Pagination } from "@/lib/ap
 import { cn } from "@/lib/utils";
 
 const STATUSES = [
-  { value: "", label: "Все" },
-  { value: "processing", label: "В работе" },
-  { value: "completed", label: "Готово" },
-  { value: "failed", label: "Ошибки" },
+  { value: "", label: "All" },
+  { value: "processing", label: "Processing" },
+  { value: "completed", label: "Completed" },
+  { value: "failed", label: "Failed" },
 ];
 
 export default function VideosPage() {
@@ -27,7 +27,7 @@ export default function VideosPage() {
     <Suspense
       fallback={
         <>
-          <TopBar title="Видео" />
+          <TopBar title="Videos" />
           <main className="flex-1 flex items-center justify-center">
             <LoadingSpinner size={32} />
           </main>
@@ -63,7 +63,7 @@ function VideosContent() {
       setVideos(res.data);
       setPagination(res.pagination);
     } catch (e: any) {
-      setError(e.message ?? "Не удалось загрузить видео");
+      setError(e.message ?? "Failed to load videos");
     } finally {
       setLoading(false);
     }
@@ -93,11 +93,11 @@ function VideosContent() {
   return (
     <>
       <TopBar
-        title="Видео"
+        title="Videos"
         actions={
           <Link href="/create">
             <Button variant="primary" size="sm">
-              <PlusIcon /> Создать
+              <PlusIcon /> Create
             </Button>
           </Link>
         }
@@ -131,17 +131,17 @@ function VideosContent() {
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <p className="text-text-secondary text-sm">{error}</p>
             <Button variant="outline" size="sm" onClick={load}>
-              Повторить
+              Retry
             </Button>
           </div>
         ) : videos.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <p className="text-text-tertiary text-sm">
-              {statusFilter ? "Нет видео с таким статусом" : "У вас пока нет видео"}
+              {statusFilter ? "No videos with this status" : "You have no videos yet"}
             </p>
             {!statusFilter && (
               <Link href="/create">
-                <Button variant="primary" size="sm">Создать первое видео</Button>
+                <Button variant="primary" size="sm">Create your first video</Button>
               </Link>
             )}
           </div>

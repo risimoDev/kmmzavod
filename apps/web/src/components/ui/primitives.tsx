@@ -334,7 +334,7 @@ export function LoadingSpinner({ size = 16, className }: { size?: number; classN
       height={size}
       viewBox="0 0 24 24"
       fill="none"
-      aria-label="Загрузка"
+      aria-label="Loading"
     >
       <circle
         className="opacity-25"

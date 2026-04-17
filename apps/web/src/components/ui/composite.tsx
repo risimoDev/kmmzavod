@@ -17,7 +17,7 @@ interface StepperProps {
 
 export function Stepper({ steps, current }: StepperProps) {
   return (
-    <nav aria-label="Шаги создания видео">
+    <nav aria-label="Video creation steps">
       <ol className="flex items-center gap-0">
         {steps.map((step, i) => {
           const done    = i < current;

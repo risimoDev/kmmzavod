@@ -23,10 +23,10 @@ export function relativeTime(date: Date | string): string {
   const d = typeof date === "string" ? new Date(date) : date;
   const diff = Date.now() - d.getTime();
   const mins = Math.floor(diff / 60_000);
-  if (mins < 1)  return "только что";
-  if (mins < 60) return `${mins} мин назад`;
+  if (mins < 1)  return "just now";
+  if (mins < 60) return `${mins} min ago`;
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} ч назад`;
+  if (hours < 24) return `${hours} h ago`;
   const days = Math.floor(hours / 24);
-  return `${days} дн назад`;
+  return `${days} d ago`;
 }

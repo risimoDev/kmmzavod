@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export const metadata = {
   title: "kmmzavod — AI Video Factory",
-  description: "Создавайте профессиональные видео с помощью искусственного интеллекта. Автоматизированный конвейер генерации контента.",
+  description: "Create professional videos with AI. Automated content generation pipeline.",
 };
 
 export default function LandingPage() {
@@ -40,13 +40,13 @@ export default function LandingPage() {
             href="/login"
             className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors px-3 py-1.5"
           >
-            Войти
+            Sign in
           </Link>
           <Link
             href="/register"
             className="text-sm font-medium text-white bg-brand-500 hover:bg-brand-600 transition-colors px-4 py-1.5 rounded-lg shadow-sm"
           >
-            Регистрация
+            Sign up
           </Link>
         </div>
       </nav>
@@ -59,18 +59,18 @@ export default function LandingPage() {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-500"></span>
           </span>
-          <span className="text-xs font-medium text-brand-400">AI-powered платформа</span>
+          <span className="text-xs font-medium text-brand-400">AI-powered platform</span>
         </div>
 
         {/* Headline */}
-        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-text-primary max-w-3xl leading-[1.1] tracking-tight">
-          Видео-контент на
-          <span className="bg-gradient-to-r from-brand-400 via-brand-500 to-brand-600 bg-clip-text text-transparent"> автопилоте</span>
+          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-text-primary max-w-3xl leading-[1.1] tracking-tight">
+          Video content on
+          <span className="bg-gradient-to-r from-brand-400 via-brand-500 to-brand-600 bg-clip-text text-transparent"> autopilot</span>
         </h1>
 
         <p className="mt-6 text-lg text-text-secondary max-w-xl leading-relaxed">
-          Создавайте профессиональные видеоролики за минуты, а не часы.
-          Аватары, голоса, субтитры, монтаж — всё автоматически.
+          Create professional videos in minutes, not hours.
+          Avatars, voices, subtitles, editing — all automated.
         </p>
 
         {/* CTA Buttons */}
@@ -79,7 +79,7 @@ export default function LandingPage() {
             href="/register"
             className="group relative inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 text-white font-semibold text-sm hover:bg-brand-600 transition-all shadow-brand-glow hover:shadow-brand-glow-sm"
           >
-            Выбрать тариф
+            Choose plan
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="group-hover:translate-x-0.5 transition-transform" aria-hidden>
               <path d="M5 12h14M12 5l7 7-7 7"/>
             </svg>
@@ -88,7 +88,7 @@ export default function LandingPage() {
             href="/login"
             className="inline-flex items-center gap-2 px-6 py-3 rounded-xl border border-border text-text-primary font-semibold text-sm hover:bg-surface-2 transition-all"
           >
-            Войти в аккаунт
+            Sign in
           </Link>
         </div>
 
@@ -96,15 +96,15 @@ export default function LandingPage() {
         <div className="mt-16 grid grid-cols-3 gap-8 sm:gap-16">
           <div>
             <p className="text-2xl sm:text-3xl font-bold text-text-primary">AI</p>
-            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Генерация</p>
+            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Generation</p>
           </div>
           <div>
             <p className="text-2xl sm:text-3xl font-bold text-text-primary">4K</p>
-            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Качество</p>
+            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Quality</p>
           </div>
           <div>
             <p className="text-2xl sm:text-3xl font-bold text-text-primary">24/7</p>
-            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Автоматизация</p>
+            <p className="text-xs sm:text-sm text-text-tertiary mt-1">Automation</p>
           </div>
         </div>
 
@@ -122,9 +122,9 @@ export default function LandingPage() {
             <div className="p-6 bg-surface-0">
               <div className="grid grid-cols-3 gap-3 mb-4">
                 {[
-                  { label: "Видео создано", val: "0" },
-                  { label: "Активные задачи", val: "0" },
-                  { label: "Тариф", val: "Pro" },
+                  { label: "Videos created", val: "0" },
+                  { label: "Active jobs", val: "0" },
+                  { label: "Plan", val: "Pro" },
                 ].map((s) => (
                   <div key={s.label} className="rounded-lg border border-border bg-surface-1 p-3">
                     <p className="text-lg font-bold text-text-primary">{s.val}</p>
@@ -141,8 +141,8 @@ export default function LandingPage() {
                     </svg>
                   </div>
                   <div>
-                    <p className="text-sm font-medium text-text-primary">Готовы создать первое видео?</p>
-                    <p className="text-xs text-text-tertiary">Выберите тариф и начните создавать</p>
+                    <p className="text-sm font-medium text-text-primary">Ready to create your first video?</p>
+                    <p className="text-xs text-text-tertiary">Choose a plan and start creating</p>
                   </div>
                 </div>
               </div>
@@ -155,39 +155,39 @@ export default function LandingPage() {
       <section className="relative z-10 px-6 lg:px-12 pb-24">
         <div className="max-w-5xl mx-auto">
           <h2 className="text-2xl sm:text-3xl font-bold text-text-primary text-center mb-12">
-            Всё для создания видео
+            Everything you need to create videos
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {[
               {
                 icon: "M15 10l5 3-5 3V10z M4 5h13a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V7a2 2 0 012-2z",
-                title: "AI-аватары",
-                desc: "Реалистичные цифровые ведущие. Выберите из библиотеки или создайте своего.",
+                title: "AI Avatars",
+                desc: "Realistic digital presenters. Choose from the library or create your own.",
               },
               {
                 icon: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
-                title: "Автоматический монтаж",
-                desc: "Переходы, субтитры, музыка — система собирает всё сама по вашему промпту.",
+                title: "Automatic editing",
+                desc: "Transitions, subtitles, music — the system stitches everything automatically from your prompt.",
               },
               {
                 icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
-                title: "Быстрая генерация",
-                desc: "Конвейерная обработка через BullMQ. Видео готовы за минуты, а не часы.",
+                title: "Fast generation",
+                desc: "Pipeline processing via BullMQ. Videos ready in minutes, not hours.",
               },
               {
                 icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
-                title: "Мульти-тенантность",
-                desc: "Изолированные рабочие пространства для команд с разграничением доступа.",
+                title: "Multi-tenancy",
+                desc: "Isolated workspaces for teams with access controls.",
               },
               {
                 icon: "M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z",
                 title: "API-first",
-                desc: "Полное REST API для интеграции. Webhooks для отслеживания статуса.",
+                desc: "Full REST API for integration. Webhooks to track status.",
               },
               {
                 icon: "M12 3v18M3 12h18",
-                title: "Гибкие тарифы",
-                desc: "Выберите план под ваши задачи — от стартового до корпоративного.",
+                title: "Flexible plans",
+                desc: "Choose a plan for your needs — from starter to enterprise.",
               },
             ].map((feature) => (
               <div key={feature.title} className="rounded-xl border border-border bg-surface-1/50 p-5 hover:bg-surface-1 hover:border-border/60 transition-all group">
@@ -208,16 +208,16 @@ export default function LandingPage() {
       <section className="relative z-10 px-6 lg:px-12 pb-24">
         <div className="max-w-2xl mx-auto text-center">
           <h2 className="text-2xl sm:text-3xl font-bold text-text-primary mb-4">
-            Готовы попробовать?
+            Ready to try?
           </h2>
           <p className="text-text-secondary mb-8">
-            Создайте аккаунт за 30 секунд и выберите подходящий тариф.
+            Create an account in 30 seconds and pick the right plan.
           </p>
           <Link
             href="/register"
             className="inline-flex items-center gap-2 px-8 py-3.5 rounded-xl bg-brand-500 text-white font-semibold hover:bg-brand-600 transition-all shadow-brand-glow"
           >
-            Создать аккаунт
+            Create account
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M5 12h14M12 5l7 7-7 7"/>
             </svg>

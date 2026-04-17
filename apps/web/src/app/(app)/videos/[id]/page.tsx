@@ -27,24 +27,24 @@ import { useVideoProgress } from "@/hooks/useVideoProgress";
 /* ── Stage labels ──────────────────────────────────────────────────────────── */
 
 const STAGE_META: Record<string, { label: string; icon: string }> = {
-  pipeline:          { label: "Запуск",               icon: "🚀" },
-  "gpt-script":     { label: "Генерация сценария",   icon: "📝" },
-  "heygen-render":  { label: "Рендер аватара",       icon: "🎭" },
-  "runway-clip":    { label: "Генерация B-roll",     icon: "🎬" },
-  "image-gen":      { label: "Генерация изображений", icon: "🖼️" },
-  "kling-clip":     { label: "Генерация клипа",      icon: "🎞️" },
-  processing:       { label: "Обработка сцен",       icon: "⚙️" },
-  composing:        { label: "Композиция видео",     icon: "🔧" },
-  "video-compose":  { label: "Финализация",          icon: "🎥" },
-  "pipeline-state": { label: "Проверка готовности",  icon: "✅" },
-  completed:        { label: "Готово",               icon: "✅" },
-  failed:           { label: "Ошибка",               icon: "❌" },
+  pipeline:          { label: "Start",                icon: "🚀" },
+  "gpt-script":     { label: "Script generation",    icon: "📝" },
+  "heygen-render":  { label: "Avatar rendering",     icon: "🎭" },
+  "runway-clip":    { label: "B-roll generation",    icon: "🎬" },
+  "image-gen":      { label: "Image generation",     icon: "🖼️" },
+  "kling-clip":     { label: "Clip generation",      icon: "🎞️" },
+  processing:       { label: "Processing scenes",    icon: "⚙️" },
+  composing:        { label: "Video composition",    icon: "🔧" },
+  "video-compose":  { label: "Finalization",         icon: "🎥" },
+  "pipeline-state": { label: "Readiness check",      icon: "✅" },
+  completed:        { label: "Completed",            icon: "✅" },
+  failed:           { label: "Failed",               icon: "❌" },
 };
 
 const PRESET_META: Record<string, { title: string; desc: string }> = {
-  dynamic: { title: "Dynamic", desc: "Энергичный монтаж с быстрыми переходами" },
-  smooth:  { title: "Smooth",  desc: "Плавные переходы и мягкие эффекты" },
-  minimal: { title: "Minimal", desc: "Минималистичный стиль без спецэффектов" },
+  dynamic: { title: "Dynamic", desc: "Energetic editing with quick transitions" },
+  smooth:  { title: "Smooth",  desc: "Smooth transitions and soft effects" },
+  minimal: { title: "Minimal", desc: "Minimalist style without special effects" },
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -138,10 +138,10 @@ export default function VideoDetailPage() {
 
   /* ── Skeleton loader ─────────────────────────────────────────────────────── */
 
-  if (loading) {
+    if (loading) {
     return (
       <>
-        <TopBar title="Видео" />
+        <TopBar title="Video" />
         <main className="flex-1 overflow-y-auto p-6 space-y-6">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {Array.from({ length: 4 }).map((_, i) => (
@@ -167,11 +167,11 @@ export default function VideoDetailPage() {
   if (error || !video) {
     return (
       <>
-        <TopBar title="Видео" />
+        <TopBar title="Video" />
         <main className="flex-1 flex flex-col items-center justify-center gap-4">
-          <p className="text-text-secondary text-sm">{error ?? "Видео не найдено"}</p>
+          <p className="text-text-secondary text-sm">{error ?? "Video not found"}</p>
           <Button variant="outline" size="sm" onClick={() => router.back()}>
-            Назад
+            Back
           </Button>
         </main>
       </>
@@ -191,14 +191,14 @@ export default function VideoDetailPage() {
   const allEvents = [
     ...dbEvents.map((e) => ({
       key: `db-${e.id}`,
-      time: new Date(e.createdAt).toLocaleTimeString("ru-RU"),
+      time: new Date(e.createdAt).toLocaleTimeString("en-US"),
       stage: e.stage,
       status: e.status,
       message: e.message,
     })),
     ...sse.events.map((e, i) => ({
       key: `sse-${i}`,
-      time: new Date(e.timestamp).toLocaleTimeString("ru-RU"),
+      time: new Date(e.timestamp).toLocaleTimeString("en-US"),
       stage: e.stage,
       status: e.status,
       message: e.message,
@@ -219,7 +219,7 @@ export default function VideoDetailPage() {
           <div className="flex items-center gap-2">
             <StatusBadge status={video.status as any} />
             <Button variant="outline" size="sm" onClick={() => router.back()}>
-              Назад
+              Back
             </Button>
           </div>
         }
@@ -230,13 +230,13 @@ export default function VideoDetailPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <Card>
             <CardContent className="py-3 px-4">
-              <p className="text-xs text-text-tertiary">Статус</p>
+              <p className="text-xs text-text-tertiary">Status</p>
               <StatusBadge status={video.status as any} />
             </CardContent>
           </Card>
           <Card>
             <CardContent className="py-3 px-4">
-              <p className="text-xs text-text-tertiary">Длительность</p>
+              <p className="text-xs text-text-tertiary">Duration</p>
               <p className="text-lg font-bold text-text-primary">
                 {video.durationSec ? formatDuration(video.durationSec) : "\u2014"}
               </p>
@@ -244,13 +244,13 @@ export default function VideoDetailPage() {
           </Card>
           <Card>
             <CardContent className="py-3 px-4">
-              <p className="text-xs text-text-tertiary">Кредиты</p>
+              <p className="text-xs text-text-tertiary">Credits</p>
               <p className="text-lg font-bold text-text-primary">{video.creditsUsed}</p>
             </CardContent>
           </Card>
           <Card>
             <CardContent className="py-3 px-4">
-              <p className="text-xs text-text-tertiary">Создано</p>
+              <p className="text-xs text-text-tertiary">Created</p>
               <p className="text-sm font-medium text-text-primary">
                 {relativeTime(video.createdAt)}
               </p>
@@ -264,7 +264,7 @@ export default function VideoDetailPage() {
             <div className="flex items-center gap-2">
               <span className="text-red-400 text-lg">❌</span>
               <p className="text-sm font-semibold text-red-400">
-                Ошибка генерации видео
+                Video generation error
               </p>
             </div>
             {(video.error || video.job?.error) && (
@@ -276,7 +276,7 @@ export default function VideoDetailPage() {
             {scenes.filter((s) => s.status === "failed" && s.error).length > 0 && (
               <div className="space-y-2">
                 <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
-                  Ошибки по сценам
+                  Scene errors
                 </p>
                 {scenes
                   .filter((s) => s.status === "failed" && s.error)
@@ -286,7 +286,7 @@ export default function VideoDetailPage() {
                       className="flex items-start gap-3 text-xs bg-surface-2 rounded-lg p-3"
                     >
                       <span className="text-red-400 font-medium whitespace-nowrap">
-                        Сцена {s.sceneIndex + 1} ({s.type})
+                        Scene {s.sceneIndex + 1} ({s.type})
                       </span>
                       <span className="text-text-secondary font-mono break-all">
                         {s.error}
@@ -299,7 +299,7 @@ export default function VideoDetailPage() {
             {dbEvents.filter((e) => e.status === "failed").length > 0 && (
               <div className="space-y-2">
                 <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
-                  Журнал ошибок
+                  Error log
                 </p>
                 {dbEvents
                   .filter((e) => e.status === "failed")
@@ -309,7 +309,7 @@ export default function VideoDetailPage() {
                       className="flex items-start gap-3 text-xs bg-surface-2 rounded-lg p-3"
                     >
                       <span className="text-text-tertiary whitespace-nowrap">
-                        {new Date(e.createdAt).toLocaleTimeString("ru-RU")}
+                        {new Date(e.createdAt).toLocaleTimeString("en-US")}
                       </span>
                       <span className="text-red-400 font-medium">
                         {STAGE_META[e.stage]?.label ?? e.stage}
@@ -331,7 +331,7 @@ export default function VideoDetailPage() {
           <div className="rounded-xl border border-border bg-surface-1 p-5">
             <div className="flex items-center justify-between mb-3">
               <div>
-                <p className="text-sm font-semibold text-text-primary">Прогресс</p>
+                <p className="text-sm font-semibold text-text-primary">Progress</p>
                 {isProcessing && sse.stage && (
                   <p className="text-xs text-text-tertiary mt-0.5">
                     <span className="mr-1">
@@ -382,8 +382,8 @@ export default function VideoDetailPage() {
         {/* ── Variant selection (visible when completed) ──────────────────── */}
         {isCompleted && readyVariants.length > 0 && (
           <div>
-            <p className="text-sm font-semibold text-text-primary mb-3">
-              Выберите вариант монтажа
+                <p className="text-sm font-semibold text-text-primary mb-3">
+              Choose an edit variant
             </p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {readyVariants.map((v) => {
@@ -432,10 +432,10 @@ export default function VideoDetailPage() {
                           <span>{formatDuration(v.durationSec)}</span>
                         )}
                         {v.fileSizeMb != null && (
-                          <span>{v.fileSizeMb} МБ</span>
+                          <span>{v.fileSizeMb} MB</span>
                         )}
                       </div>
-                      {!isSelected && (
+                        {!isSelected && (
                         <Button
                           size="sm"
                           variant="primary"
@@ -443,7 +443,7 @@ export default function VideoDetailPage() {
                           loading={selectingId === v.id}
                           onClick={() => handleSelectVariant(v.id)}
                         >
-                          Выбрать
+                          Select
                         </Button>
                       )}
                     </CardContent>
@@ -469,7 +469,7 @@ export default function VideoDetailPage() {
         {selectedVariant && (
           <div>
             <p className="text-sm font-semibold text-text-primary mb-3">
-              Публикация
+              Publish
             </p>
 
             {accountsLoading ? (
@@ -480,9 +480,9 @@ export default function VideoDetailPage() {
               </div>
             ) : accounts.length === 0 ? (
               <Card>
-                <CardContent className="py-6 text-center">
+                  <CardContent className="py-6 text-center">
                   <p className="text-text-tertiary text-sm">
-                    Нет подключённых аккаунтов
+                    No connected accounts
                   </p>
                 </CardContent>
               </Card>
@@ -513,7 +513,7 @@ export default function VideoDetailPage() {
                             )}
                           </div>
                           <div className="flex items-center gap-2">
-                            {(!job ||
+                              {(!job ||
                               job.status === "failed") && (
                               <Button
                                 size="sm"
@@ -521,7 +521,7 @@ export default function VideoDetailPage() {
                                 loading={publishingId === account.id}
                                 onClick={() => handlePublish(account)}
                               >
-                                Опубликовать
+                                Publish
                               </Button>
                             )}
                           </div>
@@ -537,16 +537,16 @@ export default function VideoDetailPage() {
         {/* ── Scene table ─────────────────────────────────────────────────── */}
         {scenes.length > 0 && (
           <div>
-            <p className="text-sm font-semibold text-text-primary mb-3">Сцены</p>
+            <p className="text-sm font-semibold text-text-primary mb-3">Scenes</p>
             <div className="rounded-xl border border-border overflow-hidden">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-surface-1 text-text-tertiary text-xs uppercase tracking-wider">
                     <th className="text-left py-2.5 px-4 font-medium">#</th>
-                    <th className="text-left py-2.5 px-4 font-medium">Тип</th>
-                    <th className="text-left py-2.5 px-4 font-medium">Статус</th>
-                    <th className="text-left py-2.5 px-4 font-medium">Длит.</th>
-                    <th className="text-left py-2.5 px-4 font-medium">Ошибка</th>
+                    <th className="text-left py-2.5 px-4 font-medium">Type</th>
+                    <th className="text-left py-2.5 px-4 font-medium">Status</th>
+                    <th className="text-left py-2.5 px-4 font-medium">Duration</th>
+                    <th className="text-left py-2.5 px-4 font-medium">Error</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -560,7 +560,7 @@ export default function VideoDetailPage() {
                         <StatusBadge status={s.status as any} />
                       </td>
                       <td className="py-2.5 px-4 text-text-secondary">
-                        {s.durationSec ? `${s.durationSec}с` : "\u2014"}
+                        {s.durationSec ? `${s.durationSec}s` : "\u2014"}
                       </td>
                       <td className="py-2.5 px-4 text-red-400 text-xs max-w-xs truncate" title={s.error ?? undefined}>
                         {s.error ?? "\u2014"}
@@ -587,11 +587,11 @@ function PublishStatusBadge({
   error: string | null;
 }) {
   const map: Record<string, { label: string; variant: "default" | "success" | "warning" | "danger" | "info" }> = {
-    pending:   { label: "Ожидание",     variant: "default" },
-    scheduled: { label: "Запланировано", variant: "info" },
-    uploading: { label: "Загрузка",     variant: "warning" },
-    published: { label: "Опубликовано", variant: "success" },
-    failed:    { label: "Ошибка",       variant: "danger" },
+    pending:   { label: "Pending",     variant: "default" },
+    scheduled: { label: "Scheduled",   variant: "info" },
+    uploading: { label: "Uploading",   variant: "warning" },
+    published: { label: "Published",   variant: "success" },
+    failed:    { label: "Failed",      variant: "danger" },
   };
   const m = map[status] ?? { label: status, variant: "default" as const };
   return (
