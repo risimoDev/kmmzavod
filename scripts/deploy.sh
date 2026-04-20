@@ -150,6 +150,14 @@ else
   fi
 fi
 
+# Удаляем dev-override — он отключает app-сервисы через profiles
+# git pull может вернуть его из репозитория
+if [ -f docker-compose.override.yml ]; then
+  info "Удаляем docker-compose.override.yml (dev-only, мешает на сервере)"
+  rm -f docker-compose.override.yml
+  success "override удалён"
+fi
+
 # =============================================================================
 # 2. Проверка .env
 # =============================================================================
@@ -166,7 +174,7 @@ success ".env найден, Docker доступен"
 # Показываем текущий статус сервисов
 echo ""
 info "Текущий статус сервисов:"
-docker compose ps --format "  {.Service}: {.Status}" 2>/dev/null || docker compose ps 2>/dev/null | tail -n +2 | sed 's/^/  /'
+docker compose ps --format "table {{.Service}}\t{{.Status}}" 2>/dev/null || docker compose ps 2>/dev/null | tail -n +2 | sed 's/^/  /'
 
 # =============================================================================
 # 3. Сборка Docker образов
@@ -230,26 +238,39 @@ if $DO_MIGRATE; then
   done
 
   info "Применяем миграции Prisma..."
-  # Пробуем применить миграции через контейнер api
   MIGRATED=false
 
-  # Вариант 1: через api контейнер если там есть prisma
+  # Ожидаем готовности api-контейнера (до 30 сек)
+  WAIT=0
+  until docker compose exec -T api sh -c 'echo ok' &>/dev/null; do
+    sleep 3; WAIT=$((WAIT+3))
+    [ "$WAIT" -ge 30 ] && break
+  done
+
+  # Вариант 1: через api контейнер (основной способ на сервере)
   if docker compose exec -T api sh -c 'command -v npx' &>/dev/null 2>&1; then
-    docker compose exec -T api \
-      sh -c 'npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>/dev/null && MIGRATED=true || true
+    if docker compose exec -T api \
+      sh -c 'npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
+      MIGRATED=true
+    fi
   fi
 
-  # Вариант 2: локально через pnpm если установлен
-  if ! $MIGRATED && command -v pnpm &>/dev/null && [ -f packages/db/package.json ]; then
-    info "Мигрируем локально через pnpm..."
-    cd packages/db && pnpm migrate:deploy && cd "$REPO_ROOT" && MIGRATED=true || true
+  # Вариант 2: docker compose run с явным DATABASE_URL (fallback)
+  if ! $MIGRATED; then
+    info "Fallback: docker compose run с DATABASE_URL..."
+    PG_PASS_FROM_ENV="$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+    if docker compose run --rm \
+      -e DATABASE_URL="postgresql://kmmzavod:${PG_PASS_FROM_ENV}@postgres:5432/kmmzavod" \
+      api sh -c 'cd /app && npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
+      MIGRATED=true
+    fi
   fi
 
   if $MIGRATED; then
     success "Миграции применены"
   else
     warn "Не удалось применить миграции автоматически."
-    echo -e "  ${CYAN}Запустите вручную: cd packages/db && pnpm migrate:deploy${RESET}"
+    echo -e "  ${CYAN}docker compose exec api sh -c 'npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma'${RESET}"
   fi
 else
   header "5/6 · Миграции пропущены (--no-migrate)"

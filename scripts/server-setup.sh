@@ -622,6 +622,15 @@ until docker compose exec -T postgres pg_isready -U kmmzavod -q 2>/dev/null; do
 done
 success "PostgreSQL готов"
 
+# Проверяем что пароль из .env совпадает с тем, что в PostgreSQL.
+# Docker PostgreSQL НЕ обновляет пароль при перезапуске, если volume уже инициализирован.
+# Поэтому принудительно устанавливаем пароль из .env через ALTER USER (local trust auth).
+info "Синхронизация пароля PostgreSQL с .env..."
+docker compose exec -T postgres psql -U kmmzavod -c \
+  "ALTER USER kmmzavod PASSWORD '$(sql_escape "$PG_PASS")';" >/dev/null 2>&1 \
+  && success "Пароль PostgreSQL синхронизирован" \
+  || warn "Не удалось обновить пароль PostgreSQL (возможно, первая инициализация)"
+
 info "Ожидание готовности Redis (до 30 сек)..."
 WAIT=0
 until docker compose exec -T redis redis-cli -a "$REDIS_PASS" ping 2>/dev/null | grep -q PONG; do
