@@ -321,6 +321,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
         },
       });
       await chargeCredits(deps.db, { tenantId, jobId, credits: ideaCredits, description: 'GPT idea generation' });
+      await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: ideaCredits } } });
 
       // ── Save idea to video + update preset usedIdeaHashes ──────────────────
       if (jobRow.videoId) {
@@ -415,6 +416,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
         },
       });
       await chargeCredits(deps.db, { tenantId, jobId, credits: scriptCredits, description: 'GPT script generation' });
+      await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: scriptCredits } } });
 
       // ── Persist scenes ────────────────────────────────────────────────────
       await deps.db.$transaction(

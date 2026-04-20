@@ -21,8 +21,19 @@ const RefreshBody = z.object({
 });
 
 export async function authRoutes(app: FastifyInstance) {
+  // Strict rate limits for auth endpoints (brute-force protection)
+  const authRateLimit = {
+    config: {
+      rateLimit: {
+        max: 5,
+        timeWindow: '1 minute',
+        keyGenerator: (req: any) => `auth:${req.ip}`,
+      },
+    },
+  };
+
   // POST /api/v1/auth/register
-  app.post('/register', async (req, reply) => {
+  app.post('/register', authRateLimit, async (req, reply) => {
     const body = RegisterBody.parse(req.body);
 
     const existing = await db.user.findUnique({ where: { email: body.email } });
@@ -73,7 +84,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   // POST /api/v1/auth/login
-  app.post('/login', async (req, reply) => {
+  app.post('/login', authRateLimit, async (req, reply) => {
     const body = LoginBody.parse(req.body);
 
     const user = await db.user.findUnique({
@@ -152,6 +163,24 @@ export async function authRoutes(app: FastifyInstance) {
       where: { refreshToken, userId: req.user.userId },
     });
     return reply.code(204).send();
+  });
+
+  // POST /api/v1/auth/sse-token — issues a short-lived httpOnly cookie for SSE connections
+  app.post('/sse-token', { preHandler: app.authenticate }, async (req, reply) => {
+    const payload = {
+      userId: req.user.userId,
+      tenantId: req.user.tenantId,
+      email: req.user.email,
+      role: req.user.role,
+      platformRole: req.user.platformRole,
+    };
+    const sseToken = app.jwt.sign(payload, { expiresIn: '15m' });
+
+    reply.header('Set-Cookie',
+      `sse_token=${sseToken}; HttpOnly; SameSite=Strict; Path=/api/v1/videos/; Max-Age=900` +
+      (process.env.NODE_ENV === 'production' ? '; Secure' : ''),
+    );
+    return reply.send({ ok: true });
   });
 }
 

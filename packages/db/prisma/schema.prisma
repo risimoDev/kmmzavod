@@ -362,6 +362,7 @@ model Job {
     events  JobEvent[]
 
     @@index([tenantId, status])
+    @@index([projectId])
     @@index([createdAt(sort: Desc)])
     @@map("jobs")
 }
@@ -485,6 +486,7 @@ model Asset {
 
     @@index([tenantId, type])
     @@index([tenantId, isDeleted])
+    @@index([projectId])
     @@map("assets")
 }
 
@@ -549,6 +551,7 @@ model Generation {
 
     @@index([tenantId, provider, createdAt(sort: Desc)])
     @@index([tenantId, status])
+    @@index([jobId])
     @@index([sceneId])
     @@index([externalTaskId])
     @@map("generations")
@@ -621,6 +624,7 @@ model CreditTransaction {
 
     @@index([tenantId, createdAt(sort: Desc)])
     @@index([tenantId, type])
+    @@index([jobId])
     @@map("credit_transactions")
 }
 

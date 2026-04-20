@@ -105,6 +105,7 @@ export function createKlingClipWorker(deps: Deps) {
         tenantId, jobId, credits: creditsCharged,
         description: `Kling clip — scene ${sceneId.slice(0, 8)}`,
       });
+      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

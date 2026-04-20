@@ -112,6 +112,7 @@ export function createHeygenRenderWorker(deps: Deps) {
         tenantId, jobId, credits: creditsCharged,
         description: `HeyGen avatar — scene ${sceneId.slice(0, 8)}`,
       });
+      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

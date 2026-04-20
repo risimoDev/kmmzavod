@@ -18,6 +18,7 @@ import { InstagramClient } from '../clients/social/instagram.client';
 import { PostBridgeClient } from '../clients/social/postbridge.client';
 import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
+import { decrypt, encrypt } from '../lib/crypto';
 
 const logger = rootLogger.child({ worker: 'publish' });
 
@@ -60,10 +61,15 @@ export function createPublishWorker(deps: Deps): Worker {
         data: { status: 'uploading' },
       });
 
-      // Load social account
-      const account = await db.socialAccount.findUniqueOrThrow({
+      // Load social account and decrypt tokens
+      const accountRaw = await db.socialAccount.findUniqueOrThrow({
         where: { id: socialAccountId },
       });
+      const account = {
+        ...accountRaw,
+        accessToken: decrypt(accountRaw.accessToken),
+        refreshToken: accountRaw.refreshToken ? decrypt(accountRaw.refreshToken) : null,
+      };
 
       if (!account.isActive) {
         throw new Error(`Social account ${socialAccountId} is disabled`);
@@ -129,8 +135,8 @@ export function createPublishWorker(deps: Deps): Worker {
               await db.socialAccount.update({
                 where: { id: socialAccountId },
                 data: {
-                  accessToken: result.newAccessToken,
-                  refreshToken: result.newRefreshToken ?? account.refreshToken,
+                  accessToken: encrypt(result.newAccessToken),
+                  refreshToken: result.newRefreshToken ? encrypt(result.newRefreshToken) : accountRaw.refreshToken,
                   expiresAt: result.newExpiresAt ?? account.expiresAt,
                 },
               });
@@ -177,7 +183,7 @@ export function createPublishWorker(deps: Deps): Worker {
           await db.socialAccount.update({
             where: { id: socialAccountId },
             data: {
-              accessToken: tokenResult.accessToken,
+              accessToken: encrypt(tokenResult.accessToken),
               expiresAt: new Date(Date.now() + tokenResult.expiresIn * 1000),
             },
           });

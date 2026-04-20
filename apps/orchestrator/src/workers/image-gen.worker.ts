@@ -127,6 +127,7 @@ export function createImageGenWorker(deps: Deps) {
         tenantId, jobId, credits: creditsCharged,
         description: `Image gen (${provider}) — ${isFrame ? 'frame' : 'image'} ${sceneId.slice(0, 8)}`,
       });
+      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

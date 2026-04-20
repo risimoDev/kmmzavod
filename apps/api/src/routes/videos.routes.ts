@@ -41,11 +41,33 @@ const ListVideosQuery = z.object({
 
 export async function videoRoutes(app: FastifyInstance) {
   // SSE endpoint — isolated encapsulation scope so the global auth hook below
-  // does NOT apply. EventSource cannot set Authorization header, so we use ?token=.
+  // does NOT apply. EventSource cannot set Authorization header, so we accept
+  // the token from: 1) Authorization header, 2) httpOnly cookie, 3) ?token= query (last resort).
   app.register(async function sseScope(sse) {
     sse.get('/:id/progress', {
       preHandler: async (req, reply) => {
-        const { token } = req.query as { token?: string };
+        // 1. Standard header (for SSE polyfills that support headers)
+        let token: string | undefined;
+        const authHeader = req.headers.authorization;
+        if (authHeader?.startsWith('Bearer ')) {
+          token = authHeader.slice(7);
+        }
+        // 2. httpOnly cookie
+        if (!token) {
+          const cookies = req.headers.cookie;
+          if (cookies) {
+            const match = cookies.match(/(?:^|;\s*)sse_token=([^\s;]+)/);
+            if (match) token = match[1];
+          }
+        }
+        // 3. Query param fallback (logged as warning)
+        if (!token) {
+          const { token: qToken } = req.query as { token?: string };
+          if (qToken) {
+            token = qToken;
+            req.log.warn({ url: req.url }, 'SSE auth via query param — migrate to cookie');
+          }
+        }
         if (!token) return reply.code(401).send({ error: 'Unauthorized' });
         try {
           const decoded = app.jwt.verify(token);

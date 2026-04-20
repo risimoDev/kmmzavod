@@ -54,18 +54,22 @@ interface SettleParams {
 }
 
 /**
- * Settles a previously reserved credit amount against actually spent credits.
+ * Settles a previously reserved credit amount after workers have directly
+ * charged their actual costs via chargeCredits().
  *
- * - If actual < reserved → refund the difference.
- * - If actual > reserved → charge the extra (best-effort, balance may go negative).
- * - If actual === reserved → no-op.
+ * Credit flow:
+ *   1. API reserves N credits (Tenant.credits -= N)
+ *   2. Workers call chargeCredits() for actual cost (Tenant.credits -= actual)
+ *   3. Settlement releases the FULL reserve (Tenant.credits += N)
+ *
+ * Net result: tenant only loses the actual amount charged by workers.
+ * The `actualCredits` (Job.creditsUsed) is recorded for audit purposes only.
  */
 export async function settleCredits(
   db: PrismaClient,
   params: SettleParams,
 ): Promise<number> {
-  const diff = params.reservedCredits - params.actualCredits;
-  if (diff === 0) {
+  if (params.reservedCredits <= 0) {
     const t = await db.tenant.findUniqueOrThrow({
       where: { id: params.tenantId },
       select: { credits: true },
@@ -74,49 +78,32 @@ export async function settleCredits(
   }
 
   return db.$transaction(async (tx) => {
-    if (diff > 0) {
-      // Refund overpayment
-      const updated = await tx.tenant.update({
-        where: { id: params.tenantId },
-        data:  { credits: { increment: diff } },
-        select: { credits: true },
-      });
-      await tx.creditTransaction.create({
-        data: {
-          tenantId:     params.tenantId,
-          type:         'refund',
-          amount:       diff,
-          balanceAfter: updated.credits,
-          description:  `Settle: refund ${diff} unused credits`,
-          jobId:        params.jobId,
-        },
-      });
-      return updated.credits;
-    } else {
-      // Charge the extra
-      const extra = -diff;
-      const updated = await tx.tenant.update({
-        where: { id: params.tenantId },
-        data:  { credits: { decrement: extra } },
-        select: { credits: true },
-      });
-      await tx.creditTransaction.create({
-        data: {
-          tenantId:     params.tenantId,
-          type:         'charge',
-          amount:       -extra,
-          balanceAfter: Math.max(0, updated.credits),
-          description:  `Settle: additional ${extra} credits charged`,
-          jobId:        params.jobId,
-        },
-      });
-      return updated.credits;
-    }
+    // Release the full reserve — workers already charged actual costs
+    const updated = await tx.tenant.update({
+      where: { id: params.tenantId },
+      data:  { credits: { increment: params.reservedCredits } },
+      select: { credits: true },
+    });
+    await tx.creditTransaction.create({
+      data: {
+        tenantId:     params.tenantId,
+        type:         'refund',
+        amount:       params.reservedCredits,
+        balanceAfter: updated.credits,
+        description:  `Settle: releasing ${params.reservedCredits} reserve (actual charged by workers: ${params.actualCredits})`,
+        jobId:        params.jobId,
+      },
+    });
+    return updated.credits;
   });
 }
 
 /**
- * Full refund of reserved credits when a job fails before spending anything.
+ * Refund reserved credits when a job fails.
+ *
+ * Workers already charged actual costs via chargeCredits(), so the full
+ * reserve must be returned. The net deduction equals only what workers
+ * actually charged (tracked in Job.creditsUsed for audit).
  */
 export async function refundReserve(
   db: PrismaClient,
@@ -129,6 +116,7 @@ export async function refundReserve(
     });
     return t.credits;
   }
+
   return db.$transaction(async (tx) => {
     const updated = await tx.tenant.update({
       where: { id: params.tenantId },
@@ -141,7 +129,7 @@ export async function refundReserve(
         type:         'refund',
         amount:       params.reservedCredits,
         balanceAfter: updated.credits,
-        description:  `Refund: pipeline failed, returning ${params.reservedCredits} reserved credits`,
+        description:  `Refund: pipeline failed, releasing ${params.reservedCredits} reserve`,
         jobId:        params.jobId,
       },
     });
