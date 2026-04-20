@@ -141,6 +141,22 @@ else
   else
     ok "CORS_ORIGIN задан: $(env_get CORS_ORIGIN)"
   fi
+
+  # Автофикс: добавить DOMAIN если нет (извлекаем из PUBLIC_API_URL)
+  if ! env_has "DOMAIN"; then
+    PUBLIC_API="$(env_get "PUBLIC_API_URL")"
+    DERIVED_DOMAIN="$(echo "$PUBLIC_API" | sed 's|https\?://||' | sed 's|/.*||')"
+    if [ -n "$DERIVED_DOMAIN" ]; then
+      if [ "$DRY_RUN" = false ]; then
+        echo "DOMAIN=${DERIVED_DOMAIN}" >> "$ENV_FILE"
+        fixed "DOMAIN добавлен в .env: $DERIVED_DOMAIN"
+      else
+        warn "[dry-run] DOMAIN отсутствует — был бы добавлен: $DERIVED_DOMAIN"
+      fi
+    fi
+  else
+    ok "DOMAIN задан: $(env_get DOMAIN)"
+  fi
 fi
 
 # =============================================================================
@@ -259,15 +275,16 @@ fi
 header "5. nginx + SSL"
 
 NGINX_CONF="$REPO_ROOT/infra/nginx/nginx.conf"
-DOMAIN="$(env_get DOMAIN 2>/dev/null || true)"
 
-# Если DOMAIN не в .env, вытащить из nginx.conf
+# Источник истины для домена: .env DOMAIN, затем из PUBLIC_API_URL
+DOMAIN="$(env_get DOMAIN 2>/dev/null || true)"
 if [ -z "$DOMAIN" ]; then
-  DOMAIN=$(grep -oP 'server_name \K[a-z0-9._-]+(?= )' "$NGINX_CONF" 2>/dev/null | grep -v '^_$' | head -1 || true)
+  PUBLIC_API="$(env_get PUBLIC_API_URL 2>/dev/null || true)"
+  DOMAIN="$(echo "$PUBLIC_API" | sed 's|https\?://||' | sed 's|/.*||')"
 fi
 
 if [ -z "$DOMAIN" ]; then
-  warn "Не удалось определить домен"
+  warn "Не удалось определить домен (нет DOMAIN и PUBLIC_API_URL в .env)"
 else
   info "Домен: $DOMAIN"
 
@@ -275,14 +292,13 @@ else
   if grep -q "server_name $DOMAIN" "$NGINX_CONF" 2>/dev/null; then
     ok "nginx.conf: server_name настроен на $DOMAIN"
   else
-    # Проверить на k-m-m.ru (хардкод из репо)
     OLD_DOMAIN=$(grep -oP 'server_name \K[a-z0-9._-]+(?= )' "$NGINX_CONF" 2>/dev/null | grep -v '^_$' | head -1 || echo "?")
     fail "nginx.conf: server_name=$OLD_DOMAIN, ожидался $DOMAIN"
     if [ "$DRY_RUN" = false ]; then
-      git checkout "$NGINX_CONF" 2>/dev/null || true
-      sed -i "s/k-m-m\.ru/${DOMAIN}/g" "$NGINX_CONF"
+      # Заменяем старый домен на нужный (не делаем git checkout — он вернёт k-m-m.ru)
+      sed -i "s/${OLD_DOMAIN}/${DOMAIN}/g" "$NGINX_CONF"
       docker compose restart nginx
-      fixed "nginx.conf перенастроен на $DOMAIN и nginx перезапущен"
+      fixed "nginx.conf перенастроен $OLD_DOMAIN → $DOMAIN, nginx перезапущен"
     fi
   fi
 
@@ -383,12 +399,15 @@ EVICTION=$(docker compose exec -T redis \
 
 case "$EVICTION" in
   "allkeys-lru"|"allkeys-lfu")
-    warn "Redis eviction policy: $EVICTION"
-    warn "BullMQ рекомендует 'noeviction' — задачи могут теряться при переполнении памяти"
-    warn "Чтобы исправить: docker compose exec redis redis-cli -a \$REDIS_PASSWORD config set maxmemory-policy noeviction"
+    warn "Redis eviction policy: $EVICTION (BullMQ рекомендует noeviction)"
+    if [ "$DRY_RUN" = false ]; then
+      docker compose exec -T redis \
+        redis-cli -a "$REDIS_PWD" --no-auth-warning config set maxmemory-policy noeviction &>/dev/null
+      fixed "Redis eviction policy изменён: $EVICTION → noeviction"
+    fi
     ;;
   "noeviction")
-    ok "Redis eviction policy: noeviction (рекомендуемое)" ;;
+    ok "Redis eviction policy: noeviction" ;;
   *)
     warn "Redis eviction policy: $EVICTION" ;;
 esac
@@ -403,18 +422,20 @@ MINIO_PASS="$(env_get MINIO_ROOT_PASSWORD)"
 MINIO_BUCKET="$(env_get MINIO_BUCKET 2>/dev/null || echo 'kmmzavod')"
 [ -z "$MINIO_BUCKET" ] && MINIO_BUCKET="kmmzavod"
 
-MINIO_HEALTH=$(curl -sf --max-time 5 "http://127.0.0.1:9000/minio/health/live" 2>/dev/null && echo "ok" || echo "fail")
+# MinIO доступность — проверяем изнутри контейнера (порт 9000 не проброшен на хост)
+MINIO_HEALTH=$(docker compose exec -T minio \
+  wget -qO- http://localhost:9000/minio/health/live 2>/dev/null && echo "ok" || echo "fail")
 if [ "$MINIO_HEALTH" = "ok" ]; then
-  ok "MinIO API доступен (:9000)"
+  ok "MinIO API доступен"
 else
-  fail "MinIO API недоступен (:9000)"
+  fail "MinIO API недоступен"
 fi
 
-# Проверить бакет через mc (если установлен)
+# Проверить бакет через mc
 if docker compose exec -T minio mc --version &>/dev/null; then
-  BUCKET_EXISTS=$(docker compose exec -T minio \
-    mc alias set local http://localhost:9000 "$MINIO_USER" "$MINIO_PASS" 2>/dev/null && \
-    docker compose exec -T minio mc ls "local/$MINIO_BUCKET" &>/dev/null && echo "yes" || echo "no")
+  docker compose exec -T minio \
+    mc alias set local http://localhost:9000 "$MINIO_USER" "$MINIO_PASS" &>/dev/null || true
+  BUCKET_EXISTS=$(docker compose exec -T minio mc ls "local/$MINIO_BUCKET" &>/dev/null && echo "yes" || echo "no")
   if [ "$BUCKET_EXISTS" = "yes" ]; then
     ok "MinIO бакет '$MINIO_BUCKET' существует"
   else
