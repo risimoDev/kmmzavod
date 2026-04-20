@@ -28,7 +28,7 @@ const schema = z.object({
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
   KLING_ACCESS_KEY: z.string().default(''),
   KLING_SECRET_KEY: z.string().default(''),
-  AI_PROXY_URL: z.string().url().optional(),
+  AI_PROXY_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
 
   // Social publishing (optional — если не заданы, publishing для платформы отключён)
   TIKTOK_CLIENT_KEY: z.string().optional(),
