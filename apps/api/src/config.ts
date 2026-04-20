@@ -36,6 +36,9 @@ const schema = z.object({
 
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
 
+  // Allowed CORS origin(s) in production (comma-separated, e.g. https://k-m-m.online)
+  CORS_ORIGIN: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+
   // AI API keys (optional — used for admin health checks)
   HEYGEN_API_KEY: z.string().optional(),
   RUNWAY_API_KEY: z.string().optional(),

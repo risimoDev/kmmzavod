@@ -87,6 +87,7 @@ services:
       RUNWAY_API_KEY: ${RUNWAY_API_KEY:-}
       GPTUNNEL_API_KEY: ${GPTUNNEL_API_KEY}
       GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1

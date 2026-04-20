@@ -45,10 +45,15 @@ export async function buildApp() {
   });
 
   // ── Plugins ──────────────────────────────────────────────────────────────
+  const corsOrigins: (string | RegExp)[] = [
+    /\.kmmzavod\.ru$/,
+    /^https?:\/\/localhost(:\d+)?$/,
+  ];
+  if (config.CORS_ORIGIN) {
+    config.CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean).forEach(o => corsOrigins.push(o));
+  }
   await app.register(fastifyCors, {
-    origin: config.NODE_ENV === 'production'
-      ? [/\.kmmzavod\.ru$/, /^https?:\/\/localhost(:\d+)?$/]
-      : true,
+    origin: config.NODE_ENV === 'production' ? corsOrigins : true,
     credentials: true,
   });
 
