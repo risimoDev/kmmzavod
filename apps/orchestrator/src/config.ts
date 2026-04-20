@@ -40,7 +40,7 @@ const schema = z.object({
   YOUTUBE_CLIENT_SECRET: z.string().optional(),
 
   // Encryption key for social tokens at rest (32 hex bytes = 64 chars)
-  ENCRYPTION_KEY: z.string().length(64).regex(/^[0-9a-fA-F]+$/).optional(),
+  ENCRYPTION_KEY: z.preprocess(v => (v === '' ? undefined : v), z.string().length(64).regex(/^[0-9a-fA-F]+$/).optional()),
 });
 
 const parsed = schema.safeParse(process.env);
