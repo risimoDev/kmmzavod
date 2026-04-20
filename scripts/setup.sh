@@ -26,7 +26,7 @@ echo -e "  Корень проекта: ${BOLD}$REPO_ROOT${RESET}\n"
 # =============================================================================
 # 1. Проверка зависимостей
 # =============================================================================
-header "1/6 · Проверка зависимостей"
+header "1/7 · Проверка зависимостей"
 
 check_cmd() {
   local cmd="$1" name="${2:-$1}" install_hint="${3:-}"
@@ -86,38 +86,72 @@ fi
 # =============================================================================
 # 2. Файл окружения (.env)
 # =============================================================================
-header "2/6 · Настройка .env"
+header "2/7 · Настройка .env"
+
+gen_secret() { openssl rand -base64 "${1:-32}" | tr -d '+=/' | head -c "${1:-32}"; }
 
 if [ ! -f .env ]; then
-  info "Создаём .env из .env.example..."
-  cp .env.example .env
+  if [ -f .env.example ]; then
+    info "Создаём .env из .env.example..."
+    cp .env.example .env
+  else
+    info "Создаём .env..."
+    touch .env
+  fi
   success ".env создан"
 else
-  success ".env уже существует — пропускаем"
+  success ".env уже существует"
 fi
 
-# Проверяем что обязательные переменные заполнены (не change_me)
-INCOMPLETE=0
-for var in POSTGRES_PASSWORD REDIS_PASSWORD MINIO_ROOT_PASSWORD JWT_SECRET; do
-  val=$(grep -E "^${var}=" .env | cut -d= -f2- | tr -d '"')
+# Автозаполняем незаполненные секреты
+fix_secret() {
+  local var="$1" length="${2:-32}"
+  local val
+  val=$(grep -E "^${var}=" .env | cut -d= -f2- | tr -d '"' || echo "")
   if [[ -z "$val" || "$val" == *"change_me"* || "$val" == *"CHANGE_ME"* ]]; then
-    warn "Переменная ${BOLD}$var${RESET}${YELLOW} не заполнена в .env"
-    INCOMPLETE=1
+    local new_val
+    if [ "$var" = "ENCRYPTION_KEY" ]; then
+      new_val=$(openssl rand -hex 32)
+    else
+      new_val=$(gen_secret "$length")
+    fi
+    if grep -qE "^${var}=" .env; then
+      sed -i "s|^${var}=.*|${var}=${new_val}|" .env
+    else
+      echo "${var}=${new_val}" >> .env
+    fi
+    success "$var — автосгенерирован"
   fi
-done
+}
 
-if [ "$INCOMPLETE" -eq 1 ]; then
-  echo ""
-  warn "Откройте .env и заполните все пустые/change_me значения."
-  echo -e "  ${CYAN}Команда: ${BOLD}nano .env${RESET}"
-  echo ""
-  read -rp "  Нажмите Enter после заполнения .env, или Ctrl+C для отмены... "
+fix_secret POSTGRES_PASSWORD 24
+fix_secret REDIS_PASSWORD 24
+fix_secret MINIO_ROOT_PASSWORD 24
+fix_secret JWT_SECRET 48
+fix_secret ENCRYPTION_KEY
+
+# Синхронизируем MINIO_SECRET_KEY с MINIO_ROOT_PASSWORD
+MINIO_PW=$(grep -E '^MINIO_ROOT_PASSWORD=' .env | cut -d= -f2-)
+if [ -n "$MINIO_PW" ]; then
+  if grep -qE '^MINIO_SECRET_KEY=' .env; then
+    sed -i "s|^MINIO_SECRET_KEY=.*|MINIO_SECRET_KEY=${MINIO_PW}|" .env
+  fi
 fi
+
+# Синхронизируем POSTGRES_PASSWORD в DATABASE_URL
+PG_PW=$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)
+if [ -n "$PG_PW" ]; then
+  if grep -qE '^DATABASE_URL=' .env; then
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://kmmzavod:${PG_PW}@localhost:5433/kmmzavod|" .env
+  fi
+fi
+
+success "Все секреты заполнены"
 
 # =============================================================================
 # 3. Запуск инфраструктуры (postgres, redis, minio)
 # =============================================================================
-header "3/6 · Запуск инфраструктуры"
+header "3/7 · Запуск инфраструктуры"
 
 info "Запускаем postgres, redis, minio..."
 docker compose up -d postgres redis minio
@@ -142,7 +176,7 @@ success "MinIO запущен (http://localhost:9001)"
 # =============================================================================
 # 4. Установка зависимостей
 # =============================================================================
-header "4/6 · Установка npm-зависимостей"
+header "4/7 · Установка npm-зависимостей"
 
 info "Запускаем pnpm install..."
 pnpm install
@@ -151,7 +185,7 @@ success "Зависимости установлены"
 # =============================================================================
 # 5. Миграции базы данных
 # =============================================================================
-header "5/6 · Применение миграций БД"
+header "5/7 · Применение миграций БД"
 
 info "Запускаем prisma migrate deploy..."
 cd packages/db

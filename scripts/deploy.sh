@@ -24,6 +24,21 @@ warn()    { echo -e "${YELLOW}⚠  $*${RESET}"; }
 error()   { echo -e "${RED}✖  $*${RESET}" >&2; exit 1; }
 header()  { echo -e "\n${BOLD}${BLUE}═══  $*  ═══${RESET}\n"; }
 
+# ── Утилиты безопасности ─────────────────────────────────────────────────────
+json_escape() {
+  local str="$1"
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  printf '"%s"' "$str"
+}
+
+sql_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
 # ── Параметры ────────────────────────────────────────────────────────────────
 DO_BUILD=true
 DO_MIGRATE=true
@@ -253,19 +268,22 @@ if $CREATE_ADMIN; then
   echo ""
 
   API_PORT=3000
+
+  # Безопасное экранирование для JSON
+  ESCAPED_EMAIL=$(json_escape "$ADMIN_EMAIL")
+  ESCAPED_PASS=$(json_escape "$ADMIN_PASS")
+  REGISTER_BODY="{\"email\":${ESCAPED_EMAIL},\"password\":${ESCAPED_PASS},\"displayName\":\"Admin\",\"tenantName\":\"Platform Admin\"}"
+
   HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "http://localhost:${API_PORT}/api/v1/auth/register" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"email\": \"${ADMIN_EMAIL}\",
-      \"password\": \"${ADMIN_PASS}\",
-      \"displayName\": \"Admin\",
-      \"tenantName\": \"Platform Admin\"
-    }" 2>/dev/null || echo "000")
+    -d "$REGISTER_BODY" 2>/dev/null || echo "000")
 
   if [[ "$HTTP_STATUS" == "201" || "$HTTP_STATUS" == "409" ]]; then
+    # Безопасное обновление роли (SQL-инъекция предотвращена экранированием)
+    SAFE_EMAIL="$(sql_escape "$ADMIN_EMAIL")"
     docker compose exec -T postgres psql -U kmmzavod -c \
-      "UPDATE \"User\" SET role='admin' WHERE email='${ADMIN_EMAIL}';" 2>/dev/null
+      "UPDATE \"User\" SET role='admin' WHERE email='${SAFE_EMAIL}';" 2>/dev/null
     success "Администратор: $ADMIN_EMAIL"
   else
     warn "HTTP $HTTP_STATUS — создайте вручную через register API + UPDATE role"
