@@ -424,7 +424,7 @@ MINIO_BUCKET="$(env_get MINIO_BUCKET 2>/dev/null || echo 'kmmzavod')"
 
 # MinIO доступность — проверяем изнутри контейнера (порт 9000 не проброшен на хост)
 MINIO_HEALTH=$(docker compose exec -T minio \
-  wget -qO- http://localhost:9000/minio/health/live 2>/dev/null && echo "ok" || echo "fail")
+  curl -sf http://localhost:9000/minio/health/live 2>/dev/null && echo "ok" || echo "fail")
 if [ "$MINIO_HEALTH" = "ok" ]; then
   ok "MinIO API доступен"
 else
