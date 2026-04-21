@@ -520,7 +520,7 @@ enum GenerationStatus {
 }
 
 model Generation {
-    id               String             @id @default(uuid()) @db.Uuid
+    id               BigInt             @id @default(autoincrement())
     tenantId         String             @map("tenant_id") @db.Uuid
     userId           String?            @map("user_id") @db.Uuid
     jobId            String?            @map("job_id") @db.Uuid
