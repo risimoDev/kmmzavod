@@ -241,9 +241,20 @@ volumes:
 networks:
   backend:
     driver: bridge
-    internal: true
+    internal: false
+    ipam:
+      config:
+        - subnet: 10.10.1.0/24
+          gateway: 10.10.1.1
   frontend:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.2.0/24
+          gateway: 10.10.2.1
   monitoring:
     driver: bridge
-    internal: true
+    ipam:
+      config:
+        - subnet: 10.10.3.0/24
+          gateway: 10.10.3.1
