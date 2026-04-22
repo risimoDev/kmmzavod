@@ -147,7 +147,7 @@ export function createRunwayClipWorker(deps: Deps) {
       await pipelineStateQueue.add(
         `state:${sceneId}`,
         { jobId, sceneId, tenantId, completedStage: 'clip' } satisfies PipelineStateJobPayload,
-        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state:${sceneId}:clip` },
+        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
       );
 
       log.info({ costUsd, creditsCharged, mode, model: actualModel }, 'Runway клип успешно обработан');

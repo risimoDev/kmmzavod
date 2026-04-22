@@ -112,7 +112,8 @@ export class HeyGenClient {
       }
 
       if (status === 'failed') {
-        throw new Error(`HeyGen video failed: ${error ?? 'unknown'}`);
+        const errMsg = typeof error === 'string' ? error : (error != null ? JSON.stringify(error) : 'unknown');
+        throw new Error(`HeyGen video failed: ${errMsg}`);
       }
 
       logger.debug(

@@ -129,7 +129,7 @@ export function createHeygenRenderWorker(deps: Deps) {
         `state:${sceneId}`,
         { jobId, sceneId, tenantId, completedStage: 'avatar' } satisfies PipelineStateJobPayload,
         // idempotent: same jobId prevents double-enqueue
-        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state:${sceneId}:avatar` },
+        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-avatar` },
       );
 
       log.info({ costUsd, creditsCharged }, 'HeyGen аватар успешно обработан');

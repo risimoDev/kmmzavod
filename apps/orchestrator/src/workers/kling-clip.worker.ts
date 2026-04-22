@@ -121,7 +121,7 @@ export function createKlingClipWorker(deps: Deps) {
       await pipelineStateQueue.add(
         `state:${sceneId}`,
         { jobId, sceneId, tenantId, completedStage: 'clip' } satisfies PipelineStateJobPayload,
-        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state:${sceneId}:clip` },
+        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
       );
 
       log.info({ costUsd, creditsCharged }, 'Kling клип успешно обработан');

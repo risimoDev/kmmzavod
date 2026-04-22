@@ -151,7 +151,7 @@ export function createImageGenWorker(deps: Deps) {
             durationSec: clipDurationSec ?? 5,
             referenceImageUrl: presignedUrl,
           } satisfies RunwayClipJobPayload,
-          { ...QUEUES['runway-clip'].defaultJobOptions, jobId: `runway:${sceneId}` },
+          { ...QUEUES['runway-clip'].defaultJobOptions, jobId: `runway-${sceneId}` },
         );
         log.info({ sceneId }, 'Frame → runway-clip chained');
       } else {
@@ -159,7 +159,7 @@ export function createImageGenWorker(deps: Deps) {
         await pipelineStateQueue.add(
           `state:${sceneId}`,
           { jobId, sceneId, tenantId, completedStage: 'image' } satisfies PipelineStateJobPayload,
-          { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state:${sceneId}:image` },
+          { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-image` },
         );
       }
 

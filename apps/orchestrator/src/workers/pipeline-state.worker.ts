@@ -125,7 +125,7 @@ export function createPipelineStateWorker(deps: Deps): Worker {
       await videoComposeQueue.add(
         `compose:${jobId}`,
         payload,
-        { ...QUEUES['video-compose'].defaultJobOptions, jobId: `compose:${jobId}` },
+        { ...QUEUES['video-compose'].defaultJobOptions, jobId: `compose-${jobId}` },
       );
     },
     { connection, concurrency: QUEUES['pipeline-state'].concurrency },
