@@ -22,6 +22,7 @@ import {
   type SocialAccount,
   type PublishJob,
 } from "@/lib/api";
+import { Download, Play } from "lucide-react";
 import { useVideoProgress } from "@/hooks/useVideoProgress";
 
 /* ── Stage labels ──────────────────────────────────────────────────────────── */
@@ -41,16 +42,22 @@ const STAGE_META: Record<string, { label: string; icon: string }> = {
   failed:           { label: "Failed",               icon: "❌" },
 };
 
-const PRESET_META: Record<string, { title: string; desc: string }> = {
-  dynamic: { title: "Dynamic", desc: "Energetic editing with quick transitions" },
-  smooth:  { title: "Smooth",  desc: "Smooth transitions and soft effects" },
-  minimal: { title: "Minimal", desc: "Minimalist style without special effects" },
+const PRESET_META: Record<string, { title: string; desc: string; icon: string }> = {
+  tiktok:    { title: "TikTok",           desc: "Fast cuts, bold subtitles, viral style",          icon: "🎵" },
+  instagram: { title: "Instagram Reels",  desc: "Smooth transitions, cinematic look",              icon: "📸" },
+  youtube:   { title: "YouTube Shorts",   desc: "Clean editing, clear subtitles",                  icon: "▶️" },
+  vk:        { title: "VK Clips",         desc: "Sharp cuts, dynamic, VK audience",                icon: "🇷🇺" },
+  // legacy names kept for backward compat
+  dynamic:   { title: "Dynamic",          desc: "Energetic editing with quick transitions",        icon: "⚡" },
+  smooth:    { title: "Smooth",           desc: "Smooth transitions and soft effects",             icon: "🌊" },
+  minimal:   { title: "Minimal",          desc: "Minimalist style without special effects",        icon: "✨" },
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
-  tiktok: "TikTok",
-  instagram: "Instagram",
+  tiktok:         "TikTok",
+  instagram:      "Instagram",
   youtube_shorts: "YouTube Shorts",
+  vk:             "VK",
 };
 
 /* ── Page ──────────────────────────────────────────────────────────────────── */
@@ -68,6 +75,11 @@ export default function VideoDetailPage() {
 
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const [publishingId, setPublishingId] = useState<string | null>(null);
+
+  // Video player state — presigned stream URLs keyed by variantId
+  const [streamUrls, setStreamUrls] = useState<Record<string, string>>({});
+  const [loadingStreamId, setLoadingStreamId] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   const isProcessing =
     video != null && ["pending", "processing", "composing"].includes(video.status);
@@ -121,6 +133,41 @@ export default function VideoDetailPage() {
       loadVideo();
     } catch {}
     setSelectingId(null);
+  };
+
+  const handleStreamVariant = async (v: VideoVariant) => {
+    // Use cached presigned URL from API if available (fresh 1h), else fetch on demand
+    const cached = v.previewUrl ?? streamUrls[v.id];
+    if (cached) {
+      setStreamUrls((prev) => ({ ...prev, [v.id]: cached }));
+      return;
+    }
+    setLoadingStreamId(v.id);
+    try {
+      const res = await videosApi.variantStreamUrl(id, v.id);
+      setStreamUrls((prev) => ({ ...prev, [v.id]: res.url }));
+    } catch {}
+    setLoadingStreamId(null);
+  };
+
+  const handleDownloadVariant = async (v: VideoVariant) => {
+    setDownloadingId(v.id);
+    try {
+      const cached = v.previewUrl ?? streamUrls[v.id];
+      if (cached) {
+        const a = document.createElement("a");
+        a.href = cached;
+        a.download = `video_${v.preset}.mp4`;
+        a.click();
+      } else {
+        const res = await videosApi.variantStreamUrl(id, v.id);
+        const a = document.createElement("a");
+        a.href = res.url;
+        a.download = `video_${v.preset}.mp4`;
+        a.click();
+      }
+    } catch {}
+    setDownloadingId(null);
   };
 
   const handlePublish = async (account: SocialAccount) => {
@@ -390,6 +437,7 @@ export default function VideoDetailPage() {
                 const meta = PRESET_META[v.preset] ?? {
                   title: v.preset,
                   desc: "",
+                  icon: "🎬",
                 };
                 const isSelected = v.selectedAt != null;
                 return (
@@ -419,13 +467,16 @@ export default function VideoDetailPage() {
                       </div>
                     )}
                     <CardContent className="py-4 px-4 space-y-3">
-                      <div>
-                        <p className="text-base font-semibold text-text-primary">
-                          {meta.title}
-                        </p>
-                        <p className="text-xs text-text-tertiary mt-0.5">
-                          {meta.desc}
-                        </p>
+                      <div className="flex items-start gap-2">
+                        <span className="text-xl leading-none">{meta.icon}</span>
+                        <div>
+                          <p className="text-base font-semibold text-text-primary">
+                            {meta.title}
+                          </p>
+                          <p className="text-xs text-text-tertiary mt-0.5">
+                            {meta.desc}
+                          </p>
+                        </div>
                       </div>
                       <div className="flex items-center gap-3 text-xs text-text-secondary">
                         {v.durationSec != null && (
@@ -435,17 +486,41 @@ export default function VideoDetailPage() {
                           <span>{v.fileSizeMb} MB</span>
                         )}
                       </div>
+                      <div className="flex flex-col gap-2">
                         {!isSelected && (
-                        <Button
-                          size="sm"
-                          variant="primary"
-                          className="w-full"
-                          loading={selectingId === v.id}
-                          onClick={() => handleSelectVariant(v.id)}
-                        >
-                          Select
-                        </Button>
-                      )}
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            className="w-full"
+                            loading={selectingId === v.id}
+                            onClick={() => handleSelectVariant(v.id)}
+                          >
+                            Select
+                          </Button>
+                        )}
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="flex-1"
+                            loading={loadingStreamId === v.id}
+                            onClick={() => handleStreamVariant(v)}
+                          >
+                            <Play className="w-3.5 h-3.5 mr-1" />
+                            Preview
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="flex-1"
+                            loading={downloadingId === v.id}
+                            onClick={() => handleDownloadVariant(v)}
+                          >
+                            <Download className="w-3.5 h-3.5 mr-1" />
+                            Download
+                          </Button>
+                        </div>
+                      </div>
                     </CardContent>
                   </Card>
                 );
@@ -454,16 +529,34 @@ export default function VideoDetailPage() {
           </div>
         )}
 
-        {/* ── Video player (after variant selected) ───────────────────────── */}
-        {selectedVariant?.outputUrl && (
-          <div className="rounded-xl border border-border bg-surface-1 overflow-hidden">
-            <video
-              controls
-              className="w-full max-h-[480px] bg-black"
-              src={selectedVariant.outputUrl}
-            />
-          </div>
-        )}
+        {/* ── Video player ────────────────────────────────────────────────── */}
+        {(() => {
+          // Show player when we have a ready variant with a presigned URL
+          // Priority: previewUrl from API response, then fetchable on demand via streamUrls state
+          const readyForPlay = readyVariants.find((v) => streamUrls[v.id] || v.previewUrl);
+          const playUrl = readyForPlay
+            ? (streamUrls[readyForPlay.id] ?? readyForPlay.previewUrl ?? null)
+            : null;
+          if (!playUrl) return null;
+          const playMeta = PRESET_META[readyForPlay!.preset] ?? { title: readyForPlay!.preset, icon: "🎬" };
+          return (
+            <div className="rounded-xl border border-border bg-surface-1 overflow-hidden">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-surface-2">
+                <span>{playMeta.icon}</span>
+                <p className="text-sm font-medium text-text-primary">{playMeta.title}</p>
+                {readyForPlay!.durationSec != null && (
+                  <span className="text-xs text-text-tertiary ml-auto">{formatDuration(readyForPlay!.durationSec)}</span>
+                )}
+              </div>
+              <video
+                key={playUrl}
+                controls
+                className="w-full max-h-[480px] bg-black"
+                src={playUrl}
+              />
+            </div>
+          );
+        })()}
 
         {/* ── Publish section (after variant selected) ────────────────────── */}
         {selectedVariant && (

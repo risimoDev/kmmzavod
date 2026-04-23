@@ -619,9 +619,28 @@ export async function videoRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'NotFound', message: 'Готовое видео не найдено' });
     }
 
-    // Получаем storage из app (задаётся в server.ts)
     const storage = (app as any).storage;
     const url = await storage.presignedUrl(video.outputUrl, 3600);
+
+    return reply.send({ url, expiresIn: 3600 });
+  });
+
+  // GET /api/v1/videos/:id/variants/:variantId/stream — presigned playback URL for a variant
+  app.get('/:id/variants/:variantId/stream', async (req, reply) => {
+    const { id, variantId } = req.params as { id: string; variantId: string };
+    const { tenantId } = req.user;
+
+    const variant = await db.videoVariant.findFirst({
+      where: { id: variantId, videoId: id, video: { tenantId }, status: 'ready' },
+      select: { outputKey: true },
+    });
+
+    if (!variant || !variant.outputKey) {
+      return reply.code(404).send({ error: 'NotFound', message: 'Вариант не найден или ещё не готов' });
+    }
+
+    const storage = (app as any).storage;
+    const url = await storage.presignedUrl(variant.outputKey, 3600);
 
     return reply.send({ url, expiresIn: 3600 });
   });

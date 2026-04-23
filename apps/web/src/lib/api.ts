@@ -180,6 +180,7 @@ export interface VideoVariant {
   preset: string;
   status: string;
   outputUrl: string | null;
+  previewUrl: string | null;  // presigned URL for playback (expires 1h, set by API)
   durationSec: number | null;
   fileSizeMb: number | null;
   selectedAt: string | null;
@@ -357,6 +358,9 @@ export const videosApi = {
 
   downloadUrl: (id: string) =>
     apiFetch<{ url: string; expiresIn: number }>(`/api/v1/videos/${id}/download`),
+
+  variantStreamUrl: (videoId: string, variantId: string) =>
+    apiFetch<{ url: string; expiresIn: number }>(`/api/v1/videos/${videoId}/variants/${variantId}/stream`),
 
   selectVariant: (id: string, variantId: string) =>
     apiFetch<void>(`/api/v1/videos/${id}/select-variant`, {
