@@ -1,5 +1,11 @@
 // Video compose worker — builds scene manifest and calls video-processor HTTP API
 // Now generates multiple variants in parallel (one per compose preset).
+//
+// COMBINED MODE (new jobs): when job.payload.combinedAvatarUrl exists, the worker
+// uses POST /compose-layout. The combined HeyGen video is the avatar track; all
+// clip/image scenes become background segments overlaid on it.
+//
+// LEGACY MODE: scene-by-scene composition via POST /compose.
 
 import { Worker, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
@@ -50,6 +56,17 @@ export function createVideoComposeWorker(deps: Deps): Worker {
       // Build accurate subtitles using Whisper transcription of avatar scenes
       type SceneRow = typeof scenes[number];
 
+      // Determine video format (slideshow = images only, no avatar)
+      const settings = payload.settings as Record<string, unknown> | undefined;
+      const videoFormat = (settings?.video_format as string) ?? 'standard';
+
+      // ── COMBINED MODE detection ────────────────────────────────────────────
+      const combinedAvatarUrl = payload.combinedAvatarUrl as string | undefined;
+      const combinedAvatarDurationSec = typeof payload.combinedAvatarDurationSec === 'number'
+        ? payload.combinedAvatarDurationSec
+        : undefined;
+      const isCombinedMode = !!combinedAvatarUrl && videoFormat !== 'slideshow';
+
       // Compute scene offsets (where each scene starts in the final timeline)
       const sceneOffsets: number[] = [];
       let offset = 0;
@@ -58,16 +75,12 @@ export function createVideoComposeWorker(deps: Deps): Worker {
         offset += Number(s.durationSec ?? 5);
       }
 
-      // Determine video format (slideshow = images only, no avatar)
-      const settings = payload.settings as Record<string, unknown> | undefined;
-      const videoFormat = (settings?.video_format as string) ?? 'standard';
-
       // Transcribe each avatar scene via Whisper for accurate word-level timing
       let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
       const avatarScenes = scenes.filter((s: SceneRow) => s.type === 'avatar' && s.script && s.avatarUrl);
 
-      // For slideshow format (no avatar scenes), generate subtitles from scene scripts
-      if (videoFormat === 'slideshow' || avatarScenes.length === 0) {
+      if (videoFormat === 'slideshow' || (avatarScenes.length === 0 && !isCombinedMode)) {
+        // Slideshow: generate subtitles from scene scripts (timing based on scene durations)
         for (let i = 0; i < scenes.length; i++) {
           const s = scenes[i];
           if (s.script) {
@@ -79,39 +92,61 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           }
         }
         logger.info({ jobId, subtitleCount: subtitles.length }, 'Slideshow mode: subtitles from scene scripts');
-      } else {
-
-      for (const scene of avatarScenes) {
-        const sceneIdx = scenes.indexOf(scene);
-        const sceneOffset = sceneOffsets[sceneIdx];
+      } else if (isCombinedMode) {
+        // Combined mode: transcribe the single combined avatar video → accurate subtitles
         try {
           const transcribeRes = await axios.post(`${videoProcessorUrl}/transcribe`, {
-            storage_key: scene.avatarUrl,
+            storage_key: combinedAvatarUrl,
             language: 'ru',
             max_words_per_chunk: 12,
-          }, { timeout: 120_000 });
+          }, { timeout: 180_000 });
 
-          const whisperSubs = transcribeRes.data.subtitles as Array<{ start_sec: number; end_sec: number; text: string }>;
-          // Offset timestamps to global timeline position
-          for (const sub of whisperSubs) {
+          subtitles = transcribeRes.data.subtitles as Array<{ start_sec: number; end_sec: number; text: string }>;
+          logger.info({ jobId, subs: subtitles.length }, 'Combined Whisper transcription OK');
+        } catch (err: any) {
+          // Fallback: build subtitles from all avatar scripts using estimated timing
+          logger.warn({ jobId, err: err.message }, 'Combined Whisper failed, using script fallback');
+          const avatarOnly = scenes
+            .filter((s: SceneRow) => s.type === 'avatar' && s.script)
+            .sort((a, b) => a.sceneIndex - b.sceneIndex);
+          let cursor = 0;
+          for (const s of avatarOnly) {
+            const dur = Number(s.durationSec ?? 5);
+            subtitles.push({ start_sec: cursor, end_sec: cursor + dur, text: s.script! });
+            cursor += dur;
+          }
+        }
+      } else {
+        // Legacy per-scene mode: transcribe each avatar scene separately
+        for (const scene of avatarScenes) {
+          const sceneIdx = scenes.indexOf(scene);
+          const sceneOffset = sceneOffsets[sceneIdx];
+          try {
+            const transcribeRes = await axios.post(`${videoProcessorUrl}/transcribe`, {
+              storage_key: scene.avatarUrl,
+              language: 'ru',
+              max_words_per_chunk: 12,
+            }, { timeout: 120_000 });
+
+            const whisperSubs = transcribeRes.data.subtitles as Array<{ start_sec: number; end_sec: number; text: string }>;
+            for (const sub of whisperSubs) {
+              subtitles.push({
+                start_sec: +(sub.start_sec + sceneOffset).toFixed(2),
+                end_sec: +(sub.end_sec + sceneOffset).toFixed(2),
+                text: sub.text,
+              });
+            }
+            logger.info({ jobId, sceneId: scene.id, subs: whisperSubs.length }, 'Whisper transcription OK for scene');
+          } catch (err: any) {
+            logger.warn({ jobId, sceneId: scene.id, err: err.message }, 'Whisper failed for scene, using fallback');
             subtitles.push({
-              start_sec: +(sub.start_sec + sceneOffset).toFixed(2),
-              end_sec: +(sub.end_sec + sceneOffset).toFixed(2),
-              text: sub.text,
+              start_sec: sceneOffset,
+              end_sec: sceneOffset + Number(scene.durationSec ?? 5),
+              text: scene.script!,
             });
           }
-          logger.info({ jobId, sceneId: scene.id, subs: whisperSubs.length }, 'Whisper transcription OK for scene');
-        } catch (err: any) {
-          // Fallback: use scene duration + script as single block
-          logger.warn({ jobId, sceneId: scene.id, err: err.message }, 'Whisper failed for scene, using fallback');
-          subtitles.push({
-            start_sec: sceneOffset,
-            end_sec: sceneOffset + Number(scene.durationSec ?? 5),
-            text: scene.script!,
-          });
         }
       }
-      } // end else (standard mode Whisper)
 
       // Create VideoVariant rows upfront (status=rendering)
       if (jobRow.videoId) {
@@ -221,27 +256,119 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           const outputKey = `tenants/${tenantId}/videos/${jobId}/variant_${presetName}/final.mp4`;
           const presetSubtitles = adjustSubtitlesForPreset(subtitles, preset);
 
-          const response = await axios.post(`${videoProcessorUrl}/compose`, {
-            job_id:     jobId,
-            tenant_id:  tenantId,
-            output_key: outputKey,
-            scenes:     buildSceneItems(preset),
-            subtitles:  presetSubtitles,
-            settings: {
-              ...((payload['settings'] as object) ?? {}),
-              subtitle_style: preset.subtitle_style.style,
-            },
-            audio_track: audioTrack
-              ? {
-                  ...audioTrack,
-                  volume: preset.audio_preset.bgm_volume,
-                  fade_in_sec: preset.audio_preset.fade_in_sec,
-                  fade_out_sec: preset.audio_preset.fade_out_sec,
-                }
-              : undefined,
-          }, { timeout: 600_000 });
+          let response: { duration_sec: number; file_size_bytes: number };
 
-          return { presetName, outputKey, response: response.data as { duration_sec: number; file_size_bytes: number } };
+          if (isCombinedMode) {
+            // ── COMBINED MODE: /compose-layout ─────────────────────────────────
+            // The combined HeyGen avatar is the main audio/video track.
+            // All non-avatar scenes (clip/image/text) become background segments
+            // that show at proportional time slices of the avatar duration.
+            const bgScenes = scenes.filter((s: SceneRow) =>
+              (s.type === 'clip' || s.type === 'image') &&
+              (s.clipUrl || s.imageUrl)
+            );
+
+            // Compute per-segment weights (proportional to scene duration within non-avatar time)
+            // If no b-roll, create a single fullscreen segment
+            const avatarOnlyDuration = combinedAvatarDurationSec ?? (
+              scenes.filter((s: SceneRow) => s.type === 'avatar').reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0)
+            );
+
+            // Build segments: interleave fullscreen avatar at start, then PIP/voiceover for each b-roll
+            // Simple strategy: divide total duration evenly among b-roll scenes; fill gaps with fullscreen
+            const backgrounds: Array<{ storage_key: string; type: 'image' | 'video' }> = [];
+            const segments: Array<{ layout: string; bg_index: number; weight: number }> = [];
+
+            if (bgScenes.length === 0) {
+              // No b-roll → pure fullscreen avatar
+              backgrounds.push({ storage_key: combinedAvatarUrl!, type: 'video' });
+              segments.push({ layout: 'fullscreen', bg_index: 0, weight: 1.0 });
+            } else {
+              // Mix: avatar fullscreen for ~60% of time, PIP/voiceover for b-roll
+              // Each b-roll scene occupies its proportional slice of total avatar duration
+              const totalNonAvatarDuration = bgScenes.reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0);
+
+              bgScenes.forEach((s: SceneRow, idx: number) => {
+                const storageKey = (s.type === 'clip' ? s.clipUrl : s.imageUrl)!;
+                backgrounds.push({
+                  storage_key: storageKey,
+                  type: s.type === 'clip' ? 'video' : 'image',
+                });
+
+                const sceneWeight = Number(s.durationSec ?? 5) / avatarOnlyDuration;
+
+                // Alternate between layouts for visual variety
+                const layouts = ['pip_bl', 'pip_br', 'voiceover', 'pip_tl'];
+                const layout = layouts[idx % layouts.length];
+                segments.push({ layout, bg_index: idx, weight: sceneWeight });
+              });
+
+              // Add a fullscreen segment at start (hook scene is avatar-only)
+              // Remaining weight = 1.0 - sum(bg weights)
+              const bgTotalWeight = segments.reduce((sum, s) => sum + s.weight, 0);
+              const ffWeight = Math.max(0.05, 1.0 - bgTotalWeight);
+
+              // Insert fullscreen at beginning if there's meaningful remaining time
+              if (ffWeight >= 0.05) {
+                backgrounds.push({ storage_key: combinedAvatarUrl!, type: 'video' });
+                // Insert at front
+                segments.unshift({ layout: 'fullscreen', bg_index: backgrounds.length - 1, weight: ffWeight });
+              }
+            }
+
+            const layoutRes = await axios.post(`${videoProcessorUrl}/compose-layout`, {
+              job_id:              jobId,
+              tenant_id:           tenantId,
+              output_key:          outputKey,
+              avatar_storage_key:  combinedAvatarUrl,
+              backgrounds,
+              segments,
+              subtitles:           presetSubtitles,
+              settings: {
+                ...((payload['settings'] as object) ?? {}),
+                subtitle_style: preset.subtitle_style.style,
+              },
+              audio_track: audioTrack
+                ? {
+                    ...audioTrack,
+                    volume: preset.audio_preset.bgm_volume,
+                    fade_in_sec: preset.audio_preset.fade_in_sec,
+                    fade_out_sec: preset.audio_preset.fade_out_sec,
+                  }
+                : undefined,
+              chroma_color: '#00FF00',
+              pip_scale: 0.30,
+              transition: preset.transition_type,
+              transition_duration: preset.transition_duration,
+            }, { timeout: 600_000 });
+
+            response = layoutRes.data as { duration_sec: number; file_size_bytes: number };
+          } else {
+            // ── LEGACY/SLIDESHOW MODE: /compose ────────────────────────────────
+            const composeRes = await axios.post(`${videoProcessorUrl}/compose`, {
+              job_id:     jobId,
+              tenant_id:  tenantId,
+              output_key: outputKey,
+              scenes:     buildSceneItems(preset),
+              subtitles:  presetSubtitles,
+              settings: {
+                ...((payload['settings'] as object) ?? {}),
+                subtitle_style: preset.subtitle_style.style,
+              },
+              audio_track: audioTrack
+                ? {
+                    ...audioTrack,
+                    volume: preset.audio_preset.bgm_volume,
+                    fade_in_sec: preset.audio_preset.fade_in_sec,
+                    fade_out_sec: preset.audio_preset.fade_out_sec,
+                  }
+                : undefined,
+            }, { timeout: 600_000 });
+
+            response = composeRes.data as { duration_sec: number; file_size_bytes: number };
+          }
+
+          return { presetName, outputKey, response };
         }),
       );
 

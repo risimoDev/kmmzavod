@@ -1,17 +1,16 @@
 /**
- * HeyGen render worker — generates a talking-head avatar video for every “avatar” scene.
+ * HeyGen render worker — generates a talking-head avatar video.
  *
- * Flow:
- *  1. Create video task on HeyGen API
- *  2. Poll until video is ready
- *  3. Download video → upload to MinIO
- *  4. Update Scene record (avatarUrl, avatarDone, status, costUsd)
- *  5. Create Generation record for cost audit
- *  6. Deduct credits from tenant
- *  7. Notify pipeline-state
+ * Two modes:
  *
- * On any error: throw → BullMQ retries.  After all retries the’failed’ handler in
- * index.ts marks the job/video as failed.
+ * COMBINED (isCombined=true, default for new jobs):
+ *   All avatar scene scripts are concatenated → ONE HeyGen video per job.
+ *   The combined video is stored at StoragePaths.jobCombinedAvatar.
+ *   All avatar scenes are marked done with the same combined video URL.
+ *   job.payload.combinedAvatarUrl is set for the compose worker.
+ *
+ * SINGLE (isCombined=false, legacy):
+ *   One HeyGen video per avatar scene (kept for backward compatibility).
  */
 import { Worker, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
@@ -39,65 +38,111 @@ export function createHeygenRenderWorker(deps: Deps) {
   return new Worker<HeygenRenderJobPayload>(
     QUEUES['heygen-render'].name,
     async (job) => {
-      const { jobId, sceneId, tenantId, avatarId, voiceId, script } = job.data;
-      const log     = logger.child({ jobId, sceneId, worker: 'heygen-render' });
+      const { jobId, sceneId, tenantId, avatarId, voiceId, script, isCombined, combinedSceneIds } = job.data;
+      const log     = logger.child({ jobId, sceneId, worker: 'heygen-render', isCombined: !!isCombined });
       const startMs = Date.now();
 
       log.info('HeyGen: начало генерации аватара');
 
       await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'heygen-render', status: 'started', meta: { sceneId } },
+        data: {
+          jobId, tenantId,
+          stage: 'heygen-render', status: 'started',
+          meta: isCombined
+            ? { mode: 'combined', sceneCount: combinedSceneIds?.length ?? 1 }
+            : { sceneId },
+        },
       });
 
       // ─── 1. Создаём задачу в HeyGen ──────────────────────────────────────
       const heygenVideoId = await heygen.createAvatarVideo({ avatarId, voiceId, script });
       log.info({ heygenVideoId }, 'HeyGen: задача создана, ожидаем рендер');
 
-      await db.scene.update({
-        where: { id: sceneId },
-        data:  { heygenVideoId, status: 'processing' },
-      });
+      if (!isCombined) {
+        await db.scene.update({
+          where: { id: sceneId },
+          data:  { heygenVideoId, status: 'processing' },
+        });
+      }
 
       // ─── 2. Polling ───────────────────────────────────────────────────────
       const { videoUrl, duration } = await heygen.pollUntilDone(heygenVideoId);
-      const durationSec = duration > 0 ? duration : Number(
-        (await db.scene.findUniqueOrThrow({
-          where:  { id: sceneId },
-          select: { durationSec: true },
-        })).durationSec ?? 5
-      );
+
+      let durationSec = duration > 0 ? duration : 0;
+      if (durationSec === 0 && !isCombined) {
+        durationSec = Number(
+          (await db.scene.findUniqueOrThrow({
+            where:  { id: sceneId },
+            select: { durationSec: true },
+          })).durationSec ?? 5
+        );
+      }
       log.info({ videoUrl, durationSec }, 'HeyGen: видео готово');
 
       // ─── 3. Скачиваем → MinIO ─────────────────────────────────────────────
-      const storageKey = StoragePaths.sceneAvatar(tenantId, sceneId);
+      const storageKey = isCombined
+        ? StoragePaths.jobCombinedAvatar(tenantId, jobId)
+        : StoragePaths.sceneAvatar(tenantId, sceneId);
+
       const dlResponse = await axios.get<ArrayBuffer>(videoUrl, {
         responseType: 'arraybuffer',
-        timeout: 120_000,
+        timeout: 180_000,
       });
       await storage.uploadBuffer(storageKey, Buffer.from(dlResponse.data), { contentType: 'video/mp4' });
       log.info({ storageKey }, 'HeyGen: видео загружено в MinIO');
 
-      // ─── 4. Обновляем Scene ───────────────────────────────────────────────
+      // ─── 4. Cost / credits ────────────────────────────────────────────────
       const costUsd        = heygenCostUsd(durationSec);
       const creditsCharged = creditsFromUsd(costUsd);
 
-      await db.scene.update({
-        where: { id: sceneId },
-        data:  { avatarUrl: storageKey, avatarDone: true, status: 'completed', costUsd, durationSec: durationSec },
-      });
-      log.info({ sceneId, durationSec }, 'HeyGen: durationSec обновлён в БД (реальная длительность голоса)');
+      // ─── 5a. COMBINED MODE: update all avatar scenes + job payload ─────────
+      if (isCombined && combinedSceneIds && combinedSceneIds.length > 0) {
+        await db.scene.updateMany({
+          where: { id: { in: combinedSceneIds } },
+          data:  { avatarUrl: storageKey, avatarDone: true, status: 'completed', costUsd },
+        });
 
-      // ─── 5. Generation record ─────────────────────────────────────────────
+        // Store combined avatar URL in job payload for video-compose worker
+        const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { payload: true } });
+        const currentPayload = (jobRow?.payload ?? {}) as Record<string, unknown>;
+        await db.job.update({
+          where: { id: jobId },
+          data:  {
+            payload: {
+              ...currentPayload,
+              combinedAvatarUrl: storageKey,
+              combinedAvatarDurationSec: durationSec,
+            },
+          },
+        });
+
+        log.info(
+          { sceneCount: combinedSceneIds.length, durationSec, storageKey },
+          'HeyGen combined: все сцены аватара обновлены',
+        );
+      } else {
+        // ─── 5b. SINGLE MODE: update individual scene ─────────────────────────
+        await db.scene.update({
+          where: { id: sceneId },
+          data:  { avatarUrl: storageKey, avatarDone: true, status: 'completed', costUsd, durationSec },
+        });
+      }
+
+      // ─── 6. Generation record ─────────────────────────────────────────────
       await db.generation.create({
         data: {
           tenantId,
           jobId,
-          sceneId,
+          sceneId: isCombined ? combinedSceneIds![0] : sceneId,
           provider:        'heygen',
           model:           `avatar:${avatarId}`,
           status:          'completed',
           externalTaskId:  heygenVideoId,
-          requestPayload:  { avatarId, script },
+          requestPayload:  {
+            avatarId,
+            isCombined: !!isCombined,
+            sceneCount: isCombined ? combinedSceneIds!.length : 1,
+          },
           responsePayload: { storageKey, durationSec },
           costUsd,
           creditsCharged,
@@ -107,10 +152,12 @@ export function createHeygenRenderWorker(deps: Deps) {
         },
       });
 
-      // ─── 6. Списываем кредиты ─────────────────────────────────────────────
+      // ─── 7. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
         tenantId, jobId, credits: creditsCharged,
-        description: `HeyGen avatar — scene ${sceneId.slice(0, 8)}`,
+        description: isCombined
+          ? `HeyGen combined avatar — ${combinedSceneIds!.length} scenes`
+          : `HeyGen avatar — scene ${sceneId.slice(0, 8)}`,
       });
       await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
@@ -119,20 +166,22 @@ export function createHeygenRenderWorker(deps: Deps) {
           jobId, tenantId,
           stage:   'heygen-render',
           status:  'completed',
-          message: `${durationSec.toFixed(1)}s — $${costUsd.toFixed(4)}`,
-          meta:    { sceneId, storageKey, costUsd, creditsCharged },
+          message: `${durationSec.toFixed(1)}s — $${costUsd.toFixed(4)}${isCombined ? ` (${combinedSceneIds!.length} scenes combined)` : ''}`,
+          meta:    { storageKey, costUsd, creditsCharged, isCombined: !!isCombined },
         },
       });
 
-      // ─── 7. Уведомляем pipeline-state ─────────────────────────────────────
-      await pipelineStateQueue.add(
-        `state:${sceneId}`,
-        { jobId, sceneId, tenantId, completedStage: 'avatar' } satisfies PipelineStateJobPayload,
-        // idempotent: same jobId prevents double-enqueue
-        { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-avatar` },
-      );
+      // ─── 8. Уведомляем pipeline-state для каждой сцены аватара ────────────
+      const sceneIdsToNotify = isCombined ? (combinedSceneIds ?? [sceneId]) : [sceneId];
+      for (const sid of sceneIdsToNotify) {
+        await pipelineStateQueue.add(
+          `state-${sid}`,
+          { jobId, sceneId: sid, tenantId, completedStage: 'avatar' } satisfies PipelineStateJobPayload,
+          { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sid}-avatar` },
+        );
+      }
 
-      log.info({ costUsd, creditsCharged }, 'HeyGen аватар успешно обработан');
+      log.info({ costUsd, creditsCharged, durationSec }, 'HeyGen аватар успешно обработан');
     },
     { connection, concurrency: QUEUES['heygen-render'].concurrency },
   );

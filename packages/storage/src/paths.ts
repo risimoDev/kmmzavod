@@ -26,6 +26,10 @@ export const StoragePaths = {
   sceneImage: (tenantId: string, sceneId: string) =>
     `tenants/${tenantId}/scenes/${sceneId}/product.png`,
 
+  /** Combined avatar video (all avatar scenes merged into one HeyGen render) */
+  jobCombinedAvatar: (tenantId: string, jobId: string) =>
+    `tenants/${tenantId}/jobs/${jobId}/combined_avatar.mp4`,
+
   /** Generated ASS subtitle file */
   subtitles: (tenantId: string, jobId: string) =>
     `tenants/${tenantId}/subtitles/${jobId}/subs.ass`,

@@ -124,11 +124,19 @@ export interface GptScriptJobPayload {
 
 export interface HeygenRenderJobPayload {
   jobId: string;
+  /** Primary/first avatar sceneId (used for logging and single-scene mode) */
   sceneId: string;
   tenantId: string;
   avatarId: string;
   voiceId: string;
   script: string;
+  /**
+   * Combined mode: when true, `script` is ALL avatar scripts concatenated and
+   * `combinedSceneIds` lists ALL avatar scene IDs in scene order.
+   * The worker will render ONE HeyGen video and mark all scenes done.
+   */
+  isCombined?: boolean;
+  combinedSceneIds?: string[];
 }
 
 export interface RunwayClipJobPayload {

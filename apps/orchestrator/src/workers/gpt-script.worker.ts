@@ -465,12 +465,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
 
       for (const scene of scenes) {
         if (scene.type === 'avatar' && scene.script) {
-          // Avatar → HeyGen (parallel with image generation)
-          await deps.heygenQueue.add(
-            `heygen:${scene.id}`,
-            { jobId, sceneId: scene.id, tenantId, avatarId, voiceId, script: scene.script },
-            QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
-          );
+          // Avatar scenes handled in combined batch below
         } else if (scene.type === 'clip' && scene.bRollPrompt) {
           // Clip → image-gen (purpose=runway-frame) → then image-gen chains to runway-clip
           await deps.imageGenQueue.add(
@@ -498,6 +493,30 @@ export function createGptScriptWorker(deps: Deps): Worker {
           );
         }
         // text scenes: no external generation needed
+      }
+
+      // ── Combined HeyGen: ONE video for ALL avatar scenes ──────────────────
+      // This matches the admin test flow and is cheaper / faster than per-scene renders.
+      const avatarScenes = scenes
+        .filter(s => s.type === 'avatar' && s.script)
+        .sort((a, b) => a.sceneIndex - b.sceneIndex);
+
+      if (avatarScenes.length > 0) {
+        // Concatenate all avatar scripts in scene order with natural pause separator
+        const combinedScript = avatarScenes.map(s => s.script!).join(' ');
+
+        await deps.heygenQueue.add(
+          `heygen-combined-${jobId}`,
+          {
+            jobId,
+            sceneId: avatarScenes[0].id,        // primary scene for logging
+            tenantId, avatarId, voiceId,
+            script: combinedScript,
+            isCombined: true,
+            combinedSceneIds: avatarScenes.map(s => s.id),
+          },
+          QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
+        );
       }
 
       const totalCostUsd = ideaTotalCostUsd + scriptCostUsd;
