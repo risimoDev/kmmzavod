@@ -166,18 +166,29 @@ export function createVideoComposeWorker(deps: Deps): Worker {
       // Build per-preset scene items with preset-specific transitions
       // Also compute subtitle timing adjustments for each preset's transition overlap
       const buildSceneItems = (preset: ComposePreset) =>
-        scenes.map((s: SceneRow) => ({
-          type: s.type,
-          storage_key:
-            s.type === 'avatar' ? s.avatarUrl! :
-            s.type === 'clip'   ? s.clipUrl!   :
-            s.type === 'image'  ? s.imageUrl!  : '',
-          duration_sec: Number(s.durationSec ?? 3),
-          transition: preset.transition_type,
-          transition_duration: preset.transition_duration,
-        }));
+        scenes
+          .filter((s: SceneRow) => {
+            // Only include scenes that have a downloadable media asset
+            if (s.type === 'avatar') return !!s.avatarUrl;
+            if (s.type === 'clip')   return !!s.clipUrl;
+            if (s.type === 'image')  return !!s.imageUrl;
+            return false; // text scenes have no media file; skip
+          })
+          .map((s: SceneRow) => ({
+            scene_id: s.id,
+            type: s.type,
+            storage_key:
+              s.type === 'avatar' ? s.avatarUrl! :
+              s.type === 'clip'   ? s.clipUrl!   :
+              s.type === 'image'  ? s.imageUrl!  : '',
+            duration_sec: Number(s.durationSec ?? 3),
+            transition: preset.transition_type,
+            transition_duration: preset.transition_duration,
+          }));
 
-      // Adjust subtitle timestamps for xfade overlap per preset
+      // Adjust subtitle timestamps for xfade overlap per preset.
+      // Each xfade transition overlaps adjacent scenes, effectively shortening the
+      // output timeline. Subtitles that fall in scene N need to shift back by N * xfadeDur.
       const adjustSubtitlesForPreset = (
         rawSubs: Array<{ start_sec: number; end_sec: number; text: string }>,
         preset: ComposePreset,
@@ -185,27 +196,9 @@ export function createVideoComposeWorker(deps: Deps): Worker {
         if (preset.transition_duration <= 0 || rawSubs.length === 0) return rawSubs;
 
         const xfadeDur = preset.transition_duration;
-        // Each transition overlaps scenes, so sceneOffset[i] should be reduced
-        // by (number of transitions before that scene) * xfadeDur.
-        // We need to figure out which scene each subtitle belongs to and apply
-        // the cumulative overlap shift.
-        const adjusted = rawSubs.map((sub) => {
-          // Find which scene this subtitle belongs to (by matching raw offset ranges)
-          let cumulativeOverlap = 0;
-          let rawOffset = 0;
-          for (let i = 0; i < scenes.length; i++) {
-            const dur = Number(scenes[i].durationSec ?? 5);
-            if (sub.start_sec >= rawOffset && sub.start_sec < rawOffset + dur + 0.5) {
-              break;
-            }
-            rawOffset += dur;
-            if (i > 0) {
-              // transitions happen between scenes, so overlap accumulates from scene 1 onwards
-            }
-            cumulativeOverlap = i * xfadeDur; // overlap before next scene
-          }
-          // Recalculate: for scene at index i, cumulative overlap = i * xfadeDur
-          // Find scene index for this subtitle
+
+        return rawSubs.map((sub) => {
+          // Find which scene this subtitle belongs to by walking scene boundaries
           let sceneIdx = 0;
           let off = 0;
           for (let i = 0; i < scenes.length; i++) {
@@ -217,15 +210,14 @@ export function createVideoComposeWorker(deps: Deps): Worker {
             off += dur;
             sceneIdx = i;
           }
+          // Scene N starts (N * xfadeDur) seconds earlier due to accumulated overlaps
           const shift = sceneIdx * xfadeDur;
-
           return {
             start_sec: +Math.max(0, sub.start_sec - shift).toFixed(2),
-            end_sec: +Math.max(0, sub.end_sec - shift).toFixed(2),
-            text: sub.text,
+            end_sec:   +Math.max(0, sub.end_sec   - shift).toFixed(2),
+            text:      sub.text,
           };
         });
-        return adjusted;
       };
 
       // Fire all variant renders in parallel
@@ -259,35 +251,55 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           let response: { duration_sec: number; file_size_bytes: number };
 
           if (isCombinedMode) {
-            // ── COMBINED MODE: /compose-layout ─────────────────────────────────
+            // ── COMBINED MODE ──────────────────────────────────────────────────
             // The combined HeyGen avatar is the main audio/video track.
-            // All non-avatar scenes (clip/image/text) become background segments
-            // that show at proportional time slices of the avatar duration.
+            // All non-avatar scenes (clip/image) become background segments
+            // overlaid on it via /compose-layout.
+            // If there are no b-roll scenes, fall back to /compose (single scene).
             const bgScenes = scenes.filter((s: SceneRow) =>
               (s.type === 'clip' || s.type === 'image') &&
               (s.clipUrl || s.imageUrl)
             );
 
-            // Compute per-segment weights (proportional to scene duration within non-avatar time)
-            // If no b-roll, create a single fullscreen segment
             const avatarOnlyDuration = combinedAvatarDurationSec ?? (
               scenes.filter((s: SceneRow) => s.type === 'avatar').reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0)
             );
 
-            // Build segments: interleave fullscreen avatar at start, then PIP/voiceover for each b-roll
-            // Simple strategy: divide total duration evenly among b-roll scenes; fill gaps with fullscreen
-            const backgrounds: Array<{ storage_key: string; type: 'image' | 'video' }> = [];
-            const segments: Array<{ layout: string; bg_index: number; weight: number }> = [];
-
             if (bgScenes.length === 0) {
-              // No b-roll → pure fullscreen avatar
-              backgrounds.push({ storage_key: combinedAvatarUrl!, type: 'video' });
-              segments.push({ layout: 'fullscreen', bg_index: 0, weight: 1.0 });
+              // Pure avatar video — no layout composition needed, use /compose directly
+              const composeRes = await axios.post(`${videoProcessorUrl}/compose`, {
+                job_id:     jobId,
+                tenant_id:  tenantId,
+                output_key: outputKey,
+                scenes: [{
+                  scene_id:            `${jobId}-combined`,
+                  type:                'avatar',
+                  storage_key:         combinedAvatarUrl,
+                  duration_sec:        avatarOnlyDuration > 0 ? avatarOnlyDuration : 30,
+                  transition:          preset.transition_type,
+                  transition_duration: preset.transition_duration,
+                }],
+                subtitles: presetSubtitles,
+                settings: {
+                  ...((payload['settings'] as object) ?? {}),
+                  subtitle_style: preset.subtitle_style.style,
+                },
+                audio_track: audioTrack
+                  ? {
+                      ...audioTrack,
+                      volume: preset.audio_preset.bgm_volume,
+                      fade_in_sec: preset.audio_preset.fade_in_sec,
+                      fade_out_sec: preset.audio_preset.fade_out_sec,
+                    }
+                  : undefined,
+              }, { timeout: 600_000 });
+              response = composeRes.data as { duration_sec: number; file_size_bytes: number };
             } else {
-              // Mix: avatar fullscreen for ~60% of time, PIP/voiceover for b-roll
-              // Each b-roll scene occupies its proportional slice of total avatar duration
-              const totalNonAvatarDuration = bgScenes.reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0);
+              // ── /compose-layout with b-roll backgrounds ─────────────────────
+              const backgrounds: Array<{ storage_key: string; type: 'image' | 'video' }> = [];
+              const segments: Array<{ layout: string; bg_index: number; weight: number }> = [];
 
+              // Push b-roll backgrounds first
               bgScenes.forEach((s: SceneRow, idx: number) => {
                 const storageKey = (s.type === 'clip' ? s.clipUrl : s.imageUrl)!;
                 backgrounds.push({
@@ -296,53 +308,50 @@ export function createVideoComposeWorker(deps: Deps): Worker {
                 });
 
                 const sceneWeight = Number(s.durationSec ?? 5) / avatarOnlyDuration;
-
-                // Alternate between layouts for visual variety
                 const layouts = ['pip_bl', 'pip_br', 'voiceover', 'pip_tl'];
-                const layout = layouts[idx % layouts.length];
-                segments.push({ layout, bg_index: idx, weight: sceneWeight });
+                segments.push({ layout: layouts[idx % layouts.length], bg_index: idx, weight: sceneWeight });
               });
 
-              // Add a fullscreen segment at start (hook scene is avatar-only)
-              // Remaining weight = 1.0 - sum(bg weights)
+              // Remaining weight → fullscreen avatar at the start (hook section)
               const bgTotalWeight = segments.reduce((sum, s) => sum + s.weight, 0);
-              const ffWeight = Math.max(0.05, 1.0 - bgTotalWeight);
+              const ffWeight = +(Math.max(0.05, 1.0 - bgTotalWeight)).toFixed(4);
 
-              // Insert fullscreen at beginning if there's meaningful remaining time
-              if (ffWeight >= 0.05) {
-                backgrounds.push({ storage_key: combinedAvatarUrl!, type: 'video' });
-                // Insert at front
-                segments.unshift({ layout: 'fullscreen', bg_index: backgrounds.length - 1, weight: ffWeight });
-              }
+              // Use the first b-roll as background for the fullscreen segment
+              // (avoids re-downloading the combined avatar just for a background track)
+              segments.unshift({ layout: 'fullscreen', bg_index: 0, weight: ffWeight });
+
+              // NOTE: subtitles are NOT adjusted via adjustSubtitlesForPreset here.
+              // The /compose-layout Python pipeline adjusts subtitle timings itself
+              // based on segment xfade overlaps. Passing presetSubtitles (which were
+              // adjusted for DB scene boundaries) would double-shift the timestamps.
+              const layoutRes = await axios.post(`${videoProcessorUrl}/compose-layout`, {
+                job_id:              jobId,
+                tenant_id:           tenantId,
+                output_key:          outputKey,
+                avatar_storage_key:  combinedAvatarUrl,
+                backgrounds,
+                segments,
+                subtitles:           subtitles, // raw, unadjusted — Python handles xfade shift
+                settings: {
+                  ...((payload['settings'] as object) ?? {}),
+                  subtitle_style: preset.subtitle_style.style,
+                },
+                audio_track: audioTrack
+                  ? {
+                      ...audioTrack,
+                      volume: preset.audio_preset.bgm_volume,
+                      fade_in_sec: preset.audio_preset.fade_in_sec,
+                      fade_out_sec: preset.audio_preset.fade_out_sec,
+                    }
+                  : undefined,
+                chroma_color: '#00FF00',
+                pip_scale: 0.30,
+                transition: preset.transition_type,
+                transition_duration: preset.transition_duration,
+              }, { timeout: 600_000 });
+
+              response = layoutRes.data as { duration_sec: number; file_size_bytes: number };
             }
-
-            const layoutRes = await axios.post(`${videoProcessorUrl}/compose-layout`, {
-              job_id:              jobId,
-              tenant_id:           tenantId,
-              output_key:          outputKey,
-              avatar_storage_key:  combinedAvatarUrl,
-              backgrounds,
-              segments,
-              subtitles:           presetSubtitles,
-              settings: {
-                ...((payload['settings'] as object) ?? {}),
-                subtitle_style: preset.subtitle_style.style,
-              },
-              audio_track: audioTrack
-                ? {
-                    ...audioTrack,
-                    volume: preset.audio_preset.bgm_volume,
-                    fade_in_sec: preset.audio_preset.fade_in_sec,
-                    fade_out_sec: preset.audio_preset.fade_out_sec,
-                  }
-                : undefined,
-              chroma_color: '#00FF00',
-              pip_scale: 0.30,
-              transition: preset.transition_type,
-              transition_duration: preset.transition_duration,
-            }, { timeout: 600_000 });
-
-            response = layoutRes.data as { duration_sec: number; file_size_bytes: number };
           } else {
             // ── LEGACY/SLIDESHOW MODE: /compose ────────────────────────────────
             const composeRes = await axios.post(`${videoProcessorUrl}/compose`, {
