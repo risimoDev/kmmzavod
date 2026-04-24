@@ -27,6 +27,7 @@
  * GET    /jobs                      All jobs (paginated, filterable)
  * GET    /jobs/:id                  Job detail (scenes + event timeline)
  * POST   /jobs/:id/retry            Re-enqueue failed job
+ * POST   /jobs/:id/recompose        Re-compose using existing assets (no regen)
  * POST   /jobs/:id/cancel           Cancel job
  *
  * ─── Platform ─────────────────────────────────────────────────────────────
@@ -735,6 +736,80 @@ export async function adminRoutes(app: FastifyInstance) {
       jobId: id, status: 'running', mode: 'resume-scenes',
       resumed: { avatar: failedAvatarScenes.length, clip: failedClipScenes.length, image: failedImageScenes.length },
     });
+  });
+
+  // POST /api/v1/admin/jobs/:id/recompose
+  // Re-runs video composition using already-generated scene assets (MinIO files).
+  // Works regardless of current job status (failed, running, completed).
+  // Useful when: compose failed, compose settings changed, or to produce a new variant.
+  // Requires ALL non-failed scenes to have their asset URLs saved in the DB.
+  app.post('/jobs/:id/recompose', async (req, reply) => {
+    const { id } = req.params as { id: string };
+
+    const job = await db.job.findUniqueOrThrow({
+      where: { id },
+      select: { id: true, tenantId: true, status: true, videoId: true },
+    });
+
+    // Verify all non-failed scenes have their assets saved
+    const scenes = await db.scene.findMany({
+      where: { jobId: id },
+      select: { id: true, sceneIndex: true, type: true, status: true,
+                avatarUrl: true, clipUrl: true, imageUrl: true,
+                avatarDone: true, clipDone: true, imageDone: true },
+      orderBy: { sceneIndex: 'asc' },
+    });
+
+    if (scenes.length === 0) {
+      return reply.code(409).send({ error: 'Conflict',
+        message: 'No scenes found — cannot recompose. Use retry to regenerate from scratch.' });
+    }
+
+    const missing = scenes.filter(s => {
+      if (s.status === 'failed') return false; // failed scenes are skipped in compose
+      if (s.type === 'avatar') return !s.avatarUrl;
+      if (s.type === 'clip')   return !s.clipUrl;
+      if (s.type === 'image')  return !s.imageUrl;
+      return false;
+    });
+
+    if (missing.length > 0) {
+      const detail = missing
+        .map(s => `scene ${s.sceneIndex + 1} (${s.type})`)
+        .join(', ');
+      return reply.code(409).send({
+        error: 'Assets not ready',
+        message: `Cannot recompose — missing assets for: ${detail}. ` +
+                 'Some scenes may still be generating. Wait for completion or use retry.',
+        missingScenes: missing.map(s => ({ id: s.id, sceneIndex: s.sceneIndex, type: s.type })),
+      });
+    }
+
+    // Reset compose-level status (keep scenes intact)
+    await db.$transaction([
+      db.job.update({ where: { id }, data: { status: 'composing', error: null } }),
+      ...(job.videoId ? [
+        db.video.update({ where: { id: job.videoId }, data: { status: 'composing', error: null } }),
+      ] : []),
+    ]);
+
+    await db.jobEvent.create({
+      data: {
+        jobId: id, tenantId: job.tenantId,
+        stage: 'admin', status: 'started',
+        message: 'Manual recompose triggered by admin',
+      },
+    });
+
+    await videoComposeQueue.add(
+      `compose:recompose:${id}`,
+      { jobId: id, tenantId: job.tenantId },
+      QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions,
+    );
+
+    await audit(req.user.userId, 'job.recompose', 'job', id, req.ip);
+    logger.info({ jobId: id, adminId: req.user.userId }, 'Video recompose triggered by admin');
+    return reply.send({ jobId: id, status: 'composing', mode: 'recompose' });
   });
 
   // POST /api/v1/admin/jobs/:id/cancel

@@ -50,6 +50,16 @@ export default function AdminJobsPage() {
     finally { setActionId(null); }
   };
 
+  const handleRecompose = async (id: string) => {
+    setActionId(id);
+    try { await adminApi.recomposeJob(id); load(); }
+    catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Ошибка пересборки: ${msg}`);
+    }
+    finally { setActionId(null); }
+  };
+
   const handleCancel = async (id: string) => {
     setActionId(id);
     try { await adminApi.cancelJob(id); load(); }
@@ -126,6 +136,13 @@ export default function AdminJobsPage() {
                                   {j._count.scenes > 0 ? "Возобновить" : "Перезапустить"}
                                 </Button>
                               )}
+                              {j._count.scenes > 0 && (
+                                <Button variant="outline" size="xs"
+                                  title="Пересобрать видео из сохранённых материалов"
+                                  loading={actionId === j.id} onClick={() => handleRecompose(j.id)}>
+                                  Пересобрать
+                                </Button>
+                              )}
                               {!["completed", "cancelled", "failed"].includes(j.status) && (
                                 <Button variant="danger" size="xs"
                                   loading={actionId === j.id} onClick={() => handleCancel(j.id)}>
@@ -174,19 +191,14 @@ export default function AdminJobsPage() {
                     {detailJob.scenes.length > 0 ? "Возобновить" : "Перезапустить"}
                   </Button>
                 )}
-                <Dialog.Close asChild>
-                  <Button variant="ghost" size="xs">✕</Button>
-                </Dialog.Close>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              {detailLoading && (
-                <div className="flex items-center justify-center h-32 text-text-tertiary text-sm">
-                  Загрузка…
-                </div>
-              )}
-
+                {detailJob && detailJob.scenes.length > 0 && (
+                  <Button variant="outline" size="xs"
+                    title="Пересобрать видео из сохранённых материалов"
+                    loading={actionId === detailJob.id}
+                    onClick={() => handleRecompose(detailJob.id)}>
+                    Пересобрать
+                  </Button>
+                )}
               {detailJob && (
                 <>
                   {/* Header info */}
@@ -230,6 +242,21 @@ export default function AdminJobsPage() {
                             {s.error && (
                               <p className="text-[10px] text-danger font-mono mt-1 truncate">{s.error}</p>
                             )}
+                            {/* Asset availability indicators */}
+                            <div className="flex gap-2 mt-1 flex-wrap">
+                              {s.type === 'avatar' && (
+                                <AssetBadge label="avatar" ready={!!s.avatarUrl} />
+                              )}
+                              {s.type === 'clip' && (
+                                <>
+                                  <AssetBadge label="frame" ready={!!s.frameUrl} />
+                                  <AssetBadge label="clip" ready={!!s.clipUrl} />
+                                </>
+                              )}
+                              {s.type === 'image' && (
+                                <AssetBadge label="image" ready={!!s.imageUrl} />
+                              )}
+                            </div>
                             {/* Generation detail */}
                             {s.generations.length > 0 && (
                               <div className="mt-2 space-y-1">
@@ -289,10 +316,18 @@ export default function AdminJobsPage() {
             </div>
 
             {detailJob && (
-              <div className="px-6 py-4 border-t border-border bg-surface-1 flex gap-2">
+              <div className="px-6 py-4 border-t border-border bg-surface-1 flex gap-2 flex-wrap">
                 {(detailJob.status === "failed" || detailJob.status === "cancelled") && (
                   <Button variant="primary" size="sm" onClick={() => { handleRetry(detailJob.id); setDetailJob(null); }}>
-                    Перезапустить задачу
+                    {detailJob.scenes.length > 0 ? "Возобновить" : "Перезапустить"}
+                  </Button>
+                )}
+                {detailJob.scenes.length > 0 && (
+                  <Button variant="outline" size="sm"
+                    title="Пересобрать видео из уже сохранённых материалов (без регенерации сцен)"
+                    loading={actionId === detailJob.id}
+                    onClick={() => { handleRecompose(detailJob.id); setDetailJob(null); }}>
+                    Пересобрать видео
                   </Button>
                 )}
                 {!["completed", "cancelled", "failed"].includes(detailJob.status) && (
@@ -318,5 +353,19 @@ function InfoRow({ label, value, mono }: { label: string; value: React.ReactNode
       <p className="text-text-tertiary mb-0.5">{label}</p>
       <p className={cn("text-text-primary", mono && "font-mono text-[10px]")}>{value}</p>
     </div>
+  );
+}
+
+function AssetBadge({ label, ready }: { label: string; ready: boolean }) {
+  return (
+    <span className={cn(
+      "inline-flex items-center gap-1 text-[9px] font-medium px-1.5 py-0.5 rounded-full border",
+      ready
+        ? "text-success border-success/30 bg-success/10"
+        : "text-text-tertiary border-border bg-surface-1"
+    )}>
+      <span>{ready ? "✓" : "○"}</span>
+      <span>{label}</span>
+    </span>
   );
 }

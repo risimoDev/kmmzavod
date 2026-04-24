@@ -29,17 +29,24 @@ export function createPipelineStateWorker(deps: Deps): Worker {
 
       await db.scene.update({ where: { id: sceneId }, data: updateData });
 
-      // Check if ALL scenes for this job are fully done (including failed)
+      // Check if ALL scenes for this job are fully done (including failed).
+      // We also verify that the required asset URL is set (belt-and-suspenders):
+      // if clipDone=true but clipUrl=null the asset isn't actually in MinIO yet.
       const scenes = await db.scene.findMany({
         where:  { jobId },
-        select: { type: true, avatarDone: true, clipDone: true, imageDone: true, status: true },
+        select: {
+          type: true,
+          avatarDone: true, clipDone: true, imageDone: true,
+          avatarUrl: true, clipUrl: true, imageUrl: true,
+          status: true,
+        },
       });
 
       type SceneRow = typeof scenes[number];
       const allDone = scenes.every((s: SceneRow) => {
-        if (s.type === 'avatar') return s.avatarDone || s.status === 'failed';
-        if (s.type === 'clip')   return s.clipDone   || s.status === 'failed';
-        if (s.type === 'image')  return s.imageDone  || s.status === 'failed';
+        if (s.type === 'avatar') return (s.avatarDone && !!s.avatarUrl) || s.status === 'failed';
+        if (s.type === 'clip')   return (s.clipDone   && !!s.clipUrl)   || s.status === 'failed';
+        if (s.type === 'image')  return (s.imageDone  && !!s.imageUrl)  || s.status === 'failed';
         return true; // text/unknown scenes need no processing
       });
 

@@ -37,6 +37,26 @@ export function createVideoComposeWorker(deps: Deps): Worker {
         db.job.findUniqueOrThrow({ where: { id: jobId }, select: { payload: true, videoId: true, creditsUsed: true } }),
       ]);
 
+      // ── Pre-flight: verify all required assets are in MinIO ────────────────
+      // If compose was triggered before all workers finished (race condition), fail
+      // fast with a clear error rather than silently producing an incomplete video.
+      type SceneRow = typeof scenes[number];
+      const missingAssets = scenes
+        .filter((s: SceneRow) => {
+          if (s.type === 'avatar') return s.status !== 'failed' && !s.avatarUrl;
+          if (s.type === 'clip')   return s.status !== 'failed' && !s.clipUrl;
+          if (s.type === 'image')  return s.status !== 'failed' && !s.imageUrl;
+          return false;
+        })
+        .map((s: SceneRow) => `scene ${s.sceneIndex} (${s.type})`);
+
+      if (missingAssets.length > 0) {
+        throw new Error(
+          `Video compose aborted — assets not ready: ${missingAssets.join(', ')}. ` +
+          'Workers may still be running. Will retry automatically.',
+        );
+      }
+
       const payload = jobRow.payload as Record<string, unknown>;
       const settingsObj0 = (payload.settings ?? {}) as Record<string, unknown>;
 
@@ -54,7 +74,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
       }
 
       // Build accurate subtitles using Whisper transcription of avatar scenes
-      type SceneRow = typeof scenes[number];
+      // (SceneRow type already declared above for the pre-flight check)
 
       // Determine video format (slideshow = images only, no avatar)
       const settings = payload.settings as Record<string, unknown> | undefined;

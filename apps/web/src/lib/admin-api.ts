@@ -137,7 +137,16 @@ export interface AdminJobDetail extends AdminJob {
     heygenVideoId: string | null;
     klingTaskId: string | null;
     imageGenTaskId: string | null;
+    runwayTaskId: string | null;
     error: string | null;
+    // Asset storage keys (MinIO) — present when the asset has been generated & saved
+    avatarUrl: string | null;
+    clipUrl: string | null;
+    imageUrl: string | null;
+    frameUrl: string | null;
+    avatarDone: boolean;
+    clipDone: boolean;
+    imageDone: boolean;
     generations: Array<{
       id: string;
       provider: string;
@@ -357,6 +366,9 @@ export const adminApi = {
 
   retryJob: (id: string) =>
     apiFetch<{ jobId: string; status: string }>(`/jobs/${id}/retry`, { method: 'POST' }),
+
+  recomposeJob: (id: string) =>
+    apiFetch<{ jobId: string; status: string; mode: string }>(`/jobs/${id}/recompose`, { method: 'POST' }),
 
   cancelJob: (id: string) =>
     apiFetch<{ jobId: string; status: string }>(`/jobs/${id}/cancel`, { method: 'POST' }),
