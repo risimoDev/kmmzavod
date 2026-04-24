@@ -199,6 +199,19 @@ export default function AdminJobsPage() {
                     Пересобрать
                   </Button>
                 )}
+                <Dialog.Close asChild>
+                  <Button variant="ghost" size="xs">✕</Button>
+                </Dialog.Close>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {detailLoading && (
+                <div className="flex items-center justify-center h-32 text-text-tertiary text-sm">
+                  Загрузка…
+                </div>
+              )}
+
               {detailJob && (
                 <>
                   {/* Header info */}
