@@ -45,7 +45,8 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
-import { pipelineQueue, videoComposeQueue, ALL_QUEUES } from '../lib/queues';
+import { pipelineQueue, videoComposeQueue, gptScriptQueue, heygenQueue, imageGenQueue, ALL_QUEUES } from '../lib/queues';
+import { QUEUE_DEFS } from '@kmmzavod/queue';
 import { logger } from '../logger';
 import { config } from '../config';
 import { getProxyUrl, proxyFetch, proxyFetchStrict } from '../lib/proxy';
@@ -592,31 +593,148 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.send(job);
   });
 
-  // POST /api/v1/admin/jobs/:id/retry
+  // POST /api/v1/admin/jobs/:id/retry  — smart resume from failure point
+  // • No scenes yet (gpt-script failed)     → full restart via pipeline queue
+  // • All scenes done, job failed           → compose stage failed → re-enqueue video-compose
+  // • Some scenes failed                    → re-enqueue only those failed scene workers
   app.post('/jobs/:id/retry', async (req, reply) => {
     const { id } = req.params as { id: string };
 
-    const job = await db.job.findUniqueOrThrow({ where: { id },
-      select: { id: true, tenantId: true, status: true, videoId: true } });
+    const job = await db.job.findUniqueOrThrow({
+      where: { id },
+      select: { id: true, tenantId: true, status: true, videoId: true, payload: true },
+    });
 
     if (job.status !== 'failed' && job.status !== 'cancelled') {
       return reply.code(409).send({ error: 'Conflict',
         message: `Cannot retry job with status "${job.status}"` });
     }
 
+    const scenes = await db.scene.findMany({
+      where: { jobId: id },
+      select: { id: true, type: true, status: true, script: true, bRollPrompt: true,
+                durationSec: true, sceneIndex: true },
+      orderBy: { sceneIndex: 'asc' },
+    });
+
+    // ── Case 1: no scenes — gpt-script stage failed → full restart ─────────────
+    if (scenes.length === 0) {
+      await db.$transaction([
+        db.job.update({ where: { id }, data: { status: 'pending', error: null } }),
+        ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'pending' } })] : []),
+      ]);
+      await pipelineQueue.add(`pipeline:retry:${id}`, { jobId: id, tenantId: job.tenantId });
+      await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
+      logger.info({ jobId: id, adminId: req.user.userId, mode: 'full-restart' }, 'Job retried (full restart) by admin');
+      return reply.send({ jobId: id, status: 'pending', mode: 'full-restart' });
+    }
+
+    const failedScenes = scenes.filter(s => s.status === 'failed');
+
+    // ── Case 2: all scenes completed but job still failed — compose failed ──────
+    if (failedScenes.length === 0) {
+      await db.$transaction([
+        db.job.update({ where: { id }, data: { status: 'composing', error: null } }),
+        ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'composing' } })] : []),
+      ]);
+      await videoComposeQueue.add(
+        `compose:retry:${id}`,
+        { jobId: id, tenantId: job.tenantId },
+        QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions,
+      );
+      await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
+      logger.info({ jobId: id, adminId: req.user.userId, mode: 'resume-compose' }, 'Job retried (resume compose) by admin');
+      return reply.send({ jobId: id, status: 'composing', mode: 'resume-compose' });
+    }
+
+    // ── Case 3: scene-level failures — re-enqueue only failed scenes ────────────
+    // Load product image keys for reference (MinIO storage keys, not presigned URLs)
+    const productImageKeys: string[] = [];
+    if (job.videoId) {
+      const video = await db.video.findUnique({ where: { id: job.videoId }, select: { productId: true } });
+      if (video?.productId) {
+        const product = await db.product.findUnique({ where: { id: video.productId }, select: { images: true } });
+        if (product?.images?.length) productImageKeys.push(...product.images);
+      }
+    }
+
+    // Load avatar/voice settings from job payload
+    const payload = (job.payload as Record<string, unknown>) ?? {};
+    const settings = (payload['settings'] as Record<string, unknown>) ?? {};
+    const avatarId = ((payload['avatar_id'] ?? settings['avatar_id']) as string | undefined) ?? 'default';
+    const voiceId  = ((payload['voice_id']  ?? settings['voice_id'])  as string | undefined)
+      ?? '70856236390f4d0392d00187143d3900';
+
+    // Reset failed scenes + job status
     await db.$transaction([
-      db.job.update({ where: { id }, data: { status: 'pending', error: null } }),
-      ...(job.videoId ? [
-        db.video.update({ where: { id: job.videoId }, data: { status: 'pending' } }),
-      ] : []),
+      ...failedScenes.map(s => db.scene.update({ where: { id: s.id }, data: { status: 'pending', error: null } })),
+      db.job.update({ where: { id }, data: { status: 'running', error: null } }),
+      ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'processing' } })] : []),
     ]);
 
-    await pipelineQueue.add(`pipeline:retry:${id}`, { jobId: id, tenantId: job.tenantId });
+    // Re-enqueue per scene type — avatar in combined batch, clip/image individually
+    const failedAvatarScenes = failedScenes.filter(s => s.type === 'avatar' && s.script);
+    const failedClipScenes   = failedScenes.filter(s => s.type === 'clip'   && s.bRollPrompt);
+    const failedImageScenes  = failedScenes.filter(s => s.type === 'image'  && s.bRollPrompt);
+
+    if (failedAvatarScenes.length > 0) {
+      // Re-run as combined — use ALL avatar scenes to produce one coherent HeyGen video
+      const allAvatarScenes = scenes
+        .filter(s => s.type === 'avatar' && s.script)
+        .sort((a, b) => a.sceneIndex - b.sceneIndex);
+      await heygenQueue.add(
+        `heygen-resume:${id}`,
+        {
+          jobId: id,
+          sceneId: allAvatarScenes[0].id,
+          tenantId: job.tenantId,
+          avatarId, voiceId,
+          script: allAvatarScenes.map(s => s.script!).join(' '),
+          isCombined: true,
+          combinedSceneIds: allAvatarScenes.map(s => s.id),
+        },
+        QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
+      );
+    }
+
+    for (const scene of failedClipScenes) {
+      // Clip: image-gen (runway-frame) → chains to runway-clip automatically
+      await imageGenQueue.add(
+        `imggen-frame-resume:${scene.id}`,
+        {
+          jobId: id, sceneId: scene.id, tenantId: job.tenantId,
+          prompt: scene.bRollPrompt!,
+          referenceImageKeys: productImageKeys,
+          purpose: 'runway-frame',
+          clipDurationSec: Number(scene.durationSec ?? 5),
+        },
+        QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
+      );
+    }
+
+    for (const scene of failedImageScenes) {
+      await imageGenQueue.add(
+        `imggen-resume:${scene.id}`,
+        {
+          jobId: id, sceneId: scene.id, tenantId: job.tenantId,
+          prompt: scene.bRollPrompt!,
+          referenceImageKeys: productImageKeys,
+          purpose: 'scene-image',
+        },
+        QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
+      );
+    }
 
     await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
-    logger.info({ jobId: id, adminId: req.user.userId }, 'Job retried by admin');
-
-    return reply.send({ jobId: id, status: 'pending' });
+    logger.info(
+      { jobId: id, adminId: req.user.userId, mode: 'resume-scenes',
+        failedAvatar: failedAvatarScenes.length, failedClip: failedClipScenes.length, failedImage: failedImageScenes.length },
+      'Job retried (resume scenes) by admin',
+    );
+    return reply.send({
+      jobId: id, status: 'running', mode: 'resume-scenes',
+      resumed: { avatar: failedAvatarScenes.length, clip: failedClipScenes.length, image: failedImageScenes.length },
+    });
   });
 
   // POST /api/v1/admin/jobs/:id/cancel

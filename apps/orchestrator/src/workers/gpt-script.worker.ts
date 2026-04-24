@@ -51,6 +51,18 @@ function hashIdea(idea: string): string {
   return createHash('sha256').update(idea.toLowerCase().trim()).digest('hex').slice(0, 16);
 }
 
+/**
+ * Strip optional markdown code fences (```json ... ```) before JSON.parse.
+ * Claude models sometimes wrap JSON in fences even when instructed not to.
+ */
+function safeParseJson<T>(raw: string): T {
+  const cleaned = raw.trim()
+    .replace(/^```[a-z]*\r?\n?/m, '')
+    .replace(/\r?\n?```\s*$/m, '')
+    .trim();
+  return JSON.parse(cleaned) as T;
+}
+
 const IDEA_SYSTEM_PROMPT = `
 You are a top-tier Russian-language creative director for short-form viral video (TikTok/Reels/Shorts).
 Your job: generate ONE unique creative idea/concept for a product advertisement video.
@@ -282,7 +294,9 @@ export function createGptScriptWorker(deps: Deps): Worker {
       let ideaTotalCostUsd = 0;
       let ideaTotalPromptTokens = 0;
       let ideaTotalCompletionTokens = 0;
-      const MAX_IDEA_ATTEMPTS = 5;
+      let ideaParseFailures = 0;
+      let ideaHashCollisions = 0;
+      const MAX_IDEA_ATTEMPTS = 8;
 
       const productInfo = productContext
         ? `\nProduct: ${productContext.name}${productContext.description ? ` — ${productContext.description}` : ''}`
@@ -320,7 +334,8 @@ export function createGptScriptWorker(deps: Deps): Worker {
         ideaTotalCompletionTokens += usage.completion_tokens;
 
         try {
-          const parsed = JSON.parse(ideaRaw) as IdeaOutput;
+          const parsed = safeParseJson<IdeaOutput>(ideaRaw);
+          if (!parsed?.idea) throw new Error('Missing idea field');
           const h = hashIdea(parsed.idea);
 
           if (!usedHashes.has(h)) {
@@ -329,13 +344,19 @@ export function createGptScriptWorker(deps: Deps): Worker {
             break;
           }
           // Duplicate — retry with new seed
+          ideaHashCollisions++;
         } catch {
           // Parse error — retry
+          ideaParseFailures++;
         }
       }
 
       if (!approvedIdea) {
-        throw new Error('Failed to generate unique idea after max attempts — all ideas duplicated');
+        throw new Error(
+          `Failed to generate idea after ${MAX_IDEA_ATTEMPTS} attempts` +
+          ` (${ideaParseFailures} parse errors, ${ideaHashCollisions} hash collisions)` +
+          ` — check if model returns valid JSON and usedIdeaHashes list is not too long`,
+        );
       }
 
       // ── Track idea generation cost ─────────────────────────────────────────
@@ -421,8 +442,8 @@ export function createGptScriptWorker(deps: Deps): Worker {
       if (!raw) throw new Error('OpenAI returned empty content');
 
       const output: GptOutput = (() => {
-        try { return JSON.parse(raw) as GptOutput; }
-        catch { throw new Error(`OpenAI returned invalid JSON: ${raw.slice(0, 200)}`); }
+        try { return safeParseJson<GptOutput>(raw); }
+        catch { throw new Error(`Model returned invalid JSON: ${raw.slice(0, 200)}`); }
       })();
 
       if (!Array.isArray(output.scenes) || output.scenes.length === 0) {

@@ -121,8 +121,9 @@ export default function AdminJobsPage() {
                             <div className="flex gap-1.5">
                               {(j.status === "failed" || j.status === "cancelled") && (
                                 <Button variant="ghost" size="xs"
+                                  title={j._count.scenes > 0 ? "Возобновить с точки сбоя" : "Полный перезапуск"}
                                   loading={actionId === j.id} onClick={() => handleRetry(j.id)}>
-                                  Повтор
+                                  {j._count.scenes > 0 ? "Возобновить" : "Перезапустить"}
                                 </Button>
                               )}
                               {!["completed", "cancelled", "failed"].includes(j.status) && (
@@ -164,9 +165,19 @@ export default function AdminJobsPage() {
               <Dialog.Title className="text-sm font-semibold text-text-primary">
                 Детали задачи
               </Dialog.Title>
-              <Dialog.Close asChild>
-                <Button variant="ghost" size="xs">✕</Button>
-              </Dialog.Close>
+              <div className="flex items-center gap-2">
+                {detailJob && (detailJob.status === "failed" || detailJob.status === "cancelled") && (
+                  <Button variant="ghost" size="xs"
+                    title={detailJob.scenes.length > 0 ? "Возобновить с точки сбоя" : "Полный перезапуск"}
+                    loading={actionId === detailJob.id}
+                    onClick={() => handleRetry(detailJob.id)}>
+                    {detailJob.scenes.length > 0 ? "Возобновить" : "Перезапустить"}
+                  </Button>
+                )}
+                <Dialog.Close asChild>
+                  <Button variant="ghost" size="xs">✕</Button>
+                </Dialog.Close>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
