@@ -13,9 +13,9 @@
 
 // ── Rate constants ────────────────────────────────────────────────────────────
 
-/** GPTunnel proxy – claude-sonnet-4-6 input: $3 / 1 M tokens → $0.003 / 1 K tokens */
+/** GPTunnel proxy – claude-4.6-sonnet input: $3 / 1 M tokens → $0.003 / 1 K tokens */
 const GPTUNNEL_INPUT_PER_1K = 0.003;
-/** GPTunnel proxy – claude-sonnet-4-6 output: $15 / 1 M tokens → $0.015 / 1 K tokens */
+/** GPTunnel proxy – claude-4.6-sonnet output: $15 / 1 M tokens → $0.015 / 1 K tokens */
 const GPTUNNEL_OUTPUT_PER_1K = 0.015;
 
 /** HeyGen avatar video: ~$0.03 per second */
@@ -50,9 +50,9 @@ const USD_PER_CREDIT = 0.001;
 // ── Cost calculators ──────────────────────────────────────────────────────────
 
 /**
- * Estimate cost of a claude-sonnet-4-6 call routed through GPTunnel.
+ * Estimate cost of a claude-4.6-sonnet call routed through GPTunnel.
  *
- * Pricing (claude-sonnet-4-6 as of 2025):
+ * Pricing (claude-4.6-sonnet as of 2025):
  * - Input:  $0.003 per 1 K tokens ($3 / 1 M)
  * - Output: $0.015 per 1 K tokens ($15 / 1 M)
  *
