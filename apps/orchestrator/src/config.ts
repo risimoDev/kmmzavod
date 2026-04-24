@@ -22,7 +22,7 @@ const schema = z.object({
   HEYGEN_API_KEY: z.string(),
   RUNWAY_API_KEY: z.string(),
   RUNWAY_VIDEO_MODEL: z.enum(['gen4.5', 'gen4_turbo']).default('gen4_turbo'),
-  IMAGE_GEN_PROVIDER: z.enum(['runway', 'fal', 'replicate', 'comfyui', 'gemini']).default('runway'),
+  IMAGE_GEN_PROVIDER: z.enum(['runway', 'fal', 'replicate', 'comfyui', 'gemini', 'gptunnel']).default('runway'),
   IMAGE_GEN_API_KEY: z.string(),
   GEMINI_API_KEY: z.string().optional(),
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),

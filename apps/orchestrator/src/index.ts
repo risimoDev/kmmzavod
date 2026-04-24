@@ -56,11 +56,14 @@ async function main() {
     ? config.RUNWAY_API_KEY
     : config.IMAGE_GEN_PROVIDER === 'gemini'
     ? (config.GEMINI_API_KEY ?? config.IMAGE_GEN_API_KEY)
+    : config.IMAGE_GEN_PROVIDER === 'gptunnel'
+    ? config.GPTUNNEL_API_KEY
     : config.IMAGE_GEN_API_KEY;
   const imageGen = new ImageGenClient(
     config.IMAGE_GEN_PROVIDER as ImageGenProvider,
     imageGenApiKey,
     config.GEMINI_API_KEY, // fallback key for any provider
+    config.IMAGE_GEN_PROVIDER === 'gptunnel' ? { baseUrl: config.GPTUNNEL_BASE_URL } : undefined,
   );
 
   const storage = new MinioStorageClient({

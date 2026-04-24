@@ -41,6 +41,8 @@ const REPLICATE_PER_IMAGE = 0.006;
 const COMFYUI_PER_IMAGE = 0;
 /** Gemini (free tier): $0 per image */
 const GEMINI_PER_IMAGE = 0;
+/** GPTunnel gpt-image-2-medium: $0.020 per image (OpenAI gpt-image-2 medium quality) */
+const GPTUNNEL_IMAGE_PER_IMAGE = 0.020;
 
 /** Platform credit conversion: 1 credit = $0.001 */
 const USD_PER_CREDIT = 0.001;
@@ -131,13 +133,14 @@ export function klingCostUsd(durationSec: number): number {
  * @param provider Image generation provider identifier
  * @returns Cost in USD
  */
-export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini'): number {
+export function imageGenCostUsd(provider: 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini' | 'gptunnel'): number {
   switch (provider) {
     case 'fal':       return FAL_PER_IMAGE;
     case 'replicate': return REPLICATE_PER_IMAGE;
     case 'comfyui':   return COMFYUI_PER_IMAGE;
     case 'runway':    return RUNWAY_IMAGE_PER_IMAGE;
     case 'gemini':    return GEMINI_PER_IMAGE;
+    case 'gptunnel':  return GPTUNNEL_IMAGE_PER_IMAGE;
   }
 }
 

@@ -98,7 +98,7 @@ export function createImageGenWorker(deps: Deps) {
       log.info({ storageKey }, 'Изображение загружено в MinIO');
 
       // ─── 3. Обновляем Scene ───────────────────────────────────────────────
-      const costUsd        = imageGenCostUsd(provider as 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini');
+      const costUsd        = imageGenCostUsd(provider as 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini' | 'gptunnel');
       const creditsCharged = creditsFromUsd(costUsd);
 
       if (isFrame) {
@@ -119,7 +119,7 @@ export function createImageGenWorker(deps: Deps) {
       await db.generation.create({
         data: {
           tenantId, jobId, sceneId,
-          provider: provider === 'runway' ? 'runway' : provider === 'replicate' ? 'replicate' : provider === 'comfyui' ? 'comfyui' : provider === 'gemini' ? 'gemini' as any : 'fal',
+          provider: provider === 'runway' ? 'runway' : provider === 'replicate' ? 'replicate' : provider === 'comfyui' ? 'comfyui' : provider === 'gemini' ? 'gemini' as any : provider === 'gptunnel' ? 'gptunnel' as any : 'fal',
           model:           provider,
           status:          'completed',
           requestPayload:  { prompt: imagePrompt, motionPrompt, purpose: purpose ?? 'scene-image' },

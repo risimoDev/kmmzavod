@@ -12,7 +12,7 @@ import axios from 'axios';
 import { logger } from '../logger';
 import { axiosProxyConfig } from '../lib/proxy';
 
-export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui' | 'gemini';
+export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui' | 'gemini' | 'gptunnel';
 
 interface GenerateImageOpts {
   prompt: string;
@@ -36,6 +36,8 @@ export class ImageGenClient {
     private readonly provider: ImageGenProvider,
     private readonly apiKey: string,
     private readonly geminiApiKey?: string,
+    /** Extra provider options (e.g. custom baseUrl for gptunnel). */
+    private readonly options?: { baseUrl?: string },
   ) {}
 
   /**
@@ -54,6 +56,8 @@ export class ImageGenClient {
         return this.generateComfyUI(opts);
       case 'gemini':
         return this.generateGemini(opts);
+      case 'gptunnel':
+        return this.generateGptunnel(opts);
     }
   }
 
@@ -162,6 +166,67 @@ export class ImageGenClient {
     }
 
     throw new Error('runway text_to_image: timeout генерации изображения');
+  }
+
+  // ── GPTunnel (OpenAI-compatible images API) ────────────────────────────────
+  /**
+   * Generate an image via GPTunnel using the gpt-image-2-medium model.
+   * OpenAI-compatible `/v1/images/generations` endpoint.
+   *
+   * Supported sizes: 1024x1024 | 1024x1536 (portrait) | 1536x1024 (landscape).
+   * Returns image as base64 buffer (b64_json format) to avoid relying on
+   * GPTunnel's ephemeral output URLs.
+   *
+   * @see https://gptunnel.ru — GPTunnel proxy
+   * @see https://platform.openai.com/docs/api-reference/images/create — Images API spec
+   */
+  private async generateGptunnel(opts: GenerateImageOpts): Promise<ImageResult> {
+    const baseURL = (this.options?.baseUrl ?? 'https://gptunnel.ru/v1').replace(/\/+$/, '');
+    const http = axios.create({
+      baseURL,
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 180_000,
+      ...axiosProxyConfig(),
+    });
+
+    // Map dimensions to nearest supported size
+    const w = opts.width ?? 1080;
+    const h = opts.height ?? 1920;
+    let size: string;
+    if (h > w) size = '1024x1536';      // portrait (9:16)
+    else if (w > h) size = '1536x1024'; // landscape (16:9)
+    else size = '1024x1024';            // square
+
+    const res = await http.post<{
+      data: Array<{ url?: string; b64_json?: string }>;
+    }>('/images/generations', {
+      model:           'gpt-image-2-medium',
+      prompt:          opts.prompt,
+      n:               1,
+      size,
+      response_format: 'b64_json',
+    });
+
+    const item = res.data?.data?.[0];
+    if (!item) throw new Error('gptunnel: empty response from images API');
+
+    if (item.b64_json) {
+      const buffer = Buffer.from(item.b64_json, 'base64');
+      return {
+        url: `data:image/png;base64,${item.b64_json.slice(0, 64)}`,
+        contentType: 'image/png',
+        buffer,
+      };
+    }
+
+    if (item.url) {
+      return { url: item.url, contentType: 'image/png' };
+    }
+
+    throw new Error('gptunnel: no image in response (neither b64_json nor url)');
   }
 
   // ── Fal.ai ─────────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ import type { RunwayClient, RunwayVideoModel } from '../clients/runway.client';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { runwayCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
+import { axiosProxyConfig } from '../lib/proxy';
 
 interface Deps {
   db:                 PrismaClient;
@@ -48,11 +49,6 @@ export function createRunwayClipWorker(deps: Deps) {
       const log     = logger.child({ jobId, sceneId, worker: 'runway-clip' });
       const startMs = Date.now();
 
-      // Determine mode: image-to-video (cheaper) when we have a product image
-      const useImageToVideo = !!referenceImageUrl;
-      const model: RunwayVideoModel = useImageToVideo ? 'gen4_turbo' : (defaultModel === 'gen4_turbo' ? 'gen4.5' : defaultModel);
-      const mode = useImageToVideo ? 'image-to-video' : 'text-to-video';
-
       // Ensure the motion prompt is clean and concise for Runway.
       // Runway image-to-video performs best with short, specific motion descriptions.
       // The prompt from image-gen already contains the extracted motion part.
@@ -62,17 +58,42 @@ export function createRunwayClipWorker(deps: Deps) {
         ? words.slice(0, MAX_MOTION_PROMPT_WORDS).join(' ')
         : prompt.trim();
 
-      log.info({ mode, model, referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
+      log.info({ referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
 
       await db.jobEvent.create({
-        data: { jobId, tenantId, stage: 'runway-clip', status: 'started', meta: { sceneId, mode, model } },
+        data: { jobId, tenantId, stage: 'runway-clip', status: 'started', meta: { sceneId } },
       });
 
       // ─── 1. Создаём задачу в Runway ──────────────────────────────────────
+      // The referenceImageUrl is a MinIO presigned URL (may be internal http://minio:9000/...).
+      // Runway's API servers cannot reach internal Docker hostnames.
+      // Download the image here (works from within Docker) and encode as base64 data URI.
+      let promptImageUri: string | undefined;
+      if (referenceImageUrl) {
+        try {
+          const imgRes = await axios.get<ArrayBuffer>(referenceImageUrl, {
+            responseType: 'arraybuffer',
+            timeout: 30_000,
+            ...axiosProxyConfig(),
+          });
+          const mimeType = (imgRes.headers['content-type'] as string | undefined)
+            ?.split(';')[0]?.trim() || 'image/jpeg';
+          const b64 = Buffer.from(imgRes.data).toString('base64');
+          promptImageUri = `data:${mimeType};base64,${b64}`;
+          log.debug({ bytes: (imgRes.data as ArrayBuffer).byteLength }, 'Runway: reference image encoded as base64 data URI');
+        } catch (err) {
+          log.warn({ err: (err as Error).message, url: referenceImageUrl.slice(0, 80) }, 'Runway: failed to download reference image, falling back to text-to-video');
+          promptImageUri = undefined;
+        }
+      }
+
+      const useImageToVideoFinal = !!promptImageUri;
+      const finalModel: RunwayVideoModel = useImageToVideoFinal ? 'gen4_turbo' : (defaultModel === 'gen4_turbo' ? 'gen4.5' : defaultModel);
+
       let taskId: string;
-      if (useImageToVideo) {
+      if (useImageToVideoFinal) {
         taskId = await runway.createImageToVideo({
-          promptImage: referenceImageUrl,
+          promptImage: promptImageUri!,
           prompt: runwayPrompt,
           durationSec: durationSec ?? 5,
           model: 'gen4_turbo',
@@ -84,17 +105,17 @@ export function createRunwayClipWorker(deps: Deps) {
           model: 'gen4.5',
         });
       }
-      log.info({ taskId, mode }, 'Runway: задача создана, ожидаем клип');
+      log.info({ taskId, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video' }, 'Runway: задача создана, ожидаем клип');
 
       await db.scene.update({
         where: { id: sceneId },
         data:  { runwayTaskId: taskId, status: 'processing' },
       });
 
-      // ─── 2. Polling ───────────────────────────────────────────────────────
+      // ─── 2. Polling ───────────────────────────────────────────────────
       const { outputUrl, duration } = await runway.pollUntilDone(taskId);
       const actualDuration = duration > 0 ? duration : (durationSec ?? 5);
-      log.info({ outputUrl, actualDuration, mode }, 'Runway: клип готов');
+      log.info({ outputUrl, actualDuration, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video' }, 'Runway: клип готов');
 
       // ─── 3. Скачиваем → MinIO ─────────────────────────────────────────────
       const storageKey = StoragePaths.sceneClip(tenantId, sceneId);
@@ -106,7 +127,7 @@ export function createRunwayClipWorker(deps: Deps) {
       log.info({ storageKey }, 'Runway: клип загружен в MinIO');
 
       // ─── 4. Обновляем Scene ───────────────────────────────────────────────
-      const actualModel = useImageToVideo ? 'gen4_turbo' : 'gen4.5';
+      const actualModel = useImageToVideoFinal ? 'gen4_turbo' : 'gen4.5';
       const costUsd        = runwayCostUsd(actualDuration, actualModel);
       const creditsCharged = creditsFromUsd(costUsd);
 
@@ -125,7 +146,7 @@ export function createRunwayClipWorker(deps: Deps) {
           model:           actualModel,
           status:          'completed',
           externalTaskId:  taskId,
-          requestPayload:  { prompt: runwayPrompt, durationSec, mode, referenceImageUrl: referenceImageUrl?.slice(0, 200) },
+          requestPayload:  { prompt: runwayPrompt, durationSec, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', referenceImageUrl: referenceImageUrl?.slice(0, 200) },
           responsePayload: { storageKey, durationSec: actualDuration },
           costUsd,
           creditsCharged,
@@ -147,8 +168,8 @@ export function createRunwayClipWorker(deps: Deps) {
           jobId, tenantId,
           stage:   'runway-clip',
           status:  'completed',
-          message: `${mode} ${actualDuration.toFixed(1)}s (${actualModel}) — $${costUsd.toFixed(4)}`,
-          meta:    { sceneId, storageKey, costUsd, creditsCharged, mode, model: actualModel },
+          message: `${useImageToVideoFinal ? 'image-to-video' : 'text-to-video'} ${actualDuration.toFixed(1)}s (${actualModel}) — $${costUsd.toFixed(4)}`,
+          meta:    { sceneId, storageKey, costUsd, creditsCharged, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', model: actualModel },
         },
       });
 
@@ -159,7 +180,7 @@ export function createRunwayClipWorker(deps: Deps) {
         { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
       );
 
-      log.info({ costUsd, creditsCharged, mode, model: actualModel }, 'Runway клип успешно обработан');
+      log.info({ costUsd, creditsCharged, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', model: actualModel }, 'Runway клип успешно обработан');
     },
     { connection, concurrency: QUEUES['runway-clip'].concurrency },
   );
