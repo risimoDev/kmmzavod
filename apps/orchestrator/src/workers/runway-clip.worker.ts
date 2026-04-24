@@ -49,13 +49,11 @@ export function createRunwayClipWorker(deps: Deps) {
       const log     = logger.child({ jobId, sceneId, worker: 'runway-clip' });
       const startMs = Date.now();
 
-      // Ensure the motion prompt is clean and concise for Runway.
-      // Runway image-to-video performs best with short, specific motion descriptions.
-      // The prompt from image-gen already contains the extracted motion part.
-      const MAX_MOTION_PROMPT_WORDS = 30;
-      const words = prompt.trim().split(/\s+/);
-      const runwayPrompt = words.length > MAX_MOTION_PROMPT_WORDS
-        ? words.slice(0, MAX_MOTION_PROMPT_WORDS).join(' ')
+      // Ensure the motion prompt fits within Runway's 1000-char promptText limit.
+      // Runway gen4.5 benefits from detailed, specific motion descriptions.
+      const MAX_PROMPT_CHARS = 990;
+      const runwayPrompt = prompt.trim().length > MAX_PROMPT_CHARS
+        ? prompt.trim().slice(0, MAX_PROMPT_CHARS)
         : prompt.trim();
 
       log.info({ referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
@@ -96,13 +94,13 @@ export function createRunwayClipWorker(deps: Deps) {
           promptImage: promptImageUri!,
           prompt: runwayPrompt,
           durationSec: durationSec ?? 5,
-          model: 'gen4_turbo',
+          model: finalModel,
         });
       } else {
         taskId = await runway.createClip({
           prompt: runwayPrompt,
           durationSec: durationSec ?? 5,
-          model: 'gen4.5',
+          model: finalModel,
         });
       }
       log.info({ taskId, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video' }, 'Runway: задача создана, ожидаем клип');

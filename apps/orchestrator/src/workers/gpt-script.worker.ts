@@ -144,24 +144,32 @@ SCENE TYPE RULES
   Формат b_roll_prompt: "<IMAGE_PROMPT> ||| <MOTION_PROMPT>"
 
   IMAGE_PROMPT (для Runway text_to_image — статичный кадр):
-  30-50 слов, ОБЯЗАТЕЛЬНО на английском. Строгий порядок:
-    1. Shot type: "extreme close-up", "product hero shot", "low angle"
-    2. The EXACT product (use name + color/material from PRODUCT_VISUAL_PROFILE)
-    3. Surface/background: "white marble surface", "dark studio", "natural wood"
-    4. Lighting: "soft studio rim lighting", "warm golden hour", "cold neon side-light"
-    5. Depth of field: "shallow DOF, blurred background", "sharp foreground"
-    6. Quality: "commercial photography, 4K, photorealistic"
-  EXAMPLE: "Hero product shot, [BRAND] [COLOR] serum bottle standing upright on white marble, soft studio rim lighting from the left, shallow DOF blurred dark background, water droplets on bottle surface, commercial photography 4K photorealistic"
+  40-60 слов, ОБЯЗАТЕЛЬНО на английском. Строгий порядок:
+    1. Shot type: "extreme close-up", "product hero shot", "low angle macro", "overhead flat-lay"
+    2. The EXACT product (name + color + material from PRODUCT_VISUAL_PROFILE)
+    3. Surface/background: "white marble surface", "dark velvet studio", "natural oak wood"
+    4. Lighting: "soft studio rim lighting from left", "warm golden hour backlight", "cold neon side-light", "Rembrandt portrait light"
+    5. Depth of field: "shallow DOF, creamy blurred background", "tack-sharp from front to back"
+    6. Atmosphere: "smoke wisps rising", "water droplets on surface", "petals scattered around base"
+    7. Quality: "ultra-detailed commercial photography, 4K, photorealistic, color-graded"
+  EXAMPLE: "Hero product shot, [BRAND] [COLOR] serum bottle standing upright on white marble, soft studio rim lighting from left, shallow DOF blurred charcoal background, water droplets on frosted glass surface, delicate flower petals at base, ultra-detailed commercial photography 4K photorealistic"
 
-  MOTION_PROMPT (для Runway image_to_video — КАК ДВИЖЕТСЯ):
-  15-25 слов, на английском. Describe ONE clear camera or subject movement:
-    ✓ "Camera slowly zooms in from medium to close-up on product label"
-    ✓ "Product rotates 180 degrees clockwise on turntable, light sweeps across surface"
-    ✓ "Camera orbits left to right around the product, revealing backside"
-    ✓ "Liquid pours from product, slow motion, droplets splash and freeze"
-    ✓ "Camera pulls back dramatically revealing product surrounded by ingredients"
-    ✗ NEVER: "The product is shown" / "A person uses the product" (no people in b-roll)
-    ✗ NEVER: Generic motion ("slight movement", "smooth pan") — be SPECIFIC
+  MOTION_PROMPT (для Runway gen4.5 image_to_video — КАК ДВИЖЕТСЯ):
+  40-80 слов, на английском. MAXIMUM CINEMATIC DETAIL. Runway gen4.5 reads up to 1000 chars.
+  Describe the EXACT motion in three parts:
+    1. PRIMARY MOTION: specific camera move OR product action
+    2. SPEED & TIMING: "slowly", "in 3 seconds", "quick snap then hold", "gradual"
+    3. ATMOSPHERE: light behavior, particle movement, surface reaction
+
+  HIGH-QUALITY MOTION PATTERNS:
+    ✓ "Camera begins at extreme close-up on the product label, then smoothly pulls back over 3 seconds to a medium hero shot, revealing the full packaging against the dark studio background. Soft rim light gradually brightens, creating a specular highlight that sweeps left to right across the bottle surface."
+    ✓ "The product rotates 90 degrees clockwise on a black reflective turntable over 4 seconds. A warm golden spotlight tracks the rotation, casting a long dramatic shadow. Particles of light flicker in the background."
+    ✓ "Camera orbits slowly from left to right at low angle, completing a 180-degree arc around the product over 5 seconds. Depth of field shifts from shallow to sharp mid-orbit, revealing texture and label detail."
+    ✓ "Liquid pours from product in slow motion — golden streams spiral downward. Camera holds tight on the pour for 2 seconds, then rack-focuses to product label in background."
+    ✓ "Camera starts at black and slowly zooms in through ambient fog toward the product hero shot, the product emerging from darkness into full studio light over 4 seconds."
+    ✗ NEVER: "slight movement", "gentle motion", "smooth pan" — too vague
+    ✗ NEVER: people, hands, body parts in any b-roll scene
+    ✗ NEVER: combine two full camera moves (pick ONE primary motion)
 
 - "image" (10–20%) — b_roll_prompt 30-50 words на английском (только IMAGE_PROMPT, без |||).
   Exact product name + colors + composition + mood. Commercial photography style.
@@ -207,8 +215,8 @@ HARD CONSTRAINTS
 - NEVER generic b-roll ("a person holds a product", "someone uses the product")
 - NEVER people in b-roll scenes — product only, with optional ingredients/textures
 - clip b_roll_prompt MUST use "|||" separator: "<IMAGE_PROMPT> ||| <MOTION_PROMPT>"
-- IMAGE_PROMPT: 30-50 words English, commercial photography style, exact product details
-- MOTION_PROMPT: 15-25 words English, ONE specific cinematic camera/product movement
+- IMAGE_PROMPT: 40-60 words English, commercial photography style, exact product details
+- MOTION_PROMPT: 40-80 words English, ONE specific cinematic movement with speed/timing/atmosphere
 - image b_roll_prompt: 30-50 words English (no ||| separator needed)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -222,7 +230,8 @@ HARD CONSTRAINTS
   ✓ Есть минимум 2 приёма из ОБЯЗАТЕЛЬНЫХ?
   ✓ CTA чёткий?
   ✓ Каждый clip b_roll_prompt содержит ||| и имя продукта + 2 визуальных детали?
-  ✓ MOTION_PROMPT описывает ОДНО конкретное движение на английском?
+  ✓ MOTION_PROMPT содержит: конкретное движение + скорость/тайминг + поведение света?
+  ✓ MOTION_PROMPT достаточно детальный (40-80 слов, не расплывчатый)?
 Если нет — перепиши эту сцену.
 `;
 
@@ -293,7 +302,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
           .replace('{{SEED}}', seed);
 
         const ideaResponse = await deps.openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'claude-sonnet-4-5',
           response_format: { type: 'json_object' },
           temperature: 1.2,
           messages: [
@@ -334,7 +343,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
       await deps.db.generation.create({
         data: {
           tenantId, jobId,
-          provider: 'gptunnel', model: 'gpt-4o', status: 'completed',
+          provider: 'gptunnel', model: 'claude-sonnet-4-5', status: 'completed',
           promptTokens: ideaTotalPromptTokens,
           completionTokens: ideaTotalCompletionTokens,
           requestPayload: { step: 'idea', productName: productContext?.name },
@@ -399,7 +408,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
         : { role: 'user', content: `Product: ${productContext?.name ?? 'неизвестный продукт'}.\n\nWrite the full script following the creative brief above.` };
 
       const response = await deps.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'claude-sonnet-4-5',
         response_format: { type: 'json_object' },
         temperature: 1.0,
         messages: [
@@ -429,7 +438,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
       await deps.db.generation.create({
         data: {
           tenantId, jobId,
-          provider: 'gptunnel', model: 'gpt-4o', status: 'completed',
+          provider: 'gptunnel', model: 'claude-sonnet-4-5', status: 'completed',
           promptTokens: usage.prompt_tokens,
           completionTokens: usage.completion_tokens,
           requestPayload: { step: 'script', idea: approvedIdea.creative_angle },
