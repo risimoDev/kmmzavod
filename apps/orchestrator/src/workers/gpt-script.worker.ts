@@ -302,7 +302,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
           .replace('{{SEED}}', seed);
 
         const ideaResponse = await deps.openai.chat.completions.create({
-          model: 'claude-sonnet-4-5',
+          model: 'claude-sonnet-4-6',
           response_format: { type: 'json_object' },
           temperature: 1.2,
           messages: [
@@ -343,7 +343,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
       await deps.db.generation.create({
         data: {
           tenantId, jobId,
-          provider: 'gptunnel', model: 'claude-sonnet-4-5', status: 'completed',
+          provider: 'gptunnel', model: 'claude-sonnet-4-6', status: 'completed',
           promptTokens: ideaTotalPromptTokens,
           completionTokens: ideaTotalCompletionTokens,
           requestPayload: { step: 'idea', productName: productContext?.name },
@@ -408,7 +408,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
         : { role: 'user', content: `Product: ${productContext?.name ?? 'неизвестный продукт'}.\n\nWrite the full script following the creative brief above.` };
 
       const response = await deps.openai.chat.completions.create({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-4-6',
         response_format: { type: 'json_object' },
         temperature: 1.0,
         messages: [
@@ -438,7 +438,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
       await deps.db.generation.create({
         data: {
           tenantId, jobId,
-          provider: 'gptunnel', model: 'claude-sonnet-4-5', status: 'completed',
+          provider: 'gptunnel', model: 'claude-sonnet-4-6', status: 'completed',
           promptTokens: usage.prompt_tokens,
           completionTokens: usage.completion_tokens,
           requestPayload: { step: 'script', idea: approvedIdea.creative_angle },
