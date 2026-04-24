@@ -47,6 +47,16 @@ export function createImageGenWorker(deps: Deps) {
       const log     = logger.child({ jobId, sceneId, worker: 'image-gen', purpose: purpose ?? 'scene-image' });
       const startMs = Date.now();
 
+      // For clip scenes, b_roll_prompt is encoded as "<IMAGE_PROMPT> ||| <MOTION_PROMPT>".
+      // Use only the IMAGE_PROMPT part for image generation.
+      const SEPARATOR = ' ||| ';
+      const imagePrompt = prompt.includes(SEPARATOR)
+        ? prompt.split(SEPARATOR)[0].trim()
+        : prompt;
+      const motionPrompt = prompt.includes(SEPARATOR)
+        ? prompt.split(SEPARATOR)[1]?.trim() ?? prompt
+        : prompt;
+
       log.info('Начало генерации изображения');
 
       await db.jobEvent.create({
@@ -60,8 +70,8 @@ export function createImageGenWorker(deps: Deps) {
 
       // ─── 1. Генерируем изображение ────────────────────────────────────────
       const result = await imageGen.generateWithFallback({
-        prompt,
-        negativePrompt: 'ugly, blurry, distorted, lowres',
+        prompt: imagePrompt,
+        negativePrompt: 'ugly, blurry, distorted, lowres, people, person, human, face, hands',
         width:  1080,
         height: 1920,
         referenceImageUrls: referenceImageKeys,
@@ -112,7 +122,7 @@ export function createImageGenWorker(deps: Deps) {
           provider: provider === 'runway' ? 'runway' : provider === 'replicate' ? 'replicate' : provider === 'comfyui' ? 'comfyui' : provider === 'gemini' ? 'gemini' as any : 'fal',
           model:           provider,
           status:          'completed',
-          requestPayload:  { prompt, purpose: purpose ?? 'scene-image' },
+          requestPayload:  { prompt: imagePrompt, motionPrompt, purpose: purpose ?? 'scene-image' },
           responsePayload: { storageKey, contentType },
           costUsd,
           creditsCharged,
@@ -147,7 +157,8 @@ export function createImageGenWorker(deps: Deps) {
           `runway:${sceneId}`,
           {
             jobId, sceneId, tenantId,
-            prompt,
+            // Use the motion prompt for Runway image→video animation
+            prompt: motionPrompt,
             durationSec: clipDurationSec ?? 5,
             referenceImageUrl: presignedUrl,
           } satisfies RunwayClipJobPayload,

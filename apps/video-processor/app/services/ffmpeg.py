@@ -606,8 +606,8 @@ def compose_layout_segment(
     pip_scale: float = 0.30,
     pip_margin: int = 30,
     chroma_color: str = "0x00FF00",
-    chroma_similarity: float = 0.15,
-    chroma_blend: float = 0.08,
+    chroma_similarity: float = 0.28,
+    chroma_blend: float = 0.10,
     threads: int = 0,
 ) -> None:
     """
@@ -617,6 +617,10 @@ def compose_layout_segment(
     Uses ``chromakey`` filter (YUV-space) to remove the green-screen background.
     Green-screen keying is far more reliable than black keying because green
     does not appear naturally in human skin, hair, or typical clothing.
+
+    similarity=0.28 is tuned for HeyGen H.264-compressed green-screen (#00FF00).
+    Higher value means more lenient keying — necessary because H.264 compression
+    introduces slight colour shifts on the background.
 
     Layout types:
         fullscreen  — avatar overlaid at full frame on top of background
@@ -631,8 +635,8 @@ def compose_layout_segment(
 
     # chromakey params for green-screen removal
     ck_color = chroma_color   # "0x00FF00"
-    ck_similarity = 0.15      # green-screen tolerance
-    ck_blend = 0.08           # smooth alpha edges
+    ck_similarity = chroma_similarity
+    ck_blend = chroma_blend
 
     if layout == "voiceover":
         # No avatar visible — use background video + avatar audio
@@ -648,12 +652,11 @@ def compose_layout_segment(
             map_args += ["-map", "[a]"]
 
     elif layout == "fullscreen":
-        # Chromakey avatar at full frame, overlay on background
-        # despill removes green colour contamination from edges
+        # Chromakey avatar at full frame, overlay on background.
+        # Note: no despill — it can be unavailable in some FFmpeg builds and is cosmetic only.
         fc_parts.append(
             f"[0:v]chromakey=color={ck_color}"
-            f":similarity={ck_similarity}:blend={ck_blend},"
-            f"despill=type=green:mix=0.5:expand=0[ak]"
+            f":similarity={ck_similarity}:blend={ck_blend}[ak]"
         )
         fc_parts.append("[1:v][ak]overlay=0:0:format=auto,format=yuv420p[v]")
         map_args += ["-map", "[v]"]
@@ -674,7 +677,6 @@ def compose_layout_segment(
         fc_parts.append(
             f"[0:v]chromakey=color={ck_color}"
             f":similarity={ck_similarity}:blend={ck_blend},"
-            f"despill=type=green:mix=0.5:expand=0,"
             f"scale={pip_w}:{pip_h}:flags=lanczos[ak_pip]"
         )
         fc_parts.append(

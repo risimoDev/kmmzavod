@@ -86,9 +86,13 @@ You MUST follow this pre-approved creative idea EXACTLY:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1 — PRODUCT VISUAL ANALYSIS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-Analyze every attached product image. Extract PRODUCT_VISUAL_PROFILE:
-  • Dominant colors, shape, material, texture, packaging, logo, distinctive features.
-Reference in every b_roll_prompt.
+Analyze every attached product image. Build PRODUCT_VISUAL_PROFILE:
+  • Brand/product name (from label or context)
+  • Exact dominant colors (2-3 specific hex/names, e.g. "matte black", "rose gold")
+  • Shape, material, texture, finish (e.g. "cylindrical glass bottle, frosted", "slim rectangular box, matte white")
+  • Packaging details (lid, cap, label style, distinctive logo or icon)
+  • Any standout visual element (metallic ring, colored gradient, embossed logo)
+Reference THESE SPECIFICS in EVERY b_roll_prompt — generic descriptions are forbidden.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 SCENE NARRATIVE ARC (STRICT)
@@ -97,7 +101,7 @@ SCENE NARRATIVE ARC (STRICT)
    Use the hook technique specified in the creative brief.
    Product MUST be mentioned in first 3 seconds.
 
-2. PRODUCT REVEAL (scene 1, clip/image) — cinematic hero shot.
+2. PRODUCT REVEAL (scene 1, clip) — cinematic hero shot of the actual product.
 
 3. BENEFITS (scenes 2-4, mix avatar + clip/image) — 2-3 concrete benefits.
    Avatar explains WHY, clip/image SHOWS proof.
@@ -118,7 +122,7 @@ OUTPUT SCHEMA
       "scene_index": 0,
       "type": "avatar" | "clip" | "image" | "text",
       "script": "<текст речи — ТОЛЬКО для avatar/text>",
-      "b_roll_prompt": "<промпт — ТОЛЬКО для clip/image>",
+      "b_roll_prompt": "<промпт — ТОЛЬКО для clip/image — формат описан НИЖЕ>",
       "duration_sec": 5
     }
   ],
@@ -135,15 +139,33 @@ SCENE TYPE RULES
   Связки: "Смотрите...", "Вот в чём фишка...", "А знаете, что самое крутое?"
   Усилители: "реально", "честно", "послушайте", "обратите внимание".
   Паузы "..." для эмфазы. Риторические вопросы.
-- "clip" (20–30%) — b_roll_prompt 50-80 words. ВСЕ 7 элементов:
-  1. Shot type  2. Camera movement  3. Lighting  4. Product placement
-  5. Background  6. Action  7. Technical quality (4K, shallow DOF)
-  ВАЖНО: clip-сцены будут сгенерированы как кадр → анимация через Runway.
-  Описывай ДВИЖЕНИЕ и АНИМАЦИЮ: "camera slowly orbits around",
-  "zoom in revealing texture", "product rotates on turntable with light sweep",
-  "water droplets splash around the product", "golden hour light shifts across surface".
-- "image" (10–20%) — b_roll_prompt 30-50 words.
-  Product appearance, composition, palette, mood.
+
+- "clip" (20–30%) — ДВОЙНОЙ ПРОМПТ, разделённый "|||":
+  Формат b_roll_prompt: "<IMAGE_PROMPT> ||| <MOTION_PROMPT>"
+
+  IMAGE_PROMPT (для Runway text_to_image — статичный кадр):
+  30-50 слов, ОБЯЗАТЕЛЬНО на английском. Строгий порядок:
+    1. Shot type: "extreme close-up", "product hero shot", "low angle"
+    2. The EXACT product (use name + color/material from PRODUCT_VISUAL_PROFILE)
+    3. Surface/background: "white marble surface", "dark studio", "natural wood"
+    4. Lighting: "soft studio rim lighting", "warm golden hour", "cold neon side-light"
+    5. Depth of field: "shallow DOF, blurred background", "sharp foreground"
+    6. Quality: "commercial photography, 4K, photorealistic"
+  EXAMPLE: "Hero product shot, [BRAND] [COLOR] serum bottle standing upright on white marble, soft studio rim lighting from the left, shallow DOF blurred dark background, water droplets on bottle surface, commercial photography 4K photorealistic"
+
+  MOTION_PROMPT (для Runway image_to_video — КАК ДВИЖЕТСЯ):
+  15-25 слов, на английском. Describe ONE clear camera or subject movement:
+    ✓ "Camera slowly zooms in from medium to close-up on product label"
+    ✓ "Product rotates 180 degrees clockwise on turntable, light sweeps across surface"
+    ✓ "Camera orbits left to right around the product, revealing backside"
+    ✓ "Liquid pours from product, slow motion, droplets splash and freeze"
+    ✓ "Camera pulls back dramatically revealing product surrounded by ingredients"
+    ✗ NEVER: "The product is shown" / "A person uses the product" (no people in b-roll)
+    ✗ NEVER: Generic motion ("slight movement", "smooth pan") — be SPECIFIC
+
+- "image" (10–20%) — b_roll_prompt 30-50 words на английском (только IMAGE_PROMPT, без |||).
+  Exact product name + colors + composition + mood. Commercial photography style.
+
 - "text" (<5%) — max 6 words.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -181,9 +203,13 @@ HARD CONSTRAINTS
 - Return VALID JSON ONLY — no markdown, no code fences
 - avatar/text: "script"; clip/image: "b_roll_prompt"
 - duration_sec: 4–8 avatar, 3–6 clip/image, 2–4 text
-- EVERY b_roll_prompt: product name + 2 visual details from PRODUCT_VISUAL_PROFILE
-- NEVER generic b-roll ("a person holds a product")
-- clip b_roll_prompt: 50-80 words, all 7 elements
+- EVERY b_roll_prompt: exact product name + 2 specific visual details from PRODUCT_VISUAL_PROFILE
+- NEVER generic b-roll ("a person holds a product", "someone uses the product")
+- NEVER people in b-roll scenes — product only, with optional ingredients/textures
+- clip b_roll_prompt MUST use "|||" separator: "<IMAGE_PROMPT> ||| <MOTION_PROMPT>"
+- IMAGE_PROMPT: 30-50 words English, commercial photography style, exact product details
+- MOTION_PROMPT: 15-25 words English, ONE specific cinematic camera/product movement
+- image b_roll_prompt: 30-50 words English (no ||| separator needed)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 САМОПРОВЕРКА
@@ -195,8 +221,8 @@ HARD CONSTRAINTS
   ✓ Текст звучит как живая речь, а не рекламный буклет?
   ✓ Есть минимум 2 приёма из ОБЯЗАТЕЛЬНЫХ?
   ✓ CTA чёткий?
-  ✓ Каждый b_roll_prompt: имя + 2 детали?
-  ✓ clip = 50-80 слов с 7 элементами?
+  ✓ Каждый clip b_roll_prompt содержит ||| и имя продукта + 2 визуальных детали?
+  ✓ MOTION_PROMPT описывает ОДНО конкретное движение на английском?
 Если нет — перепиши эту сцену.
 `;
 

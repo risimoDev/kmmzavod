@@ -97,13 +97,36 @@ export class ImageGenClient {
     const h = opts.height ?? 1920;
     const ratio = h > w ? '1080:1920' : w > h ? '1920:1080' : '1080:1080';
 
-    // Create task
-    const referenceImages = (opts.referenceImageUrls ?? [])
-      .filter(Boolean)
-      .map((uri) => ({ uri, relevance: 0.5 }));
+    // Convert reference image URLs to base64 data URIs.
+    // Runway's API calls out to download these URLs from its servers — internal MinIO
+    // presigned URLs are not accessible externally. Encoding as data URIs sidesteps this.
+    const rawUrls = (opts.referenceImageUrls ?? []).filter(Boolean);
+    if (rawUrls.length === 0) {
+      throw new Error('runway text_to_image requires at least 1 reference image — upload product images');
+    }
+
+    const referenceImages: Array<{ uri: string; relevance: number }> = [];
+    for (const url of rawUrls.slice(0, 3)) { // max 3 reference images
+      try {
+        const imgRes = await axios.get<ArrayBuffer>(url, {
+          responseType: 'arraybuffer',
+          timeout: 30_000,
+          ...axiosProxyConfig(),
+        });
+        const mimeType = (imgRes.headers['content-type'] as string | undefined)
+          ?.split(';')[0]?.trim() || 'image/jpeg';
+        const b64 = Buffer.from(imgRes.data).toString('base64');
+        referenceImages.push({
+          uri: `data:${mimeType};base64,${b64}`,
+          relevance: 0.9, // high relevance — we WANT the product to match
+        });
+      } catch (err) {
+        logger.warn({ url: url.slice(0, 80), err: (err as Error).message }, 'runway: failed to fetch reference image, skipping');
+      }
+    }
 
     if (referenceImages.length === 0) {
-      throw new Error('runway text_to_image requires at least 1 reference image — upload product images');
+      throw new Error('runway text_to_image: all reference images failed to download');
     }
 
     const createRes = await http.post<{ id: string }>('/text_to_image', {

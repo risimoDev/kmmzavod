@@ -53,6 +53,15 @@ export function createRunwayClipWorker(deps: Deps) {
       const model: RunwayVideoModel = useImageToVideo ? 'gen4_turbo' : (defaultModel === 'gen4_turbo' ? 'gen4.5' : defaultModel);
       const mode = useImageToVideo ? 'image-to-video' : 'text-to-video';
 
+      // Ensure the motion prompt is clean and concise for Runway.
+      // Runway image-to-video performs best with short, specific motion descriptions.
+      // The prompt from image-gen already contains the extracted motion part.
+      const MAX_MOTION_PROMPT_WORDS = 30;
+      const words = prompt.trim().split(/\s+/);
+      const runwayPrompt = words.length > MAX_MOTION_PROMPT_WORDS
+        ? words.slice(0, MAX_MOTION_PROMPT_WORDS).join(' ')
+        : prompt.trim();
+
       log.info({ mode, model, referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
 
       await db.jobEvent.create({
@@ -64,13 +73,13 @@ export function createRunwayClipWorker(deps: Deps) {
       if (useImageToVideo) {
         taskId = await runway.createImageToVideo({
           promptImage: referenceImageUrl,
-          prompt,
+          prompt: runwayPrompt,
           durationSec: durationSec ?? 5,
           model: 'gen4_turbo',
         });
       } else {
         taskId = await runway.createClip({
-          prompt,
+          prompt: runwayPrompt,
           durationSec: durationSec ?? 5,
           model: 'gen4.5',
         });
@@ -116,7 +125,7 @@ export function createRunwayClipWorker(deps: Deps) {
           model:           actualModel,
           status:          'completed',
           externalTaskId:  taskId,
-          requestPayload:  { prompt, durationSec, mode, referenceImageUrl: referenceImageUrl?.slice(0, 200) },
+          requestPayload:  { prompt: runwayPrompt, durationSec, mode, referenceImageUrl: referenceImageUrl?.slice(0, 200) },
           responsePayload: { storageKey, durationSec: actualDuration },
           costUsd,
           creditsCharged,
