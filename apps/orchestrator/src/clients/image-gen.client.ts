@@ -168,17 +168,19 @@ export class ImageGenClient {
     throw new Error('runway text_to_image: timeout генерации изображения');
   }
 
-  // ── GPTunnel (OpenAI-compatible images API) ────────────────────────────────
+  // ── GPTunnel (/v1/media/create + /v1/media/result polling) ──────────────────
   /**
-   * Generate an image via GPTunnel using the gpt-image-2-medium model.
-   * OpenAI-compatible `/v1/images/generations` endpoint.
+   * Generate an image via GPTunnel using the native `/v1/media/create` endpoint.
    *
-   * Supported sizes: 1024x1024 | 1024x1536 (portrait) | 1536x1024 (landscape).
-   * Returns image as base64 buffer (b64_json format) to avoid relying on
-   * GPTunnel's ephemeral output URLs.
+   * Flow:
+   *  1. POST /v1/media/create  → {id, status:"running"}
+   *  2. Poll POST /v1/media/result {task_id: id} until status === "done" | "failed"
+   *  3. Download the resulting URL and return as buffer.
+   *
+   * Supported models (from /v1/media/models): gpt-image-2-medium, flux-pro-1.1,
+   * google-imagen-4, seedream-4.5, etc.
    *
    * @see https://gptunnel.ru — GPTunnel proxy
-   * @see https://platform.openai.com/docs/api-reference/images/create — Images API spec
    */
   private async generateGptunnel(opts: GenerateImageOpts): Promise<ImageResult> {
     const baseURL = (this.options?.baseUrl ?? 'https://gptunnel.ru/v1').replace(/\/+$/, '');
@@ -188,45 +190,72 @@ export class ImageGenClient {
         'Authorization': `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json',
       },
-      timeout: 180_000,
+      timeout: 120_000,
       ...axiosProxyConfig(),
     });
 
-    // Map dimensions to nearest supported size
     const w = opts.width ?? 1080;
     const h = opts.height ?? 1920;
-    let size: string;
-    if (h > w) size = '1024x1536';      // portrait (9:16)
-    else if (w > h) size = '1536x1024'; // landscape (16:9)
-    else size = '1024x1024';            // square
 
-    const res = await http.post<{
-      data: Array<{ url?: string; b64_json?: string }>;
-    }>('/images/generations', {
-      model:           'gpt-image-2-medium',
-      prompt:          opts.prompt,
-      n:               1,
-      size,
-      response_format: 'b64_json',
+    // ── Step 1: create task ────────────────────────────────────────────────
+    const createRes = await http.post<{
+      code: number;
+      id?: string;
+      status?: string;
+      message?: string;
+    }>('/media/create', {
+      model:  'gpt-image-2-medium',
+      prompt: opts.prompt,
+      width:  w,
+      height: h,
     });
 
-    const item = res.data?.data?.[0];
-    if (!item) throw new Error('gptunnel: empty response from images API');
-
-    if (item.b64_json) {
-      const buffer = Buffer.from(item.b64_json, 'base64');
-      return {
-        url: `data:image/png;base64,${item.b64_json.slice(0, 64)}`,
-        contentType: 'image/png',
-        buffer,
-      };
+    if (createRes.data.code !== 0 || !createRes.data.id) {
+      throw new Error(`gptunnel media/create error ${createRes.data.code}: ${createRes.data.message ?? 'unknown'}`);
     }
 
-    if (item.url) {
-      return { url: item.url, contentType: 'image/png' };
+    const taskId = createRes.data.id;
+    logger.debug({ taskId, model: 'gpt-image-2-medium' }, 'gptunnel: media task created');
+
+    // ── Step 2: poll until done ────────────────────────────────────────────
+    const MAX_POLLS = 60; // up to 5 minutes (5s interval)
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await sleep(5_000);
+
+      const pollRes = await http.post<{
+        code: number;
+        id:   string;
+        status: 'running' | 'done' | 'failed' | string;
+        url:  string | null;
+        message?: string;
+      }>('/media/result', { task_id: taskId });
+
+      const { status, url } = pollRes.data;
+
+      if (status === 'done' && url) {
+        // ── Step 3: download image → return as buffer ──────────────────────
+        logger.debug({ taskId, url }, 'gptunnel: image ready, downloading');
+        const dlRes = await axios.get<ArrayBuffer>(url, {
+          responseType: 'arraybuffer',
+          timeout: 60_000,
+          ...axiosProxyConfig(),
+        });
+        const buffer = Buffer.from(dlRes.data);
+        return {
+          url,
+          contentType: (dlRes.headers['content-type'] as string | undefined)?.split(';')[0]?.trim() || 'image/png',
+          buffer,
+        };
+      }
+
+      if (status === 'failed') {
+        throw new Error(`gptunnel: image generation failed — ${pollRes.data.message ?? 'unknown error'}`);
+      }
+
+      logger.debug({ taskId, attempt: i + 1 }, 'gptunnel: ожидаем изображение');
     }
 
-    throw new Error('gptunnel: no image in response (neither b64_json nor url)');
+    throw new Error('gptunnel: timeout генерации изображения (300s)');
   }
 
   // ── Fal.ai ─────────────────────────────────────────────────────────────────
