@@ -86,7 +86,8 @@ export function createRunwayClipWorker(deps: Deps) {
       }
 
       const useImageToVideoFinal = !!promptImageUri;
-      const finalModel: RunwayVideoModel = useImageToVideoFinal ? 'gen4_turbo' : (defaultModel === 'gen4_turbo' ? 'gen4.5' : defaultModel);
+      const mode       = useImageToVideoFinal ? 'image-to-video' : 'text-to-video';
+      const finalModel: RunwayVideoModel = defaultModel;
 
       let taskId: string;
       if (useImageToVideoFinal) {
@@ -103,7 +104,7 @@ export function createRunwayClipWorker(deps: Deps) {
           model: finalModel,
         });
       }
-      log.info({ taskId, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video' }, 'Runway: задача создана, ожидаем клип');
+      log.info({ taskId, mode }, 'Runway: задача создана, ожидаем клип');
 
       await db.scene.update({
         where: { id: sceneId },
@@ -113,7 +114,7 @@ export function createRunwayClipWorker(deps: Deps) {
       // ─── 2. Polling ───────────────────────────────────────────────────
       const { outputUrl, duration } = await runway.pollUntilDone(taskId);
       const actualDuration = duration > 0 ? duration : (durationSec ?? 5);
-      log.info({ outputUrl, actualDuration, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video' }, 'Runway: клип готов');
+      log.info({ outputUrl, actualDuration, mode }, 'Runway: клип готов');
 
       // ─── 3. Скачиваем → MinIO ─────────────────────────────────────────────
       const storageKey = StoragePaths.sceneClip(tenantId, sceneId);
@@ -125,7 +126,7 @@ export function createRunwayClipWorker(deps: Deps) {
       log.info({ storageKey }, 'Runway: клип загружен в MinIO');
 
       // ─── 4. Обновляем Scene ───────────────────────────────────────────────
-      const actualModel = useImageToVideoFinal ? 'gen4_turbo' : 'gen4.5';
+      const actualModel = finalModel;
       const costUsd        = runwayCostUsd(actualDuration, actualModel);
       const creditsCharged = creditsFromUsd(costUsd);
 
@@ -144,7 +145,7 @@ export function createRunwayClipWorker(deps: Deps) {
           model:           actualModel,
           status:          'completed',
           externalTaskId:  taskId,
-          requestPayload:  { prompt: runwayPrompt, durationSec, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', referenceImageUrl: referenceImageUrl?.slice(0, 200) },
+          requestPayload:  { prompt: runwayPrompt, durationSec, mode, referenceImageUrl: referenceImageUrl?.slice(0, 200) },
           responsePayload: { storageKey, durationSec: actualDuration },
           costUsd,
           creditsCharged,
@@ -166,8 +167,8 @@ export function createRunwayClipWorker(deps: Deps) {
           jobId, tenantId,
           stage:   'runway-clip',
           status:  'completed',
-          message: `${useImageToVideoFinal ? 'image-to-video' : 'text-to-video'} ${actualDuration.toFixed(1)}s (${actualModel}) — $${costUsd.toFixed(4)}`,
-          meta:    { sceneId, storageKey, costUsd, creditsCharged, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', model: actualModel },
+          message: `${mode} ${actualDuration.toFixed(1)}s (${actualModel}) — $${costUsd.toFixed(4)}`,
+          meta:    { sceneId, storageKey, costUsd, creditsCharged, mode, model: actualModel },
         },
       });
 
@@ -178,7 +179,7 @@ export function createRunwayClipWorker(deps: Deps) {
         { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
       );
 
-      log.info({ costUsd, creditsCharged, mode: useImageToVideoFinal ? 'image-to-video' : 'text-to-video', model: actualModel }, 'Runway клип успешно обработан');
+      log.info({ costUsd, creditsCharged, mode, model: actualModel }, 'Runway клип успешно обработан');
     },
     { connection, concurrency: QUEUES['runway-clip'].concurrency },
   );
