@@ -97,6 +97,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       // Transcribe each avatar scene via Whisper for accurate word-level timing
       let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
+      let combinedTranscribeWords: Array<{ word: string; start_sec: number; end_sec: number }> = [];
       const avatarScenes = scenes.filter((s: SceneRow) => s.type === 'avatar' && s.script && s.avatarUrl);
 
       if (videoFormat === 'slideshow' || (avatarScenes.length === 0 && !isCombinedMode)) {
@@ -122,7 +123,8 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           }, { timeout: 180_000 });
 
           subtitles = transcribeRes.data.subtitles as Array<{ start_sec: number; end_sec: number; text: string }>;
-          logger.info({ jobId, subs: subtitles.length }, 'Combined Whisper transcription OK');
+          combinedTranscribeWords = (transcribeRes.data.words ?? []) as Array<{ word: string; start_sec: number; end_sec: number }>;
+          logger.info({ jobId, subs: subtitles.length, words: combinedTranscribeWords.length }, 'Combined Whisper transcription OK');
         } catch (err: any) {
           // Fallback: build subtitles from all avatar scripts using estimated timing
           logger.warn({ jobId, err: err.message }, 'Combined Whisper failed, using script fallback');
@@ -185,60 +187,98 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       // Build per-preset scene items with preset-specific transitions
       // Also compute subtitle timing adjustments for each preset's transition overlap
+      // L/J-cut logic: avatar→clip = J-cut (audio leads), clip→avatar = L-cut (audio lags)
       const buildSceneItems = (preset: ComposePreset) =>
         scenes
           .filter((s: SceneRow) => {
-            // Only include scenes that have a downloadable media asset
             if (s.type === 'avatar') return !!s.avatarUrl;
             if (s.type === 'clip')   return !!s.clipUrl;
             if (s.type === 'image')  return !!s.imageUrl;
-            return false; // text scenes have no media file; skip
+            return false;
           })
-          .map((s: SceneRow) => ({
-            scene_id: s.id,
-            type: s.type,
-            storage_key:
-              s.type === 'avatar' ? s.avatarUrl! :
-              s.type === 'clip'   ? s.clipUrl!   :
-              s.type === 'image'  ? s.imageUrl!  : '',
-            duration_sec: Number(s.durationSec ?? 3),
-            transition: preset.transition_type,
-            transition_duration: preset.transition_duration,
-          }));
+          .map((s: SceneRow, idx: number, arr: SceneRow[]) => {
+            // Content-aware transition + L/J-cut
+            let cutType = 'hard';
+            let audioOffset = 0;
 
-      // Adjust subtitle timestamps for xfade overlap per preset.
-      // Each xfade transition overlaps adjacent scenes, effectively shortening the
-      // output timeline. Subtitles that fall in scene N need to shift back by N * xfadeDur.
-      const adjustSubtitlesForPreset = (
-        rawSubs: Array<{ start_sec: number; end_sec: number; text: string }>,
-        preset: ComposePreset,
-      ) => {
-        if (preset.transition_duration <= 0 || rawSubs.length === 0) return rawSubs;
+            if (idx > 0) {
+              const prevType = arr[idx - 1].type;
+              const curType = s.type;
 
-        const xfadeDur = preset.transition_duration;
-
-        return rawSubs.map((sub) => {
-          // Find which scene this subtitle belongs to by walking scene boundaries
-          let sceneIdx = 0;
-          let off = 0;
-          for (let i = 0; i < scenes.length; i++) {
-            const dur = Number(scenes[i].durationSec ?? 5);
-            if (sub.start_sec < off + dur + 0.5) {
-              sceneIdx = i;
-              break;
+              // J-cut: audio of b-roll starts before video transition
+              if (prevType === 'avatar' && (curType === 'clip' || curType === 'image')) {
+                cutType = 'j_cut';
+                audioOffset = 0.3; // Audio leads by 0.3s
+              }
+              // L-cut: avatar audio continues over new b-roll
+              if (prevType === 'clip' && curType === 'avatar') {
+                cutType = 'l_cut';
+                audioOffset = -0.2; // Audio lags by 0.2s
+              }
             }
-            off += dur;
-            sceneIdx = i;
+
+            return {
+              scene_id: s.id,
+              type: s.type,
+              storage_key:
+                s.type === 'avatar' ? s.avatarUrl! :
+                s.type === 'clip'   ? s.clipUrl!   :
+                s.type === 'image'  ? s.imageUrl!  : '',
+              duration_sec: Number(s.durationSec ?? 3),
+              transition: preset.transition_type,
+              transition_duration: preset.transition_duration,
+              cut_type: cutType,
+              audio_offset_sec: audioOffset,
+              speed: 1.0,
+            };
+          });
+
+      // ── Compute duck zones from Whisper word timestamps ──────────────────
+      // Word-level timestamps are now returned directly from /transcribe
+      // (no second Whisper call needed, no uniform-distribution approximation)
+      const wordTimestamps: Array<{ word: string; start: number; end: number }> = [];
+      if (isCombinedMode && combinedTranscribeWords.length > 0) {
+        // Words from the first (and only) transcription call
+        for (const w of combinedTranscribeWords) {
+          wordTimestamps.push({ word: w.word, start: w.start_sec, end: w.end_sec });
+        }
+        logger.info({ jobId, wordCount: wordTimestamps.length }, 'Word timestamps from transcription used for ducking');
+        } catch (err: any) {
+          logger.warn({ jobId, err: err.message }, 'Failed to get word timestamps for ducking');
+        }
+      }
+
+      // Compute duck zones: group words into continuous speech segments
+      const computeDuckZones = (words: Array<{ start: number; end: number }>) => {
+        if (words.length === 0) return [];
+        const zones: Array<{ start_sec: number; end_sec: number; duck_volume: number }> = [];
+        let segStart = words[0].start;
+        let segEnd = words[0].end;
+
+        for (let i = 1; i < words.length; i++) {
+          const gap = words[i].start - segEnd;
+          if (gap < 0.5) {
+            segEnd = words[i].end;
+          } else {
+            zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.04 });
+            segStart = words[i].start;
+            segEnd = words[i].end;
           }
-          // Scene N starts (N * xfadeDur) seconds earlier due to accumulated overlaps
-          const shift = sceneIdx * xfadeDur;
-          return {
-            start_sec: +Math.max(0, sub.start_sec - shift).toFixed(2),
-            end_sec:   +Math.max(0, sub.end_sec   - shift).toFixed(2),
-            text:      sub.text,
-          };
-        });
+        }
+        zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.04 });
+        return zones;
       };
+
+      const duckZones = computeDuckZones(wordTimestamps);
+
+      // Subtitle timing adjustment is handled by the Python pipeline (both /compose
+      // and /compose-layout). The Python side has access to ACTUAL clip durations
+      // after normalization, speed ramping, and beat alignment — which the TS side
+      // cannot know in advance. We pass RAW subtitles and let Python adjust them.
+      // Previously adjustSubtitlesForPreset() was used but it was inaccurate:
+      // it used a uniform shift (sceneIdx * xfadeDur) that didn't account for
+      // CUT transitions, content-aware overrides, or beat alignment changes.
+      const rawSubtitles = subtitles;
 
       // Fire all variant renders in parallel
       // ── BGM auto-selection from library ─────────────────────────────────────
@@ -266,7 +306,6 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           if (!preset) throw new Error(`Unknown compose preset: ${presetName}`);
 
           const outputKey = `tenants/${tenantId}/videos/${jobId}/variant_${presetName}/final.mp4`;
-          const presetSubtitles = adjustSubtitlesForPreset(subtitles, preset);
 
           let response: { duration_sec: number; file_size_bytes: number };
 
@@ -281,8 +320,9 @@ export function createVideoComposeWorker(deps: Deps): Worker {
               (s.clipUrl || s.imageUrl)
             );
 
-            const avatarOnlyDuration = combinedAvatarDurationSec ?? (
-              scenes.filter((s: SceneRow) => s.type === 'avatar').reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0)
+            const avatarOnlyDuration = (combinedAvatarDurationSec && combinedAvatarDurationSec > 0)
+              ? combinedAvatarDurationSec
+              : scenes.filter((s: SceneRow) => s.type === 'avatar').reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0);
             );
 
             if (bgScenes.length === 0) {
@@ -299,22 +339,27 @@ export function createVideoComposeWorker(deps: Deps): Worker {
                   transition:          preset.transition_type,
                   transition_duration: preset.transition_duration,
                 }],
-                subtitles: presetSubtitles,
+                subtitles: rawSubtitles,
                 settings: {
                   ...((payload['settings'] as object) ?? {}),
                   subtitle_style: preset.subtitle_style.style,
                 },
-                audio_track: audioTrack
-                  ? {
-                      ...audioTrack,
-                      volume: preset.audio_preset.bgm_volume,
-                      fade_in_sec: preset.audio_preset.fade_in_sec,
-                      fade_out_sec: preset.audio_preset.fade_out_sec,
-                    }
-                  : undefined,
-              }, { timeout: 600_000 });
-              response = composeRes.data as { duration_sec: number; file_size_bytes: number };
-            } else {
+              audio_track: audioTrack
+                ? {
+                    ...audioTrack,
+                    volume: preset.audio_preset.bgm_volume,
+                    fade_in_sec: preset.audio_preset.fade_in_sec,
+                    fade_out_sec: preset.audio_preset.fade_out_sec,
+                    duck_zones: duckZones,
+                    duck_fade_ms: 80,
+                  }
+                : undefined,
+              beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
+              content_aware_transitions: { enabled: true, rules: {} },
+              color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
+               }, { timeout: 600_000 });
+               response = composeRes.data as { duration_sec: number; file_size_bytes: number };
+              } else {
               // ── /compose-layout with b-roll backgrounds ─────────────────────
               const backgrounds: Array<{ storage_key: string; type: 'image' | 'video' }> = [];
               const segments: Array<{ layout: string; bg_index: number; weight: number }> = [];
@@ -340,10 +385,9 @@ export function createVideoComposeWorker(deps: Deps): Worker {
               // (avoids re-downloading the combined avatar just for a background track)
               segments.unshift({ layout: 'fullscreen', bg_index: 0, weight: ffWeight });
 
-              // NOTE: subtitles are NOT adjusted via adjustSubtitlesForPreset here.
-              // The /compose-layout Python pipeline adjusts subtitle timings itself
-              // based on segment xfade overlaps. Passing presetSubtitles (which were
-              // adjusted for DB scene boundaries) would double-shift the timestamps.
+              // NOTE: Both /compose and /compose-layout receive RAW subtitles.
+              // The Python pipelines adjust subtitle timings based on actual clip
+              // durations and xfade overlaps — the only place with access to probed data.
               const layoutRes = await axios.post(`${videoProcessorUrl}/compose-layout`, {
                 job_id:              jobId,
                 tenant_id:           tenantId,
@@ -362,8 +406,14 @@ export function createVideoComposeWorker(deps: Deps): Worker {
                       volume: preset.audio_preset.bgm_volume,
                       fade_in_sec: preset.audio_preset.fade_in_sec,
                       fade_out_sec: preset.audio_preset.fade_out_sec,
+                      duck_zones: duckZones,
+                      duck_fade_ms: 80,
                     }
                   : undefined,
+                beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
+                content_aware_transitions: { enabled: true, rules: {} },
+                color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
+                word_timestamps: wordTimestamps,
                 chroma_color: '#00FF00',
                 pip_scale: 0.30,
                 transition: preset.transition_type,
@@ -379,20 +429,25 @@ export function createVideoComposeWorker(deps: Deps): Worker {
               tenant_id:  tenantId,
               output_key: outputKey,
               scenes:     buildSceneItems(preset),
-              subtitles:  presetSubtitles,
+              subtitles:  rawSubtitles,
               settings: {
                 ...((payload['settings'] as object) ?? {}),
                 subtitle_style: preset.subtitle_style.style,
               },
-              audio_track: audioTrack
-                ? {
-                    ...audioTrack,
-                    volume: preset.audio_preset.bgm_volume,
-                    fade_in_sec: preset.audio_preset.fade_in_sec,
-                    fade_out_sec: preset.audio_preset.fade_out_sec,
-                  }
-                : undefined,
-            }, { timeout: 600_000 });
+                 audio_track: audioTrack
+                   ? {
+                       ...audioTrack,
+                       volume: preset.audio_preset.bgm_volume,
+                       fade_in_sec: preset.audio_preset.fade_in_sec,
+                       fade_out_sec: preset.audio_preset.fade_out_sec,
+                       duck_zones: duckZones,
+                       duck_fade_ms: 80,
+                     }
+                   : undefined,
+                  beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
+                  content_aware_transitions: { enabled: true, rules: {} },
+                  color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
+             }, { timeout: 600_000 });
 
             response = composeRes.data as { duration_sec: number; file_size_bytes: number };
           }

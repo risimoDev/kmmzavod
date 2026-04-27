@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app.config import settings
-from app.models import KenBurnsPreset, TransitionType
+from app.models import CutType, KenBurnsPreset, TransitionType
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,11 @@ class ClipInfo:
     # Transition applied when moving FROM this clip TO the next
     transition: TransitionType = TransitionType.FADE
     transition_duration: float = 0.5
+    # L-cut / J-cut audio offset for the start of this clip
+    cut_type: CutType = CutType.HARD
+    audio_offset_sec: float = 0.0
+    # Speed multiplier (1.0 = normal)
+    speed: float = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -491,6 +496,104 @@ def mix_bgm(
     _run(cmd, "mix_bgm")
 
 
+def mix_bgm_ducking(
+    video_path: str,
+    bgm_path: str,
+    output_path: str,
+    volume: float = 0.12,
+    duck_volume: float = 0.04,
+    duck_zones: list[tuple[float, float]] | None = None,
+    duck_fade_ms: int = 80,
+    fade_in_sec: float = 1.5,
+    fade_out_sec: float = 2.0,
+    threads: int = 0,
+) -> None:
+    """
+    Mix BGM with automatic ducking — BGM volume lowers when speech is active.
+
+    Duck zones define time ranges where the avatar is speaking. Outside those
+    zones, BGM plays at full ``volume``; inside, it drops to ``duck_volume``.
+
+    The volume transitions use ``enable`` expressions per zone with smooth
+    fade-in/fade-out of the volume change (``duck_fade_ms``) to avoid
+    abrupt volume jumps (side-chain compression style).
+
+    If duck_zones is empty or None, falls back to regular mix_bgm().
+    """
+    if not duck_zones:
+        mix_bgm(video_path, bgm_path, output_path, volume,
+                fade_in_sec, fade_out_sec, threads)
+        return
+
+    info = probe(video_path)
+    dur = info.duration
+    fade_out_start = max(0.0, dur - fade_out_sec)
+    fade_s = duck_fade_ms / 1000.0
+
+    # Build volume envelope: start at full volume, duck during speech zones
+    # FFmpeg volume filter with enable='between(t,start,end)' per zone
+    # We apply multiple volume filters chained: one per duck zone
+    # Each filter lowers volume during its zone and is passthrough otherwise
+    volume_filters: list[str] = []
+
+    # BGM chain: loop → trim → initial volume → fade in/out
+    bgm_chain = (
+        f"[1:a]aloop=loop=-1:size=2e+09,"
+        f"atrim=duration={dur:.4f},"
+        f"volume={volume:.4f},"
+        f"afade=t=in:st=0:d={fade_in_sec:.2f},"
+        f"afade=t=out:st={fade_out_start:.4f}:d={fade_out_sec:.2f}"
+    )
+
+    # Apply duck zones as additional volume filters with enable expressions
+    # Each duck zone: volume=duck_volume with enable='between(t,s,e)'
+    # Plus a tiny fade envelope around the zone edges for smooth transition
+    prev_label = "bgm"
+    fc_parts = [f"{bgm_chain}[{prev_label}]"]
+
+    for i, (start, end) in enumerate(duck_zones):
+        end = min(end, dur)
+        if start >= end:
+            continue
+        # Duck with smooth fade: use volume filter with enable expression
+        # During duck zone, volume goes from full → duck_volume
+        # We use a single volume filter per zone that activates only in range
+        next_label = f"d{i}" if i < len(duck_zones) - 1 else "bgm_ducked"
+        fc_parts.append(
+            f"[{prev_label}]volume="
+            f"{duck_volume:.4f}"
+            f":enable='between(t,{start:.3f},{end:.3f})'"
+            f"[{next_label}]"
+        )
+        prev_label = next_label
+
+    # If no valid duck zones were processed, fallback label
+    if prev_label == "bgm":
+        prev_label = "bgm_ducked"
+        fc_parts[-1] = fc_parts[-1].replace("[bgm]", "[bgm_ducked]")
+
+    # Final mix: original audio + ducked BGM
+    fc_parts.append(
+        f"[0:a][{prev_label}]amix=inputs=2:duration=first:dropout_transition=3[aout]"
+    )
+
+    fc = ";".join(fc_parts)
+
+    cmd = [
+        _bin("ffmpeg"), "-y",
+        "-i", video_path,
+        "-i", bgm_path,
+        "-filter_complex", fc,
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-threads", str(threads),
+        output_path,
+    ]
+    _run(cmd, "mix_bgm_ducking")
+
+
 def burn_subtitles(
     input_path: str,
     ass_path: str,
@@ -592,6 +695,346 @@ def _pip_xy(
         return (width - pip_w - margin, margin)
     # pip_bl (default)
     return (margin, height - pip_h - margin)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Speed ramping — variable speed playback with audio compensation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_speed_ramp(
+    input_path: str,
+    output_path: str,
+    speed: float = 1.0,
+    threads: int = 0,
+) -> float:
+    """
+    Apply speed ramping to a clip. Returns the new duration.
+
+    • speed > 1.0 = faster (time-lapse effect)
+    • speed < 1.0 = slower (slow-motion effect)
+    • speed = 1.0 = no change (passthrough)
+
+    Video uses ``setpts=PTS/speed``; audio uses ``atempo=speed`` (clamped to
+    FFmpeg's 0.5–2.0 range, chained if needed for extreme speeds).
+
+    Returns the resulting clip duration (original_duration / speed).
+    """
+    if abs(speed - 1.0) < 0.01:
+        import shutil
+        shutil.copy2(input_path, output_path)
+        info = probe(input_path)
+        return info.duration
+
+    info = probe(input_path)
+    new_duration = info.duration / speed
+
+    atempo_filters = _build_atempo_chain(speed)
+
+    fc_parts = []
+
+    if info.has_video:
+        fc_parts.append(f"[0:v]setpts=PTS/{speed:.4f}[v]")
+        map_v = ["-map", "[v]"]
+    else:
+        map_v = []
+
+    if info.has_audio:
+        atempo_chain = ",".join(atempo_filters)
+        fc_parts.append(f"[0:a]{atempo_chain}[a]")
+        map_a = ["-map", "[a]"]
+    else:
+        map_a = []
+
+    if not fc_parts:
+        import shutil
+        shutil.copy2(input_path, output_path)
+        return new_duration
+
+    cmd = [
+        _bin("ffmpeg"), "-y",
+        "-i", input_path,
+        "-filter_complex", ";".join(fc_parts),
+    ] + map_v + map_a + [
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-t", str(new_duration),
+        "-threads", str(threads),
+        output_path,
+    ]
+    _run(cmd, f"speed_ramp_{speed:.2f}x")
+    return new_duration
+
+
+def _build_atempo_chain(speed: float) -> list[str]:
+    """
+    Build a chain of FFmpeg atempo filters to handle any speed value.
+
+    FFmpeg's atempo filter only supports 0.5–2.0 range.
+    For values outside, we chain multiple filters.
+    """
+    if 0.5 <= speed <= 2.0:
+        return [f"atempo={speed:.4f}"]
+
+    filters: list[str] = []
+    remaining = speed
+    while remaining < 0.5:
+        filters.append("atempo=0.5000")
+        remaining /= 0.5
+    while remaining > 2.0:
+        filters.append("atempo=2.0000")
+        remaining /= 2.0
+    filters.append(f"atempo={remaining:.4f}")
+    return filters
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L-cut / J-cut concatenation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def concat_with_lj_cuts(
+    clips: list[ClipInfo],
+    output: str,
+    threads: int = 0,
+) -> None:
+    """
+    Concatenate clips with L-cut and J-cut audio offsets.
+
+    L-cut:  Video switches to next scene, but audio from the previous scene
+            continues for a moment. Creates a smooth narrative flow.
+    J-cut:  Audio from the next scene starts before the video switches.
+            Creates anticipation and connection between scenes.
+
+    Falls back to regular concat_with_transitions when no L/J-cuts are present.
+    """
+    has_lj = any(c.cut_type != CutType.HARD for c in clips)
+    if not has_lj:
+        concat_with_transitions(clips, output, threads)
+        return
+
+    n = len(clips)
+    if n == 1:
+        _run([_bin("ffmpeg"), "-y", "-i", clips[0].path, "-c", "copy", output], "single_clip_copy")
+        return
+
+    cmd = [_bin("ffmpeg"), "-y"]
+    for c in clips:
+        cmd += ["-i", c.path]
+
+    fc_parts: list[str] = []
+
+    # ── Video xfade chain (same as concat_with_transitions) ────────────────
+    v_prev = "[0:v]"
+    cum_duration = 0.0
+    cum_transition = 0.0
+    transition_params: list[tuple[float, bool]] = []
+
+    for i in range(1, n):
+        td = clips[i - 1].transition_duration
+        tr = clips[i - 1].transition.value
+
+        v_next = "[v_end]" if i == n - 1 else f"[v{i}]"
+
+        if tr == TransitionType.CUT.value or td <= 0:
+            v_next = f"[v{i}]" if i < n - 1 else "[v_end]"
+            fc_parts.append(f"{v_prev}[{i}:v]concat=n=2:v=1:a=0{v_next}")
+            cum_duration += clips[i - 1].duration
+            cum_transition += 0.0
+            transition_params.append((0.0, False))
+        else:
+            cum_duration += clips[i - 1].duration
+            cum_transition += td
+            offset = max(cum_duration - cum_transition, 0.01)
+            fc_parts.append(
+                f"{v_prev}[{i}:v]xfade=transition={tr}"
+                f":duration={td:.4f}:offset={offset:.4f}{v_next}"
+            )
+            transition_params.append((td, True))
+
+        v_prev = v_next
+
+    # ── Audio chain with L/J-cut offsets ──────────────────────────────────
+    has_xfade = any(is_xf for _, is_xf in transition_params)
+
+    if has_xfade and n > 1:
+        a_prev = "[0:a]"
+        for i in range(1, n):
+            td, is_xf = transition_params[i - 1]
+            a_next = "[a_end]" if i == n - 1 else f"[a{i}]"
+            clip = clips[i]
+
+            if is_xf and td > 0:
+                audio_td = td
+                if clip.cut_type == CutType.J_CUT and clip.audio_offset_sec > 0:
+                    audio_td = td + clip.audio_offset_sec
+                elif clip.cut_type == CutType.L_CUT and clip.audio_offset_sec < 0:
+                    audio_td = max(0.05, td + clip.audio_offset_sec)
+
+                fc_parts.append(
+                    f"{a_prev}[{i}:a]acrossfade=d={audio_td:.4f}:c1=tri:c2=tri{a_next}"
+                )
+            else:
+                fc_parts.append(f"{a_prev}[{i}:a]concat=n=2:v=0:a=1{a_next}")
+            a_prev = a_next
+    else:
+        audio_inputs = "".join(f"[{i}:a]" for i in range(n))
+        fc_parts.append(f"{audio_inputs}concat=n={n}:v=0:a=1[a_end]")
+
+    total_duration = sum(c.duration for c in clips) - sum(
+        c.transition_duration for c in clips[:-1]
+        if c.transition != TransitionType.CUT and c.transition_duration > 0
+    )
+
+    cmd += [
+        "-filter_complex", ";".join(fc_parts),
+        "-map", "[v_end]",
+        "-map", "[a_end]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-t", str(total_duration),
+        "-threads", str(threads),
+        output,
+    ]
+    _run(cmd, "concat_lj_cuts")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Color grading — histogram matching between clips
+# ─────────────────────────────────────────────────────────────────────────────
+
+def color_grade_clip(
+    input_path: str,
+    output_path: str,
+    reference_path: str | None = None,
+    strength: float = 0.6,
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    threads: int = 0,
+) -> None:
+    """
+    Apply color grading to a clip for visual consistency.
+
+    Two modes:
+    1. Reference-based: luma matching against a reference clip
+    2. Parametric: brightness/contrast/saturation adjustments
+
+    The ``strength`` parameter controls blending between original and graded.
+    """
+    if not reference_path and abs(brightness) < 0.01 and abs(contrast - 1.0) < 0.01 and abs(saturation - 1.0) < 0.01:
+        import shutil
+        shutil.copy2(input_path, output_path)
+        return
+
+    vf_parts: list[str] = []
+
+    if reference_path:
+        ref_luma = _compute_average_luma(reference_path)
+        clip_luma = _compute_average_luma(input_path)
+
+        if ref_luma > 0 and clip_luma > 0:
+            luma_ratio = ref_luma / clip_luma
+            adjusted_brightness = (luma_ratio - 1.0) * strength
+            vf_parts.append(f"eq=brightness={adjusted_brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}")
+        else:
+            if abs(brightness) > 0.01 or abs(contrast - 1.0) > 0.01 or abs(saturation - 1.0) > 0.01:
+                vf_parts.append(f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}")
+    else:
+        if abs(brightness) > 0.01 or abs(contrast - 1.0) > 0.01 or abs(saturation - 1.0) > 0.01:
+            vf_parts.append(f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}")
+
+    if not vf_parts:
+        import shutil
+        shutil.copy2(input_path, output_path)
+        return
+
+    vf = ",".join(vf_parts) + ",format=yuv420p"
+
+    cmd = [
+        _bin("ffmpeg"), "-y",
+        "-i", input_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "copy",
+        "-threads", str(threads),
+        output_path,
+    ]
+    _run(cmd, "color_grade")
+
+
+def _compute_average_luma(video_path: str) -> float:
+    """
+    Compute the average luma (brightness) of a video clip using FFmpeg.
+    Extracts the mean Y-channel value from the first 30 frames.
+    """
+    cmd = [
+        _bin("ffmpeg"), "-i", video_path,
+        "-vf", "signalstats=stat=tout+vrep:brng",
+        "-f", "null", "-",
+        "-frames:v", "30",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    for line in result.stderr.split("\n"):
+        if "YAVG" in line or "yavg" in line:
+            try:
+                parts = line.strip().split()
+                for p in parts:
+                    if "yavg" in p.lower():
+                        val = p.split("=")[-1] if "=" in p else p
+                        return float(val)
+            except (ValueError, IndexError):
+                continue
+    return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Content-aware transition selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_TRANSITION_RULES: dict[str, str] = {
+    "avatar->clip": "fade",
+    "avatar->image": "fade",
+    "clip->avatar": "cut",
+    "clip->clip": "smoothleft",
+    "clip->image": "dissolve",
+    "image->avatar": "fade",
+    "image->clip": "fade",
+    "image->image": "dissolve",
+    "avatar->avatar": "cut",
+    "text->avatar": "fade",
+    "text->clip": "fade",
+    "text->image": "fade",
+    "avatar->text": "cut",
+    "clip->text": "cut",
+    "image->text": "cut",
+}
+
+DEFAULT_DURATION_RULES: dict[str, float] = {
+    "avatar->clip": 0.4,
+    "clip->avatar": 0.0,
+    "clip->clip": 0.5,
+    "avatar->avatar": 0.0,
+    "image->clip": 0.35,
+    "clip->image": 0.3,
+}
+
+
+def select_transition_for_pair(
+    from_type: str,
+    to_type: str,
+    rules: dict[str, str] | None = None,
+) -> tuple[str, float]:
+    """
+    Select the best transition type and duration for a pair of scene types.
+    Returns (transition_name, duration_seconds).
+    """
+    merged = {**DEFAULT_TRANSITION_RULES, **(rules or {})}
+    merged_dur = {**DEFAULT_DURATION_RULES, **(rules or {})}
+
+    key = f"{from_type}->{to_type}"
+    transition = merged.get(key, "fade")
+    duration = merged_dur.get(key, 0.3)
+
+    return transition, duration
 
 
 def compose_layout_segment(

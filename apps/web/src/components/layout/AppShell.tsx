@@ -51,6 +51,16 @@ const NAV_ITEMS = [
     ),
   },
   {
+    href: "/presets",
+    label: "Factories",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M20 10c0-4.418-3.582-8-8-8s-8 3.582-8 8c0 4.418 3.582 8 8 8s8-3.582 8-8z" />
+        <path d="M12 22v-4M8 22v-4M16 22v-4M7 10h10M12 6v8" />
+      </svg>
+    ),
+  },
+  {
     href: "/create",
     label: "Create",
     icon: (

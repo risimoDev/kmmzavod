@@ -37,8 +37,15 @@ class SubtitleItem(BaseModel):
     text: str
 
 
+class WordItem(BaseModel):
+    word: str
+    start_sec: float
+    end_sec: float
+
+
 class TranscribeResponse(BaseModel):
     subtitles: list[SubtitleItem]
+    words: list[WordItem] = []
     word_count: int
     duration_sec: float
 
@@ -96,6 +103,10 @@ def create_router() -> APIRouter:
                 SubtitleItem(start_sec=c.start_sec, end_sec=c.end_sec, text=c.text)
                 for c in chunks
             ]
+            word_items = [
+                WordItem(word=w.word, start_sec=round(w.start, 3), end_sec=round(w.end, 3))
+                for w in words
+            ]
 
             logger.info(
                 "Transcription done: %d words → %d subtitle chunks, %.1fs",
@@ -104,6 +115,7 @@ def create_router() -> APIRouter:
 
             return TranscribeResponse(
                 subtitles=subtitles,
+                words=word_items,
                 word_count=len(words),
                 duration_sec=round(duration, 2),
             )

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { TopBar } from "@/components/layout/AppShell";
 import { Button, Badge, Card, CardContent, LoadingSpinner } from "@/components/ui/primitives";
-import { socialAccountsApi, type SocialAccount } from "@/lib/api";
+import { socialAccountsApi, type SocialAccount, getAccessToken } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // ── Platform metadata ─────────────────────────────────────────────────────────
@@ -23,17 +24,20 @@ function platformColor(value: string) {
   return PLATFORMS.find(p => p.value === value)?.color ?? "bg-surface-2 text-text-secondary";
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Page Content ──────────────────────────────────────────────────────────────
 
-export default function SettingsPage() {
+function SettingsContent() {
+  const searchParams = useSearchParams();
   const [accounts, setAccounts]       = useState<SocialAccount[]>([]);
   const [loading, setLoading]         = useState(true);
   const [addOpen, setAddOpen]         = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SocialAccount | null>(null);
   const [saving, setSaving]           = useState(false);
   const [error, setError]             = useState<string | null>(null);
+  const [status, setStatus]           = useState<string | null>(null);
 
-  // Form state
+  // Form state (fallback manual)
+  const [showManual, setShowManual]   = useState(false);
   const [platform, setPlatform]       = useState("tiktok");
   const [accountName, setAccountName] = useState("");
   const [accessToken, setAccessToken] = useState("");
@@ -51,6 +55,14 @@ export default function SettingsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    const success = searchParams.get("success");
+    const err = searchParams.get("error");
+    const msg = searchParams.get("message");
+    if (success) setStatus("Аккаунт успешно подключён");
+    if (err) setError(msg || "Ошибка при подключении аккаунта");
+  }, [searchParams]);
+
   const resetForm = () => {
     setPlatform("tiktok");
     setAccountName("");
@@ -59,9 +71,16 @@ export default function SettingsPage() {
     setIgUserId("");
     setProxyUrl("");
     setError(null);
+    setShowManual(false);
   };
 
-  const handleAdd = async () => {
+  const handleOAuth = (p: string) => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
+    // Construct the authorize URL with token (carried in state eventually)
+    window.location.href = `${apiBase}/api/v1/social/${p}/authorize?token=${getAccessToken()}`;
+  };
+
+  const handleAddManual = async () => {
     if (!accountName.trim() || !accessToken.trim()) return;
     setSaving(true);
     setError(null);
@@ -110,6 +129,18 @@ export default function SettingsPage() {
       />
 
       <div className="p-6 space-y-6 max-w-3xl">
+        {status && (
+          <div className="bg-green-50 text-green-700 p-3 rounded-lg text-sm mb-4">
+            {status}
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 text-red-700 p-3 rounded-lg text-sm mb-4">
+            {error}
+          </div>
+        )}
+
         {/* ── Social accounts ────────────────────────────────────────── */}
         <section>
           <h2 className="text-sm font-semibold text-text-primary mb-1">Социальные сети</h2>
@@ -193,10 +224,6 @@ export default function SettingsPage() {
             </div>
           )}
         </section>
-
-        {error && (
-          <p className="text-xs text-danger bg-danger/10 rounded-md px-3 py-2">{error}</p>
-        )}
       </div>
 
       {/* ── Add account dialog ────────────────────────────────────── */}
@@ -209,95 +236,144 @@ export default function SettingsPage() {
               Подключить аккаунт
             </AlertDialog.Title>
 
-            <div className="space-y-3">
-              <Field label="Платформа">
-                <select
-                  value={platform}
-                  onChange={e => setPlatform(e.target.value)}
-                  className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                    focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+            <div className="space-y-4">
+              <div className="grid gap-3">
+                <button
+                  onClick={() => handleOAuth("tiktok")}
+                  className="flex items-center gap-3 w-full p-3 rounded-xl border border-border hover:bg-surface-2 transition-colors text-left"
                 >
-                  {PLATFORMS.map(p => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
-              </Field>
+                  <div className="w-10 h-10 rounded-lg bg-[#ff0050] flex items-center justify-center text-white shrink-0">
+                    T
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">TikTok</div>
+                    <div className="text-[11px] text-text-tertiary">Авторизация через TikTok OAuth 2.0</div>
+                  </div>
+                </button>
 
-              <Field label="Имя аккаунта">
-                <input
-                  value={accountName}
-                  onChange={e => setAccountName(e.target.value)}
-                  placeholder="@username"
-                  className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                    focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-                />
-              </Field>
+                <button
+                  onClick={() => handleOAuth("instagram")}
+                  className="flex items-center gap-3 w-full p-3 rounded-xl border border-border hover:bg-surface-2 transition-colors text-left"
+                >
+                  <div className="w-10 h-10 rounded-lg bg-[#e1306c] flex items-center justify-center text-white shrink-0">
+                    I
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">Instagram</div>
+                    <div className="text-[11px] text-text-tertiary">Через Facebook Graph API</div>
+                  </div>
+                </button>
 
-              <Field label="Access Token">
-                <input
-                  type="password"
-                  value={accessToken}
-                  onChange={e => setAccessToken(e.target.value)}
-                  placeholder="Вставьте токен доступа"
-                  className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                    focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-                />
-              </Field>
+                <button
+                  onClick={() => handleOAuth("youtube")}
+                  className="flex items-center gap-3 w-full p-3 rounded-xl border border-border hover:bg-surface-2 transition-colors text-left"
+                >
+                  <div className="w-10 h-10 rounded-lg bg-[#ff0000] flex items-center justify-center text-white shrink-0">
+                    Y
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">YouTube Shorts</div>
+                    <div className="text-[11px] text-text-tertiary">Через Google OAuth 2.0</div>
+                  </div>
+                </button>
+              </div>
 
-              <Field label="Refresh Token (опционально)">
-                <input
-                  type="password"
-                  value={refreshToken}
-                  onChange={e => setRefreshToken(e.target.value)}
-                  placeholder="Для автоматического обновления токена"
-                  className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                    focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-                />
-              </Field>
-
-              {platform === "instagram" && (
-                <Field label="Instagram Business Account ID">
-                  <input
-                    value={igUserId}
-                    onChange={e => setIgUserId(e.target.value)}
-                    placeholder="Числовой ID бизнес-аккаунта"
-                    className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                      focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-                  />
-                </Field>
+              {!showManual && (
+                <button
+                  onClick={() => setShowManual(true)}
+                  className="text-[11px] text-text-tertiary hover:text-brand-400 w-full text-center"
+                >
+                  Ввести токен вручную (для продвинутых)
+                </button>
               )}
 
-              <Field label="Прокси (рекомендуется)">
-                <input
-                  value={proxyUrl}
-                  onChange={e => setProxyUrl(e.target.value)}
-                  placeholder="socks5://user:pass@ip:port или http://ip:port"
-                  className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
-                    focus:outline-none focus:ring-1 focus:ring-brand-500/50 font-mono"
-                />
-                <p className="text-[10px] text-text-tertiary mt-0.5">
-                  Личный прокси для этого аккаунта — защита от блокировки при публикации
-                </p>
-              </Field>
+              {showManual && (
+                <div className="pt-4 border-t border-dashed space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <Field label="Платформа">
+                    <select
+                      value={platform}
+                      onChange={e => setPlatform(e.target.value)}
+                      className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                        focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                    >
+                      {PLATFORMS.map(p => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                  </Field>
 
-              {error && (
-                <p className="text-xs text-danger">{error}</p>
+                  <Field label="Имя аккаунта">
+                    <input
+                      value={accountName}
+                      onChange={e => setAccountName(e.target.value)}
+                      placeholder="@username"
+                      className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                        focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                    />
+                  </Field>
+
+                  <Field label="Access Token">
+                    <input
+                      type="password"
+                      value={accessToken}
+                      onChange={e => setAccessToken(e.target.value)}
+                      placeholder="Вставьте токен доступа"
+                      className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                        focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                    />
+                  </Field>
+
+                  <Field label="Refresh Token (опционально)">
+                    <input
+                      type="password"
+                      value={refreshToken}
+                      onChange={e => setRefreshToken(e.target.value)}
+                      placeholder="Для автоматического обновления токена"
+                      className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                        focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                    />
+                  </Field>
+
+                  {platform === "instagram" && (
+                    <Field label="Instagram Business Account ID">
+                      <input
+                        value={igUserId}
+                        onChange={e => setIgUserId(e.target.value)}
+                        placeholder="Числовой ID бизнес-аккаунта"
+                        className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                          focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                      />
+                    </Field>
+                  )}
+
+                  <Field label="Прокси (рекомендуется)">
+                    <input
+                      value={proxyUrl}
+                      onChange={e => setProxyUrl(e.target.value)}
+                      placeholder="socks5://user:pass@ip:port или http://ip:port"
+                      className="w-full h-8 px-2.5 text-xs rounded-md bg-surface-2 border border-border text-text-primary
+                        focus:outline-none focus:ring-1 focus:ring-brand-500/50 font-mono"
+                    />
+                  </Field>
+
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    className="w-full"
+                    loading={saving}
+                    disabled={!accountName.trim() || !accessToken.trim()}
+                    onClick={handleAddManual}
+                  >
+                    Подключить вручную
+                  </Button>
+                </div>
               )}
             </div>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex justify-end gap-2 pt-2">
               <AlertDialog.Cancel asChild>
                 <Button variant="ghost" size="sm">Отмена</Button>
               </AlertDialog.Cancel>
-              <Button
-                variant="primary"
-                size="sm"
-                loading={saving}
-                disabled={!accountName.trim() || !accessToken.trim()}
-                onClick={handleAdd}
-              >
-                Подключить
-              </Button>
             </div>
           </AlertDialog.Content>
         </AlertDialog.Portal>
@@ -337,5 +413,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="text-xs text-text-tertiary mb-1 block">{label}</label>
       {children}
     </div>
+  );
+}
+
+// ── Main Page Component ───────────────────────────────────────────────────────
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<div className="flex justify-center py-20"><LoadingSpinner size={32} /></div>}>
+      <SettingsContent />
+    </Suspense>
   );
 }

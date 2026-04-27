@@ -12,3 +12,5 @@ venv/
 Thumbs.db
 *.log
 .secrets-setup
+docs/prompt.md
+DEPLOYMENT_REPORT.md

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.compose import create_router as compose_router
 from app.api.transcribe import create_router as transcribe_router
+from app.api.quality import create_router as quality_router
 from app.config import settings
 
 logging.basicConfig(
@@ -21,11 +22,12 @@ _startup_time = time.time()
 
 app = FastAPI(
     title="Video Processor",
-    version="2.0.0",
-    description="FFmpeg-based video composition service with Ken Burns, xfade, and subtitle support.",
+    version="3.0.0",
+    description="FFmpeg-based video composition service with beat-sync, audio ducking, quality gate, and subtitle support.",
 )
 app.include_router(compose_router())
 app.include_router(transcribe_router())
+app.include_router(quality_router())
 
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")

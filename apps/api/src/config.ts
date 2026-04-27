@@ -35,6 +35,15 @@ const schema = z.object({
   ENCRYPTION_KEY: z.preprocess(v => (v === '' ? undefined : v), z.string().length(64).regex(/^[0-9a-fA-F]+$/).optional()),
 
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
+  NEXT_PUBLIC_API_URL: z.string().url().default('http://localhost:3000'),
+
+  // Social OAuth (optional)
+  TIKTOK_CLIENT_KEY: z.string().optional(),
+  TIKTOK_CLIENT_SECRET: z.string().optional(),
+  INSTAGRAM_APP_ID: z.string().optional(),
+  INSTAGRAM_APP_SECRET: z.string().optional(),
+  YOUTUBE_CLIENT_ID: z.string().optional(),
+  YOUTUBE_CLIENT_SECRET: z.string().optional(),
 
   // Allowed CORS origin(s) in production (comma-separated, e.g. https://k-m-m.online)
   CORS_ORIGIN: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
