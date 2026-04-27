@@ -13,6 +13,7 @@ import type { Queue } from 'bullmq';
 import type { ConnectionOptions } from 'bullmq';
 import { gptunnelCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
+import { logger } from '../logger';
 
 interface SceneOutput {
   scene_index: number;
