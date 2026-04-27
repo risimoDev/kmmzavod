@@ -187,7 +187,7 @@ export async function publishRoutes(app: FastifyInstance) {
 
   app.get('/social/tiktok/authorize', async (req, reply) => {
     if (!config.TIKTOK_CLIENT_KEY) return reply.code(400).send({ error: 'TikTok OAuth not configured' });
-    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.id })).toString('base64');
+    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.userId })).toString('base64');
     const qs = new URLSearchParams({
       client_key: config.TIKTOK_CLIENT_KEY,
       scope: 'user.info.basic,video.upload,video.publish',
@@ -200,7 +200,7 @@ export async function publishRoutes(app: FastifyInstance) {
 
   app.get('/social/youtube/authorize', async (req, reply) => {
     if (!config.YOUTUBE_CLIENT_ID) return reply.code(400).send({ error: 'YouTube OAuth not configured' });
-    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.id })).toString('base64');
+    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.userId })).toString('base64');
     const qs = new URLSearchParams({
       client_id: config.YOUTUBE_CLIENT_ID,
       redirect_uri: `${config.NEXT_PUBLIC_API_URL}/api/v1/social/youtube/callback`,
@@ -215,7 +215,7 @@ export async function publishRoutes(app: FastifyInstance) {
 
   app.get('/social/instagram/authorize', async (req, reply) => {
     if (!config.INSTAGRAM_APP_ID) return reply.code(400).send({ error: 'Instagram OAuth not configured' });
-    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.id })).toString('base64');
+    const state = Buffer.from(JSON.stringify({ tenantId: req.user.tenantId, userId: req.user.userId })).toString('base64');
     const qs = new URLSearchParams({
       client_id: config.INSTAGRAM_APP_ID,
       redirect_uri: `${config.NEXT_PUBLIC_API_URL}/api/v1/social/instagram/callback`,

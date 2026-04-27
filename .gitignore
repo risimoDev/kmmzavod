@@ -14,3 +14,5 @@ Thumbs.db
 .secrets-setup
 docs/prompt.md
 DEPLOYMENT_REPORT.md
+IMPROVEMENT_PLAN.md
+FIX_REPORT.md
