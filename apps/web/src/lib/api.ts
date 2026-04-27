@@ -544,25 +544,27 @@ export interface VideoPreset {
   _count?: { videos: number };
 }
 
+export interface PresetCreateBody {
+  productId: string;
+  name?: string;
+  heygenAvatarId?: string;
+  heygenVoiceId?: string;
+  editStyle?: string;
+  targetDurationSec?: number;
+  customPrompt?: string;
+  cronExpression?: string;
+  timezone?: string;
+  autoPublish?: boolean;
+  publishPlatforms?: string[];
+  socialAccountIds?: string[];
+  bgmEnabled?: boolean;
+}
+
 export const presetsApi: {
   list: (params?: { productId?: string; status?: string; page?: number; limit?: number }) => Promise<{ presets: VideoPreset[]; total: number; page: number; limit: number }>;
   get: (id: string) => Promise<{ preset: VideoPreset }>;
-  create: (body: {
-    productId: string;
-    name?: string;
-    heygenAvatarId?: string;
-    heygenVoiceId?: string;
-    editStyle?: string;
-    targetDurationSec?: number;
-    customPrompt?: string;
-    cronExpression?: string;
-    timezone?: string;
-    autoPublish?: boolean;
-    publishPlatforms?: string[];
-    socialAccountIds?: string[];
-    bgmEnabled?: boolean;
-  }) => Promise<{ preset: VideoPreset }>;
-  update: (id: string, body: any) => Promise<{ preset: VideoPreset }>;
+  create: (body: PresetCreateBody) => Promise<{ preset: VideoPreset }>;
+  update: (id: string, body: Partial<PresetCreateBody>) => Promise<{ preset: VideoPreset }>;
   delete: (id: string) => Promise<void>;
   preview: (id: string) => Promise<{ video: any; jobId: string }>;
   activate: (id: string) => Promise<{ preset: VideoPreset }>;
@@ -583,24 +585,10 @@ export const presetsApi: {
   get: (id: string) =>
     apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}`),
 
-  create: (body: {
-    productId: string;
-    name?: string;
-    heygenAvatarId?: string;
-    heygenVoiceId?: string;
-    editStyle?: string;
-    targetDurationSec?: number;
-    customPrompt?: string;
-    cronExpression?: string;
-    timezone?: string;
-    autoPublish?: boolean;
-    publishPlatforms?: string[];
-    socialAccountIds?: string[];
-    bgmEnabled?: boolean;
-  }) =>
+  create: (body: PresetCreateBody) =>
     apiFetch<{ preset: VideoPreset }>('/api/v1/presets', { method: 'POST', body: JSON.stringify(body) }),
 
-  update: (id: string, body: Partial<Parameters<typeof presetsApi.create>[1]>) =>
+  update: (id: string, body: Partial<PresetCreateBody>) =>
     apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   delete: (id: string) =>
