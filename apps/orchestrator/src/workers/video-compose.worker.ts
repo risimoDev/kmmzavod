@@ -243,9 +243,6 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           wordTimestamps.push({ word: w.word, start: w.start_sec, end: w.end_sec });
         }
         logger.info({ jobId, wordCount: wordTimestamps.length }, 'Word timestamps from transcription used for ducking');
-        } catch (err: any) {
-          logger.warn({ jobId, err: err.message }, 'Failed to get word timestamps for ducking');
-        }
       }
 
       // Compute duck zones: group words into continuous speech segments
@@ -323,7 +320,6 @@ export function createVideoComposeWorker(deps: Deps): Worker {
             const avatarOnlyDuration = (combinedAvatarDurationSec && combinedAvatarDurationSec > 0)
               ? combinedAvatarDurationSec
               : scenes.filter((s: SceneRow) => s.type === 'avatar').reduce((sum, s) => sum + Number(s.durationSec ?? 5), 0);
-            );
 
             if (bgScenes.length === 0) {
               // Pure avatar video — no layout composition needed, use /compose directly
@@ -344,22 +340,22 @@ export function createVideoComposeWorker(deps: Deps): Worker {
                   ...((payload['settings'] as object) ?? {}),
                   subtitle_style: preset.subtitle_style.style,
                 },
-              audio_track: audioTrack
-                ? {
-                    ...audioTrack,
-                    volume: preset.audio_preset.bgm_volume,
-                    fade_in_sec: preset.audio_preset.fade_in_sec,
-                    fade_out_sec: preset.audio_preset.fade_out_sec,
-                    duck_zones: duckZones,
-                    duck_fade_ms: 80,
-                  }
-                : undefined,
-              beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
-              content_aware_transitions: { enabled: true, rules: {} },
-              color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
-               }, { timeout: 600_000 });
-               response = composeRes.data as { duration_sec: number; file_size_bytes: number };
-              } else {
+                audio_track: audioTrack
+                  ? {
+                      ...audioTrack,
+                      volume: preset.audio_preset.bgm_volume,
+                      fade_in_sec: preset.audio_preset.fade_in_sec,
+                      fade_out_sec: preset.audio_preset.fade_out_sec,
+                      duck_zones: duckZones,
+                      duck_fade_ms: 80,
+                    }
+                  : undefined,
+                beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
+                content_aware_transitions: { enabled: true, rules: {} },
+                color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
+              }, { timeout: 600_000 });
+              response = composeRes.data as { duration_sec: number; file_size_bytes: number };
+            } else {
               // ── /compose-layout with b-roll backgrounds ─────────────────────
               const backgrounds: Array<{ storage_key: string; type: 'image' | 'video' }> = [];
               const segments: Array<{ layout: string; bg_index: number; weight: number }> = [];
@@ -434,20 +430,20 @@ export function createVideoComposeWorker(deps: Deps): Worker {
                 ...((payload['settings'] as object) ?? {}),
                 subtitle_style: preset.subtitle_style.style,
               },
-                 audio_track: audioTrack
-                   ? {
-                       ...audioTrack,
-                       volume: preset.audio_preset.bgm_volume,
-                       fade_in_sec: preset.audio_preset.fade_in_sec,
-                       fade_out_sec: preset.audio_preset.fade_out_sec,
-                       duck_zones: duckZones,
-                       duck_fade_ms: 80,
-                     }
-                   : undefined,
-                  beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
-                  content_aware_transitions: { enabled: true, rules: {} },
-                  color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
-             }, { timeout: 600_000 });
+              audio_track: audioTrack
+                ? {
+                    ...audioTrack,
+                    volume: preset.audio_preset.bgm_volume,
+                    fade_in_sec: preset.audio_preset.fade_in_sec,
+                    fade_out_sec: preset.audio_preset.fade_out_sec,
+                    duck_zones: duckZones,
+                    duck_fade_ms: 80,
+                  }
+                : undefined,
+              beat_sync: { enabled: true, tolerance_sec: 0.5, use_onsets: false },
+              content_aware_transitions: { enabled: true, rules: {} },
+              color_grading: { enabled: true, method: 'histogram', strength: 0.6 },
+            }, { timeout: 600_000 });
 
             response = composeRes.data as { duration_sec: number; file_size_bytes: number };
           }
