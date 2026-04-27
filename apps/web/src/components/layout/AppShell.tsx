@@ -210,15 +210,21 @@ export function Sidebar() {
 
 interface TopBarProps {
   title?: string;
+  subtitle?: string;
   actions?: React.ReactNode;
+  children?: React.ReactNode;
 }
 
-export function TopBar({ title, actions }: TopBarProps) {
+export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
   return (
     <header className="h-14 border-b border-border bg-surface-0/80 backdrop-blur-sm flex items-center px-6 gap-4 sticky top-0 z-20">
-      {title && <h1 className="text-sm font-semibold text-text-primary">{title}</h1>}
+      <div className="flex flex-col">
+        {title && <h1 className="text-sm font-semibold text-text-primary">{title}</h1>}
+        {subtitle && <p className="text-xs text-text-secondary">{subtitle}</p>}
+      </div>
       <div className="flex-1" />
       {actions}
+      {children}
     </header>
   );
 }
