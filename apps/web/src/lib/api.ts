@@ -544,7 +544,30 @@ export interface VideoPreset {
   _count?: { videos: number };
 }
 
-export const presetsApi = {
+export const presetsApi: {
+  list: (params?: { productId?: string; status?: string; page?: number; limit?: number }) => Promise<{ presets: VideoPreset[]; total: number; page: number; limit: number }>;
+  get: (id: string) => Promise<{ preset: VideoPreset }>;
+  create: (body: {
+    productId: string;
+    name?: string;
+    heygenAvatarId?: string;
+    heygenVoiceId?: string;
+    editStyle?: string;
+    targetDurationSec?: number;
+    customPrompt?: string;
+    cronExpression?: string;
+    timezone?: string;
+    autoPublish?: boolean;
+    publishPlatforms?: string[];
+    socialAccountIds?: string[];
+    bgmEnabled?: boolean;
+  }) => Promise<{ preset: VideoPreset }>;
+  update: (id: string, body: any) => Promise<{ preset: VideoPreset }>;
+  delete: (id: string) => Promise<void>;
+  preview: (id: string) => Promise<{ video: any; jobId: string }>;
+  activate: (id: string) => Promise<{ preset: VideoPreset }>;
+  pause: (id: string) => Promise<{ preset: VideoPreset }>;
+} = {
   list: (params?: { productId?: string; status?: string; page?: number; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.productId) qs.set('productId', params.productId);
