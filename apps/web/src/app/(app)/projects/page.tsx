@@ -15,6 +15,7 @@ export default function ProjectsPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [showMobileList, setShowMobileList] = useState(true);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -79,9 +80,12 @@ export default function ProjectsPage() {
         }
       />
 
-      <main className="flex-1 flex h-[calc(100vh-56px)] overflow-hidden">
+      <main className="flex-1 flex flex-col lg:flex-row lg:h-[calc(100vh-56px)] overflow-hidden">
         {/* Project list */}
-        <aside className="w-72 flex-shrink-0 border-r border-border flex flex-col bg-surface-0">
+        <aside className={cn(
+          "w-full lg:w-72 flex-shrink-0 border-r border-border flex flex-col bg-surface-0",
+          selected && !showMobileList ? "hidden lg:flex" : "flex"
+        )}>
           <div className="p-3 border-b border-border">
             <Input placeholder="Поиск проектов…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
@@ -119,11 +123,21 @@ export default function ProjectsPage() {
         </aside>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className={cn(
+          "flex-1 overflow-y-auto p-4 lg:p-6",
+          !selected && showMobileList ? "hidden lg:block" : "block"
+        )}>
           {selected && detail ? (
             <div className="animate-slide-up space-y-6">
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setShowMobileList(true)}
+                    className="lg:hidden shrink-0 w-8 h-8 rounded-md flex items-center justify-center text-text-secondary hover:bg-surface-2 transition-colors"
+                    aria-label="Back to projects"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                  </button>
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-brand-500/10">
                     <FolderIcon className="w-5 h-5 text-brand-400" />
                   </div>
@@ -189,7 +203,7 @@ export default function ProjectsPage() {
             <div className="flex items-center justify-center h-full"><LoadingSpinner size={32} /></div>
           ) : (
             <div className="animate-slide-up">
-              <p className="text-sm text-text-tertiary mb-6">Выберите проект слева или создайте новый</p>
+              <p className="text-sm text-text-tertiary mb-6 hidden lg:block">Выберите проект слева или создайте новый</p>
               {projects.length > 0 ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {projects.map((p, i) => (

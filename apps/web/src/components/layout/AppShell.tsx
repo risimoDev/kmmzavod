@@ -8,6 +8,21 @@ import { Button } from "@/components/ui/primitives";
 import { useTheme } from "@/components/providers/ThemeProvider";
 import { getStoredUser, authApi } from "@/lib/api";
 
+// ── Mobile menu hook ─────────────────────────────────────────────────────────
+
+function useMobileMenu() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (open) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [open]);
+  return { open, setOpen, toggle: () => setOpen((v) => !v), close: () => setOpen(false) };
+}
+
 // ── Navigation items ──────────────────────────────────────────────────────────
 
 const NAV_ITEMS = [
@@ -97,7 +112,7 @@ const NAV_BOTTOM = [
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
-export function Sidebar() {
+export function Sidebar({ mobileOpen, onCloseMobile }: { mobileOpen?: boolean; onCloseMobile?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
@@ -111,7 +126,11 @@ export function Sidebar() {
 
   return (
     <aside
-      className="fixed inset-y-0 left-0 z-30 flex flex-col w-[216px] border-r"
+      className={cn(
+        "fixed inset-y-0 left-0 z-40 flex flex-col w-[216px] border-r transition-transform duration-300 ease-in-out",
+        "lg:translate-x-0",
+        mobileOpen ? "translate-x-0" : "-translate-x-full"
+      )}
       style={{
         background: "hsl(var(--sidebar-bg))",
         borderColor: "hsl(var(--sidebar-border))",
@@ -125,6 +144,15 @@ export function Sidebar() {
           <span className="text-xs font-medium text-brand-400 bg-brand-500/10 px-1.5 py-0.5 rounded-md">AI</span>
         </span>
       </div>
+
+      {/* Close button for mobile */}
+      <button
+        onClick={onCloseMobile}
+        className="lg:hidden absolute top-3 right-3 w-7 h-7 rounded-md flex items-center justify-center text-text-tertiary hover:bg-surface-2 hover:text-text-primary transition-colors"
+        aria-label="Close menu"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
 
       {/* Main nav */}
       <nav className="flex-1 overflow-y-auto py-3 px-2">
@@ -216,11 +244,19 @@ interface TopBarProps {
 }
 
 export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
+  const mobile = useMobileMenu();
   return (
-    <header className="h-14 border-b border-border bg-surface-0/80 backdrop-blur-sm flex items-center px-6 gap-4 sticky top-0 z-20">
-      <div className="flex flex-col">
-        {title && <h1 className="text-sm font-semibold text-text-primary">{title}</h1>}
-        {subtitle && <p className="text-xs text-text-secondary">{subtitle}</p>}
+    <header className="h-14 border-b border-border bg-surface-0/80 backdrop-blur-sm flex items-center px-4 lg:px-6 gap-4 sticky top-0 z-20">
+      <button
+        onClick={mobile.toggle}
+        className="lg:hidden shrink-0 w-8 h-8 rounded-md flex items-center justify-center text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors"
+        aria-label="Open menu"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div className="flex flex-col min-w-0">
+        {title && <h1 className="text-sm font-semibold text-text-primary truncate">{title}</h1>}
+        {subtitle && <p className="text-xs text-text-secondary truncate">{subtitle}</p>}
       </div>
       <div className="flex-1" />
       {actions}
@@ -233,10 +269,21 @@ export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
 // ── App shell layout ──────────────────────────────────────────────────────────
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const mobile = useMobileMenu();
   return (
     <div className="min-h-screen bg-surface-0">
-      <Sidebar />
-      <div className="ml-[216px] min-h-screen flex flex-col">
+      <Sidebar mobileOpen={mobile.open} onCloseMobile={mobile.close} />
+
+      {/* Mobile overlay */}
+      {mobile.open && (
+        <div
+          className="fixed inset-0 bg-black/40 z-30 lg:hidden"
+          onClick={mobile.close}
+          aria-hidden="true"
+        />
+      )}
+
+      <div className="min-h-screen flex flex-col lg:ml-[216px]">
         {children}
       </div>
     </div>

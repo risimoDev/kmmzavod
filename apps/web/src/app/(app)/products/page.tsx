@@ -117,20 +117,24 @@ export default function ProductsPage() {
       <main className="flex-1 p-6">
         <div className="max-w-6xl mx-auto space-y-6">
           {/* Header */}
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div>
               <p className="text-sm text-text-tertiary">
                 {total} {total === 1 ? "продукт" : "продуктов"} · Выбирайте при создании видео
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 w-full sm:w-auto">
               <Input
                 placeholder="Поиск..."
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-56"
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                className="w-full sm:w-56"
               />
-              <Button variant="primary" size="sm" onClick={() => router.push("/create")}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => router.push("/create")}
+              >
                 + Создать видео
               </Button>
             </div>
@@ -267,7 +271,7 @@ export default function ProductsPage() {
                   <label className="text-xs font-medium text-text-secondary">Описание</label>
                   <Textarea value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} rows={3} />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="text-xs font-medium text-text-secondary">Характеристики</label>
                     <Input value={editForm.features} onChange={(e) => setEditForm({ ...editForm, features: e.target.value })} placeholder="Через запятую" />
@@ -277,7 +281,7 @@ export default function ProductsPage() {
                     <Input value={editForm.targetAudience} onChange={(e) => setEditForm({ ...editForm, targetAudience: e.target.value })} />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="text-xs font-medium text-text-secondary">Категория</label>
                     <Input value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value })} />

@@ -570,12 +570,12 @@ function Step1Product({ form, set, addFeature, removeFeature, existingProductId,
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input label="Target audience" placeholder="Young adults 18-35, tech enthusiasts" value={form.targetAudience} onChange={(e) => set("targetAudience", e.target.value)} />
           <RadixSelect label="Brand tone" value={form.brandVoice} options={BRAND_VOICES} onValueChange={(v) => set("brandVoice", v)} />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <RadixSelect label="Category" value={form.category} options={CATEGORIES} onValueChange={(v) => set("category", v)} />
           <Input label="Price" placeholder="e.g., 9,990 ₽" value={form.price} onChange={(e) => set("price", e.target.value)} />
         </div>
@@ -691,7 +691,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
           hint="Optional. If empty, AI will generate a unique creative idea based on product data"
         />
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <RadixSelect label="Language" value={form.language} options={LANGUAGES} onValueChange={(v) => set("language", v)} />
           <RadixSelect label="Style" value={form.style} options={STYLES} onValueChange={(v) => set("style", v)} />
         </div>
@@ -980,7 +980,7 @@ function Step2VideoSettings({ form, set, avatars }: { form: FormData; set: (key:
           <SwitchToggle checked={form.subtitlesEnabled} onCheckedChange={(v) => set("subtitlesEnabled", v)} />
         </div>
         {form.subtitlesEnabled && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {SUB_STYLES.map((s) => (
               <button
                 key={s.value}

@@ -631,8 +631,8 @@ export default function VideoDetailPage() {
         {scenes.length > 0 && (
           <div>
             <p className="text-sm font-semibold text-text-primary mb-3">Scenes</p>
-            <div className="rounded-xl border border-border overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded-xl border border-border overflow-hidden overflow-x-auto">
+              <table className="w-full text-sm min-w-[600px]">
                 <thead>
                   <tr className="bg-surface-1 text-text-tertiary text-xs uppercase tracking-wider">
                     <th className="text-left py-2.5 px-4 font-medium">#</th>

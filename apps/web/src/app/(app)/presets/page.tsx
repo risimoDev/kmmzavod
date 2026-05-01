@@ -324,7 +324,7 @@ export default function PresetsPage() {
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Новый пресет" />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium text-gray-700">Стиль монтажа</label>
                   <select className="w-full border rounded-lg p-2 text-sm" value={form.editStyle} onChange={(e) => setForm({ ...form, editStyle: e.target.value as any })}>

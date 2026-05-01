@@ -175,7 +175,7 @@ function SettingsContent() {
                           {platformLabel(account.platform)}
                         </Badge>
                       </div>
-                      <div className="flex items-center gap-3 text-[11px] text-text-tertiary">
+                      <div className="flex items-center gap-3 text-[11px] text-text-tertiary flex-wrap">
                         <span>Публикаций: {account._count?.publishJobs ?? 0}</span>
                         {account.proxyUrl && (
                           <span title={account.proxyUrl}>Прокси: ✓</span>

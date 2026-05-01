@@ -46,7 +46,7 @@ export function Stepper({ steps, current }: StepperProps) {
                 </span>
                 <span
                   className={cn(
-                    "text-sm whitespace-nowrap",
+                    "text-sm leading-tight",
                     active  && "font-medium text-text-primary",
                     done    && "text-text-secondary",
                     pending && "text-text-tertiary"

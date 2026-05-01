@@ -75,7 +75,7 @@ export default function AdminTenantsPage() {
         <input value={query} onChange={e => { setQuery(e.target.value); setPage(1); }}
           placeholder="Поиск по имени, slug…"
           className="h-8 px-3 text-xs rounded-lg bg-surface-1 border border-border text-text-primary
-            placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500/50 w-64" />
+            placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500/50 w-full sm:w-64" />
         <select value={plan} onChange={e => { setPlan(e.target.value); setPage(1); }}
           className="h-8 px-2.5 text-xs rounded-lg bg-surface-1 border border-border text-text-secondary focus:outline-none">
           <option value="">Все планы</option>

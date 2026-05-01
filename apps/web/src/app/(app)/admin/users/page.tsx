@@ -69,7 +69,7 @@ export default function AdminUsersPage() {
           placeholder="Поиск по email / имени…"
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-          className="w-64"
+          className="w-full sm:w-64"
         />
 
         <Select.Root value={roleFilter} onValueChange={(v) => { setRoleFilter(v === "all" ? "" : v); setPage(1); }}>
