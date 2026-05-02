@@ -13,6 +13,8 @@ import type { PipelineJobPayload } from '@kmmzavod/queue';
 
 const EDIT_STYLES = ['dynamic', 'smooth', 'minimal', 'random'] as const;
 
+const SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
+
 const CreatePresetBody = z.object({
   productId:        z.string().uuid(),
   name:             z.string().min(1).max(100).default('Новый пресет'),
@@ -24,6 +26,9 @@ const CreatePresetBody = z.object({
   cronExpression:   z.string().min(5).max(100).default('0 10 * * *'),
   timezone:         z.string().default('Europe/Moscow'),
   autoPublish:      z.boolean().default(false),
+  publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).default([]),
+  socialAccountIds: z.array(z.string().uuid()).default([]),
+  bgmEnabled:       z.boolean().default(true),
 });
 
 const UpdatePresetBody = z.object({
@@ -36,6 +41,9 @@ const UpdatePresetBody = z.object({
   cronExpression:   z.string().min(5).max(100).optional(),
   timezone:         z.string().optional(),
   autoPublish:      z.boolean().optional(),
+  publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).optional(),
+  socialAccountIds: z.array(z.string().uuid()).optional(),
+  bgmEnabled:       z.boolean().optional(),
 });
 
 const ListQuery = z.object({

@@ -515,3 +515,80 @@ export const productsApi = {
       sourceUrl: string;
     }>('/api/v1/products/scrape-wb', { method: 'POST', body: JSON.stringify({ url }) }),
 };
+
+export interface VideoPreset {
+  id: string;
+  tenantId: string;
+  productId: string;
+  name: string;
+  status: 'draft' | 'preview' | 'active' | 'paused';
+  heygenAvatarId: string;
+  heygenVoiceId: string;
+  editStyle: string;
+  targetDurationSec: number;
+  customPrompt: string | null;
+  cronExpression: string | null;
+  timezone: string;
+  autoPublish: boolean;
+  publishPlatforms: string[];
+  socialAccountIds: string[];
+  bgmEnabled: boolean;
+  totalRuns: number;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  product?: { id: string; name: string };
+  previewVideo?: { id: string; status: string; outputUrl: string | null; thumbnailUrl?: string | null };
+  _count?: { videos: number };
+}
+
+export const presetsApi = {
+  list: (params?: { productId?: string; status?: string; page?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.productId) qs.set('productId', params.productId);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString();
+    return apiFetch<{ presets: VideoPreset[]; total: number; page: number; limit: number }>(
+      `/api/v1/presets${query ? `?${query}` : ''}`,
+    );
+  },
+
+  get: (id: string) =>
+    apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}`),
+
+  create: (body: {
+    productId: string;
+    name?: string;
+    heygenAvatarId?: string;
+    heygenVoiceId?: string;
+    editStyle?: string;
+    targetDurationSec?: number;
+    customPrompt?: string;
+    cronExpression?: string;
+    timezone?: string;
+    autoPublish?: boolean;
+    publishPlatforms?: string[];
+    socialAccountIds?: string[];
+    bgmEnabled?: boolean;
+  }) =>
+    apiFetch<{ preset: VideoPreset }>('/api/v1/presets', { method: 'POST', body: JSON.stringify(body) }),
+
+  update: (id: string, body: Partial<Parameters<typeof presetsApi.create>[1]>) =>
+    apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+  delete: (id: string) =>
+    apiFetch<void>(`/api/v1/presets/${id}`, { method: 'DELETE' }),
+
+  preview: (id: string) =>
+    apiFetch<{ video: any; jobId: string }>(`/api/v1/presets/${id}/preview`, { method: 'POST' }),
+
+  activate: (id: string) =>
+    apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}/activate`, { method: 'POST' }),
+
+  pause: (id: string) =>
+    apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}/pause`, { method: 'POST' }),
+};

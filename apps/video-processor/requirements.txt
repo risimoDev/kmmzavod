@@ -15,5 +15,13 @@ psutil==6.0.0
 # Speech-to-text for subtitle synchronisation
 faster-whisper==1.1.0
 
+# Beat detection for rhythm-synced video editing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Quality gate: blur/artifact detection
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+
 # CLI
 click==8.1.7

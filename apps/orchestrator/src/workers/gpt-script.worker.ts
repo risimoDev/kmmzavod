@@ -107,22 +107,34 @@ Analyze every attached product image. Build PRODUCT_VISUAL_PROFILE:
 Reference THESE SPECIFICS in EVERY b_roll_prompt — generic descriptions are forbidden.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-SCENE NARRATIVE ARC (STRICT)
+SCENE NARRATIVE ARC (STRICT — PAS FRAMEWORK)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. HOOK (scene 0, avatar/text, 3-5 sec) — the MOST CRITICAL moment. Pattern interrupt.
-   Use the hook technique specified in the creative brief.
-   Product MUST be mentioned in first 3 seconds.
+The script MUST follow the PAS (Problem-Agitate-Solution) selling framework:
 
-2. PRODUCT REVEAL (scene 1, clip) — cinematic hero shot of the actual product.
+1. HOOK + PROBLEM (scene 0, avatar/text, 3-5 sec) — the MOST CRITICAL moment.
+   Open with a pattern interrupt that IMMEDIATELY names a pain/problem the viewer has.
+   "Устали от...?", "Замечали, что...?", "А вот это бесит — ..."
+   Product MUST be implied or named in first 3 seconds.
+   Use the hook technique from the creative brief.
 
-3. BENEFITS (scenes 2-4, mix avatar + clip/image) — 2-3 concrete benefits.
-   Avatar explains WHY, clip/image SHOWS proof.
+2. AGITATE (scene 1, avatar, 3-5 sec) — twist the knife.
+   Make the viewer FEEL the problem. Not "it's bad" but paint a vivid picture.
+   "Тратите деньги впустую", "Результат ноль — а время ушло", "Обидно, да?"
+
+3. PRODUCT REVEAL (scene 2, clip) — cinematic hero shot of the actual product.
+   This is the SOLUTION entering the frame. Visual relief after agitation.
+
+4. BENEFITS + PROOF (scenes 3-5, mix avatar + clip/image) — 2-3 concrete benefits.
+   Avatar explains WHY it solves the problem, clip/image SHOWS proof.
    Цифры, сроки, сравнения: "через 7 дней морщины на 40% меньше", "в 3 раза экономичнее".
    Сенсорные детали: как пахнет, какая текстура, ощущения.
+   Each benefit = one avatar line + one visual proof clip.
 
-4. SOCIAL PROOF (avatar) — "50 000 клиентов", цитата, упоминание эксперта.
+5. SOCIAL PROOF (avatar) — "50 000 клиентов", цитата, упоминание эксперта.
+   Reduces remaining doubt. Must feel like real evidence, not bragging.
 
-5. CTA (final, avatar) — "Ссылка в описании", "закажите сейчас — скидка только до пятницы".
+6. CTA (final, avatar) — Urgent, specific, with deadline or scarcity.
+   "Ссылка в описании — скидка 30% до конца недели", "Жмите — осталось 47 штук".
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT SCHEMA
@@ -448,6 +460,97 @@ export function createGptScriptWorker(deps: Deps): Worker {
 
       if (!Array.isArray(output.scenes) || output.scenes.length === 0) {
         throw new Error('OpenAI: scenes array is empty or missing');
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // STEP 2.5: Hook quality evaluation + auto-rewrite
+      // ══════════════════════════════════════════════════════════════════════
+      // The first 3 seconds determine whether the viewer keeps watching or scrolls.
+      // We evaluate the hook scene with a dedicated LLM call. If the hook scores
+      // below 7/10, we auto-rewrite it using a focused prompt that generates
+      // a stronger, more arresting opening.
+      const hookScene = output.scenes.find(
+        (s) => s.scene_index === 0 && (s.type === 'avatar' || s.type === 'text'),
+      );
+
+      if (hookScene?.script) {
+        try {
+          const hookEvalRes = await deps.openai.chat.completions.create({
+            model: 'claude-4.6-sonnet',
+            response_format: { type: 'json_object' },
+            temperature: 0.3,
+            messages: [
+              {
+                role: 'system',
+                content: `You are a viral content strategist. Evaluate the HOOK (first 3 seconds) of a short-form video script.
+
+The hook MUST:
+1. Create an immediate pattern interrupt (stop the scrolling thumb)
+2. Name or imply the product within 3 seconds
+3. Evoke a strong emotion: shock, curiosity, desire, fear of missing out
+4. Use conversational Russian — NOT ad copy language
+5. Be SHORT: 6-12 words maximum
+
+Rate the hook 1-10 on these criteria:
+- stopping_power (does it arrest attention?)
+- product_presence (is product mentioned/implied?)
+- emotional_impact (does it trigger emotion?)
+- conversational_naturalness (does it sound like a real person?)
+
+Return JSON:
+{
+  "score": <1-10 overall>,
+  "scores": { "stopping_power": <1-10>, "product_presence": <1-10>, "emotional_impact": <1-10>, "conversational_naturalness": <1-10> },
+  "verdict": "pass" | "rewrite",
+  "issues": ["<issue1>", ...],
+  "improved_hook": "<better version, only if verdict=rewrite>"
+}
+
+The improved_hook must be 6-12 words of spoken Russian, conversational, with a pattern interrupt.`,
+              },
+              {
+                role: 'user',
+                content: `Evaluate this hook for a ${targetDuration}s product video about "${productContext?.name ?? 'a product'}":\n\n"${hookScene.script}"`,
+              },
+            ],
+          });
+
+          const evalRaw = hookEvalRes.choices[0]?.message?.content;
+          if (evalRaw) {
+            const evalData = safeParseJson<{
+              score: number;
+              scores: Record<string, number>;
+              verdict: 'pass' | 'rewrite';
+              issues: string[];
+              improved_hook?: string;
+            }>(evalRaw);
+
+            logger.info(
+              { jobId, hookScore: evalData.score, verdict: evalData.verdict },
+              'Hook evaluation complete',
+            );
+
+            if (evalData.verdict === 'rewrite' && evalData.improved_hook) {
+              logger.info(
+                { jobId, oldHook: hookScene.script, newHook: evalData.improved_hook, issues: evalData.issues },
+                'Hook auto-rewritten (score was %.1f)',
+              );
+              hookScene.script = evalData.improved_hook;
+
+              // Track hook rewrite cost
+              const hookUsage = hookEvalRes.usage!;
+              const hookCostUsd = gptunnelCostUsd(hookUsage.prompt_tokens, hookUsage.completion_tokens);
+              const hookCredits = creditsFromUsd(hookCostUsd);
+              await chargeCredits(deps.db, { tenantId, jobId, credits: hookCredits, description: 'Hook quality evaluation + rewrite' });
+              await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: hookCredits } } });
+            } else {
+              logger.info({ jobId, hookScore: evalData.score }, 'Hook passed quality check');
+            }
+          }
+        } catch (err: any) {
+          // Hook eval is best-effort — don't fail the job if it errors
+          logger.warn({ jobId, err: err.message }, 'Hook evaluation failed (non-critical, proceeding)');
+        }
       }
 
       // ── Track script cost ──────────────────────────────────────────────────
