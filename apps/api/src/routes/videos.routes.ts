@@ -414,7 +414,19 @@ export async function videoRoutes(app: FastifyInstance) {
 
     // Ставим задачу в очередь BullMQ
     const payload: PipelineJobPayload = { jobId: job.id, tenantId };
-    await pipelineQueue.add(`pipeline:${job.id}`, payload);
+    try {
+      await pipelineQueue.add(`pipeline:${job.id}`, payload);
+    } catch (queueErr: any) {
+      // Queue add failed — mark records as failed to avoid orphaned/zombie jobs
+      try {
+        await db.$transaction([
+          db.job.update({ where: { id: job.id }, data: { status: 'failed', error: 'Queue unavailable' } }),
+          db.video.update({ where: { id: video.id }, data: { status: 'failed' } }),
+        ]);
+      } catch { /* best-effort cleanup */ }
+      logger.error({ jobId: job.id, err: queueErr.message }, 'Failed to enqueue pipeline job — records marked failed');
+      return reply.code(503).send({ error: 'ServiceUnavailable', message: 'Очередь задач недоступна. Попробуйте позже.' });
+    }
 
     logger.info({ videoId: video.id, jobId: job.id, tenantId }, 'Video job enqueued');
 

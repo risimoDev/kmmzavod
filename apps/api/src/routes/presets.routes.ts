@@ -15,6 +15,41 @@ const EDIT_STYLES = ['dynamic', 'smooth', 'minimal', 'random'] as const;
 
 const SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
 
+// Validates a 5-field standard cron expression (minute hour dom month dow)
+function isValidCron(expr: string): boolean {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  // [min, max] for each cron field: minute, hour, dom, month, dow
+  const ranges: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  return fields.every((field, i) => {
+    const [lo, hi] = ranges[i];
+    if (field === '*') return true;
+    // Step: */n or base/n
+    if (field.includes('/')) {
+      const [left, right] = field.split('/');
+      const step = parseInt(right, 10);
+      if (isNaN(step) || step < 1) return false;
+      if (left === '*') return true;
+      const base = parseInt(left, 10);
+      return !isNaN(base) && base >= lo && base <= hi;
+    }
+    // List: n,m,k
+    if (field.includes(',')) {
+      return field.split(',').every(v => { const n = parseInt(v, 10); return !isNaN(n) && n >= lo && n <= hi; });
+    }
+    // Range: n-m
+    if (field.includes('-')) {
+      const parts = field.split('-').map(v => parseInt(v, 10));
+      return parts.length === 2 && parts.every(n => !isNaN(n)) && parts[0] >= lo && parts[1] <= hi && parts[0] <= parts[1];
+    }
+    // Single numeric value
+    const n = parseInt(field, 10);
+    return !isNaN(n) && n >= lo && n <= hi;
+  });
+}
+
+const CRON_REFINE = { message: 'Некорректное cron-выражение. Пример: "0 10 * * *" (5 полей: мин час день-месяца месяц день-недели)' };
+
 const CreatePresetBody = z.object({
   productId:        z.string().uuid(),
   name:             z.string().min(1).max(100).default('Новый пресет'),
@@ -23,7 +58,7 @@ const CreatePresetBody = z.object({
   editStyle:        z.enum(EDIT_STYLES).default('random'),
   targetDurationSec: z.number().int().min(15).max(90).default(30),
   customPrompt:     z.string().max(2000).optional(),
-  cronExpression:   z.string().min(5).max(100).default('0 10 * * *'),
+  cronExpression:   z.string().min(5).max(100).refine(isValidCron, CRON_REFINE).default('0 10 * * *'),
   timezone:         z.string().default('Europe/Moscow'),
   autoPublish:      z.boolean().default(false),
   publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).default([]),
@@ -38,7 +73,7 @@ const UpdatePresetBody = z.object({
   editStyle:        z.enum(EDIT_STYLES).optional(),
   targetDurationSec: z.number().int().min(15).max(90).optional(),
   customPrompt:     z.string().max(2000).nullable().optional(),
-  cronExpression:   z.string().min(5).max(100).optional(),
+  cronExpression:   z.string().min(5).max(100).refine(isValidCron, CRON_REFINE).optional(),
   timezone:         z.string().optional(),
   autoPublish:      z.boolean().optional(),
   publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).optional(),

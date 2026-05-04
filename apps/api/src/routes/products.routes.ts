@@ -292,6 +292,10 @@ export async function productRoutes(app: FastifyInstance) {
       if (!cardRes.ok) {
         return reply.code(404).send({ error: 'NotFound', message: 'Товар не найден на Wildberries' });
       }
+      const cardContentType = cardRes.headers.get('content-type') ?? '';
+      if (!cardContentType.includes('json')) {
+        return reply.code(502).send({ error: 'UpstreamError', message: 'Wildberries вернул неожиданный формат ответа' });
+      }
       const card = await cardRes.json() as any;
 
       const name = card.imt_name ?? '';

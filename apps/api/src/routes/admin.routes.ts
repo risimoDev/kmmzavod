@@ -1140,11 +1140,16 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     const redis = getRedis();
-    await redis.publish(RESTART_CHANNEL, JSON.stringify({
-      service: svc,
-      admin: req.user.email,
-      timestamp: new Date().toISOString(),
-    }));
+    try {
+      await redis.publish(RESTART_CHANNEL, JSON.stringify({
+        service: svc,
+        admin: req.user.email,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch (pubErr: any) {
+      logger.error({ service: svc, err: pubErr.message }, 'Redis publish failed for service restart');
+      return reply.code(503).send({ error: 'ServiceUnavailable', message: 'Не удалось отправить команду перезапуска — Redis недоступен.' });
+    }
 
     await audit(req.user.userId, 'restart', 'service', svc, req.ip, {
       note: `Перезапуск сервиса: ${svc}`,
