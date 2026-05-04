@@ -4,13 +4,11 @@
 //   Step 2: Generate full SCRIPT from the approved idea
 // Fan-out: clip scenes → image-gen (purpose=runway-frame) → runway-clip (chained)
 
-import { Worker, type Job, type Queue } from 'bullmq';
+import { Worker, type Job, type Queue, type ConnectionOptions } from 'bullmq';
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
 import { QUEUE_DEFS, type GptScriptJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
-import type { Queue } from 'bullmq';
-import type { ConnectionOptions } from 'bullmq';
 import { gptunnelCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
 import { logger } from '../logger';
