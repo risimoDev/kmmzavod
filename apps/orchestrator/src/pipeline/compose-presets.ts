@@ -98,6 +98,6 @@ export const COMPOSE_PRESETS: Record<string, ComposePreset> = {
   },
 } as const;
 
-export const DEFAULT_VARIANT_PRESETS = ['tiktok', 'instagram', 'youtube', 'vk'] as const;
+export const DEFAULT_VARIANT_PRESETS = ['tiktok', 'instagram'] as const;
 
 export type PresetName = keyof typeof COMPOSE_PRESETS;

@@ -185,6 +185,7 @@ class ComposeResponse(BaseModel):
     width: int
     height: int
     scene_count: int
+    thumbnail_key: str | None = None
 
 
 # ── Layout composition ────────────────────────────────────────────────────────

@@ -88,7 +88,7 @@ _STYLES: dict[SubtitleStyle, _StyleDef] = {
         alignment=2,   # bottom-centre
         margin_v=350,
         max_chars_per_line=18,
-        words_per_chunk=3,
+        words_per_chunk=2,
     ),
     SubtitleStyle.CINEMATIC: _StyleDef(
         name="Cinematic",

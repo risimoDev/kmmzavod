@@ -269,24 +269,29 @@ def image_to_clip(
     mw = sw - width    # Horizontal movement budget
     mh = sh - height   # Vertical movement budget
 
+    # Smoothstep easing: e(t) = t²·(3−2t) for t in [0,1] — ease-in-out curve
+    # Much more cinematic than linear min(t/d,1)
+    ease = f"if(lt(t,{d}),(t/{d})*(t/{d})*(3-2*(t/{d})),1)"
+    ease_inv = f"(1-if(lt(t,{d}),(t/{d})*(t/{d})*(3-2*(t/{d})),1))"
+
     if preset is KenBurnsPreset.ZOOM_IN:
         # Crop starts large (sw×sh), shrinks towards (width×height) centred
         crop = (
             f"crop="
-            f"w='{sw}-{mw}*min(t/{d},1)':"
-            f"h='{sh}-{mh}*min(t/{d},1)':"
-            f"x='{mw}*min(t/{d},1)/2':"
-            f"y='{mh}*min(t/{d},1)/2'"
+            f"w='{sw}-{mw}*{ease}':"
+            f"h='{sh}-{mh}*{ease}':"
+            f"x='{mw}*{ease}/2':"
+            f"y='{mh}*{ease}/2'"
         )
 
     elif preset is KenBurnsPreset.ZOOM_OUT:
         # Crop starts small (width×height centred), grows to sw×sh
         crop = (
             f"crop="
-            f"w='{width}+{mw}*min(t/{d},1)':"
-            f"h='{height}+{mh}*min(t/{d},1)':"
-            f"x='{mw}*(1-min(t/{d},1))/2':"
-            f"y='{mh}*(1-min(t/{d},1))/2'"
+            f"w='{width}+{mw}*{ease}':"
+            f"h='{height}+{mh}*{ease}':"
+            f"x='{mw}*{ease_inv}/2':"
+            f"y='{mh}*{ease_inv}/2'"
         )
 
     elif preset is KenBurnsPreset.PAN_LR:
@@ -294,7 +299,7 @@ def image_to_clip(
         crop = (
             f"crop="
             f"w={width}:h={height}:"
-            f"x='{mw}*min(t/{d},1)':"
+            f"x='{mw}*{ease}':"
             f"y='{mh//2}'"
         )
 
@@ -303,7 +308,7 @@ def image_to_clip(
         crop = (
             f"crop="
             f"w={width}:h={height}:"
-            f"x='{mw}*(1-min(t/{d},1))':"
+            f"x='{mw}*{ease_inv}':"
             f"y='{mh//2}'"
         )
 
@@ -313,7 +318,7 @@ def image_to_clip(
             f"crop="
             f"w={width}:h={height}:"
             f"x='{mw//2}':"
-            f"y='{mh}*min(t/{d},1)'"
+            f"y='{mh}*{ease}'"
         )
 
     scale_back = f"scale={width}:{height}:flags=lanczos"
@@ -632,6 +637,7 @@ def final_encode(
     max_bitrate: str = "6M",
     bufsize: str = "12M",
     threads: int = 0,
+    ass_path: str | None = None,
 ) -> None:
     """
     Final H.264 encode targeting social media platforms.
@@ -644,6 +650,7 @@ def final_encode(
     • ``-pix_fmt yuv420p`` — required by most platforms.
     • AAC-LC stereo — universally supported.
     • ``loudnorm`` — EBU R128 audio normalisation for consistent volume.
+    • ``ass_path`` — optional ASS subtitle path; burns subtitles inline (saves one encode pass).
     """
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -651,6 +658,9 @@ def final_encode(
         f"fps={fps},"
         f"format=yuv420p"
     )
+    # Inline subtitle burn: append ass filter to vf chain if provided
+    if ass_path:
+        vf += f",ass='{_safe_filter_path(ass_path)}'"
 
     # Audio normalization: EBU R128 loudness standard for social media
     af = "loudnorm=I=-16:LRA=11:TP=-1.5"
@@ -677,6 +687,32 @@ def final_encode(
         output_path,
     ]
     _run(cmd, "final_encode")
+
+
+def extract_thumbnail(
+    input_path: str,
+    output_path: str,
+    offset_pct: float = 0.15,
+) -> None:
+    """
+    Extract a JPEG thumbnail frame from a video.
+
+    Seeks to ``offset_pct`` of the video duration (default 15%) to avoid
+    black frames at the start. Output is scaled to 540×960 (9:16 portrait)
+    with JPEG quality 2 (highest).
+    """
+    info = probe(input_path)
+    seek_time = max(1.0, info.duration * offset_pct)
+    cmd = [
+        _bin("ffmpeg"), "-y",
+        "-ss", f"{seek_time:.2f}",
+        "-i", input_path,
+        "-vframes", "1",
+        "-q:v", "2",
+        "-vf", "scale=540:960:force_original_aspect_ratio=decrease,pad=540:960:(ow-iw)/2:(oh-ih)/2",
+        output_path,
+    ]
+    _run(cmd, "extract_thumbnail")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

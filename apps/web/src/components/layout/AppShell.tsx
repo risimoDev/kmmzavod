@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -8,9 +8,21 @@ import { Button } from "@/components/ui/primitives";
 import { useTheme } from "@/components/providers/ThemeProvider";
 import { getStoredUser, authApi } from "@/lib/api";
 
-// ── Mobile menu hook ─────────────────────────────────────────────────────────
+// ── Mobile menu context ─────────────────────────────────────────────────────────
 
-function useMobileMenu() {
+interface MobileMenuCtx {
+  open: boolean;
+  toggle: () => void;
+  close: () => void;
+}
+
+const MobileMenuContext = createContext<MobileMenuCtx>({ open: false, toggle: () => {}, close: () => {} });
+
+export function useMobileMenu() {
+  return useContext(MobileMenuContext);
+}
+
+function useMobileMenuState() {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (open) {
@@ -20,7 +32,7 @@ function useMobileMenu() {
     }
     return () => { document.body.style.overflow = ""; };
   }, [open]);
-  return { open, setOpen, toggle: () => setOpen((v) => !v), close: () => setOpen(false) };
+  return { open, toggle: () => setOpen((v) => !v), close: () => setOpen(false) };
 }
 
 // ── Navigation items ──────────────────────────────────────────────────────────
@@ -161,6 +173,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: { mobileOpen?: boolean; o
             <li key={item.href}>
               <Link
                 href={item.href}
+                onClick={onCloseMobile}
                 className={cn(
                   "flex items-center gap-2.5 h-8 px-2.5 rounded-md text-sm font-medium transition-colors duration-150",
                   pathname.startsWith(item.href)
@@ -187,6 +200,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: { mobileOpen?: boolean; o
             <li key={item.href}>
               <Link
                 href={item.href}
+                onClick={onCloseMobile}
                 className={cn(
                   "flex items-center gap-2.5 h-8 px-2.5 rounded-md text-sm font-medium transition-colors duration-150",
                   pathname.startsWith(item.href)
@@ -250,9 +264,13 @@ export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
       <button
         onClick={mobile.toggle}
         className="lg:hidden shrink-0 w-8 h-8 rounded-md flex items-center justify-center text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors"
-        aria-label="Open menu"
+        aria-label="Toggle menu"
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        {mobile.open ? (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        ) : (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        )}
       </button>
       <div className="flex flex-col min-w-0">
         {title && <h1 className="text-sm font-semibold text-text-primary truncate">{title}</h1>}
@@ -269,24 +287,26 @@ export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
 // ── App shell layout ──────────────────────────────────────────────────────────
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const mobile = useMobileMenu();
+  const mobile = useMobileMenuState();
   return (
-    <div className="min-h-screen bg-surface-0">
-      <Sidebar mobileOpen={mobile.open} onCloseMobile={mobile.close} />
+    <MobileMenuContext.Provider value={mobile}>
+      <div className="min-h-screen bg-surface-0">
+        <Sidebar mobileOpen={mobile.open} onCloseMobile={mobile.close} />
 
-      {/* Mobile overlay */}
-      {mobile.open && (
-        <div
-          className="fixed inset-0 bg-black/40 z-30 lg:hidden"
-          onClick={mobile.close}
-          aria-hidden="true"
-        />
-      )}
+        {/* Mobile overlay */}
+        {mobile.open && (
+          <div
+            className="fixed inset-0 bg-black/40 z-30 lg:hidden"
+            onClick={mobile.close}
+            aria-hidden="true"
+          />
+        )}
 
-      <div className="min-h-screen flex flex-col lg:ml-[216px]">
-        {children}
+        <div className="min-h-screen flex flex-col lg:ml-[216px]">
+          {children}
+        </div>
       </div>
-    </div>
+    </MobileMenuContext.Provider>
   );
 }
 

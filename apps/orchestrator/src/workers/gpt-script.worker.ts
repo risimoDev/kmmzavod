@@ -4,7 +4,7 @@
 //   Step 2: Generate full SCRIPT from the approved idea
 // Fan-out: clip scenes → image-gen (purpose=runway-frame) → runway-clip (chained)
 
-import { Worker, type Job } from 'bullmq';
+import { Worker, type Job, type Queue } from 'bullmq';
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
 import { QUEUE_DEFS, type GptScriptJobPayload } from '@kmmzavod/queue';

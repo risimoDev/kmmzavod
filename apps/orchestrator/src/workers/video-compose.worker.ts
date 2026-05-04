@@ -490,7 +490,9 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       // Pick the first successful variant as the default outputUrl
       const firstOk = results.find((r) => r.status === 'fulfilled') as
-        PromiseFulfilledResult<{ presetName: string; outputKey: string; response: { duration_sec: number; file_size_bytes: number } }>;
+        PromiseFulfilledResult<{ presetName: string; outputKey: string; response: { duration_sec: number; file_size_bytes: number; thumbnail_key?: string } }>;
+
+      const thumbnailKey = firstOk.value.response.thumbnail_key ?? null;
 
       await db.$transaction([
         db.job.update({
@@ -503,6 +505,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
             data: {
               status: 'completed',
               outputUrl: firstOk.value.outputKey,
+              thumbnailUrl: thumbnailKey,
               durationSec: firstOk.value.response.duration_sec,
               fileSizeBytes: BigInt(firstOk.value.response.file_size_bytes ?? 0),
               completedAt: new Date(),

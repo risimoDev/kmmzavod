@@ -234,11 +234,11 @@ class CompositionPipeline:
                     len(self.req.subtitles), cum_overlap,
                 )
 
-        # Stage 5: Burn subtitles
+        # Stage 5: Generate subtitle ASS file (no separate encode — burned inline in final_encode)
+        ass_path: str | None = None
         if self.req.subtitles:
-            self._progress(7, "Сжигаем субтитры")
+            self._progress(7, "Генерируем файл субтитров")
             ass_path = self._path("subs.ass")
-            subtitled = self._path("subtitled.mp4")
             generate_ass_file(
                 self.req.subtitles,
                 ass_path,
@@ -246,10 +246,6 @@ class CompositionPipeline:
                 height=s.height,
                 style=s.subtitle_style,
             )
-            await asyncio.get_event_loop().run_in_executor(
-                None, fx.burn_subtitles, current, ass_path, subtitled, self.threads
-            )
-            current = subtitled
         else:
             self._progress(7, "Субтитров нет, пропускаем")
 
@@ -284,7 +280,7 @@ class CompositionPipeline:
         else:
             self._progress(8, "Фоновой музыки нет, пропускаем")
 
-        # Stage 7: Final encode
+        # Stage 7: Final encode (with inline subtitle burn via ass_path)
         self._progress(9, "Финальная кодировка (H.264, social-media)")
         final = self._path("final.mp4")
         await asyncio.get_event_loop().run_in_executor(
@@ -301,6 +297,7 @@ class CompositionPipeline:
             s.max_bitrate,
             s.bufsize,
             self.threads,
+            ass_path,
         )
 
         # Stage 8: Upload
@@ -309,6 +306,20 @@ class CompositionPipeline:
 
         info = fx.probe(final)
         file_size = os.path.getsize(final)
+
+        # Stage 9: Extract and upload thumbnail
+        thumbnail_key: str | None = None
+        try:
+            thumb_local = self._path("thumbnail.jpg")
+            await asyncio.get_event_loop().run_in_executor(
+                None, fx.extract_thumbnail, final, thumb_local, 0.15
+            )
+            thumb_key = self.req.output_key.rsplit("/", 1)[0] + "/thumbnail.jpg"
+            await self.storage.upload(thumb_key, thumb_local, "image/jpeg")
+            thumbnail_key = thumb_key
+            logger.info("Job %s thumbnail uploaded → %s", self.req.job_id, thumb_key)
+        except Exception as e:
+            logger.warning("Thumbnail extraction failed for job %s: %s", self.req.job_id, e)
 
         logger.info(
             "Job %s завершён за %.1f с | %dx%d | %.1f с | %d KB",
@@ -327,6 +338,7 @@ class CompositionPipeline:
             width=info.width,
             height=info.height,
             scene_count=len(self.req.scenes),
+            thumbnail_key=thumbnail_key,
         )
 
     # ── Stage implementations ──────────────────────────────────────────────
