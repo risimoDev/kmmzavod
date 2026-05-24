@@ -114,6 +114,6 @@ export async function startPipeline(jobId: string, tenantId: string, deps: Deps)
 
   await deps.gptQueue.add(`gpt:${jobId}`, gptPayload, {
     ...QUEUE_DEFS.GPT_SCRIPT.defaultJobOptions,
-    jobId: `gpt:${jobId}`, // BullMQ deduplication: retried coordinator won't double-enqueue
+    jobId: `gpt-${jobId}`, // BullMQ deduplication: retried coordinator won't double-enqueue
   });
 }
