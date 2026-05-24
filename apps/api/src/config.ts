@@ -36,6 +36,8 @@ const schema = z.object({
 
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
   NEXT_PUBLIC_API_URL: z.string().url().default('http://localhost:3000'),
+  // Frontend URL for OAuth redirects (separate from API URL)
+  FRONTEND_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
 
   // Social OAuth (optional)
   TIKTOK_CLIENT_KEY: z.string().optional(),

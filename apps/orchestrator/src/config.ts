@@ -50,4 +50,9 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+if (parsed.data.NODE_ENV === 'production' && !parsed.data.ENCRYPTION_KEY) {
+  console.error('❌ ENCRYPTION_KEY is required in production (32 hex bytes = 64 chars)');
+  process.exit(1);
+}
+
 export const config = parsed.data;

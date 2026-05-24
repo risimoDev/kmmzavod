@@ -661,7 +661,7 @@ The improved_hook must be 6-12 words of spoken Russian, conversational, with a p
 
       if (avatarScenes.length > 0) {
         // Concatenate all avatar scripts in scene order with natural pause separator
-        const combinedScript = avatarScenes.map(s => s.script!).join(' ');
+        const combinedScript = avatarScenes.map(s => s.script!).join(' ... ');
 
         await deps.heygenQueue.add(
           `heygen-combined-${jobId}`,

@@ -20,6 +20,8 @@ export function getRefreshToken(): string {
 export function setTokens(access: string, refresh: string) {
   localStorage.setItem('access_token', access);
   localStorage.setItem('refresh_token', refresh);
+  // Mirror to cookie for Next.js middleware auth guard
+  document.cookie = `access_token=${access}; path=/; max-age=86400; SameSite=Lax`;
 }
 
 export function clearTokens() {
@@ -27,6 +29,8 @@ export function clearTokens() {
   localStorage.removeItem('refresh_token');
   localStorage.removeItem('user');
   localStorage.removeItem('tenant');
+  // Clear auth cookie
+  document.cookie = 'access_token=; path=/; max-age=0';
 }
 
 export function getStoredUser(): AuthUser | null {

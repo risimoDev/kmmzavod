@@ -257,12 +257,12 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           if (gap < 0.5) {
             segEnd = words[i].end;
           } else {
-            zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.04 });
+            zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.10 });
             segStart = words[i].start;
             segEnd = words[i].end;
           }
         }
-        zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.04 });
+        zones.push({ start_sec: Math.round(segStart * 100) / 100, end_sec: Math.round(segEnd * 100) / 100, duck_volume: 0.10 });
         return zones;
       };
 

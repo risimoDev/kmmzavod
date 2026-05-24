@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { sseSubscriber } from '../lib/sse-subscriber';
 import { pipelineQueue } from '../lib/queues';
 import { logger } from '../logger';
 import { config } from '../config';
@@ -106,13 +107,10 @@ export async function videoRoutes(app: FastifyInstance) {
         if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
       }, 25_000);
 
-      // Redis pub/sub — dedicated connection per SSE client
-      const sub = getRedis().duplicate();
+      // Shared Redis pub/sub — single connection multiplexed across all SSE clients
       const channel = `video:progress:${tenantId}:${id}`;
-      await sub.subscribe(channel);
-
-      const onMessage = (ch: string, message: string) => {
-        if (ch !== channel || closed || reply.raw.writableEnded) return;
+      const unsubscribe = sseSubscriber.subscribe(channel, (message: string) => {
+        if (closed || reply.raw.writableEnded) return;
         try {
           const event = JSON.parse(message);
           reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -122,17 +120,14 @@ export async function videoRoutes(app: FastifyInstance) {
             }, 500);
           }
         } catch { /* ignore parse errors */ }
-      };
-      sub.on('message', onMessage);
+      });
 
-      // Cleanup — unsubscribe and disconnect the per-request connection
-      const cleanup = async () => {
+      // Cleanup — unsubscribe from shared subscriber
+      const cleanup = () => {
         if (closed) return;
         closed = true;
         clearInterval(heartbeat);
-        sub.removeListener('message', onMessage);
-        try { await sub.unsubscribe(channel); } catch { /* ignore */ }
-        sub.disconnect();
+        unsubscribe();
       };
       reply.raw.on('close', cleanup);
       reply.raw.on('error', cleanup);
@@ -321,9 +316,9 @@ export async function videoRoutes(app: FastifyInstance) {
     }
 
     // Создаём видео + задачу + soft reserve кредитов в одной транзакции
-    // Credit check is inside the transaction to prevent race conditions
+    // Serializable isolation prevents double-spending race conditions
     const result = await db.$transaction(async (tx) => {
-      // Atomic credit check — SELECT FOR UPDATE via Prisma interactive transaction
+      // Atomic credit check under Serializable isolation prevents double-spending
       const tenant = await tx.tenant.findUniqueOrThrow({
         where: { id: tenantId },
         select: { credits: true },
@@ -396,7 +391,7 @@ export async function videoRoutes(app: FastifyInstance) {
       });
 
       return { video, job };
-    }).catch((err: any) => {
+    }, { isolationLevel: 'Serializable' }).catch((err: any) => {
       if (err.message === 'InsufficientCredits') {
         return reply.code(402).send({
           error: 'InsufficientCredits',

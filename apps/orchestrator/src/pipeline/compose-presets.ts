@@ -83,7 +83,7 @@ export const COMPOSE_PRESETS: Record<string, ComposePreset> = {
     label: 'VK Клипы',
     platform: 'vk',
     transition_type: 'cut',
-    transition_duration: 0.15,
+    transition_duration: 0,
     subtitle_style: {
       font_color: '#FFFFFF',
       font_size: 44,
@@ -98,6 +98,6 @@ export const COMPOSE_PRESETS: Record<string, ComposePreset> = {
   },
 } as const;
 
-export const DEFAULT_VARIANT_PRESETS = ['tiktok', 'instagram'] as const;
+export const DEFAULT_VARIANT_PRESETS = ['tiktok', 'instagram', 'youtube'] as const;
 
 export type PresetName = keyof typeof COMPOSE_PRESETS;

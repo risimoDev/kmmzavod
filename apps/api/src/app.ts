@@ -1,7 +1,9 @@
 // Prisma returns BigInt for autoincrement IDs and large integer columns.
 // JSON.stringify doesn't know how to serialize BigInt natively, so we add toJSON.
+// Using String avoids precision loss for values > Number.MAX_SAFE_INTEGER (2^53).
 (BigInt.prototype as any).toJSON = function () {
-  return Number(this);
+  const n = Number(this);
+  return Number.isSafeInteger(n) ? n : String(this);
 };
 
 import Fastify from 'fastify';

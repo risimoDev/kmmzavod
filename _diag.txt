@@ -1,2 +1,0 @@
-500
-{"detail":"EndpointConnectionError: Could not connect to the endpoint URL: \"http://localhost:9000/kmmzavod/test/x.png\""}
