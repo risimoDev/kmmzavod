@@ -44,6 +44,50 @@ export function createHeygenRenderWorker(deps: Deps) {
 
       log.info('HeyGen: начало генерации аватара');
 
+      // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
+      // Skip HeyGen API call if avatar video was already generated for this job/scene.
+      // This prevents wasted API tokens on retries when the previous run already
+      // succeeded at this stage but failed later (e.g. compose, credit charging).
+      if (isCombined && combinedSceneIds && combinedSceneIds.length > 0) {
+        const existingJob = await db.job.findUnique({
+          where: { id: jobId },
+          select: { payload: true },
+        });
+        const existingPayload = (existingJob?.payload ?? {}) as Record<string, unknown>;
+        const existingUrl = existingPayload.combinedAvatarUrl as string | undefined;
+        if (existingUrl) {
+          log.info({ existingUrl }, 'HeyGen: combined avatar already generated — skipping API call');
+          // Ensure all combined scenes are marked done (in case earlier update was partial)
+          await db.scene.updateMany({
+            where: { id: { in: combinedSceneIds }, avatarDone: false },
+            data:  { avatarUrl: existingUrl, avatarDone: true, status: 'completed' },
+          });
+          // Notify pipeline-state for each scene (idempotent via jobId dedup)
+          for (const sid of combinedSceneIds) {
+            await pipelineStateQueue.add(
+              `state-${sid}`,
+              { jobId, sceneId: sid, tenantId, completedStage: 'avatar' } satisfies PipelineStateJobPayload,
+              { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sid}-avatar` },
+            );
+          }
+          return;
+        }
+      } else if (!isCombined) {
+        const existingScene = await db.scene.findUnique({
+          where:  { id: sceneId },
+          select: { avatarUrl: true, avatarDone: true },
+        });
+        if (existingScene?.avatarUrl && existingScene.avatarDone) {
+          log.info({ existingUrl: existingScene.avatarUrl }, 'HeyGen: scene avatar already generated — skipping API call');
+          await pipelineStateQueue.add(
+            `state-${sceneId}`,
+            { jobId, sceneId, tenantId, completedStage: 'avatar' } satisfies PipelineStateJobPayload,
+            { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-avatar` },
+          );
+          return;
+        }
+      }
+
       await db.jobEvent.create({
         data: {
           jobId, tenantId,

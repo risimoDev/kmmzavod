@@ -59,6 +59,54 @@ export function createImageGenWorker(deps: Deps) {
 
       log.info('Начало генерации изображения');
 
+      // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
+      // Skip image generation if asset already exists in MinIO from a previous run.
+      // For runway-frame: if frameUrl exists, skip image-gen AND chain to runway-clip directly
+      // (unless clip already exists — then we're fully done with this scene).
+      const existingSceneAssets = await db.scene.findUnique({
+        where:  { id: sceneId },
+        select: { imageUrl: true, imageDone: true, frameUrl: true, clipUrl: true, clipDone: true },
+      });
+
+      if (isFrame) {
+        if (existingSceneAssets?.clipUrl && existingSceneAssets.clipDone) {
+          // Clip already exists → entire scene is done, notify pipeline-state for the clip stage
+          log.info({ existingClipUrl: existingSceneAssets.clipUrl }, 'Image-gen: clip already complete — skipping frame+runway chain');
+          await pipelineStateQueue.add(
+            `state-${sceneId}`,
+            { jobId, sceneId, tenantId, completedStage: 'clip' } satisfies PipelineStateJobPayload,
+            { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
+          );
+          return;
+        }
+        if (existingSceneAssets?.frameUrl) {
+          // Frame exists, clip missing → skip image-gen, chain directly to runway-clip
+          log.info({ existingFrameUrl: existingSceneAssets.frameUrl }, 'Image-gen: frame already exists — chaining to runway-clip');
+          const presignedUrl = await storage.presignedUrl(existingSceneAssets.frameUrl, 3600);
+          await runwayQueue.add(
+            `runway:${sceneId}`,
+            {
+              jobId, sceneId, tenantId,
+              prompt: motionPrompt,
+              durationSec: clipDurationSec ?? 5,
+              referenceImageUrl: presignedUrl,
+            } satisfies RunwayClipJobPayload,
+            { ...QUEUES['runway-clip'].defaultJobOptions, jobId: `runway-${sceneId}` },
+          );
+          return;
+        }
+      } else {
+        if (existingSceneAssets?.imageUrl && existingSceneAssets.imageDone) {
+          log.info({ existingImageUrl: existingSceneAssets.imageUrl }, 'Image-gen: scene image already exists — skipping API call');
+          await pipelineStateQueue.add(
+            `state-${sceneId}`,
+            { jobId, sceneId, tenantId, completedStage: 'image' } satisfies PipelineStateJobPayload,
+            { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-image` },
+          );
+          return;
+        }
+      }
+
       await db.jobEvent.create({
         data: { jobId, tenantId, stage: 'image-gen', status: 'started', meta: { sceneId, purpose: purpose ?? 'scene-image' } },
       });

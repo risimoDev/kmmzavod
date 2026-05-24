@@ -44,7 +44,7 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
-import { pipelineQueue, videoComposeQueue, gptScriptQueue, heygenQueue, imageGenQueue, ALL_QUEUES } from '../lib/queues';
+import { pipelineQueue, videoComposeQueue, gptScriptQueue, heygenQueue, imageGenQueue, runwayQueue, pipelineStateQueue, ALL_QUEUES } from '../lib/queues';
 import { QUEUE_DEFS } from '@kmmzavod/queue';
 import { logger } from '../logger';
 import { config } from '../config';
@@ -546,7 +546,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const scenes = await db.scene.findMany({
       where: { jobId: id },
       select: { id: true, type: true, status: true, script: true, bRollPrompt: true,
-                durationSec: true, sceneIndex: true },
+                durationSec: true, sceneIndex: true,
+                avatarUrl: true, avatarDone: true,
+                clipUrl: true,   clipDone:   true,
+                imageUrl: true,  imageDone:  true,
+                frameUrl: true },
       orderBy: { sceneIndex: 'asc' },
     });
 
@@ -605,68 +609,155 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'processing' } })] : []),
     ]);
 
-    // Re-enqueue per scene type — avatar in combined batch, clip/image individually
+    // ── SMART RESUME: classify each failed scene by what's already done ────────
+    // For each failed scene we look at what assets exist in MinIO and re-enqueue
+    // ONLY the missing stages. This saves HeyGen/Runway/ImageGen tokens on retry.
+    const storage = (app as any).storage;
+
+    // Avatar: check if combinedAvatarUrl already exists in job payload.
+    // If yes — skip HeyGen entirely; just notify pipeline-state for each failed avatar scene.
     const failedAvatarScenes = failedScenes.filter(s => s.type === 'avatar' && s.script);
     const failedClipScenes   = failedScenes.filter(s => s.type === 'clip'   && s.bRollPrompt);
     const failedImageScenes  = failedScenes.filter(s => s.type === 'image'  && s.bRollPrompt);
 
+    let avatarMode: 'regenerate' | 'reuse' | 'skip' = 'skip';
+    const combinedAvatarUrlExisting = payload['combinedAvatarUrl'] as string | undefined;
+
     if (failedAvatarScenes.length > 0) {
-      // Re-run as combined — use ALL avatar scenes to produce one coherent HeyGen video
-      const allAvatarScenes = scenes
-        .filter(s => s.type === 'avatar' && s.script)
-        .sort((a, b) => a.sceneIndex - b.sceneIndex);
-      await heygenQueue.add(
-        `heygen-resume:${id}`,
-        {
-          jobId: id,
-          sceneId: allAvatarScenes[0].id,
-          tenantId: job.tenantId,
-          avatarId, voiceId,
-          script: allAvatarScenes.map(s => s.script!).join(' '),
-          isCombined: true,
-          combinedSceneIds: allAvatarScenes.map(s => s.id),
-        },
-        QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
-      );
+      if (combinedAvatarUrlExisting) {
+        // Combined avatar already exists in MinIO — backfill scenes and notify pipeline-state.
+        // Saves HeyGen tokens on retry.
+        avatarMode = 'reuse';
+        await db.scene.updateMany({
+          where: { id: { in: failedAvatarScenes.map(s => s.id) } },
+          data:  { avatarUrl: combinedAvatarUrlExisting, avatarDone: true, status: 'completed' },
+        });
+        for (const s of failedAvatarScenes) {
+          await pipelineStateQueue.add(
+            `state-${s.id}`,
+            { jobId: id, sceneId: s.id, tenantId: job.tenantId, completedStage: 'avatar' },
+            { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${s.id}-avatar` },
+          );
+        }
+      } else {
+        // No combined avatar in MinIO — regenerate using ALL avatar scenes (combined mode).
+        avatarMode = 'regenerate';
+        const allAvatarScenes = scenes
+          .filter(s => s.type === 'avatar' && s.script)
+          .sort((a, b) => a.sceneIndex - b.sceneIndex);
+        await heygenQueue.add(
+          `heygen-resume:${id}`,
+          {
+            jobId: id,
+            sceneId: allAvatarScenes[0].id,
+            tenantId: job.tenantId,
+            avatarId, voiceId,
+            script: allAvatarScenes.map(s => s.script!).join(' ... '),
+            isCombined: true,
+            combinedSceneIds: allAvatarScenes.map(s => s.id),
+          },
+          QUEUE_DEFS.HEYGEN_RENDER.defaultJobOptions,
+        );
+      }
     }
 
+    // Clip: per-scene asset check. Three cases:
+    //   1) clipUrl exists → skip everything, notify pipeline-state.
+    //   2) frameUrl exists, clipUrl missing → enqueue runway-clip directly (skip image-gen).
+    //   3) nothing exists → enqueue image-gen (runway-frame) → chains to runway-clip.
+    const clipBreakdown = { skipped: 0, runwayOnly: 0, full: 0 };
     for (const scene of failedClipScenes) {
-      // Clip: image-gen (runway-frame) → chains to runway-clip automatically
-      await imageGenQueue.add(
-        `imggen-frame-resume:${scene.id}`,
-        {
-          jobId: id, sceneId: scene.id, tenantId: job.tenantId,
-          prompt: scene.bRollPrompt!,
-          referenceImageKeys: productImageKeys,
-          purpose: 'runway-frame',
-          clipDurationSec: Number(scene.durationSec ?? 5),
-        },
-        QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
-      );
+      if (scene.clipUrl && scene.clipDone) {
+        clipBreakdown.skipped++;
+        await db.scene.update({
+          where: { id: scene.id },
+          data:  { status: 'completed' },
+        });
+        await pipelineStateQueue.add(
+          `state-${scene.id}`,
+          { jobId: id, sceneId: scene.id, tenantId: job.tenantId, completedStage: 'clip' },
+          { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${scene.id}-clip` },
+        );
+      } else if (scene.frameUrl) {
+        // Frame exists, only Runway clip generation is needed — saves image-gen cost.
+        clipBreakdown.runwayOnly++;
+        const presignedFrameUrl = await storage.presignedUrl(scene.frameUrl, 3600);
+        // Parse motion prompt from b_roll_prompt (format: "IMAGE_PROMPT ||| MOTION_PROMPT")
+        const SEPARATOR = ' ||| ';
+        const motionPrompt = scene.bRollPrompt!.includes(SEPARATOR)
+          ? scene.bRollPrompt!.split(SEPARATOR)[1]?.trim() ?? scene.bRollPrompt!
+          : scene.bRollPrompt!;
+        await runwayQueue.add(
+          `runway-resume:${scene.id}`,
+          {
+            jobId: id, sceneId: scene.id, tenantId: job.tenantId,
+            prompt: motionPrompt,
+            durationSec: Number(scene.durationSec ?? 5),
+            referenceImageUrl: presignedFrameUrl,
+          },
+          { ...QUEUE_DEFS.RUNWAY_CLIP.defaultJobOptions, jobId: `runway-${scene.id}` },
+        );
+      } else {
+        // No frame, no clip — full chain from image-gen.
+        clipBreakdown.full++;
+        await imageGenQueue.add(
+          `imggen-frame-resume:${scene.id}`,
+          {
+            jobId: id, sceneId: scene.id, tenantId: job.tenantId,
+            prompt: scene.bRollPrompt!,
+            referenceImageKeys: productImageKeys,
+            purpose: 'runway-frame',
+            clipDurationSec: Number(scene.durationSec ?? 5),
+          },
+          QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
+        );
+      }
     }
 
+    // Image: check if scene already has imageUrl in MinIO.
+    const imageBreakdown = { skipped: 0, regenerated: 0 };
     for (const scene of failedImageScenes) {
-      await imageGenQueue.add(
-        `imggen-resume:${scene.id}`,
-        {
-          jobId: id, sceneId: scene.id, tenantId: job.tenantId,
-          prompt: scene.bRollPrompt!,
-          referenceImageKeys: productImageKeys,
-          purpose: 'scene-image',
-        },
-        QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
-      );
+      if (scene.imageUrl && scene.imageDone) {
+        imageBreakdown.skipped++;
+        await db.scene.update({
+          where: { id: scene.id },
+          data:  { status: 'completed' },
+        });
+        await pipelineStateQueue.add(
+          `state-${scene.id}`,
+          { jobId: id, sceneId: scene.id, tenantId: job.tenantId, completedStage: 'image' },
+          { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${scene.id}-image` },
+        );
+      } else {
+        imageBreakdown.regenerated++;
+        await imageGenQueue.add(
+          `imggen-resume:${scene.id}`,
+          {
+            jobId: id, sceneId: scene.id, tenantId: job.tenantId,
+            prompt: scene.bRollPrompt!,
+            referenceImageKeys: productImageKeys,
+            purpose: 'scene-image',
+          },
+          QUEUE_DEFS.IMAGE_GEN.defaultJobOptions,
+        );
+      }
     }
 
     await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
     logger.info(
       { jobId: id, adminId: req.user.userId, mode: 'resume-scenes',
-        failedAvatar: failedAvatarScenes.length, failedClip: failedClipScenes.length, failedImage: failedImageScenes.length },
-      'Job retried (resume scenes) by admin',
+        avatar: { count: failedAvatarScenes.length, mode: avatarMode },
+        clip:   { count: failedClipScenes.length,   ...clipBreakdown },
+        image:  { count: failedImageScenes.length,  ...imageBreakdown } },
+      'Job retried (smart resume) by admin',
     );
     return reply.send({
       jobId: id, status: 'running', mode: 'resume-scenes',
-      resumed: { avatar: failedAvatarScenes.length, clip: failedClipScenes.length, image: failedImageScenes.length },
+      resumed: {
+        avatar: { count: failedAvatarScenes.length, mode: avatarMode },
+        clip:   { count: failedClipScenes.length,   breakdown: clipBreakdown },
+        image:  { count: failedImageScenes.length,  breakdown: imageBreakdown },
+      },
     });
   });
 

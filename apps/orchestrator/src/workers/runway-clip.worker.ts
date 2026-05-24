@@ -58,6 +58,23 @@ export function createRunwayClipWorker(deps: Deps) {
 
       log.info({ referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
 
+      // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
+      // Skip Runway API call if clip was already generated for this scene.
+      // Saves Runway credits on retries — clip generation is the second-most expensive step.
+      const existingScene = await db.scene.findUnique({
+        where:  { id: sceneId },
+        select: { clipUrl: true, clipDone: true },
+      });
+      if (existingScene?.clipUrl && existingScene.clipDone) {
+        log.info({ existingUrl: existingScene.clipUrl }, 'Runway: clip already generated — skipping API call');
+        await pipelineStateQueue.add(
+          `state-${sceneId}`,
+          { jobId, sceneId, tenantId, completedStage: 'clip' } satisfies PipelineStateJobPayload,
+          { ...QUEUES['pipeline-state'].defaultJobOptions, jobId: `state-${sceneId}-clip` },
+        );
+        return;
+      }
+
       await db.jobEvent.create({
         data: { jobId, tenantId, stage: 'runway-clip', status: 'started', meta: { sceneId } },
       });
