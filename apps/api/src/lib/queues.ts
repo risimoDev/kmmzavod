@@ -45,6 +45,16 @@ export const publishQueue = new Queue(QUEUE_DEFS.PUBLISH.name, {
   defaultJobOptions: QUEUE_DEFS.PUBLISH.defaultJobOptions,
 });
 
+export const uniquifyAnalyzeQueue = new Queue(QUEUE_DEFS.UNIQUIFY_ANALYZE.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.UNIQUIFY_ANALYZE.defaultJobOptions,
+});
+
+export const distributeQueue = new Queue(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.UNIQUIFY_DISTRIBUTE.defaultJobOptions,
+});
+
 // All queues for unified stats
 export const ALL_QUEUES = {
   pipeline:       pipelineQueue,

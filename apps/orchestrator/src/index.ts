@@ -24,6 +24,10 @@ import type {
   PipelineStateJobPayload,
   PipelineJobPayload,
   PublishJobPayload,
+  UniquifyAnalyzeJobPayload,
+  UniquifyRenderJobPayload,
+  UniquifyStateJobPayload,
+  DistributeJobPayload,
 } from '@kmmzavod/queue';
 
 import { createGptScriptWorker } from './workers/gpt-script.worker';
@@ -34,6 +38,10 @@ import { createVideoComposeWorker } from './workers/video-compose.worker';
 import { createPipelineStateWorker } from './workers/pipeline-state.worker';
 import { createPublishWorker } from './workers/publish.worker';
 import { createSchedulerWorker } from './workers/scheduler.worker';
+import { createUniquifyAnalyzeWorker } from './workers/uniquify-analyze.worker';
+import { createUniquifyRenderWorker } from './workers/uniquify-render.worker';
+import { createUniquifyStateWorker } from './workers/uniquify-state.worker';
+import { createDistributeWorker } from './workers/distribute.worker';
 import { startPipeline } from './pipeline/coordinator';
 import { loadProxyConfig } from './lib/proxy';
 
@@ -86,6 +94,10 @@ async function main() {
   const publishQueue = new Queue<PublishJobPayload>(QUEUES['publish'].name, { connection });
   const pipelineQueue = new Queue<PipelineJobPayload>(QUEUES['pipeline'].name, { connection });
   const schedulerQueue = new Queue(QUEUES['scheduler'].name, { connection });
+  const uniquifyAnalyzeQueue = new Queue<UniquifyAnalyzeJobPayload>(QUEUES['uniquify-analyze'].name, { connection });
+  const uniquifyRenderQueue = new Queue<UniquifyRenderJobPayload>(QUEUES['uniquify-render'].name, { connection });
+  const uniquifyStateQueue = new Queue<UniquifyStateJobPayload>(QUEUES['uniquify-state'].name, { connection });
+  const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -154,6 +166,32 @@ async function main() {
   const schedulerWorker = createSchedulerWorker({
     db,
     pipelineQueue,
+    connection,
+  });
+
+  // ── Uniquification workers ─────────────────────────────────────────────────
+  const uniquifyAnalyzeWorker = createUniquifyAnalyzeWorker({
+    db,
+    videoProcessorUrl: config.VIDEO_PROCESSOR_URL,
+    uniquifyRenderQueue,
+    connection,
+  });
+
+  const uniquifyRenderWorker = createUniquifyRenderWorker({
+    db,
+    videoProcessorUrl: config.VIDEO_PROCESSOR_URL,
+    uniquifyStateQueue,
+    connection,
+  });
+
+  const uniquifyStateWorker = createUniquifyStateWorker({
+    db,
+    connection,
+  });
+
+  const distributeWorker = createDistributeWorker({
+    db,
+    publishQueue,
     connection,
   });
 
@@ -264,6 +302,28 @@ async function main() {
         where: { id: publishJobId },
         data: { status: 'failed', error: err.message },
       });
+      // Update linked DistributeItem if this publish came from distribution
+      const distItem = await db.distributeItem.findFirst({
+        where: { publishJobId },
+        select: { id: true, distributeJobId: true },
+      });
+      if (distItem) {
+        await db.distributeItem.update({
+          where: { id: distItem.id },
+          data: { status: 'failed', error: err.message },
+        });
+        const distJob = await db.distributeJob.update({
+          where: { id: distItem.distributeJobId },
+          data: { failedCount: { increment: 1 } },
+          select: { publishedCount: true, failedCount: true, totalItems: true },
+        });
+        if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
+          await db.distributeJob.update({
+            where: { id: distItem.distributeJobId },
+            data: { status: 'completed', completedAt: new Date() },
+          });
+        }
+      }
       logger.error({ publishJobId, tenantId, err: err.message }, 'Publish: final failure after retries');
     } catch (dbErr) {
       logger.error({ dbErr, publishJobId }, 'Publish failed handler: DB error');
@@ -279,6 +339,10 @@ async function main() {
     videoComposeWorker,
     pipelineStateWorker,
     publishWorker,
+    uniquifyAnalyzeWorker,
+    uniquifyRenderWorker,
+    uniquifyStateWorker,
+    distributeWorker,
   ];
 
   // Логируем активные воркеры
@@ -346,6 +410,10 @@ async function main() {
       pipelineStateQueue.close(),
       publishQueue.close(),
       pipelineQueue.close(),
+      uniquifyAnalyzeQueue.close(),
+      uniquifyRenderQueue.close(),
+      uniquifyStateQueue.close(),
+      distributeQueue.close(),
     ]);
     await db.$disconnect();
     try { await connection.del(HEARTBEAT_KEY); } catch {}

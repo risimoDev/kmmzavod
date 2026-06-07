@@ -90,6 +90,46 @@ export const QUEUE_DEFS = {
     },
     concurrency: 1,
   },
+  // ── Uniquification pipeline ──────────────────────────────────────────────
+  UNIQUIFY_ANALYZE: {
+    name: 'uniquify-analyze',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'exponential' as const, delay: 5000 },
+      removeOnComplete: { count: 200 },
+      removeOnFail: false,
+    },
+    concurrency: 2,
+  },
+  UNIQUIFY_RENDER: {
+    name: 'uniquify-render',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'fixed' as const, delay: 10000 },
+      removeOnComplete: { count: 500 },
+      removeOnFail: false,
+    },
+    concurrency: 3,
+  },
+  UNIQUIFY_STATE: {
+    name: 'uniquify-state',
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: { count: 2000 },
+      removeOnFail: { count: 500 },
+    },
+    concurrency: 10,
+  },
+  UNIQUIFY_DISTRIBUTE: {
+    name: 'uniquify-distribute',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'fixed' as const, delay: 5000 },
+      removeOnComplete: { count: 200 },
+      removeOnFail: false,
+    },
+    concurrency: 2,
+  },
 } as const;
 
 export type QueueName = typeof QUEUE_DEFS[keyof typeof QUEUE_DEFS]['name'];
@@ -179,7 +219,8 @@ export interface PipelineStateJobPayload {
 
 export interface PublishJobPayload {
   publishJobId: string;
-  videoId: string;
+  videoId?: string;
+  uniqueVariantId?: string;
   tenantId: string;
   platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
   socialAccountId: string;
@@ -189,6 +230,68 @@ export interface PublishJobPayload {
 /** Scheduler tick payload — the repeatable job fires this every minute */
 export interface SchedulerTickPayload {
   tick: number;
+}
+
+// ── Uniquification payloads ──────────────────────────────────────────────────
+
+export interface UniquifyAnalyzeJobPayload {
+  sourceVideoId: string;
+  tenantId: string;
+  uniquifyJobId: string;
+}
+
+/** Configuration for visual transforms applied to each variant */
+export interface VariantTransforms {
+  // Visual
+  cropPercent: number;       // 0.01–0.05 random crop
+  cropOffsetX: number;       // normalized 0–1
+  cropOffsetY: number;       // normalized 0–1
+  hFlip: boolean;            // horizontal mirror
+  speed: number;             // 0.95–1.05
+  hueShift: number;          // -10 to +10 degrees
+  saturationShift: number;   // 0.9–1.1
+  brightnessShift: number;   // -0.05 to +0.05
+  contrastShift: number;     // 0.95–1.05
+  crf: number;               // 19–25 (encoder quality variation)
+  // Audio
+  bgmTrackKey?: string;      // MinIO key of BGM track
+  bgmVolume: number;         // 0.05–0.20
+  pitchShift: number;        // -2 to +2 semitones
+  // Subtitles
+  subtitleStyle: 'tiktok' | 'cinematic' | 'minimal' | 'default' | 'none';
+  subtitleFontSize: number;  // 18–32
+  subtitleColor: string;     // hex color
+  subtitlePosition: 'bottom' | 'top' | 'center';
+  // TTS
+  ttsVoiceId?: string;
+  ttsSpeed?: number;         // 0.9–1.1
+  // Intro/outro
+  trimStartSec: number;      // 0–2 sec trim from start
+  trimEndSec: number;        // 0–2 sec trim from end
+}
+
+export interface UniquifyRenderJobPayload {
+  uniquifyJobId: string;
+  variantId: string;
+  tenantId: string;
+  sourceVideoStorageKey: string;
+  outputKey: string;
+  transforms: VariantTransforms;
+  /** Whisper transcript for subtitle generation */
+  transcript?: unknown;
+}
+
+export interface UniquifyStateJobPayload {
+  uniquifyJobId: string;
+  variantId: string;
+  tenantId: string;
+  status: 'completed' | 'failed';
+  error?: string;
+}
+
+export interface DistributeJobPayload {
+  distributeJobId: string;
+  tenantId: string;
 }
 
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
@@ -226,5 +329,9 @@ export const QUEUES: Record<string, QueueEntry> = {
   'video-compose':  flatten(QUEUE_DEFS.VIDEO_COMPOSE),
   'pipeline-state': flatten(QUEUE_DEFS.PIPELINE_STATE),
   'publish':        flatten(QUEUE_DEFS.PUBLISH),
-  'scheduler':      flatten(QUEUE_DEFS.SCHEDULER),
+  'scheduler':         flatten(QUEUE_DEFS.SCHEDULER),
+  'uniquify-analyze':  flatten(QUEUE_DEFS.UNIQUIFY_ANALYZE),
+  'uniquify-render':   flatten(QUEUE_DEFS.UNIQUIFY_RENDER),
+  'uniquify-state':    flatten(QUEUE_DEFS.UNIQUIFY_STATE),
+  'uniquify-distribute': flatten(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE),
 };

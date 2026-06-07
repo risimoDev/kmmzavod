@@ -14,6 +14,8 @@ export interface IStorageClient {
   downloadFile(key: string, localPath: string): Promise<void>;
   /** Generate a pre-signed GET URL (default 1h TTL) */
   presignedUrl(key: string, expirySeconds?: number): Promise<string>;
+  /** Generate a pre-signed PUT URL for client uploads (default 1h TTL) */
+  presignedPutUrl(key: string, contentType?: string, expirySeconds?: number): Promise<string>;
 
   /** Build a public URL for a key (no signature, requires bucket read policy). */
   publicUrl(key: string): string;

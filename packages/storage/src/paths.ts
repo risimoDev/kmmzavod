@@ -44,4 +44,16 @@ export const StoragePaths = {
 
   /** Global BGM library prefix (admin-uploaded background music tracks) */
   bgmPrefix: () => 'bgm/',
+
+  /** Uploaded source videos for uniquification */
+  sourceVideo: (tenantId: string, sourceVideoId: string, filename: string) =>
+    `tenants/${tenantId}/source-videos/${sourceVideoId}/${sanitizeFilename(filename)}`,
+
+  /** Uniquified variant output */
+  uniqueVariant: (tenantId: string, uniquifyJobId: string, variantId: string) =>
+    `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variantId}.mp4`,
+
+  /** Uniquified variant thumbnail */
+  uniqueVariantThumb: (tenantId: string, uniquifyJobId: string, variantId: string) =>
+    `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variantId}_thumb.jpg`,
 } as const;

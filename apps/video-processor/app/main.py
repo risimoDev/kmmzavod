@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app.api.compose import create_router as compose_router
 from app.api.transcribe import create_router as transcribe_router
 from app.api.quality import create_router as quality_router
+from app.api.uniquify import create_router as uniquify_router
 from app.config import settings
 
 logging.basicConfig(
@@ -28,6 +29,7 @@ app = FastAPI(
 app.include_router(compose_router())
 app.include_router(transcribe_router())
 app.include_router(quality_router())
+app.include_router(uniquify_router())
 
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")

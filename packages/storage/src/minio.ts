@@ -75,6 +75,10 @@ export class MinioStorageClient implements IStorageClient {
     return this.client.presignedGetObject(this.bucket, key, expirySeconds);
   }
 
+  async presignedPutUrl(key: string, _contentType?: string, expirySeconds = 3600): Promise<string> {
+    return this.client.presignedPutObject(this.bucket, key, expirySeconds);
+  }
+
   /** Public URL for a key (no signature). Requires publicBaseUrl to be configured. */
   publicUrl(key: string): string {
     if (!this._publicBaseUrl) {

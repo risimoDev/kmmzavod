@@ -39,6 +39,9 @@ model Tenant {
     publishJobs        PublishJob[]
     creditTransactions CreditTransaction[]
     notifications      Notification[]
+    sourceVideos       SourceVideo[]
+    uniquifyJobs       UniquifyJob[]
+    distributeJobs     DistributeJob[]
 
     @@map("tenants")
 }
@@ -122,10 +125,11 @@ model Project {
     updatedAt   DateTime @updatedAt @map("updated_at")
 
     tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    jobs     Job[]
-    assets   Asset[]
-    videos   Video[]
-    products Product[]
+    jobs         Job[]
+    assets       Asset[]
+    videos       Video[]
+    products     Product[]
+    sourceVideos SourceVideo[]
 
     @@index([tenantId])
     @@index([tenantId, isArchived])
@@ -784,8 +788,9 @@ model SocialAccount {
     createdAt    DateTime       @default(now()) @map("created_at")
     updatedAt    DateTime       @updatedAt @map("updated_at")
 
-    tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    publishJobs PublishJob[]
+    tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    publishJobs     PublishJob[]
+    distributeItems DistributeItem[]
 
     @@unique([tenantId, platform, accountName])
     @@index([tenantId])
@@ -809,10 +814,11 @@ enum PublishStatus {
 
 model PublishJob {
     id              String         @id @default(uuid()) @db.Uuid
-    videoId         String         @map("video_id") @db.Uuid
+    videoId         String?        @map("video_id") @db.Uuid
     tenantId        String         @map("tenant_id") @db.Uuid
     socialAccountId String         @map("social_account_id") @db.Uuid
     variantId       String?        @map("variant_id") @db.Uuid
+    uniqueVariantId String?        @map("unique_variant_id") @db.Uuid
     platform        SocialPlatform
     status          PublishStatus  @default(pending)
     caption         String?        @db.Text
@@ -824,14 +830,243 @@ model PublishJob {
     createdAt       DateTime       @default(now()) @map("created_at")
     updatedAt       DateTime       @updatedAt @map("updated_at")
 
-    video         Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
-    tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id])
+    video           Video?           @relation(fields: [videoId], references: [id], onDelete: Cascade)
+    tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id])
+    uniqueVariant   UniqueVariant?   @relation(fields: [uniqueVariantId], references: [id])
+    distributeItems DistributeItem[]
 
     @@index([videoId])
     @@index([tenantId, status])
     @@index([scheduledAt])
     @@map("publish_jobs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOURCE VIDEOS (загруженные исходные видео для уникализации)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SourceVideoStatus {
+    uploading  // загрузка в storage
+    analyzing  // анализ: scene detection, транскрипт
+    ready      // готово к уникализации
+    failed     // ошибка анализа
+
+    @@map("source_video_status")
+}
+
+model SourceVideo {
+    id            String            @id @default(uuid()) @db.Uuid
+    tenantId      String            @map("tenant_id") @db.Uuid
+    projectId     String?           @map("project_id") @db.Uuid
+    uploadedBy    String?           @map("uploaded_by") @db.Uuid
+    title         String
+    description   String?
+    status        SourceVideoStatus @default(uploading)
+    // Storage
+    storageKey    String            @map("storage_key")
+    mimeType      String?           @map("mime_type")
+    fileSizeBytes BigInt?           @map("file_size_bytes")
+    // Metadata extracted during analysis
+    durationSec   Decimal?          @map("duration_sec") @db.Decimal(8, 2)
+    width         Int?
+    height        Int?
+    fps           Int?              @db.SmallInt
+    // Analysis results (populated by analyze step)
+    transcript    Json?             // Whisper transcript with word timestamps
+    sceneBreaks   Json?             @map("scene_breaks") // detected scene cut timestamps
+    audioProfile  Json?             @map("audio_profile") // volume levels, silence zones, etc.
+    //
+    error         String?
+    isArchived    Boolean           @default(false) @map("is_archived")
+    createdAt     DateTime          @default(now()) @map("created_at")
+    updatedAt     DateTime          @updatedAt @map("updated_at")
+
+    tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project      Project?      @relation(fields: [projectId], references: [id])
+    uniquifyJobs UniquifyJob[]
+
+    @@index([tenantId, status])
+    @@index([tenantId, isArchived])
+    @@index([projectId])
+    @@map("source_videos")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIQUIFY JOBS (задачи массовой уникализации видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UniquifyJobStatus {
+    pending     // создана, ожидает запуска
+    analyzing   // анализируем исходное видео
+    generating  // генерируем варианты
+    completed   // все варианты готовы
+    failed      // ошибка
+    cancelled   // отменена
+
+    @@map("uniquify_job_status")
+}
+
+model UniquifyJob {
+    id               String             @id @default(uuid()) @db.Uuid
+    tenantId         String             @map("tenant_id") @db.Uuid
+    sourceVideoId    String             @map("source_video_id") @db.Uuid
+    createdBy        String?            @map("created_by") @db.Uuid
+    status           UniquifyJobStatus  @default(pending)
+    // How many unique variants to produce
+    variantCount     Int                @default(10) @map("variant_count")
+    // Target platforms (affects aspect ratios & durations)
+    targetPlatforms  SocialPlatform[]   @map("target_platforms")
+    // Uniquification config
+    config           Json               @default("{}") // UniquifyConfig JSON
+    // Stats
+    completedCount   Int                @default(0) @map("completed_count")
+    failedCount      Int                @default(0) @map("failed_count")
+    creditsUsed      Int                @default(0) @map("credits_used")
+    error            String?
+    createdAt        DateTime           @default(now()) @map("created_at")
+    updatedAt        DateTime           @updatedAt @map("updated_at")
+    completedAt      DateTime?          @map("completed_at")
+
+    tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    sourceVideo    SourceVideo     @relation(fields: [sourceVideoId], references: [id])
+    variants       UniqueVariant[]
+    distributeJobs DistributeJob[]
+
+    @@index([tenantId, status])
+    @@index([sourceVideoId])
+    @@index([createdAt(sort: Desc)])
+    @@map("uniquify_jobs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIQUE VARIANTS (сгенерированные уникальные варианты видео)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UniqueVariantStatus {
+    pending     // в очереди
+    rendering   // FFmpeg рендерит
+    tts         // генерируем озвучку
+    completed   // готов
+    failed      // ошибка
+
+    @@map("unique_variant_status")
+}
+
+model UniqueVariant {
+    id              String              @id @default(uuid()) @db.Uuid
+    uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
+    tenantId        String              @map("tenant_id") @db.Uuid
+    variantIndex    Int                 @map("variant_index") @db.SmallInt
+    status          UniqueVariantStatus @default(pending)
+    // Applied transforms (full recipe for reproducibility)
+    transforms      Json                @default("{}") // VariantTransforms JSON
+    // Output
+    outputKey       String?             @map("output_key")
+    outputUrl       String?             @map("output_url")
+    thumbnailKey    String?             @map("thumbnail_key")
+    durationSec     Decimal?            @map("duration_sec") @db.Decimal(8, 2)
+    fileSizeBytes   BigInt?             @map("file_size_bytes")
+    width           Int?
+    height          Int?
+    // Subtitle & voice info
+    subtitleStyle   String?             @map("subtitle_style")
+    ttsVoiceId      String?             @map("tts_voice_id")
+    bgmTrackKey     String?             @map("bgm_track_key")
+    //
+    error           String?
+    createdAt       DateTime            @default(now()) @map("created_at")
+    updatedAt       DateTime            @updatedAt @map("updated_at")
+
+    uniquifyJob    UniquifyJob      @relation(fields: [uniquifyJobId], references: [id], onDelete: Cascade)
+    publishJobs    PublishJob[]
+    distributeItems DistributeItem[]
+
+    @@unique([uniquifyJobId, variantIndex])
+    @@index([uniquifyJobId, status])
+    @@index([tenantId, status])
+    @@map("unique_variants")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISTRIBUTE JOBS (раздача уникальных вариантов по множеству аккаунтов)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum DistributeJobStatus {
+    pending     // создана, ожидает старта
+    distributing // раздаём публикации
+    completed   // все items обработаны
+    failed      // ошибка
+    cancelled   // отменена
+
+    @@map("distribute_job_status")
+}
+
+enum DistributeItemStatus {
+    pending     // ожидает своей задержки
+    scheduled   // PublishJob создан, ожидает времени
+    publishing  // публикуется прямо сейчас
+    published   // успешно опубликовано
+    failed      // ошибка публикации
+    skipped     // пропущен (аккаунт неактивен, вариант не готов и т.д.)
+
+    @@map("distribute_item_status")
+}
+
+model DistributeJob {
+    id              String              @id @default(uuid()) @db.Uuid
+    tenantId        String              @map("tenant_id") @db.Uuid
+    uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
+    createdBy       String?             @map("created_by") @db.Uuid
+    status          DistributeJobStatus @default(pending)
+    // Config
+    staggerMinutes  Int                 @default(15) @map("stagger_minutes") // задержка между публикациями
+    captionTemplate String?             @map("caption_template") @db.Text   // шаблон описания ({{variant_index}}, {{platform}})
+    hashtags        String[]            @default([])
+    // Stats
+    totalItems      Int                 @default(0) @map("total_items")
+    publishedCount  Int                 @default(0) @map("published_count")
+    failedCount     Int                 @default(0) @map("failed_count")
+    error           String?
+    createdAt       DateTime            @default(now()) @map("created_at")
+    updatedAt       DateTime            @updatedAt @map("updated_at")
+    completedAt     DateTime?           @map("completed_at")
+
+    tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    uniquifyJob UniquifyJob     @relation(fields: [uniquifyJobId], references: [id])
+    items       DistributeItem[]
+
+    @@index([tenantId, status])
+    @@index([uniquifyJobId])
+    @@map("distribute_jobs")
+}
+
+model DistributeItem {
+    id               String              @id @default(uuid()) @db.Uuid
+    distributeJobId  String              @map("distribute_job_id") @db.Uuid
+    uniqueVariantId  String              @map("unique_variant_id") @db.Uuid
+    socialAccountId  String              @map("social_account_id") @db.Uuid
+    publishJobId     String?             @map("publish_job_id") @db.Uuid
+    status           DistributeItemStatus @default(pending)
+    // Scheduling
+    scheduledAt      DateTime?           @map("scheduled_at")
+    publishedAt      DateTime?           @map("published_at")
+    // Per-item overrides
+    caption          String?             @db.Text
+    hashtags         String[]            @default([])
+    error            String?
+    createdAt        DateTime            @default(now()) @map("created_at")
+    updatedAt        DateTime            @updatedAt @map("updated_at")
+
+    distributeJob DistributeJob @relation(fields: [distributeJobId], references: [id], onDelete: Cascade)
+    uniqueVariant UniqueVariant @relation(fields: [uniqueVariantId], references: [id])
+    socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id])
+    publishJob    PublishJob?   @relation(fields: [publishJobId], references: [id])
+
+    @@unique([distributeJobId, uniqueVariantId, socialAccountId])
+    @@index([distributeJobId, status])
+    @@index([scheduledAt])
+    @@map("distribute_items")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

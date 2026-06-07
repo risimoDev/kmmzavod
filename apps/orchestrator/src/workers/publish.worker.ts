@@ -90,24 +90,34 @@ export function createPublishWorker(deps: Deps): Worker {
       // Load publish job for caption/hashtags + determine video storage key
       const publishJob = await db.publishJob.findUniqueOrThrow({
         where: { id: publishJobId },
-        select: { caption: true, hashtags: true, variantId: true },
+        select: { caption: true, hashtags: true, variantId: true, uniqueVariantId: true },
       });
 
       let storageKey: string;
 
-      if (publishJob.variantId) {
+      if (publishJob.uniqueVariantId) {
+        // Uniquified variant — resolve from UniqueVariant
+        const uVariant = await db.uniqueVariant.findUniqueOrThrow({
+          where: { id: publishJob.uniqueVariantId },
+          select: { outputKey: true },
+        });
+        if (!uVariant.outputKey) throw new Error(`UniqueVariant ${publishJob.uniqueVariantId} has no outputKey`);
+        storageKey = uVariant.outputKey;
+      } else if (publishJob.variantId) {
         const variant = await db.videoVariant.findUniqueOrThrow({
           where: { id: publishJob.variantId },
           select: { outputKey: true },
         });
         storageKey = variant.outputKey;
-      } else {
+      } else if (videoId) {
         const video = await db.video.findUniqueOrThrow({
           where: { id: videoId },
           select: { outputUrl: true },
         });
         if (!video.outputUrl) throw new Error(`Video ${videoId} has no outputUrl`);
         storageKey = video.outputUrl;
+      } else {
+        throw new Error(`PublishJob ${publishJobId} has no videoId or uniqueVariantId`);
       }
 
       let externalPostId: string | undefined;
@@ -195,11 +205,13 @@ export function createPublishWorker(deps: Deps): Worker {
             await storage.downloadFile(storageKey, tmpFile);
             const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
-            // Load video metadata for title/description
-            const video = await db.video.findUnique({
-              where: { id: videoId },
-              select: { title: true, description: true, metadata: true },
-            });
+            // Load video metadata for title/description (may be null for uniquified variants)
+            const video = videoId
+              ? await db.video.findUnique({
+                  where: { id: videoId },
+                  select: { title: true, description: true, metadata: true },
+                })
+              : null;
 
             const socialMeta = (video?.metadata as any)?.socialMetadata;
             const title = video?.title ?? 'Video';
@@ -252,14 +264,39 @@ export function createPublishWorker(deps: Deps): Worker {
       }
 
       // Mark as published
+      const now = new Date();
       await db.publishJob.update({
         where: { id: publishJobId },
         data: {
           status: 'published',
-          publishedAt: new Date(),
+          publishedAt: now,
           externalPostId,
         },
       });
+
+      // Update linked DistributeItem if this publish came from distribution
+      const distItem = await db.distributeItem.findFirst({
+        where: { publishJobId },
+        select: { id: true, distributeJobId: true },
+      });
+      if (distItem) {
+        await db.distributeItem.update({
+          where: { id: distItem.id },
+          data: { status: 'published', publishedAt: now },
+        });
+        // Increment published count and check if distribution is complete
+        const distJob = await db.distributeJob.update({
+          where: { id: distItem.distributeJobId },
+          data: { publishedCount: { increment: 1 } },
+          select: { publishedCount: true, failedCount: true, totalItems: true },
+        });
+        if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
+          await db.distributeJob.update({
+            where: { id: distItem.distributeJobId },
+            data: { status: 'completed', completedAt: now },
+          });
+        }
+      }
 
       logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
     },
