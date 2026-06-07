@@ -12,6 +12,7 @@ import {
   QUEUES,
   type UniquifyAnalyzeJobPayload,
   type UniquifyRenderJobPayload,
+  type VariantTransforms,
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
@@ -73,8 +74,8 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           width: analysis.width,
           height: analysis.height,
           fps: analysis.fps,
-          sceneBreaks: analysis.scene_breaks,
-          audioProfile: analysis.audio_profile,
+          sceneBreaks: analysis.scene_breaks as unknown as any,
+          audioProfile: analysis.audio_profile as unknown as any,
         },
       });
 
@@ -87,7 +88,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
 
       // 6. Generate random transforms via video-processor
       const transformsResp = await axios.post<{
-        transforms: Record<string, unknown>[];
+        transforms: VariantTransforms[];
       }>(`${videoProcessorUrl}/uniquify/generate-transforms`, {
         count: variantCount,
         seed: Date.now(),
@@ -97,7 +98,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
 
       // 7. Create UniqueVariant rows and enqueue render jobs
       const variants = await db.$transaction(
-        allTransforms.map((transforms, i) =>
+        allTransforms.map((transforms: VariantTransforms, i: number) =>
           db.uniqueVariant.create({
             data: {
               uniquifyJobId,
@@ -105,7 +106,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               variantIndex: i,
               status: 'pending',
               transforms: transforms as any,
-              subtitleStyle: (transforms as any).subtitleStyle || 'none',
+              subtitleStyle: transforms.subtitleStyle || 'none',
             },
           })
         )
@@ -118,7 +119,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
       });
 
       // 9. Enqueue all render jobs
-      const renderJobs = variants.map((variant, i) => ({
+      const renderJobs = variants.map((variant: any, i: number) => ({
         name: `uniquify-render-${variant.id}`,
         data: {
           uniquifyJobId,
@@ -127,9 +128,9 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           sourceVideoStorageKey: sourceVideo.storageKey,
           outputKey: `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variant.id}.mp4`,
           transforms: allTransforms[i],
-          transcript: analysis.audio_profile ? undefined : undefined,
-        } satisfies UniquifyRenderJobPayload,
-        opts: QUEUES['uniquify-render'].defaultJobOptions,
+          transcript: undefined,
+        } as UniquifyRenderJobPayload,
+        opts: QUEUES['uniquify-render'].defaultJobOptions as any,
       }));
 
       await uniquifyRenderQueue.addBulk(renderJobs);
