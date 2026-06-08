@@ -28,53 +28,63 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
         'Uniquify-state: processing variant result',
       );
 
-      // Update the parent job counters atomically
-      if (status === 'completed') {
-        await db.uniquifyJob.update({
-          where: { id: uniquifyJobId },
-          data: { completedCount: { increment: 1 } },
-        });
-      } else {
-        await db.uniquifyJob.update({
-          where: { id: uniquifyJobId },
-          data: { failedCount: { increment: 1 } },
-        });
-      }
-
-      // Check if all variants are done
-      const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({
-        where: { id: uniquifyJobId },
+      // Guard against duplicate events from BullMQ retries.
+      const variant = await db.uniqueVariant.findUnique({
+        where: { id: variantId },
+        select: { status: true },
       });
+      if (variant?.status === status) {
+        logger.info({ variantId, status }, 'Uniquify-state: duplicate event, skipping');
+        return;
+      }
 
-      const totalDone = uniquifyJob.completedCount + uniquifyJob.failedCount;
+      // Atomic increment + completion check inside a transaction
+      await db.$transaction(async (tx) => {
+        if (status === 'completed') {
+          await tx.uniquifyJob.update({
+            where: { id: uniquifyJobId },
+            data: { completedCount: { increment: 1 } },
+          });
+        } else {
+          await tx.uniquifyJob.update({
+            where: { id: uniquifyJobId },
+            data: { failedCount: { increment: 1 } },
+          });
+        }
 
-      if (totalDone >= uniquifyJob.variantCount) {
-        // All variants processed — update job status
-        const allFailed = uniquifyJob.completedCount === 0;
-        const finalStatus = allFailed ? 'failed' : 'completed';
-        const finalError = allFailed
-          ? `All ${uniquifyJob.failedCount} variants failed`
-          : null;
-
-        await db.uniquifyJob.update({
+        const uniquifyJob = await tx.uniquifyJob.findUniqueOrThrow({
           where: { id: uniquifyJobId },
-          data: {
-            status: finalStatus as any,
-            completedAt: new Date(),
-            error: finalError,
-          },
         });
 
-        logger.info(
-          {
-            uniquifyJobId,
-            completed: uniquifyJob.completedCount,
-            failed: uniquifyJob.failedCount,
-            finalStatus,
-          },
-          'Uniquify-state: job finished',
-        );
-      }
+        const totalDone = uniquifyJob.completedCount + uniquifyJob.failedCount;
+
+        if (totalDone >= uniquifyJob.variantCount) {
+          const allFailed = uniquifyJob.completedCount === 0;
+          const finalStatus = allFailed ? 'failed' : 'completed';
+          const finalError = allFailed
+            ? `All ${uniquifyJob.failedCount} variants failed`
+            : null;
+
+          await tx.uniquifyJob.update({
+            where: { id: uniquifyJobId },
+            data: {
+              status: finalStatus as any,
+              completedAt: new Date(),
+              error: finalError,
+            },
+          });
+
+          logger.info(
+            {
+              uniquifyJobId,
+              completed: uniquifyJob.completedCount,
+              failed: uniquifyJob.failedCount,
+              finalStatus,
+            },
+            'Uniquify-state: job finished',
+          );
+        }
+      });
     },
     {
       connection,

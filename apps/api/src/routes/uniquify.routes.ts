@@ -111,12 +111,13 @@ export async function uniquifyRoutes(app: FastifyInstance) {
 
   /**
    * POST /source-videos/:id/confirm-upload
-   * Confirm that upload is complete. Triggers analysis if autoAnalyze=true.
+   * Confirm that upload is complete. Sets status to ready.
+   * (Analysis is triggered later when a uniquify job is created.)
    */
   app.post('/source-videos/:id/confirm-upload', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { tenantId } = req.user;
-    const body = z.object({ autoAnalyze: z.boolean().default(true) }).parse(req.body ?? {});
+    z.object({}).parse(req.body ?? {});
 
     const sourceVideo = await db.sourceVideo.findFirst({
       where: { id, tenantId },
@@ -233,6 +234,9 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     if (!sourceVideo) {
       return reply.code(404).send({ error: 'NotFound', message: 'Source video not found' });
     }
+    if (sourceVideo.status !== 'ready') {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Source video is not ready for uniquification' });
+    }
 
     // Create the uniquify job
     const uniquifyJob = await db.uniquifyJob.create({
@@ -311,7 +315,19 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const job = await db.uniquifyJob.findFirst({
       where: { id, tenantId },
       include: {
-        sourceVideo: true,
+        sourceVideo: {
+          select: {
+            id: true,
+            title: true,
+            storageKey: true,
+            durationSec: true,
+            width: true,
+            height: true,
+            fps: true,
+            status: true,
+            createdAt: true,
+          },
+        },
         variants: {
           orderBy: { variantIndex: 'asc' },
         },
@@ -480,7 +496,17 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     let items: Array<{ variantId: string; socialAccountId: string; caption?: string; hashtags?: string[] }>;
 
     if (body.assignments && body.assignments.length > 0) {
-      // Explicit mapping
+      // Explicit mapping — validate all references belong to this job / tenant
+      const validVariantIds = new Set(uniquifyJob.variants.map(v => v.id));
+      const validAccountIds = new Set(accounts.map(a => a.id));
+      for (const a of body.assignments) {
+        if (!validVariantIds.has(a.variantId)) {
+          return reply.code(400).send({ error: 'BadRequest', message: `Variant ${a.variantId} does not belong to this job` });
+        }
+        if (!validAccountIds.has(a.socialAccountId)) {
+          return reply.code(400).send({ error: 'BadRequest', message: `Social account ${a.socialAccountId} is not active or does not belong to tenant` });
+        }
+      }
       items = body.assignments;
     } else {
       // Round-robin: distribute variants across accounts

@@ -40,7 +40,17 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
 
       logger.info({ variantId, uniquifyJobId }, 'Uniquify-render: starting');
 
-      // 1. Mark variant as rendering
+      // 1. Verify job wasn't cancelled before we start
+      const jobCheck = await db.uniquifyJob.findUnique({
+        where: { id: uniquifyJobId },
+        select: { status: true },
+      });
+      if (jobCheck?.status === 'cancelled') {
+        logger.info({ uniquifyJobId, variantId }, 'Uniquify-render: job cancelled, aborting');
+        return;
+      }
+
+      // 2. Mark variant as rendering
       await db.uniqueVariant.update({
         where: { id: variantId },
         data: { status: 'rendering' },
@@ -76,7 +86,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           source_storage_key: sourceVideoStorageKey,
           output_key: outputKey,
           transforms,
-          transcript: transcript ?? null,
+          transcript: transcript,
           bgm_storage_key: bgmKey ?? null,
           tts_storage_key: null, // TTS will be a future enhancement
         }, { timeout: 600_000 });
@@ -92,7 +102,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
             outputUrl: result.output_key, // Will be resolved to presigned URL by API
             thumbnailKey: result.thumbnail_key,
             durationSec: result.duration_sec,
-            fileSizeBytes: BigInt(result.file_size_bytes),
+            fileSizeBytes: result.file_size_bytes != null ? BigInt(Math.round(result.file_size_bytes)) : null,
             width: result.width,
             height: result.height,
             bgmTrackKey: bgmKey,
