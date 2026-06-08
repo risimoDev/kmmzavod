@@ -28,12 +28,12 @@ export function createDistributeWorker(deps: Deps): Worker {
       const { distributeJobId, tenantId } = job.data;
       logger.info({ distributeJobId, tenantId }, 'Distribute: start');
 
-      // Load distribute job with items
+      // Load distribute job with ALL items (not just pending) so retries maintain
+      // correct stagger timing and completion tracking.
       const distJob = await db.distributeJob.findUniqueOrThrow({
         where: { id: distributeJobId },
         include: {
           items: {
-            where: { status: 'pending' },
             include: {
               uniqueVariant: { select: { id: true, status: true, outputKey: true } },
               socialAccount: { select: { id: true, platform: true, isActive: true } },
@@ -57,8 +57,16 @@ export function createDistributeWorker(deps: Deps): Worker {
       const staggerMs = distJob.staggerMinutes * 60 * 1000;
       let itemIndex = 0;
       let skippedCount = 0;
+      let newlyScheduledCount = 0;
 
       for (const item of distJob.items) {
+        // Skip items already processed in a previous attempt
+        if (item.status !== 'pending') {
+          itemIndex++;
+          if (item.status === 'skipped') skippedCount++;
+          continue;
+        }
+
         // Skip if variant not ready or account disabled
         if (item.uniqueVariant.status !== 'completed' || !item.uniqueVariant.outputKey) {
           await db.distributeItem.update({
@@ -66,6 +74,7 @@ export function createDistributeWorker(deps: Deps): Worker {
             data: { status: 'skipped', error: 'Variant not completed or has no output' },
           });
           skippedCount++;
+          itemIndex++;
           continue;
         }
         if (!item.socialAccount.isActive) {
@@ -74,10 +83,11 @@ export function createDistributeWorker(deps: Deps): Worker {
             data: { status: 'skipped', error: 'Social account is disabled' },
           });
           skippedCount++;
+          itemIndex++;
           continue;
         }
 
-        // Calculate scheduled time with stagger
+        // Calculate scheduled time with stagger (preserve slot across retries)
         const scheduledAt = new Date(Date.now() + itemIndex * staggerMs);
         const delay = itemIndex * staggerMs;
 
@@ -146,22 +156,21 @@ export function createDistributeWorker(deps: Deps): Worker {
         );
 
         itemIndex++;
+        newlyScheduledCount++;
       }
 
-      // Update stats
-      const scheduledCount = itemIndex;
+      // Update stats — mark completed only when every item is done (no publish jobs exist)
+      const allSkipped = skippedCount === distJob.items.length && newlyScheduledCount === 0;
       await db.distributeJob.update({
         where: { id: distributeJobId },
         data: {
           totalItems: distJob.items.length,
-          ...(scheduledCount === 0 && skippedCount === distJob.items.length
-            ? { status: 'completed', completedAt: new Date() }
-            : {}),
+          ...(allSkipped ? { status: 'completed', completedAt: new Date() } : {}),
         },
       });
 
       logger.info(
-        { distributeJobId, scheduled: scheduledCount, skipped: skippedCount, total: distJob.items.length },
+        { distributeJobId, scheduled: newlyScheduledCount, skipped: skippedCount, total: distJob.items.length },
         'Distribute: items dispatched',
       );
     },

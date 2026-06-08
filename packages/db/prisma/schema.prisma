@@ -871,7 +871,7 @@ model SourceVideo {
     durationSec   Decimal?          @map("duration_sec") @db.Decimal(8, 2)
     width         Int?
     height        Int?
-    fps           Int?              @db.SmallInt
+    fps           Decimal?          @db.Decimal(5, 2)
     // Analysis results (populated by analyze step)
     transcript    Json?             // Whisper transcript with word timestamps
     sceneBreaks   Json?             @map("scene_breaks") // detected scene cut timestamps

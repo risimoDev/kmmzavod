@@ -54,7 +54,7 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
         const finalStatus = allFailed ? 'failed' : 'completed';
         const finalError = allFailed
           ? `All ${uniquifyJob.failedCount} variants failed`
-          : undefined;
+          : null;
 
         await db.uniquifyJob.update({
           where: { id: uniquifyJobId },

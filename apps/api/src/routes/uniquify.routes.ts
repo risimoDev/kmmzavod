@@ -128,17 +128,8 @@ export async function uniquifyRoutes(app: FastifyInstance) {
 
     await db.sourceVideo.update({
       where: { id },
-      data: { status: body.autoAnalyze ? 'analyzing' : 'ready' },
+      data: { status: 'ready' },
     });
-
-    // If auto-analyze, we create a placeholder uniquify job and trigger analysis
-    // For now, just mark as ready — analysis will happen when uniquify job is created
-    if (body.autoAnalyze) {
-      await db.sourceVideo.update({
-        where: { id },
-        data: { status: 'ready' },
-      });
-    }
 
     return reply.send({ status: 'ok', sourceVideoId: id });
   });
@@ -469,6 +460,9 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       },
     });
     if (!uniquifyJob) return reply.code(404).send({ error: 'NotFound' });
+    if (uniquifyJob.status !== 'completed') {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Uniquify job is not completed' });
+    }
     if (uniquifyJob.variants.length === 0) {
       return reply.code(400).send({ error: 'BadRequest', message: 'No completed variants to distribute' });
     }
