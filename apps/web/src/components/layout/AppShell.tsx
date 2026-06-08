@@ -68,6 +68,16 @@ const NAV_ITEMS = [
     ),
   },
   {
+    href: "/uniquify",
+    label: "Uniquify",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M12 3v18M3 12h18"/>
+        <circle cx="12" cy="12" r="9" strokeDasharray="4 4"/>
+      </svg>
+    ),
+  },
+  {
     href: "/products",
     label: "Products",
     icon: (

@@ -520,6 +520,147 @@ export const productsApi = {
     }>('/api/v1/products/scrape-wb', { method: 'POST', body: JSON.stringify({ url }) }),
 };
 
+// ── Uniquify Types ────────────────────────────────────────────────────────────
+
+export interface SourceVideo {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  storageKey: string;
+  durationSec: number | null;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  fileSizeMb: number | null;
+  createdAt: string;
+}
+
+export interface UniquifyJob {
+  id: string;
+  sourceVideoId: string;
+  status: string;
+  variantCount: number;
+  completedCount: number;
+  failedCount: number;
+  creditsUsed: number;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface UniquifyJobDetail extends UniquifyJob {
+  sourceVideo: SourceVideo;
+  variants: UniqueVariant[];
+}
+
+export interface UniqueVariant {
+  id: string;
+  variantIndex: number;
+  status: string;
+  outputKey: string | null;
+  thumbnailKey: string | null;
+  downloadUrl: string | null;
+  thumbnailUrl: string | null;
+  durationSec: number | null;
+  width: number | null;
+  height: number | null;
+  subtitleStyle: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface DistributeJob {
+  id: string;
+  uniquifyJobId: string;
+  status: string;
+  staggerMinutes: number;
+  captionTemplate: string | null;
+  hashtags: string[];
+  totalItems: number;
+  publishedCount: number;
+  failedCount: number;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  _count?: { items: number };
+}
+
+export interface DistributeItem {
+  id: string;
+  status: string;
+  scheduledAt: string | null;
+  publishedAt: string | null;
+  caption: string | null;
+  hashtags: string[];
+  error: string | null;
+  uniqueVariant: { id: string; variantIndex: number; outputKey: string | null; thumbnailKey: string | null };
+  socialAccount: { id: string; platform: string; accountName: string };
+  publishJob: { id: string; status: string; publishedAt: string | null; externalPostId: string | null; error: string | null } | null;
+}
+
+export interface DistributeJobDetail extends DistributeJob {
+  items: DistributeItem[];
+}
+
+// ── Uniquify API ──────────────────────────────────────────────────────────────
+
+export const uniquifyApi = {
+  uploadUrl: (body: { title: string; description?: string; projectId?: string }) =>
+    apiFetch<{ uploadUrl: string; storageKey: string; sourceVideoId: string }>(
+      '/api/v1/uniquify/source-videos/upload-url',
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  confirmUpload: (id: string) =>
+    apiFetch<void>(`/api/v1/uniquify/source-videos/${id}/confirm-upload`, { method: 'POST' }),
+
+  listSourceVideos: (params: { page?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.page) q.set('page', String(params.page));
+    if (params.limit) q.set('limit', String(params.limit));
+    return apiFetch<{ items: SourceVideo[]; pagination: Pagination }>(`/api/v1/uniquify/source-videos?${q}`);
+  },
+
+  createJob: (body: { sourceVideoId: string; variantCount: number; projectId?: string }) =>
+    apiFetch<UniquifyJob>('/api/v1/uniquify/uniquify-jobs', { method: 'POST', body: JSON.stringify(body) }),
+
+  listJobs: (params: { status?: string; page?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set('status', params.status);
+    if (params.page) q.set('page', String(params.page));
+    if (params.limit) q.set('limit', String(params.limit));
+    return apiFetch<{ items: UniquifyJob[]; pagination: Pagination }>(`/api/v1/uniquify/uniquify-jobs?${q}`);
+  },
+
+  getJob: (id: string) => apiFetch<UniquifyJobDetail>(`/api/v1/uniquify/uniquify-jobs/${id}`),
+
+  listVariants: (jobId: string, params: { status?: string; page?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set('status', params.status);
+    if (params.page) q.set('page', String(params.page));
+    if (params.limit) q.set('limit', String(params.limit));
+    return apiFetch<{ items: UniqueVariant[]; pagination: Pagination }>(`/api/v1/uniquify/uniquify-jobs/${jobId}/variants?${q}`);
+  },
+
+  createDistribute: (jobId: string, body: {
+    socialAccountIds: string[];
+    staggerMinutes?: number;
+    captionTemplate?: string;
+    hashtags?: string[];
+    assignments?: Array<{ variantId: string; socialAccountId: string; caption?: string; hashtags?: string[] }>;
+  }) =>
+    apiFetch<DistributeJob>(`/api/v1/uniquify/uniquify-jobs/${jobId}/distribute`, { method: 'POST', body: JSON.stringify(body) }),
+
+  listDistributes: (jobId: string) =>
+    apiFetch<{ items: DistributeJob[] }>(`/api/v1/uniquify/uniquify-jobs/${jobId}/distribute`),
+
+  getDistribute: (id: string) => apiFetch<DistributeJobDetail>(`/api/v1/uniquify/distribute-jobs/${id}`),
+
+  cancelDistribute: (id: string) =>
+    apiFetch<{ status: string }>(`/api/v1/uniquify/distribute-jobs/${id}/cancel`, { method: 'POST' }),
+};
+
 export interface VideoPreset {
   id: string;
   tenantId: string;
