@@ -108,7 +108,7 @@ export function createPublishWorker(deps: Deps): Worker {
             logger.info({ publishJobId, distributeJobId: linkedDistItem.distributeJobId }, 'Publish: distribution cancelled, aborting');
             await db.publishJob.update({
               where: { id: publishJobId },
-              data: { status: 'cancelled' },
+              data: { status: 'failed', error: 'Distribution cancelled' },
             });
             return;
           }
