@@ -1,3 +1,3 @@
--- Change SourceVideo.fps from smallint to numeric(5,2) to store fractional FPS values
--- (e.g. 29.97, 23.976) returned by the video-processor analysis endpoint.
-ALTER TABLE "source_videos" ALTER COLUMN "fps" TYPE numeric(5,2) USING "fps"::numeric(5,2);
+-- Intentionally empty: this migration failed because source_videos table did not exist yet.
+-- The full table creation is handled in the follow-up migration 20260608100100_create_uniquify_tables.
+-- On production run: npx prisma migrate resolve --rolled-back "20260608100000_fix_source_video_fps_decimal"
