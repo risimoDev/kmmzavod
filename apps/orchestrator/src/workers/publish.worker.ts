@@ -9,8 +9,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Worker, type ConnectionOptions } from 'bullmq';
-import { QUEUES, type PublishJobPayload } from '@kmmzavod/queue';
+import { Worker, Queue, type ConnectionOptions } from 'bullmq';
+import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { TikTokClient } from '../clients/social/tiktok.client';
@@ -21,9 +21,6 @@ import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
 
 const logger = rootLogger.child({ worker: 'publish' });
-
-import type { ShadowBanCheckPayload } from '@kmmzavod/queue';
-import { Queue } from 'bullmq';
 
 interface Deps {
   db: PrismaClient;

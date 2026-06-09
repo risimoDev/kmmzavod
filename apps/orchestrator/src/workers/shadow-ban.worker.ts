@@ -6,12 +6,12 @@
  * search APIs or scraping. When a shadow-ban is detected the account
  * health score is dropped and the account is paused.
  */
-import { Worker, Queue } from 'bullmq';
-import type { ConnectionOptions } from 'bullmq';
-import { PrismaClient } from '@prisma/client';
-import { QUEUES } from '@kmmzavod/queue';
-import type { ShadowBanCheckPayload } from '@kmmzavod/queue';
-import { logger } from '../logger';
+import { Worker, type ConnectionOptions } from 'bullmq';
+import { QUEUES, type ShadowBanCheckPayload } from '@kmmzavod/queue';
+import type { PrismaClient } from '@kmmzavod/db';
+import { logger as rootLogger } from '../logger';
+
+const logger = rootLogger.child({ worker: 'shadow-ban' });
 
 interface Deps {
   db: PrismaClient;

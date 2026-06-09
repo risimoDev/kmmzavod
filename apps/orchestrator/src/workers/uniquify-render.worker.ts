@@ -81,6 +81,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           file_size_bytes: number;
           width: number;
           height: number;
+          phash: string | null;
         }>(`${videoProcessorUrl}/uniquify/render`, {
           variant_id: variantId,
           uniquify_job_id: uniquifyJobId,

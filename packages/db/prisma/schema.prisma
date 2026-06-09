@@ -845,6 +845,7 @@ model SocialAccount {
     // Shadow-ban detection
     shadowBanDetected Boolean        @default(false) @map("shadow_ban_detected")
     shadowBanCheckedAt DateTime?      @map("shadow_ban_checked_at")
+    lastError         String?        @map("last_error")
     // ── Core fields ────────────────────────────────────────────────────
     isActive          Boolean        @default(true) @map("is_active")
     createdAt         DateTime       @default(now()) @map("created_at")
