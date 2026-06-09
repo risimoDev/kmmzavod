@@ -402,6 +402,165 @@ export const socialAccountsApi = {
     apiFetch<{ success: boolean }>(`/api/v1/social-accounts/${id}`, { method: 'DELETE' }),
 };
 
+// ── Account Farm Types ────────────────────────────────────────────────────────
+
+export interface AccountGroup {
+  id: string;
+  tenantId: string;
+  name: string;
+  niche: string;
+  timezone: string;
+  maxPostsPerDay: number;
+  staggerMinutes: number;
+  bgmPool: string[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  _count?: { accounts: number };
+}
+
+export interface Proxy {
+  id: string;
+  host: string;
+  port: number;
+  type: string;
+  country: string | null;
+  city: string | null;
+  username: string | null;
+  isActive: boolean;
+  assignedAccounts: number;
+  maxAccounts: number;
+  healthCheckAt: string | null;
+  failCount: number;
+  lastError: string | null;
+  createdAt: string;
+  _count?: { accounts: number };
+}
+
+export interface FarmSocialAccount {
+  id: string;
+  platform: string;
+  accountName: string;
+  isActive: boolean;
+  healthScore: number;
+  warmupStatus: string;
+  dailyPostCount: number;
+  lastPostAt: string | null;
+  shadowBanDetected: boolean;
+  niche: string | null;
+  language: string;
+  accountGroupId: string | null;
+  proxyId: string | null;
+  createdAt: string;
+  accountGroup?: { name: string } | null;
+  proxy?: { host: string; port: number; type: string } | null;
+}
+
+export interface FarmMetrics {
+  accounts: {
+    total: number;
+    active: number;
+    shadowBanned: number;
+    lowHealth: number;
+    postsToday: number;
+    healthByPlatform: Array<{ platform: string; avgHealth: number; count: number }>;
+  };
+  proxies: {
+    total: number;
+    active: number;
+    failed: number;
+  };
+}
+
+// ── Account Farm API ──────────────────────────────────────────────────────────
+
+export const accountFarmApi = {
+  // Account groups
+  listGroups: () => apiFetch<AccountGroup[]>('/api/v1/farm/account-groups'),
+
+  createGroup: (body: {
+    name: string;
+    niche: string;
+    timezone?: string;
+    maxPostsPerDay?: number;
+    staggerMinutes?: number;
+    bgmPool?: string[];
+  }) => apiFetch<AccountGroup>('/api/v1/farm/account-groups', { method: 'POST', body: JSON.stringify(body) }),
+
+  updateGroup: (id: string, body: Partial<{
+    name: string;
+    niche: string;
+    timezone: string;
+    maxPostsPerDay: number;
+    staggerMinutes: number;
+    bgmPool: string[];
+    isActive: boolean;
+  }>) => apiFetch<{ updated: number }>(`/api/v1/farm/account-groups/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteGroup: (id: string) =>
+    apiFetch<void>(`/api/v1/farm/account-groups/${id}`, { method: 'DELETE' }),
+
+  // Proxies
+  listProxies: (params: { isActive?: boolean; country?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.isActive !== undefined) q.set('isActive', String(params.isActive));
+    if (params.country) q.set('country', params.country);
+    return apiFetch<Proxy[]>(`/api/v1/farm/proxies?${q}`);
+  },
+
+  bulkImportProxies: (proxies: Array<{
+    host: string;
+    port: number;
+    type: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+    country?: string;
+    city?: string;
+    username?: string;
+    password?: string;
+    maxAccounts?: number;
+  }>) => apiFetch<{ imported: number }>('/api/v1/farm/proxies/bulk', { method: 'POST', body: JSON.stringify({ proxies }) }),
+
+  healthCheckProxy: (id: string) =>
+    apiFetch<{ id: string; ok: boolean }>(`/api/v1/farm/proxies/${id}/health-check`, { method: 'POST' }),
+
+  // Social accounts
+  listAccounts: (params: { platform?: string; accountGroupId?: string; isActive?: boolean; page?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.platform) q.set('platform', params.platform);
+    if (params.accountGroupId) q.set('accountGroupId', params.accountGroupId);
+    if (params.isActive !== undefined) q.set('isActive', String(params.isActive));
+    if (params.page) q.set('page', String(params.page));
+    if (params.limit) q.set('limit', String(params.limit));
+    return apiFetch<{ accounts: FarmSocialAccount[]; total: number; page: number; limit: number }>(`/api/v1/farm/social-accounts?${q}`);
+  },
+
+  bulkImportAccounts: (body: {
+    accounts: Array<{
+      platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
+      accountName: string;
+      accessToken: string;
+      refreshToken?: string;
+      expiresAt?: string;
+      igUserId?: string;
+      accountGroupId?: string;
+      niche?: string;
+      language?: string;
+    }>;
+    autoAssign?: boolean;
+  }) => apiFetch<{ imported: number; results: Array<{ accountName: string; status: string; error?: string }> }>(
+    '/api/v1/farm/social-accounts/bulk',
+    { method: 'POST', body: JSON.stringify(body) }
+  ),
+
+  resetDaily: (timezone?: string) => {
+    const q = new URLSearchParams();
+    if (timezone) q.set('timezone', timezone);
+    return apiFetch<{ reset: number }>(`/api/v1/farm/social-accounts/reset-daily?${q}`, { method: 'POST' });
+  },
+
+  // Metrics
+  metrics: () => apiFetch<FarmMetrics>('/api/v1/farm/metrics'),
+};
+
 // ── Projects API ──────────────────────────────────────────────────────────────
 
 export const projectsApi = {

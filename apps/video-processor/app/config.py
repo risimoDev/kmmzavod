@@ -22,23 +22,23 @@ class Settings(BaseSettings):
     # ── FFmpeg knobs ──────────────────────────────────────────────────
     # Directory containing ffmpeg/ffprobe binaries (auto-detected if empty)
     ffmpeg_bin_dir: str = ""
-    # Threads: 0 means let FFmpeg auto-detect (uses all cores)
-    ffmpeg_threads: int = 0
+    # Threads: 0=auto (all cores). On 4-core server use 3 to leave 1 for API/DB
+    ffmpeg_threads: int = 3
     # Preset used for intermediate (temp) files — fast I/O, lower quality OK
     ffmpeg_interim_preset: str = "ultrafast"
-    # Preset for the final output file — better compression
-    ffmpeg_final_preset: str = "medium"
-    # CRF for final encode (18=visually lossless, 21=high quality, 23=good)
-    ffmpeg_crf: int = 21
-    # Output audio bitrate
-    ffmpeg_audio_bitrate: str = "192k"
+    # Preset for the final output file — veryfast for CPU-only server (4 cores)
+    ffmpeg_final_preset: str = "veryfast"
+    # CRF for final encode: 24-26 = good quality, much faster encoding on CPU
+    ffmpeg_crf: int = 24
+    # Output audio bitrate (reduced slightly to save CPU during mux)
+    ffmpeg_audio_bitrate: str = "128k"
     # Max video bitrate for social media (helps with platform limits)
-    ffmpeg_max_bitrate: str = "6M"
-    ffmpeg_bufsize: str = "12M"
+    ffmpeg_max_bitrate: str = "4M"
+    ffmpeg_bufsize: str = "8M"
 
     # ── Service ───────────────────────────────────────────────────────
     log_level: str = "INFO"
-    # Limit concurrent composition jobs to avoid OOM on CPU-heavy tasks
+    # Hard limit concurrent jobs for 4-core / 6GB RAM server (no GPU)
     max_concurrent_jobs: int = 2
     # Temp dir base; defaults to OS temp
     work_dir_base: str = ""

@@ -82,6 +82,7 @@ class RenderResponse(BaseModel):
     file_size_bytes: int
     width: int
     height: int
+    phash: str | None = None
 
 
 class GenerateTransformsRequest(BaseModel):
@@ -204,6 +205,7 @@ def create_router() -> APIRouter:
                 file_size_bytes=result.file_size_bytes,
                 width=result.width,
                 height=result.height,
+                phash=result.phash,
             )
         except Exception as e:
             logger.exception("Render failed for variant %s", req.variant_id)

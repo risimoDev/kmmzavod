@@ -16,16 +16,18 @@ import {
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
+import { GptunnelService } from '../services/gptunnel';
 
 interface Deps {
   db: PrismaClient;
   videoProcessorUrl: string;
   uniquifyRenderQueue: Queue<UniquifyRenderJobPayload>;
+  gptunnelService: GptunnelService;
   connection: ConnectionOptions;
 }
 
 export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
-  const { db, videoProcessorUrl, uniquifyRenderQueue, connection } = deps;
+  const { db, videoProcessorUrl, uniquifyRenderQueue, gptunnelService, connection } = deps;
 
   return new Worker<UniquifyAnalyzeJobPayload>(
     QUEUES['uniquify-analyze'].name,
@@ -122,6 +124,93 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
             })
           )
         );
+
+        // 8.5. Generate unique captions, hashtags, and TTS per variant via GPTunnel
+        const sourceVideoTitle = sourceVideo.title ?? 'video';
+        const sourceVideoDesc = sourceVideo.description ?? '';
+
+        // Batch generate captions/hashtags via GPT-4o-mini
+        let generatedContents: Array<{ caption: string; hashtags: string[] }> = [];
+        try {
+          const chatRes = await gptunnelService.chatCompletion({
+            model: 'gpt-4o-mini',
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a social media content generator. Return ONLY a valid JSON array.',
+              },
+              {
+                role: 'user',
+                content: `Generate ${variantCount} unique captions and 5-10 relevant hashtags for each for a video titled "${sourceVideoTitle}". Description: "${sourceVideoDesc}". Return a JSON array: [{"caption":"...","hashtags":["#tag1","#tag2"]},...]. Each caption must be unique, engaging, and platform-agnostic.`,
+              },
+            ],
+            temperature: 0.9,
+            responseFormat: { type: 'json_object' },
+            maxTokens: 2000,
+          });
+          const raw = chatRes.choices[0]?.message?.content ?? '[]';
+          const parsed = JSON.parse(raw);
+          generatedContents = Array.isArray(parsed) ? parsed : parsed.captions ?? [];
+        } catch (err: unknown) {
+          logger.warn({ err }, 'Uniquify-analyze: caption generation failed, using defaults');
+        }
+        while (generatedContents.length < variantCount) {
+          generatedContents.push({
+            caption: `${sourceVideoTitle} — check this out!`,
+            hashtags: ['#viral', '#trending'],
+          });
+        }
+
+        // Generate TTS and update variants in parallel batches (avoid rate-limiting)
+        const TTS_BATCH_SIZE = 5;
+        for (let batchStart = 0; batchStart < variants.length; batchStart += TTS_BATCH_SIZE) {
+          const batch = variants.slice(batchStart, batchStart + TTS_BATCH_SIZE);
+          await Promise.all(
+            batch.map(async (variant: any, batchIdx: number) => {
+              const i = batchStart + batchIdx;
+              const content = generatedContents[i];
+              const voiceId = allTransforms[i].ttsVoiceId;
+              const ttsText = allTransforms[i].ttsText ?? content.caption;
+
+              let ttsStorageKey: string | null = null;
+              if (voiceId && ttsText) {
+                try {
+                  const ttsRes = await gptunnelService.ttsCreate({
+                    text: ttsText,
+                    voiceId,
+                    tenantId,
+                    uniquifyJobId,
+                    variantIndex: i,
+                  });
+                  ttsStorageKey = ttsRes.storageKey;
+                } catch (err: unknown) {
+                  logger.warn(
+                    { variantId: variant.id, err: (err as Error).message },
+                    'Uniquify-analyze: TTS generation failed',
+                  );
+                }
+              }
+
+              await db.uniqueVariant.update({
+                where: { id: variant.id },
+                data: {
+                  generatedCaption: content.caption,
+                  generatedHashtags: content.hashtags,
+                  ttsVoiceId: voiceId,
+                  ttsStorageKey,
+                },
+              });
+
+              // Enrich transforms for render payload
+              allTransforms[i] = {
+                ...allTransforms[i],
+                ttsText,
+                ttsVoiceId: voiceId,
+              };
+            }),
+          );
+        }
 
         // 9. Update job status to generating
         await db.uniquifyJob.update({

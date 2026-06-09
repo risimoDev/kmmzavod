@@ -28,6 +28,7 @@ import type {
   UniquifyRenderJobPayload,
   UniquifyStateJobPayload,
   DistributeJobPayload,
+  ShadowBanCheckPayload,
 } from '@kmmzavod/queue';
 
 import { createGptScriptWorker } from './workers/gpt-script.worker';
@@ -42,6 +43,7 @@ import { createUniquifyAnalyzeWorker } from './workers/uniquify-analyze.worker';
 import { createUniquifyRenderWorker } from './workers/uniquify-render.worker';
 import { createUniquifyStateWorker } from './workers/uniquify-state.worker';
 import { createDistributeWorker } from './workers/distribute.worker';
+import { createShadowBanWorker } from './workers/shadow-ban.worker';
 import { startPipeline } from './pipeline/coordinator';
 import { loadProxyConfig } from './lib/proxy';
 
@@ -84,6 +86,10 @@ async function main() {
     publicBaseUrl: config.MINIO_PUBLIC_URL,
   });
 
+  // GPTunnel service for TTS, image generation, and chat completions
+  const { GptunnelService } = await import('./services/gptunnel');
+  const gptunnelService = new GptunnelService(storage);
+
   // ── Очереди для fan-out ───────────────────────────────────────────────────
   const gptScriptQueue = new Queue<GptScriptJobPayload>(QUEUES['gpt-script'].name, { connection });
   const heygenQueue = new Queue<HeygenRenderJobPayload>(QUEUES['heygen-render'].name, { connection });
@@ -98,6 +104,7 @@ async function main() {
   const uniquifyRenderQueue = new Queue<UniquifyRenderJobPayload>(QUEUES['uniquify-render'].name, { connection });
   const uniquifyStateQueue = new Queue<UniquifyStateJobPayload>(QUEUES['uniquify-state'].name, { connection });
   const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection });
+  const shadowBanCheckQueue = new Queue<ShadowBanCheckPayload>(QUEUES['shadow-ban-check'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -153,6 +160,7 @@ async function main() {
     db,
     storage,
     connection,
+    shadowBanCheckQueue,
     tiktokClientKey: config.TIKTOK_CLIENT_KEY,
     tiktokClientSecret: config.TIKTOK_CLIENT_SECRET,
     instagramAppId: config.INSTAGRAM_APP_ID,
@@ -174,6 +182,7 @@ async function main() {
     db,
     videoProcessorUrl: config.VIDEO_PROCESSOR_URL,
     uniquifyRenderQueue,
+    gptunnelService,
     connection,
   });
 
@@ -192,6 +201,11 @@ async function main() {
   const distributeWorker = createDistributeWorker({
     db,
     publishQueue,
+    connection,
+  });
+
+  const shadowBanWorker = createShadowBanWorker({
+    db,
     connection,
   });
 
@@ -343,6 +357,7 @@ async function main() {
     uniquifyRenderWorker,
     uniquifyStateWorker,
     distributeWorker,
+    shadowBanWorker,
   ];
 
   // Логируем активные воркеры
@@ -414,6 +429,7 @@ async function main() {
       uniquifyRenderQueue.close(),
       uniquifyStateQueue.close(),
       distributeQueue.close(),
+      shadowBanCheckQueue.close(),
     ]);
     await db.$disconnect();
     try { await connection.del(HEARTBEAT_KEY); } catch {}

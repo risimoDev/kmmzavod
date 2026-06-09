@@ -57,19 +57,21 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
       });
 
       try {
-        // 2. Get config for optional BGM/TTS keys
+        // 2. Get variant record for TTS key and config for BGM
+        const variantRecord = await db.uniqueVariant.findUniqueOrThrow({
+          where: { id: variantId },
+          select: { ttsStorageKey: true, bgmTrackKey: true },
+        });
         const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({
           where: { id: uniquifyJobId },
         });
 
         const config = uniquifyJob.config as Record<string, unknown>;
         const bgmKeys = (config.bgmTrackKeys ?? []) as string[];
-        const ttsVoiceIds = (config.ttsVoiceIds ?? []) as string[];
 
         // Pick a random BGM key for this variant (if available)
-        const bgmKey = bgmKeys.length > 0
-          ? bgmKeys[job.data.transforms.crf % bgmKeys.length]
-          : undefined;
+        const bgmKey = variantRecord.bgmTrackKey
+          ?? (bgmKeys.length > 0 ? bgmKeys[job.data.transforms.crf % bgmKeys.length] : undefined);
 
         // 3. Call video-processor /uniquify/render
         const renderResp = await axios.post<{
@@ -88,7 +90,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           transforms,
           transcript: transcript,
           bgm_storage_key: bgmKey ?? null,
-          tts_storage_key: null, // TTS will be a future enhancement
+          tts_storage_key: variantRecord.ttsStorageKey ?? null,
         }, { timeout: 600_000 });
 
         const result = renderResp.data;
@@ -106,6 +108,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
             width: result.width,
             height: result.height,
             bgmTrackKey: bgmKey,
+            pHash: result.phash ?? null,
           },
         });
 

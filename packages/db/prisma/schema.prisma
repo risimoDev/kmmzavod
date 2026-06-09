@@ -42,6 +42,8 @@ model Tenant {
     sourceVideos       SourceVideo[]
     uniquifyJobs       UniquifyJob[]
     distributeJobs     DistributeJob[]
+    accountGroups      AccountGroup[]
+    proxies            Proxy[]
 
     @@map("tenants")
 }
@@ -774,27 +776,91 @@ enum SocialPlatform {
     @@map("social_platform")
 }
 
+model AccountGroup {
+    id             String    @id @default(uuid()) @db.Uuid
+    tenantId       String    @map("tenant_id") @db.Uuid
+    name           String
+    niche          String
+    timezone       String    @default("UTC")
+    maxPostsPerDay Int       @default(3) @map("max_posts_per_day")
+    staggerMinutes Int       @default(120) @map("stagger_minutes")
+    bgmPool        String[]  @default([]) @map("bgm_pool")
+    isActive       Boolean   @default(true) @map("is_active")
+    createdAt      DateTime  @default(now()) @map("created_at")
+    updatedAt      DateTime  @updatedAt @map("updated_at")
+
+    tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    accounts SocialAccount[]
+
+    @@index([tenantId, isActive])
+    @@map("account_groups")
+}
+
+model Proxy {
+    id               String   @id @default(uuid()) @db.Uuid
+    tenantId         String   @map("tenant_id") @db.Uuid
+    host             String
+    port             Int
+    type             String // http, socks5, residential, mobile
+    country          String?
+    city             String?
+    username         String?
+    password         String? // encrypted
+    isActive         Boolean  @default(true) @map("is_active")
+    assignedAccounts Int      @default(0) @map("assigned_accounts")
+    maxAccounts      Int      @default(3) @map("max_accounts")
+    healthCheckAt    DateTime? @map("health_check_at")
+    failCount        Int      @default(0) @map("fail_count")
+    lastError        String?  @map("last_error")
+    createdAt        DateTime @default(now()) @map("created_at")
+
+    tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    accounts SocialAccount[]
+
+    @@index([tenantId, isActive, assignedAccounts])
+    @@map("proxies")
+}
+
 model SocialAccount {
-    id           String         @id @default(uuid()) @db.Uuid
-    tenantId     String         @map("tenant_id") @db.Uuid
-    platform     SocialPlatform
-    accessToken  String         @map("access_token") // TODO: encrypt at rest using application-level encryption
-    refreshToken String?        @map("refresh_token")
-    expiresAt    DateTime?      @map("expires_at")
-    accountName  String         @map("account_name")
-    igUserId     String?        @map("ig_user_id")
-    proxyUrl     String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
-    isActive     Boolean        @default(true) @map("is_active")
-    createdAt    DateTime       @default(now()) @map("created_at")
-    updatedAt    DateTime       @updatedAt @map("updated_at")
+    id                String         @id @default(uuid()) @db.Uuid
+    tenantId          String         @map("tenant_id") @db.Uuid
+    platform          SocialPlatform
+    accessToken       String         @map("access_token") // TODO: encrypt at rest using application-level encryption
+    refreshToken      String?        @map("refresh_token")
+    expiresAt         DateTime?      @map("expires_at")
+    accountName       String         @map("account_name")
+    igUserId          String?        @map("ig_user_id")
+    proxyUrl          String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
+    // ── Farm fields ────────────────────────────────────────────────────
+    accountGroupId    String?        @map("account_group_id") @db.Uuid
+    proxyId           String?        @map("proxy_id") @db.Uuid
+    deviceFingerprint Json?          @map("device_fingerprint")
+    warmupStatus      String         @default("cold") @map("warmup_status") // cold, warming, warm
+    healthScore       Int            @default(100) @map("health_score") // 0-100
+    dailyPostCount    Int            @default(0) @map("daily_post_count")
+    lastPostAt        DateTime?      @map("last_post_at")
+    niche             String?
+    language          String         @default("en")
+    actionLimits      Json?          @map("action_limits") // { maxPostsPerDay, maxLikesPerDay, ... }
+    // Shadow-ban detection
+    shadowBanDetected Boolean        @default(false) @map("shadow_ban_detected")
+    shadowBanCheckedAt DateTime?      @map("shadow_ban_checked_at")
+    // ── Core fields ────────────────────────────────────────────────────
+    isActive          Boolean        @default(true) @map("is_active")
+    createdAt         DateTime       @default(now()) @map("created_at")
+    updatedAt         DateTime       @updatedAt @map("updated_at")
 
     tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    accountGroup    AccountGroup?    @relation(fields: [accountGroupId], references: [id])
+    proxy           Proxy?           @relation(fields: [proxyId], references: [id])
     publishJobs     PublishJob[]
     distributeItems DistributeItem[]
 
     @@unique([tenantId, platform, accountName])
     @@index([tenantId])
     @@index([tenantId, platform])
+    @@index([accountGroupId])
+    @@index([proxyId])
     @@map("social_accounts")
 }
 
@@ -972,7 +1038,13 @@ model UniqueVariant {
     // Subtitle & voice info
     subtitleStyle   String?             @map("subtitle_style")
     ttsVoiceId      String?             @map("tts_voice_id")
+    ttsStorageKey   String?             @map("tts_storage_key")
     bgmTrackKey     String?             @map("bgm_track_key")
+    // Auto-generated content
+    generatedCaption  String?             @map("generated_caption") @db.Text
+    generatedHashtags String[]            @default([]) @map("generated_hashtags")
+    // Perceptual hash for duplicate detection
+    pHash             String?             @map("phash")
     //
     error           String?
     createdAt       DateTime            @default(now()) @map("created_at")

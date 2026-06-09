@@ -28,6 +28,7 @@ import { publishRoutes } from './routes/publish.routes';
 import { scheduleRoutes } from './routes/schedules.routes';
 import { presetRoutes } from './routes/presets.routes';
 import { uniquifyRoutes } from './routes/uniquify.routes';
+import { accountFarmRoutes } from './routes/account-farm.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -131,6 +132,7 @@ export async function buildApp() {
   app.register(scheduleRoutes, { prefix: '/api/v1/schedules' });
   app.register(presetRoutes,   { prefix: '/api/v1/presets' });
   app.register(uniquifyRoutes,  { prefix: '/api/v1/uniquify' });
+  app.register(accountFarmRoutes, { prefix: '/api/v1/farm' });
 
   // Health check — includes Redis and DB liveness
   app.get('/health', { logLevel: 'warn' }, async (_req, reply) => {

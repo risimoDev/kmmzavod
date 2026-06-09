@@ -109,6 +109,24 @@ class RenderResult:
     file_size_bytes: int = 0
     width: int = 0
     height: int = 0
+    phash: str | None = None
+
+
+def _compute_phash(image_path: str) -> str | None:
+    """Fast average-hash via OpenCV (CPU-only, no extra deps)."""
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return None
+        img = cv2.resize(img, (8, 8), interpolation=cv2.INTER_AREA)
+        mean = img.mean()
+        bits = (img >= mean).astype(np.uint8).flatten()
+        hex_str = ''.join(f'{sum(b << (3 - j) for j, b in enumerate(bits[i:i+4])):x}' for i in range(0, 64, 4))
+        return hex_str
+    except Exception:
+        return None
 
 
 def _ffmpeg() -> str:
@@ -199,10 +217,10 @@ async def analyze_video(source_path: str) -> AnalysisResult:
     if not result.duration_sec and fmt.get("duration"):
         result.duration_sec = round(float(fmt["duration"]), 2)
 
-    # 2. Scene detection via ffmpeg's scene filter
+    # 2. Scene detection via ffmpeg's scene filter (skip frames to reduce CPU)
     scene_cmd = [
-        _ffmpeg(), "-i", source_path,
-        "-vf", "select='gt(scene,0.35)',showinfo",
+        _ffmpeg(), "-threads", str(settings.ffmpeg_threads), "-i", source_path,
+        "-vf", "fps=1,select='gt(scene,0.35)',showinfo",
         "-vsync", "vfr",
         "-f", "null", "-",
     ]
@@ -221,7 +239,7 @@ async def analyze_video(source_path: str) -> AnalysisResult:
 
     # 3. Audio loudness profile
     loud_cmd = [
-        _ffmpeg(), "-i", source_path,
+        _ffmpeg(), "-threads", str(settings.ffmpeg_threads), "-i", source_path,
         "-af", "loudnorm=print_format=json",
         "-f", "null", "-",
     ]
@@ -499,8 +517,9 @@ async def render_unique_variant(
         if afilters:
             cmd += ["-af", ",".join(afilters)]
 
-    # Output encoding
+    # Output encoding (CPU-optimized: threads, veryfast preset)
     cmd += [
+        "-threads", str(settings.ffmpeg_threads),
         "-c:v", "libx264",
         "-preset", settings.ffmpeg_final_preset,
         "-crf", str(t.crf),
@@ -531,6 +550,9 @@ async def render_unique_variant(
     except Exception:
         thumbnail_path = None
 
+    # Compute perceptual hash from thumbnail (CPU-only duplicate detection)
+    phash = _compute_phash(thumbnail_path) if thumbnail_path else None
+
     # Get output file info
     stat = os.stat(output_path)
 
@@ -556,4 +578,5 @@ async def render_unique_variant(
         file_size_bytes=stat.st_size,
         width=out_w,
         height=out_h,
+        phash=phash,
     )

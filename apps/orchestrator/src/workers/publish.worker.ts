@@ -22,10 +22,14 @@ import { decrypt, encrypt } from '../lib/crypto';
 
 const logger = rootLogger.child({ worker: 'publish' });
 
+import type { ShadowBanCheckPayload } from '@kmmzavod/queue';
+import { Queue } from 'bullmq';
+
 interface Deps {
   db: PrismaClient;
   storage: IStorageClient;
   connection: ConnectionOptions;
+  shadowBanCheckQueue?: Queue<ShadowBanCheckPayload>;
   tiktokClientKey?: string;
   tiktokClientSecret?: string;
   instagramAppId?: string;
@@ -36,7 +40,7 @@ interface Deps {
 }
 
 export function createPublishWorker(deps: Deps): Worker {
-  const { db, storage, connection } = deps;
+  const { db, storage, connection, shadowBanCheckQueue } = deps;
 
   const tiktok = deps.tiktokClientKey && deps.tiktokClientSecret
     ? new TikTokClient(deps.tiktokClientKey, deps.tiktokClientSecret)
@@ -74,6 +78,9 @@ export function createPublishWorker(deps: Deps): Worker {
 
         if (!account.isActive) {
           throw new Error(`Social account ${socialAccountId} is disabled`);
+        }
+        if ((accountRaw.healthScore ?? 100) < 30) {
+          throw new Error(`Social account ${socialAccountId} health score too low (${accountRaw.healthScore}) — paused for safety`);
         }
 
         // Set per-account proxy on all social clients (isolation: each tenant uses their own IP)
@@ -284,15 +291,30 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new Error(`Unknown platform: ${platform}`);
         }
 
-        // Mark as published
+        // Mark as published and update account health
         const now = new Date();
-        await db.publishJob.update({
-          where: { id: publishJobId },
-          data: {
-            status: 'published',
-            publishedAt: now,
-            externalPostId,
-          },
+        await db.$transaction([
+          db.publishJob.update({
+            where: { id: publishJobId },
+            data: {
+              status: 'published',
+              publishedAt: now,
+              externalPostId,
+            },
+          }),
+          db.socialAccount.update({
+            where: { id: socialAccountId },
+            data: {
+              dailyPostCount: { increment: 1 },
+              lastPostAt: now,
+              healthScore: { increment: 5 },
+            },
+          }),
+        ]);
+        // Clamp healthScore at 100 via a second update if needed (Prisma doesn't support cap in single update)
+        await db.socialAccount.updateMany({
+          where: { id: socialAccountId, healthScore: { gt: 100 } },
+          data: { healthScore: 100 },
         });
 
         // Update linked DistributeItem if this publish came from distribution
@@ -320,14 +342,46 @@ export function createPublishWorker(deps: Deps): Worker {
         }
 
         logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
+
+        // Schedule shadow-ban check ~45 min after publish
+        if (shadowBanCheckQueue) {
+          await shadowBanCheckQueue.add(
+            `shadow-ban-${publishJobId}`,
+            {
+              publishJobId,
+              socialAccountId,
+              tenantId,
+              platform,
+              externalPostId,
+              hashtags: publishJob.hashtags ?? [],
+            } satisfies ShadowBanCheckPayload,
+            { delay: 45 * 60_000, attempts: 1 },
+          );
+        }
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error({ publishJobId, platform, err: errorMsg }, 'Publish: failed');
 
         const now = new Date();
-        await db.publishJob.update({
-          where: { id: publishJobId },
-          data: { status: 'failed', error: errorMsg },
+        const isRateLimit = /rate.?limit|too.?many|429|action.?block/i.test(errorMsg);
+        const healthDelta = isRateLimit ? -30 : -20;
+        await db.$transaction([
+          db.publishJob.update({
+            where: { id: publishJobId },
+            data: { status: 'failed', error: errorMsg },
+          }),
+          db.socialAccount.update({
+            where: { id: socialAccountId },
+            data: {
+              healthScore: { increment: healthDelta },
+              ...(isRateLimit ? { lastError: errorMsg } : {}),
+            },
+          }),
+        ]);
+        // Clamp healthScore at 0
+        await db.socialAccount.updateMany({
+          where: { id: socialAccountId, healthScore: { lt: 0 } },
+          data: { healthScore: 0 },
         });
 
         // Update linked DistributeItem on failure so distribution can complete

@@ -35,8 +35,14 @@ export function createDistributeWorker(deps: Deps): Worker {
         include: {
           items: {
             include: {
-              uniqueVariant: { select: { id: true, status: true, outputKey: true } },
-              socialAccount: { select: { id: true, platform: true, isActive: true } },
+              uniqueVariant: { select: { id: true, status: true, outputKey: true, generatedCaption: true, generatedHashtags: true } },
+              socialAccount: {
+                select: {
+                  id: true, platform: true, isActive: true,
+                  dailyPostCount: true, lastPostAt: true, healthScore: true,
+                  accountGroup: { select: { maxPostsPerDay: true, timezone: true, staggerMinutes: true } },
+                },
+              },
             },
             orderBy: { createdAt: 'asc' },
           },
@@ -87,20 +93,55 @@ export function createDistributeWorker(deps: Deps): Worker {
           continue;
         }
 
-        // Calculate scheduled time with stagger (preserve slot across retries)
-        const scheduledAt = new Date(Date.now() + itemIndex * staggerMs);
-        const delay = itemIndex * staggerMs;
+        // Anti-ban guards
+        const maxPosts = item.socialAccount.accountGroup?.maxPostsPerDay ?? 3;
+        if ((item.socialAccount.healthScore ?? 100) < 30) {
+          await db.distributeItem.update({
+            where: { id: item.id },
+            data: { status: 'skipped', error: 'Account health score too low (<30)' },
+          });
+          skippedCount++; itemIndex++; continue;
+        }
+        if ((item.socialAccount.dailyPostCount ?? 0) >= maxPosts) {
+          await db.distributeItem.update({
+            where: { id: item.id },
+            data: { status: 'skipped', error: `Daily post limit reached (${maxPosts})` },
+          });
+          skippedCount++; itemIndex++; continue;
+        }
+        if (item.socialAccount.lastPostAt) {
+          const hoursSinceLast = (Date.now() - item.socialAccount.lastPostAt.getTime()) / 36e5;
+          if (hoursSinceLast < 3) {
+            await db.distributeItem.update({
+              where: { id: item.id },
+              data: { status: 'skipped', error: 'Minimum 3-hour gap between posts not met' },
+            });
+            skippedCount++; itemIndex++; continue;
+          }
+        }
 
-        // Build caption from template
-        const caption = buildCaption(
-          distJob.captionTemplate,
-          item.caption,
-          item.hashtags.length > 0 ? item.hashtags : distJob.hashtags,
-          itemIndex,
-          item.socialAccount.platform,
-        );
+        // Calculate scheduled time with jittered stagger (±15% randomness)
+        const baseDelay = itemIndex * staggerMs;
+        const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
+        const scheduledAt = new Date(Date.now() + jitteredDelay);
 
-        const hashtags = item.hashtags.length > 0 ? item.hashtags : distJob.hashtags;
+        // Prefer auto-generated content from uniqueVariant, fallback to template/manual
+        const autoCaption = item.uniqueVariant.generatedCaption;
+        const autoHashtags = item.uniqueVariant.generatedHashtags;
+
+        const caption = autoCaption
+          ? `${autoCaption}\n\n${autoHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
+          : buildCaption(
+              distJob.captionTemplate,
+              item.caption,
+              item.hashtags.length > 0 ? item.hashtags : distJob.hashtags,
+              itemIndex,
+              item.socialAccount.platform,
+            );
+
+        const hashtags = autoHashtags && autoHashtags.length > 0
+          ? autoHashtags
+          : item.hashtags.length > 0 ? item.hashtags : distJob.hashtags;
 
         // Create PublishJob
         const publishJob = await db.publishJob.create({
@@ -139,7 +180,7 @@ export function createDistributeWorker(deps: Deps): Worker {
         await publishQueue.add(
           `publish-distribute:${publishJob.id}`,
           payload,
-          { delay, jobId: publishJob.id },
+          { delay: jitteredDelay, jobId: publishJob.id },
         );
 
         logger.info(
@@ -150,7 +191,7 @@ export function createDistributeWorker(deps: Deps): Worker {
             variantId: item.uniqueVariant.id,
             accountId: item.socialAccount.id,
             platform: item.socialAccount.platform,
-            delay: `${Math.round(delay / 60000)}min`,
+            delay: `${Math.round(jitteredDelay / 60000)}min`,
           },
           'Distribute: scheduled publish',
         );

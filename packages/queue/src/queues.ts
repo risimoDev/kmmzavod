@@ -99,7 +99,7 @@ export const QUEUE_DEFS = {
       removeOnComplete: { count: 200 },
       removeOnFail: false,
     },
-    concurrency: 2,
+    concurrency: 1, // CPU-bound (ffmpeg probe), leave cores for render + API
   },
   UNIQUIFY_RENDER: {
     name: 'uniquify-render',
@@ -109,7 +109,7 @@ export const QUEUE_DEFS = {
       removeOnComplete: { count: 500 },
       removeOnFail: false,
     },
-    concurrency: 3,
+    concurrency: 2, // 4-core server: 2 render + 1 analyze + 1 spare for API/DB
   },
   UNIQUIFY_STATE: {
     name: 'uniquify-state',
@@ -129,6 +129,15 @@ export const QUEUE_DEFS = {
       removeOnFail: false,
     },
     concurrency: 2,
+  },
+  SHADOW_BAN_CHECK: {
+    name: 'shadow-ban-check',
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: { count: 500 },
+      removeOnFail: { count: 200 },
+    },
+    concurrency: 3,
   },
 } as const;
 
@@ -265,6 +274,7 @@ export interface VariantTransforms {
   // TTS
   ttsVoiceId?: string;
   ttsSpeed?: number;         // 0.9–1.1
+  ttsText?: string;          // script for TTS generation
   // Intro/outro
   trimStartSec: number;      // 0–2 sec trim from start
   trimEndSec: number;        // 0–2 sec trim from end
@@ -292,6 +302,15 @@ export interface UniquifyStateJobPayload {
 export interface DistributeJobPayload {
   distributeJobId: string;
   tenantId: string;
+}
+
+export interface ShadowBanCheckPayload {
+  publishJobId: string;
+  socialAccountId: string;
+  tenantId: string;
+  platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
+  externalPostId?: string;
+  hashtags: string[];
 }
 
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
@@ -334,4 +353,5 @@ export const QUEUES: Record<string, QueueEntry> = {
   'uniquify-render':   flatten(QUEUE_DEFS.UNIQUIFY_RENDER),
   'uniquify-state':    flatten(QUEUE_DEFS.UNIQUIFY_STATE),
   'uniquify-distribute': flatten(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE),
+  'shadow-ban-check':    flatten(QUEUE_DEFS.SHADOW_BAN_CHECK),
 };
