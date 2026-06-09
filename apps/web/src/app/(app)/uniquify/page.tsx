@@ -136,22 +136,9 @@ function UniquifyContent() {
     }
     setUploading(true);
     try {
-      const { uploadUrl, sourceVideoId } = await uniquifyApi.uploadUrl({
-        title: file.name,
-      });
-
-      // Upload directly to MinIO
-      const uploadRes = await fetch(uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type },
-      });
-      if (!uploadRes.ok) throw new Error("Upload failed");
-
-      // Confirm
-      await uniquifyApi.confirmUpload(sourceVideoId);
-
-      // Refresh
+      // Server-side multipart upload: browser → API → MinIO
+      // Avoids presigned PUT failures caused by internal MinIO hostnames / CORS.
+      await uniquifyApi.upload(file, { title: file.name });
       load();
     } catch (e: any) {
       alert(e.message ?? "Upload failed");

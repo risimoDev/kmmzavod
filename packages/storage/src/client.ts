@@ -1,5 +1,7 @@
 // Storage client interface — swap MinIO ↔ S3 without touching workers
 
+import type { Readable } from 'node:stream';
+
 export interface UploadOptions {
   contentType?: string;
   metadata?: Record<string, string>;
@@ -10,6 +12,8 @@ export interface IStorageClient {
   uploadFile(key: string, localPath: string, opts?: UploadOptions): Promise<void>;
   /** Upload from a Buffer */
   uploadBuffer(key: string, buffer: Buffer, opts?: UploadOptions): Promise<void>;
+  /** Upload from a Readable stream (size optional — unknown sizes are supported) */
+  uploadStream(key: string, stream: Readable, size?: number, opts?: UploadOptions): Promise<void>;
   /** Download to a local file path */
   downloadFile(key: string, localPath: string): Promise<void>;
   /** Generate a pre-signed GET URL (default 1h TTL) */

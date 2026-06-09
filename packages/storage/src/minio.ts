@@ -1,5 +1,6 @@
 import { Client as MinioClient } from 'minio';
 import * as fs from 'fs';
+import type { Readable } from 'node:stream';
 import type { IStorageClient, UploadOptions } from './client';
 
 export class MinioStorageClient implements IStorageClient {
@@ -57,6 +58,14 @@ export class MinioStorageClient implements IStorageClient {
 
   async uploadBuffer(key: string, buffer: Buffer, opts?: UploadOptions): Promise<void> {
     await this.client.putObject(this.bucket, key, buffer, buffer.length, {
+      'Content-Type': opts?.contentType ?? 'application/octet-stream',
+      ...opts?.metadata,
+    });
+  }
+
+  async uploadStream(key: string, stream: Readable, size?: number, opts?: UploadOptions): Promise<void> {
+    // When size is undefined, minio uploads via multipart with an internal part size.
+    await this.client.putObject(this.bucket, key, stream, size, {
       'Content-Type': opts?.contentType ?? 'application/octet-stream',
       ...opts?.metadata,
     });

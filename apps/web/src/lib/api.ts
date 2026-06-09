@@ -765,11 +765,23 @@ export interface DistributeJobDetail extends DistributeJob {
 // ── Uniquify API ──────────────────────────────────────────────────────────────
 
 export const uniquifyApi = {
-  uploadUrl: (body: { title: string; description?: string; projectId?: string }) =>
-    apiFetch<{ uploadUrl: string; storageKey: string; sourceVideoId: string }>(
-      '/api/v1/uniquify/source-videos/upload-url',
-      { method: 'POST', body: JSON.stringify(body) }
-    ),
+  upload: async (file: File, body: { title?: string; description?: string; projectId?: string }) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (body.title) form.append('title', body.title);
+    if (body.description) form.append('description', body.description);
+    if (body.projectId) form.append('projectId', body.projectId);
+    const res = await fetch(`${BASE}/api/v1/uniquify/source-videos/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAccessToken()}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<SourceVideo>;
+  },
 
   confirmUpload: (id: string) =>
     apiFetch<void>(`/api/v1/uniquify/source-videos/${id}/confirm-upload`, { method: 'POST' }),

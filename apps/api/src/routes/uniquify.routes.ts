@@ -110,6 +110,72 @@ export async function uniquifyRoutes(app: FastifyInstance) {
   });
 
   /**
+   * POST /source-videos/upload
+   * Server-side multipart upload. The browser sends the file to the API and the
+   * API streams it into MinIO. This avoids exposing MinIO (and its internal
+   * hostname / CORS) to the browser, which was causing "Failed to fetch" and
+   * videos stuck in "uploading".
+   *
+   * Form fields: file (required), title (optional), description, projectId.
+   */
+  app.post('/source-videos/upload', async (req, reply) => {
+    const { tenantId, userId } = req.user;
+
+    const data = await req.file();
+    if (!data) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Файл не передан' });
+    }
+
+    if (!data.mimetype.startsWith('video/')) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Допустим только видеофайл' });
+    }
+
+    const fields = data.fields as Record<string, { value?: string } | undefined>;
+    const title = fields.title?.value?.trim() || data.filename || `source_${Date.now()}`;
+    const description = fields.description?.value?.trim() || undefined;
+    const projectId = fields.projectId?.value?.trim() || undefined;
+
+    // Create the record first to get an id for the storage key.
+    const sourceVideo = await db.sourceVideo.create({
+      data: {
+        tenantId,
+        uploadedBy: userId,
+        title: title.slice(0, 200),
+        description: description?.slice(0, 1000),
+        projectId,
+        status: 'uploading',
+        storageKey: '',
+      },
+    });
+
+    const filename = data.filename || `source_${Date.now()}.mp4`;
+    const storageKey = StoragePaths.sourceVideo(tenantId, sourceVideo.id, filename);
+
+    try {
+      await app.storage.uploadStream(storageKey, data.file, undefined, {
+        contentType: data.mimetype,
+      });
+
+      // @fastify/multipart flags truncation if the file exceeded the size limit.
+      if (data.file.truncated) {
+        await db.sourceVideo.update({ where: { id: sourceVideo.id }, data: { status: 'failed' } });
+        return reply.code(413).send({ error: 'PayloadTooLarge', message: 'Файл превышает лимит 500 МБ' });
+      }
+
+      const updated = await db.sourceVideo.update({
+        where: { id: sourceVideo.id },
+        data: { status: 'ready', storageKey },
+      });
+
+      return reply.code(201).send(updated);
+    } catch (err) {
+      logger.error({ err, sourceVideoId: sourceVideo.id }, 'Source video upload failed');
+      await db.sourceVideo.update({ where: { id: sourceVideo.id }, data: { status: 'failed', storageKey } }).catch(() => {});
+      return reply.code(500).send({ error: 'UploadFailed', message: 'Не удалось загрузить видео' });
+    }
+  });
+
+  /**
    * POST /source-videos/:id/confirm-upload
    * Confirm that upload is complete. Sets status to ready.
    * (Analysis is triggered later when a uniquify job is created.)
