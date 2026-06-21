@@ -719,6 +719,11 @@ export interface BgmTrack {
   url: string | null;
 }
 
+export interface TtsVoice {
+  id: string;
+  name: string;
+}
+
 export interface UniqueVariant {
   id: string;
   variantIndex: number;
@@ -837,6 +842,8 @@ export const uniquifyApi = {
   },
 
   listBgm: () => apiFetch<{ items: BgmTrack[] }>(`/api/v1/uniquify/bgm`),
+
+  listVoices: () => apiFetch<{ items: TtsVoice[] }>(`/api/v1/uniquify/voices`),
 
   deleteBgm: (key: string) =>
     apiFetch<void>(`/api/v1/uniquify/bgm?key=${encodeURIComponent(key)}`, { method: 'DELETE' }),

@@ -22,6 +22,7 @@ import {
   type UniquifyJob,
   type Pagination,
   type BgmTrack,
+  type TtsVoice,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -400,6 +401,8 @@ function CreateJobModal({
   const [selectedTracks, setSelectedTracks] = useState<string[]>([]);
   const [loadingTracks, setLoadingTracks] = useState(true);
 
+  const [voices, setVoices] = useState<TtsVoice[]>([]);
+
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -412,6 +415,10 @@ function CreateJobModal({
       })
       .catch(() => setTracks([]))
       .finally(() => setLoadingTracks(false));
+    uniquifyApi
+      .listVoices()
+      .then((res) => setVoices(res.items))
+      .catch(() => setVoices([]));
   }, []);
 
   const toggleTrack = (key: string) => {
@@ -496,12 +503,19 @@ function CreateJobModal({
           </Field>
         </div>
 
-        <Field label="ID голоса (GPTunnel, необязательно)">
-          <Input
+        <Field label="Голос озвучки">
+          <select
             value={voiceId}
             onChange={(e) => setVoiceId(e.target.value)}
-            placeholder="оставьте пустым для голоса по умолчанию"
-          />
+            className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary"
+          >
+            <option value="">По умолчанию (ALEX)</option>
+            {voices.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}
+              </option>
+            ))}
+          </select>
         </Field>
 
         <div className="space-y-2">

@@ -14,6 +14,19 @@ function authHeaders() {
   return { Authorization: API_KEY, 'Content-Type': 'application/json' };
 }
 
+/** Extract a JSON object from a model reply that may be wrapped in prose / ``` fences. */
+function extractJsonObject(raw: string): string {
+  let s = raw.trim();
+  // Strip ```json ... ``` or ``` ... ``` fences.
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  // Otherwise take the outermost { ... } span.
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first >= 0 && last > first) return s.slice(first, last + 1);
+  return s;
+}
+
 export class GptunnelService {
   constructor(private storage: MinioStorageClient) {}
 
@@ -62,11 +75,13 @@ export class GptunnelService {
   }): Promise<{ script: string; captions: Array<{ caption: string; hashtags: string[] }> }> {
     const lang = opts.language ?? 'ru';
     const seconds = opts.targetSeconds ?? 30;
+    // NB: we deliberately do NOT send response_format here — some OpenAI-compatible
+    // proxies reject `response_format: json_object` with HTTP 400. We ask for JSON
+    // in the prompt and parse it leniently below instead.
     const res = await this.chatCompletion({
       model: 'gpt-4o-mini',
       temperature: 0.85,
       maxTokens: 2000,
-      responseFormat: { type: 'json_object' },
       messages: [
         {
           role: 'system',
@@ -97,7 +112,7 @@ export class GptunnelService {
     const raw = res.choices[0]?.message?.content ?? '{}';
     let parsed: any = {};
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(extractJsonObject(raw));
     } catch {
       logger.warn('Gptunnel.generateScript: failed to parse JSON, using fallback');
     }

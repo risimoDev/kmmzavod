@@ -5,9 +5,20 @@ import { db } from '../lib/db';
 import { uniquifyAnalyzeQueue, distributeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
+import { config } from '../config';
 import type { UniquifyAnalyzeJobPayload, DistributeJobPayload } from '@kmmzavod/queue';
 
 const AUDIO_EXT_RE = /\.(mp3|wav|aac|m4a|ogg|flac)$/i;
+
+// Known GPTunnel TTS voices (used as a fallback if the live /tts/voices call fails).
+const FALLBACK_VOICES = [
+  { id: '65f4092eddc5862248a18111', name: 'ALEX' },
+  { id: '65f4092eddc5862248a18d78', name: 'OLEG' },
+  { id: '65f4092eddc5862248a18d72', name: 'DMITRY' },
+  { id: '65f4092eddc5862248a18d73', name: 'VALERIA' },
+  { id: '65f4092eddc5862248a18d7c', name: 'VALENTIN' },
+  { id: '65f4092eddc5862248a18d74', name: 'SVETLANA' },
+];
 
 // ── Zod schemas ──────────────────────────────────────────────────────────────
 
@@ -295,6 +306,36 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ status: 'ok' });
+  });
+
+  // ── TTS voices (GPTunnel) ─────────────────────────────────────────────────
+
+  /**
+   * GET /voices
+   * List available GPTunnel TTS voices so the UI can offer a dropdown instead
+   * of asking the user to paste a voice id. Falls back to a known static list
+   * if the live call is unavailable.
+   */
+  app.get('/voices', async (_req, reply) => {
+    try {
+      if (config.GPTUNNEL_API_KEY) {
+        const base = config.GPTUNNEL_BASE_URL.replace(/\/+$/, '');
+        const res = await fetch(`${base}/tts/voices`, {
+          headers: { Authorization: config.GPTUNNEL_API_KEY },
+        });
+        if (res.ok) {
+          const data = (await res.json()) as Array<{ id: string; name: string }>;
+          if (Array.isArray(data) && data.length > 0) {
+            return reply.send({ items: data.map((v) => ({ id: v.id, name: v.name })) });
+          }
+        } else {
+          logger.warn({ status: res.status }, 'GPTunnel /tts/voices returned non-OK, using fallback');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'GPTunnel /tts/voices fetch failed, using fallback');
+    }
+    return reply.send({ items: FALLBACK_VOICES });
   });
 
   // ── Background-music library (per tenant) ─────────────────────────────────

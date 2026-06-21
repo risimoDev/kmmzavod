@@ -33,11 +33,22 @@ interface Deps {
   connection: ConnectionOptions;
 }
 
-// Configure to a Russian voice id available in your GPTunnel account.
-// Can be overridden per job via config.voiceId.
-const DEFAULT_TTS_VOICE_ID = 'alloy';
+// Default GPTunnel TTS voice (ALEX — Russian). Valid IDs come from
+// GET /v1/tts/voices; can be overridden per job via config.voiceId.
+const DEFAULT_TTS_VOICE_ID = '65f4092eddc5862248a18111';
 
 const SUBTITLE_STYLES = ['tiktok', 'cinematic', 'minimal', 'default'] as const;
+
+/** Turn an axios/other error into a precise, storable message (status + body). */
+function describeAxios(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    const data = err.response?.data;
+    const body = typeof data === 'string' ? data : data ? JSON.stringify(data) : err.message;
+    return `HTTP ${status ?? '?'}: ${String(body).slice(0, 800)}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
 
 function dimsForAspect(aspect: string | undefined): { width: number; height: number } {
   switch (aspect) {
@@ -97,18 +108,23 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         ].filter(Boolean);
 
         // ── 2. Probe source(s) ───────────────────────────────────────────────
-        const analyzeResp = await axios.post<{
+        let analysis: {
           duration_sec: number;
           width: number;
           height: number;
           fps: number;
           scene_breaks: number[];
           audio_profile: Record<string, unknown>;
-        }>(`${videoProcessorUrl}/uniquify/analyze`, {
-          source_video_id: sourceVideoId,
-          storage_keys: sourceStorageKeys,
-        }, { timeout: 300_000 });
-        const analysis = analyzeResp.data;
+        };
+        try {
+          const analyzeResp = await axios.post(`${videoProcessorUrl}/uniquify/analyze`, {
+            source_video_id: sourceVideoId,
+            storage_keys: sourceStorageKeys,
+          }, { timeout: 300_000 });
+          analysis = analyzeResp.data;
+        } catch (e) {
+          throw new Error(`video-analyze: ${describeAxios(e)}`);
+        }
 
         await db.sourceVideo.update({
           where: { id: sourceVideoId },
@@ -136,21 +152,32 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         const fps = typeof config.fps === 'number' ? config.fps : 30;
 
         // ── 3. ONE GPT call: script (from theme) + per-variant captions ───────
-        const { script, captions } = await gptunnelService.generateScript({
-          title: sourceVideo.title ?? 'video',
-          description: sourceVideo.description ?? '',
-          language,
-          variantCount,
-          targetSeconds,
-        });
+        let script = '';
+        let captions: Array<{ caption: string; hashtags: string[] }> = [];
+        try {
+          ({ script, captions } = await gptunnelService.generateScript({
+            title: sourceVideo.title ?? 'video',
+            description: sourceVideo.description ?? '',
+            language,
+            variantCount,
+            targetSeconds,
+          }));
+        } catch (e) {
+          throw new Error(`gpt-script: ${describeAxios(e)}`);
+        }
 
         // ── 4. ONE TTS call: the shared voiceover ────────────────────────────
-        const tts = await gptunnelService.ttsCreate({
-          text: script,
-          voiceId,
-          tenantId,
-          uniquifyJobId,
-        });
+        let tts: { storageKey: string; cost: number };
+        try {
+          tts = await gptunnelService.ttsCreate({
+            text: script,
+            voiceId,
+            tenantId,
+            uniquifyJobId,
+          });
+        } catch (e) {
+          throw new Error(`tts (voiceId=${voiceId}): ${describeAxios(e)}`);
+        }
         const voiceoverKey = tts.storageKey;
 
         // ── 5. ONE Whisper run: subtitle lines timed to the voiceover ────────
@@ -166,7 +193,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
             subtitles = tr.data.subtitles ?? [];
           } catch (err: unknown) {
             logger.warn(
-              { uniquifyJobId, err: (err as Error).message },
+              { uniquifyJobId, err: describeAxios(err) },
               'Uniquify-analyze: voiceover transcription failed, continuing without subtitles',
             );
           }
