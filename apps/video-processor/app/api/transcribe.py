@@ -88,17 +88,33 @@ def create_router() -> APIRouter:
 
             await storage.download(req.storage_key, video_path)
             extract_audio(video_path, audio_path)
-            words = transcribe_audio(audio_path, language=req.language)
+
+            # Probe the real audio duration up front so callers always get it,
+            # even if Whisper fails (e.g. model not cached). This lets the
+            # orchestrator build fallback subtitles synced to the true length.
+            audio_duration = 0.0
+            try:
+                from app.services.ffmpeg import probe
+                audio_duration = round(probe(audio_path).duration, 2)
+            except Exception as e:
+                logger.warning("Audio duration probe failed: %s", e)
+
+            # Whisper must never hard-fail the request — degrade to no subtitles.
+            try:
+                words = transcribe_audio(audio_path, language=req.language)
+            except Exception as e:
+                logger.warning("Whisper transcription failed (continuing without subtitles): %s", e)
+                words = []
 
             if not words:
-                return TranscribeResponse(subtitles=[], word_count=0, duration_sec=0)
+                return TranscribeResponse(subtitles=[], word_count=0, duration_sec=audio_duration)
 
             chunks = group_words_into_subtitles(
                 words,
                 max_words_per_chunk=req.max_words_per_chunk,
             )
 
-            duration = words[-1].end if words else 0
+            duration = words[-1].end if words else audio_duration
             subtitles = [
                 SubtitleItem(start_sec=c.start_sec, end_sec=c.end_sec, text=c.text)
                 for c in chunks

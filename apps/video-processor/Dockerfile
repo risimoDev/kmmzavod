@@ -1,9 +1,12 @@
 FROM python:3.12-slim
 
-# FFmpeg CPU build + libass for subtitle rendering
+# FFmpeg CPU build + libass for subtitle rendering.
+# fontconfig is required so libass can resolve font names (e.g. "Arial" → Liberation Sans);
+# without it burned subtitles can render as empty.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libass9 \
+    fontconfig \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 

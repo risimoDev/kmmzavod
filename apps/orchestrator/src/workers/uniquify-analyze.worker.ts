@@ -39,6 +39,47 @@ const DEFAULT_TTS_VOICE_ID = '65f4092eddc5862248a18111';
 
 const SUBTITLE_STYLES = ['tiktok', 'cinematic', 'minimal', 'default'] as const;
 
+/** Rough speech duration (sec) from a script — ~2.6 words/sec for Russian TTS. */
+function estimateSpeechDuration(script: string): number {
+  const words = script.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(3, words / 2.6);
+}
+
+/**
+ * Build subtitle lines from the script when Whisper is unavailable.
+ * Splits into short chunks and distributes time by character proportion across
+ * the voiceover length — not word-perfect, but always present and roughly synced.
+ */
+function buildSubtitlesFromScript(
+  script: string,
+  durationSec: number,
+): Array<{ start_sec: number; end_sec: number; text: string }> {
+  const words = script.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || durationSec <= 0) return [];
+
+  const CHUNK = 6;
+  const chunks: string[] = [];
+  for (let i = 0; i < words.length; i += CHUNK) {
+    chunks.push(words.slice(i, i + CHUNK).join(' '));
+  }
+  const totalChars = chunks.reduce((a, c) => a + c.length, 0) || 1;
+
+  const lines: Array<{ start_sec: number; end_sec: number; text: string }> = [];
+  let t = 0;
+  for (const text of chunks) {
+    const dur = Math.max(0.6, (text.length / totalChars) * durationSec);
+    const start = t;
+    const end = Math.min(durationSec, t + dur);
+    lines.push({
+      start_sec: Number(start.toFixed(2)),
+      end_sec: Number(end.toFixed(2)),
+      text,
+    });
+    t = end;
+  }
+  return lines;
+}
+
 /** Turn an axios/other error into a precise, storable message (status + body). */
 function describeAxios(err: unknown): string {
   if (axios.isAxiosError(err)) {
@@ -181,20 +222,35 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         const voiceoverKey = tts.storageKey;
 
         // ── 5. ONE Whisper run: subtitle lines timed to the voiceover ────────
+        // Whisper gives the best (word-level) sync; if it yields nothing we fall
+        // back to evenly distributing the known script across the voiceover
+        // length, so subtitles are always present.
         let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
         if (enableSubtitles) {
+          let voiceDuration = 0;
           try {
             const tr = await axios.post<{
               subtitles: Array<{ start_sec: number; end_sec: number; text: string }>;
+              duration_sec?: number;
             }>(`${videoProcessorUrl}/transcribe`, {
               storage_key: voiceoverKey,
               language,
             }, { timeout: 300_000 });
             subtitles = tr.data.subtitles ?? [];
+            voiceDuration = tr.data.duration_sec ?? 0;
           } catch (err: unknown) {
             logger.warn(
               { uniquifyJobId, err: describeAxios(err) },
-              'Uniquify-analyze: voiceover transcription failed, continuing without subtitles',
+              'Uniquify-analyze: voiceover transcription failed, will use script-based subtitles',
+            );
+          }
+
+          if (subtitles.length === 0 && script.trim()) {
+            if (voiceDuration <= 0) voiceDuration = estimateSpeechDuration(script);
+            subtitles = buildSubtitlesFromScript(script, voiceDuration);
+            logger.info(
+              { uniquifyJobId, lines: subtitles.length, voiceDuration },
+              'Uniquify-analyze: using script-based fallback subtitles',
             );
           }
         }
