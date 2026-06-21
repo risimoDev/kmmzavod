@@ -65,7 +65,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
       await db.uniqueVariant.update({ where: { id: variantId }, data: { status: 'rendering' } });
 
       try {
-        const subtitles = (uniquifyJob.transcript ?? []) as SubtitleLine[];
+        const subtitles = (uniquifyJob.transcript ?? []) as unknown as SubtitleLine[];
 
         const renderResp = await axios.post<{
           output_key: string;
