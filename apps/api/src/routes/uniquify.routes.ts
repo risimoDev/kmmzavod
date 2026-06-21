@@ -1,10 +1,13 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { uniquifyAnalyzeQueue, distributeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import type { UniquifyAnalyzeJobPayload, DistributeJobPayload } from '@kmmzavod/queue';
+
+const AUDIO_EXT_RE = /\.(mp3|wav|aac|m4a|ogg|flac)$/i;
 
 // ── Zod schemas ──────────────────────────────────────────────────────────────
 
@@ -19,11 +22,22 @@ const CreateUniquifyJobBody = z.object({
   variantCount: z.number().int().min(1).max(100).default(10),
   targetPlatforms: z.array(z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge'])).default([]),
   config: z.object({
+    // Extra source clips to recombine alongside the primary one (pool mode).
+    additionalSourceVideoIds: z.array(z.string().uuid()).max(20).optional(),
+    // Background-music library — one different track is picked per variant so the
+    // audio fingerprint differs across accounts. Provide >= variantCount tracks ideally.
     bgmTrackKeys: z.array(z.string()).optional(),
-    ttsVoiceIds: z.array(z.string()).optional(),
-    enableSubtitles: z.boolean().default(true),
-    enableTts: z.boolean().default(false),
+    bgmVolume: z.number().min(0).max(1).default(0.16),
     enableBgm: z.boolean().default(true),
+    // Voiceover (generated ONCE, reused by all variants).
+    voiceId: z.string().optional(),
+    language: z.string().min(2).max(8).default('ru'),
+    targetSeconds: z.number().int().min(8).max(120).default(30),
+    enableSubtitles: z.boolean().default(true),
+    // Output format.
+    aspectRatio: z.enum(['9:16', '1:1', '16:9', '4:5']).default('9:16'),
+    fps: z.number().int().min(24).max(60).default(30),
+    beatSync: z.boolean().default(true),
   }).default({}),
 });
 
@@ -280,6 +294,85 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       data: { isArchived: true },
     });
 
+    return reply.send({ status: 'ok' });
+  });
+
+  // ── Background-music library (per tenant) ─────────────────────────────────
+
+  /**
+   * POST /bgm/upload
+   * Upload a background-music track into the tenant's music library. The library
+   * feeds the uniquify montage: each variant gets a different track so the audio
+   * fingerprint differs across accounts.
+   */
+  app.post('/bgm/upload', async (req, reply) => {
+    const { tenantId } = req.user;
+
+    const data = await req.file();
+    if (!data) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Файл не передан' });
+    }
+    const isAudio = data.mimetype.startsWith('audio/') || AUDIO_EXT_RE.test(data.filename ?? '');
+    if (!isAudio) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Допустим только аудиофайл' });
+    }
+
+    const trackId = randomUUID();
+    const filename = data.filename || `track_${Date.now()}.mp3`;
+    const key = StoragePaths.bgmTrack(tenantId, trackId, filename);
+
+    try {
+      await app.storage.uploadStream(key, data.file, undefined, { contentType: data.mimetype });
+      if (data.file.truncated) {
+        await app.storage.delete(key).catch(() => {});
+        return reply.code(413).send({ error: 'PayloadTooLarge', message: 'Файл слишком большой' });
+      }
+      const url = await app.storage.presignedUrl(key, 3600).catch(() => null);
+      return reply.code(201).send({ key, name: filename, url });
+    } catch (err) {
+      logger.error({ err, tenantId }, 'BGM upload failed');
+      return reply.code(500).send({ error: 'UploadFailed', message: 'Не удалось загрузить трек' });
+    }
+  });
+
+  /**
+   * GET /bgm
+   * List the tenant's background-music tracks.
+   */
+  app.get('/bgm', async (req, reply) => {
+    const { tenantId } = req.user;
+    const prefix = StoragePaths.bgmTenantPrefix(tenantId);
+
+    const keys = await app.storage.listPrefix(prefix).catch(() => [] as string[]);
+    const audioKeys = keys.filter((k) => AUDIO_EXT_RE.test(k));
+
+    const items = await Promise.all(
+      audioKeys.map(async (key) => ({
+        key,
+        name: decodeURIComponent(key.split('/').pop() ?? key),
+        url: await app.storage.presignedUrl(key, 3600).catch(() => null),
+      })),
+    );
+
+    return reply.send({ items });
+  });
+
+  /**
+   * DELETE /bgm?key=...
+   * Remove a track from the tenant's library.
+   */
+  app.delete('/bgm', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { key } = z.object({ key: z.string().min(1) }).parse(req.query);
+
+    // Tenant isolation: a tenant may only delete keys under its own prefix.
+    if (!key.startsWith(StoragePaths.bgmTenantPrefix(tenantId))) {
+      return reply.code(403).send({ error: 'Forbidden', message: 'Нет доступа к этому файлу' });
+    }
+
+    await app.storage.delete(key).catch((err) => {
+      logger.warn({ err, key }, 'BGM delete failed');
+    });
     return reply.send({ status: 'ok' });
   });
 

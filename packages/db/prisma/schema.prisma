@@ -986,6 +986,12 @@ model UniquifyJob {
     targetPlatforms  SocialPlatform[]   @map("target_platforms")
     // Uniquification config
     config           Json               @default("{}") // UniquifyConfig JSON
+    // Shared creative assets (generated ONCE per job, reused by every variant)
+    script           String?            @db.Text                 // AI voiceover script
+    voiceoverKey     String?            @map("voiceover_key")    // MinIO key of the shared voiceover
+    voiceId          String?            @map("voice_id")         // TTS voice used
+    language         String?            @default("ru")           // script/subtitle language
+    transcript       Json?              // subtitle lines timed to the voiceover
     // Stats
     completedCount   Int                @default(0) @map("completed_count")
     failedCount      Int                @default(0) @map("failed_count")

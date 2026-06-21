@@ -1,9 +1,17 @@
 /**
- * Uniquify-analyze worker.
+ * Uniquify-analyze worker (montage pipeline).
  *
- * Calls video-processor POST /uniquify/analyze to probe the source video,
- * detect scenes, and extract audio profile. Then updates the SourceVideo
- * and creates UniqueVariant rows with random transforms.
+ * Runs ONCE per job and produces the SHARED creative assets, then fans out one
+ * render job per variant. The expensive AI work happens here exactly once:
+ *
+ *   1. Probe the source clip(s).
+ *   2. ONE GPT call  → voiceover script (from the title/description theme) + a
+ *                      unique caption/hashtag set per variant.
+ *   3. ONE TTS call  → the voiceover (stored job-level, reused by every variant).
+ *   4. ONE Whisper run → subtitle lines timed to that voiceover.
+ *   5. Create N variants and enqueue N montage renders. Each render differs only
+ *      by its montage `seed`, background-music track and subtitle style — so the
+ *      voice is identical, the edit/music are unique, and token spend is flat.
  */
 
 import { Worker, Queue, type ConnectionOptions } from 'bullmq';
@@ -12,7 +20,6 @@ import {
   QUEUES,
   type UniquifyAnalyzeJobPayload,
   type UniquifyRenderJobPayload,
-  type VariantTransforms,
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
@@ -26,6 +33,26 @@ interface Deps {
   connection: ConnectionOptions;
 }
 
+// Configure to a Russian voice id available in your GPTunnel account.
+// Can be overridden per job via config.voiceId.
+const DEFAULT_TTS_VOICE_ID = 'alloy';
+
+const SUBTITLE_STYLES = ['tiktok', 'cinematic', 'minimal', 'default'] as const;
+
+function dimsForAspect(aspect: string | undefined): { width: number; height: number } {
+  switch (aspect) {
+    case '1:1':
+      return { width: 1080, height: 1080 };
+    case '16:9':
+      return { width: 1920, height: 1080 };
+    case '4:5':
+      return { width: 1080, height: 1350 };
+    case '9:16':
+    default:
+      return { width: 1080, height: 1920 };
+  }
+}
+
 export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
   const { db, videoProcessorUrl, uniquifyRenderQueue, gptunnelService, connection } = deps;
 
@@ -35,7 +62,6 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
       const { sourceVideoId, tenantId, uniquifyJobId } = job.data;
       logger.info({ sourceVideoId, uniquifyJobId }, 'Uniquify-analyze: starting');
 
-      // 1. Verify job wasn't cancelled before we start
       const jobCheck = await db.uniquifyJob.findUnique({
         where: { id: uniquifyJobId },
         select: { status: true },
@@ -45,25 +71,32 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         return;
       }
 
-      // 2. Get source video record
-      const sourceVideo = await db.sourceVideo.findUniqueOrThrow({
-        where: { id: sourceVideoId },
-      });
+      const sourceVideo = await db.sourceVideo.findUniqueOrThrow({ where: { id: sourceVideoId } });
+      const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({ where: { id: uniquifyJobId } });
+      const config = (uniquifyJob.config ?? {}) as Record<string, unknown>;
 
-      // 3. Update status
       await db.$transaction([
-        db.sourceVideo.update({
-          where: { id: sourceVideoId },
-          data: { status: 'analyzing' },
-        }),
-        db.uniquifyJob.update({
-          where: { id: uniquifyJobId },
-          data: { status: 'analyzing' },
-        }),
+        db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'analyzing' } }),
+        db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'analyzing' } }),
       ]);
 
       try {
-        // 4. Call video-processor /uniquify/analyze
+        // ── 1. Resolve all source clips (primary + optional pool) ────────────
+        const extraIds = Array.isArray(config.additionalSourceVideoIds)
+          ? (config.additionalSourceVideoIds as string[])
+          : [];
+        const poolVideos = extraIds.length
+          ? await db.sourceVideo.findMany({
+              where: { id: { in: extraIds }, tenantId },
+              select: { storageKey: true },
+            })
+          : [];
+        const sourceStorageKeys = [
+          sourceVideo.storageKey,
+          ...poolVideos.map((v) => v.storageKey),
+        ].filter(Boolean);
+
+        // ── 2. Probe source(s) ───────────────────────────────────────────────
         const analyzeResp = await axios.post<{
           duration_sec: number;
           width: number;
@@ -73,12 +106,10 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           audio_profile: Record<string, unknown>;
         }>(`${videoProcessorUrl}/uniquify/analyze`, {
           source_video_id: sourceVideoId,
-          storage_key: sourceVideo.storageKey,
+          storage_keys: sourceStorageKeys,
         }, { timeout: 300_000 });
-
         const analysis = analyzeResp.data;
 
-        // 5. Update SourceVideo with analysis results
         await db.sourceVideo.update({
           where: { id: sourceVideoId },
           data: {
@@ -92,168 +123,131 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           },
         });
 
-        // 6. Get uniquify job config
-        const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({
-          where: { id: uniquifyJobId },
+        const variantCount = uniquifyJob.variantCount;
+        const language = (config.language as string) ?? uniquifyJob.language ?? 'ru';
+        const voiceId = (config.voiceId as string) ?? uniquifyJob.voiceId ?? DEFAULT_TTS_VOICE_ID;
+        const targetSeconds = typeof config.targetSeconds === 'number' ? config.targetSeconds : 30;
+        const enableSubtitles = config.enableSubtitles !== false;
+        const enableBgm = config.enableBgm !== false;
+        const bgmKeys = (Array.isArray(config.bgmTrackKeys) ? config.bgmTrackKeys : []) as string[];
+        const bgmVolume = typeof config.bgmVolume === 'number' ? config.bgmVolume : 0.16;
+        const beatSync = config.beatSync !== false;
+        const { width, height } = dimsForAspect(config.aspectRatio as string | undefined);
+        const fps = typeof config.fps === 'number' ? config.fps : 30;
+
+        // ── 3. ONE GPT call: script (from theme) + per-variant captions ───────
+        const { script, captions } = await gptunnelService.generateScript({
+          title: sourceVideo.title ?? 'video',
+          description: sourceVideo.description ?? '',
+          language,
+          variantCount,
+          targetSeconds,
         });
 
-        const variantCount = uniquifyJob.variantCount;
+        // ── 4. ONE TTS call: the shared voiceover ────────────────────────────
+        const tts = await gptunnelService.ttsCreate({
+          text: script,
+          voiceId,
+          tenantId,
+          uniquifyJobId,
+        });
+        const voiceoverKey = tts.storageKey;
 
-        // 7. Generate random transforms via video-processor
-        const transformsResp = await axios.post<{
-          transforms: VariantTransforms[];
-        }>(`${videoProcessorUrl}/uniquify/generate-transforms`, {
-          count: variantCount,
-          seed: Date.now(),
-        }, { timeout: 10_000 });
-
-        const allTransforms = transformsResp.data.transforms;
-
-        // 8. Create UniqueVariant rows and enqueue render jobs
-        const variants = await db.$transaction(
-          allTransforms.map((transforms: VariantTransforms, i: number) =>
-            db.uniqueVariant.create({
-              data: {
-                uniquifyJobId,
-                tenantId,
-                variantIndex: i,
-                status: 'pending',
-                transforms: transforms as any,
-                subtitleStyle: transforms.subtitleStyle || 'none',
-              },
-            })
-          )
-        );
-
-        // 8.5. Generate unique captions, hashtags, and TTS per variant via GPTunnel
-        const sourceVideoTitle = sourceVideo.title ?? 'video';
-        const sourceVideoDesc = sourceVideo.description ?? '';
-
-        // Batch generate captions/hashtags via GPT-4o-mini
-        let generatedContents: Array<{ caption: string; hashtags: string[] }> = [];
-        try {
-          const chatRes = await gptunnelService.chatCompletion({
-            model: 'gpt-4o-mini',
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a social media content generator. Return ONLY a valid JSON array.',
-              },
-              {
-                role: 'user',
-                content: `Generate ${variantCount} unique captions and 5-10 relevant hashtags for each for a video titled "${sourceVideoTitle}". Description: "${sourceVideoDesc}". Return a JSON array: [{"caption":"...","hashtags":["#tag1","#tag2"]},...]. Each caption must be unique, engaging, and platform-agnostic.`,
-              },
-            ],
-            temperature: 0.9,
-            responseFormat: { type: 'json_object' },
-            maxTokens: 2000,
-          });
-          const raw = chatRes.choices[0]?.message?.content ?? '[]';
-          const parsed = JSON.parse(raw);
-          generatedContents = Array.isArray(parsed) ? parsed : parsed.captions ?? [];
-        } catch (err: unknown) {
-          logger.warn({ err }, 'Uniquify-analyze: caption generation failed, using defaults');
-        }
-        while (generatedContents.length < variantCount) {
-          generatedContents.push({
-            caption: `${sourceVideoTitle} — check this out!`,
-            hashtags: ['#viral', '#trending'],
-          });
+        // ── 5. ONE Whisper run: subtitle lines timed to the voiceover ────────
+        let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
+        if (enableSubtitles) {
+          try {
+            const tr = await axios.post<{
+              subtitles: Array<{ start_sec: number; end_sec: number; text: string }>;
+            }>(`${videoProcessorUrl}/transcribe`, {
+              storage_key: voiceoverKey,
+              language,
+            }, { timeout: 300_000 });
+            subtitles = tr.data.subtitles ?? [];
+          } catch (err: unknown) {
+            logger.warn(
+              { uniquifyJobId, err: (err as Error).message },
+              'Uniquify-analyze: voiceover transcription failed, continuing without subtitles',
+            );
+          }
         }
 
-        // Generate TTS and update variants in parallel batches (avoid rate-limiting)
-        const TTS_BATCH_SIZE = 5;
-        for (let batchStart = 0; batchStart < variants.length; batchStart += TTS_BATCH_SIZE) {
-          const batch = variants.slice(batchStart, batchStart + TTS_BATCH_SIZE);
-          await Promise.all(
-            batch.map(async (variant: any, batchIdx: number) => {
-              const i = batchStart + batchIdx;
-              const content = generatedContents[i];
-              const voiceId = allTransforms[i].ttsVoiceId;
-              const ttsText = allTransforms[i].ttsText ?? content.caption;
-
-              let ttsStorageKey: string | null = null;
-              if (voiceId && ttsText) {
-                try {
-                  const ttsRes = await gptunnelService.ttsCreate({
-                    text: ttsText,
-                    voiceId,
-                    tenantId,
-                    uniquifyJobId,
-                    variantIndex: i,
-                  });
-                  ttsStorageKey = ttsRes.storageKey;
-                } catch (err: unknown) {
-                  logger.warn(
-                    { variantId: variant.id, err: (err as Error).message },
-                    'Uniquify-analyze: TTS generation failed',
-                  );
-                }
-              }
-
-              await db.uniqueVariant.update({
-                where: { id: variant.id },
-                data: {
-                  generatedCaption: content.caption,
-                  generatedHashtags: content.hashtags,
-                  ttsVoiceId: voiceId,
-                  ttsStorageKey,
-                },
-              });
-
-              // Enrich transforms for render payload
-              allTransforms[i] = {
-                ...allTransforms[i],
-                ttsText,
-                ttsVoiceId: voiceId,
-              };
-            }),
-          );
-        }
-
-        // 9. Update job status to generating
+        // ── 6. Persist shared assets on the job ──────────────────────────────
         await db.uniquifyJob.update({
           where: { id: uniquifyJobId },
-          data: { status: 'generating' },
+          data: {
+            status: 'generating',
+            script,
+            voiceoverKey,
+            voiceId,
+            language,
+            transcript: subtitles as unknown as any,
+            creditsUsed: { increment: Math.round(tts.cost ?? 0) },
+          },
         });
 
-        // 10. Enqueue all render jobs
-        const renderJobs = variants.map((variant: any, i: number) => ({
-          name: `uniquify-render-${variant.id}`,
-          data: {
-            uniquifyJobId,
-            variantId: variant.id,
-            tenantId,
-            sourceVideoStorageKey: sourceVideo.storageKey,
-            outputKey: `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variant.id}.mp4`,
-            transforms: allTransforms[i],
-          } as UniquifyRenderJobPayload,
-          opts: QUEUES['uniquify-render'].defaultJobOptions as any,
-        }));
+        // ── 7. Create variants + enqueue one montage render each ─────────────
+        const seedBase = Math.floor(Math.random() * 1_000_000);
+
+        const renderJobs: Array<{ name: string; data: UniquifyRenderJobPayload; opts: any }> = [];
+        for (let i = 0; i < variantCount; i++) {
+          const seed = seedBase + i * 7919; // spread seeds apart for distinct edits
+          const subtitleStyle = enableSubtitles ? SUBTITLE_STYLES[i % SUBTITLE_STYLES.length] : 'none';
+          const bgmKey = enableBgm && bgmKeys.length > 0 ? bgmKeys[i % bgmKeys.length] : undefined;
+          const content = captions[i] ?? captions[i % Math.max(captions.length, 1)] ?? null;
+
+          const variant = await db.uniqueVariant.create({
+            data: {
+              uniquifyJobId,
+              tenantId,
+              variantIndex: i,
+              status: 'pending',
+              transforms: { seed, subtitleStyle, bgmKey, width, height, fps } as any,
+              subtitleStyle,
+              ttsVoiceId: voiceId,
+              ttsStorageKey: voiceoverKey,
+              bgmTrackKey: bgmKey ?? null,
+              generatedCaption: content?.caption ?? null,
+              generatedHashtags: content?.hashtags ?? [],
+            },
+          });
+
+          renderJobs.push({
+            name: `uniquify-render-${variant.id}`,
+            data: {
+              uniquifyJobId,
+              variantId: variant.id,
+              tenantId,
+              sourceStorageKeys,
+              outputKey: `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variant.id}.mp4`,
+              seed,
+              subtitleStyle,
+              bgmStorageKey: bgmKey,
+              bgmVolume,
+              voiceoverVolume: 1.0,
+              width,
+              height,
+              fps,
+              beatSync,
+            },
+            opts: QUEUES['uniquify-render'].defaultJobOptions as any,
+          });
+        }
 
         await uniquifyRenderQueue.addBulk(renderJobs);
 
         logger.info(
-          { uniquifyJobId, variantCount: variants.length },
-          'Uniquify-analyze: complete, render jobs enqueued',
+          { uniquifyJobId, variantCount, subtitleLines: subtitles.length, bgmTracks: bgmKeys.length },
+          'Uniquify-analyze: complete, montage render jobs enqueued',
         );
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error({ sourceVideoId, uniquifyJobId, err: errorMsg }, 'Uniquify-analyze: failed');
-
         await db.$transaction([
-          db.sourceVideo.update({
-            where: { id: sourceVideoId },
-            data: { status: 'failed', error: errorMsg },
-          }),
-          db.uniquifyJob.update({
-            where: { id: uniquifyJobId },
-            data: { status: 'failed', error: errorMsg },
-          }),
+          db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'failed', error: errorMsg } }),
+          db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'failed', error: errorMsg } }),
         ]);
-
-        throw err; // Let BullMQ handle retries
+        throw err;
       }
     },
     {

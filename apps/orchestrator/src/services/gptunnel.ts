@@ -43,28 +43,104 @@ export class GptunnelService {
     };
   }
 
+  // ── Script + captions (ONE call per job) ────────────────────────────────────
+
+  /**
+   * Generate, in a single chat call, an ad voiceover script for the video plus
+   * one unique caption/hashtag set per variant. Doing both in one call (and once
+   * per job, not per variant) keeps token spend flat regardless of variant count.
+   *
+   * The script drives the whole video length — the montage is later cut to fit
+   * the generated voiceover, so we ask for a concise, well-paced narration.
+   */
+  async generateScript(opts: {
+    title: string;
+    description?: string;
+    language?: string; // ISO code, e.g. 'ru'
+    variantCount: number;
+    targetSeconds?: number;
+  }): Promise<{ script: string; captions: Array<{ caption: string; hashtags: string[] }> }> {
+    const lang = opts.language ?? 'ru';
+    const seconds = opts.targetSeconds ?? 30;
+    const res = await this.chatCompletion({
+      model: 'gpt-4o-mini',
+      temperature: 0.85,
+      maxTokens: 2000,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a senior short-form video copywriter for product marketing. ' +
+            'You write punchy, natural-sounding voiceover scripts and platform captions. ' +
+            'Always respond with a single valid JSON object and nothing else.',
+        },
+        {
+          role: 'user',
+          content:
+            `Language: ${lang}. Write content for a product video.\n` +
+            `Product title: "${opts.title}".\n` +
+            `Details: "${opts.description ?? ''}".\n\n` +
+            `Return JSON with this exact shape:\n` +
+            `{\n` +
+            `  "script": "<a spoken voiceover narration in ${lang}, ~${seconds} seconds when read aloud, ` +
+            `with a strong hook in the first sentence, 2-3 concrete benefits, and a short call to action. ` +
+            `Plain sentences only — no scene directions, no emojis, no markdown>",\n` +
+            `  "captions": [ ${opts.variantCount} objects like ` +
+            `{"caption":"<short engaging caption in ${lang}>","hashtags":["#tag", "..."]} — ` +
+            `each caption MUST be unique and different in wording, 5-10 relevant hashtags each ]\n` +
+            `}`,
+        },
+      ],
+    });
+
+    const raw = res.choices[0]?.message?.content ?? '{}';
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      logger.warn('Gptunnel.generateScript: failed to parse JSON, using fallback');
+    }
+    const script: string = typeof parsed.script === 'string' && parsed.script.trim()
+      ? parsed.script.trim()
+      : `${opts.title}. ${opts.description ?? ''}`.trim();
+    let captions: Array<{ caption: string; hashtags: string[] }> = Array.isArray(parsed.captions)
+      ? parsed.captions
+      : [];
+    captions = captions
+      .filter((c) => c && typeof c.caption === 'string')
+      .map((c) => ({
+        caption: c.caption,
+        hashtags: Array.isArray(c.hashtags) ? c.hashtags.map(String) : [],
+      }));
+    return { script, captions };
+  }
+
   // ── TTS ───────────────────────────────────────────────────────────────────────
 
+  /**
+   * Generate the voiceover ONCE per job and store it under a job-level key.
+   * Every variant reuses this same file, so TTS spend does not scale with the
+   * number of variants (the voice is identical by design; uniqueness is in the
+   * montage + per-variant music).
+   */
   async ttsCreate(opts: {
     text: string;
     voiceId: string;
     tenantId: string;
     uniquifyJobId: string;
-    variantIndex: number;
   }) {
     const res = await axios.post(
       `${BASE_URL}/tts/create`,
       { text: opts.text, voice_id: opts.voiceId },
-      { headers: authHeaders(), timeout: 30_000 },
+      { headers: authHeaders(), timeout: 120_000 },
     );
     const data = res.data as { data: string; cost?: number; id?: string };
+    if (!data?.data) throw new Error('Gptunnel TTS returned no audio data');
     const buffer = Buffer.from(data.data, 'base64');
-    const key = `tenants/${opts.tenantId}/uniquify/${opts.uniquifyJobId}/tts_v${opts.variantIndex}.mp3`;
+    const key = `tenants/${opts.tenantId}/uniquify/${opts.uniquifyJobId}/voiceover.mp3`;
     await this.storage.uploadBuffer(key, buffer, { contentType: 'audio/mpeg' });
-    logger.info(
-      { key, cost: data.cost, ttsId: data.id },
-      'Gptunnel: TTS uploaded to MinIO',
-    );
+    logger.info({ key, cost: data.cost, ttsId: data.id }, 'Gptunnel: voiceover uploaded to MinIO');
     return { storageKey: key, cost: data.cost ?? 0 };
   }
 

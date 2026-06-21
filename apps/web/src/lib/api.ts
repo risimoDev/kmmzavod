@@ -713,6 +713,12 @@ export interface UniquifyJobDetail extends UniquifyJob {
   variants: UniqueVariant[];
 }
 
+export interface BgmTrack {
+  key: string;
+  name: string;
+  url: string | null;
+}
+
 export interface UniqueVariant {
   id: string;
   variantIndex: number;
@@ -793,8 +799,47 @@ export const uniquifyApi = {
     return apiFetch<{ items: SourceVideo[]; pagination: Pagination }>(`/api/v1/uniquify/source-videos?${q}`);
   },
 
-  createJob: (body: { sourceVideoId: string; variantCount: number; projectId?: string }) =>
+  createJob: (body: {
+    sourceVideoId: string;
+    variantCount: number;
+    projectId?: string;
+    targetPlatforms?: string[];
+    config?: {
+      additionalSourceVideoIds?: string[];
+      bgmTrackKeys?: string[];
+      bgmVolume?: number;
+      enableBgm?: boolean;
+      voiceId?: string;
+      language?: string;
+      targetSeconds?: number;
+      enableSubtitles?: boolean;
+      aspectRatio?: "9:16" | "1:1" | "16:9" | "4:5";
+      fps?: number;
+      beatSync?: boolean;
+    };
+  }) =>
     apiFetch<UniquifyJob>('/api/v1/uniquify/uniquify-jobs', { method: 'POST', body: JSON.stringify(body) }),
+
+  // ── Background-music library ─────────────────────────────────────────────
+  uploadBgm: async (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE}/api/v1/uniquify/bgm/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAccessToken()}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error((b as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<BgmTrack>;
+  },
+
+  listBgm: () => apiFetch<{ items: BgmTrack[] }>(`/api/v1/uniquify/bgm`),
+
+  deleteBgm: (key: string) =>
+    apiFetch<void>(`/api/v1/uniquify/bgm?key=${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
   listJobs: (params: { status?: string; page?: number; limit?: number } = {}) => {
     const q = new URLSearchParams();

@@ -45,6 +45,13 @@ export const StoragePaths = {
   /** Global BGM library prefix (admin-uploaded background music tracks) */
   bgmPrefix: () => 'bgm/',
 
+  /** Per-tenant background-music library prefix (uniquify music) */
+  bgmTenantPrefix: (tenantId: string) => `tenants/${tenantId}/bgm/`,
+
+  /** A single uploaded background-music track */
+  bgmTrack: (tenantId: string, trackId: string, filename: string) =>
+    `tenants/${tenantId}/bgm/${trackId}/${sanitizeFilename(filename)}`,
+
   /** Uploaded source videos for uniquification */
   sourceVideo: (tenantId: string, sourceVideoId: string, filename: string) =>
     `tenants/${tenantId}/source-videos/${sourceVideoId}/${sanitizeFilename(filename)}`,

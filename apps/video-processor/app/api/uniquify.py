@@ -1,8 +1,16 @@
 """
-Video uniquification HTTP endpoints.
+Video uniquification HTTP endpoints (montage-based).
 
-POST /uniquify/analyze  — Analyze a source video (probe, scene detection, audio profile)
-POST /uniquify/render   — Render a single unique variant with specified transforms
+POST /uniquify/analyze — Probe source clip(s): metadata + scene breaks.
+POST /uniquify/render  — Render one unique montage variant: cut the footage to
+                         the shared AI voiceover, add per-variant music + burned
+                         subtitles, and produce a finished social-ready video.
+
+Design note: the heavy creative work (script, voiceover, transcription) happens
+ONCE per job in the orchestrator and is passed in here for every variant. This
+endpoint is purely deterministic montage + audio assembly keyed by ``seed`` —
+no AI calls, so producing 30 variants costs 30 FFmpeg renders and zero extra
+tokens.
 """
 
 from __future__ import annotations
@@ -20,12 +28,8 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.storage import StorageClient
-from app.services.uniquify import (
-    VariantTransforms,
-    analyze_video,
-    render_unique_variant,
-    generate_random_transforms,
-)
+from app.services.uniquify import analyze_video
+from app.services.montage import render_montage
 
 logger = logging.getLogger(__name__)
 
@@ -51,28 +55,55 @@ def _get_storage() -> StorageClient:
 
 class AnalyzeRequest(BaseModel):
     source_video_id: str
+    # Either a single key or several (pool mode). `storage_key` kept for back-compat.
+    storage_key: str | None = None
+    storage_keys: list[str] = Field(default_factory=list)
+
+
+class SourceMeta(BaseModel):
     storage_key: str
+    duration_sec: float
+    width: int
+    height: int
+    fps: float
+    scene_breaks: list[float] = []
 
 
 class AnalyzeResponse(BaseModel):
+    # Primary source (back-compat with single-source callers)
     duration_sec: float
     width: int
     height: int
     fps: float
     scene_breaks: list[float] = []
     audio_profile: dict[str, Any] = {}
+    # All sources (pool mode)
+    sources: list[SourceMeta] = []
+
+
+class SubtitleIn(BaseModel):
+    start_sec: float
+    end_sec: float
+    text: str
 
 
 class RenderRequest(BaseModel):
     variant_id: str
     uniquify_job_id: str
     tenant_id: str
-    source_storage_key: str
+    source_storage_keys: list[str] = Field(min_length=1)
+    voiceover_storage_key: str
     output_key: str
-    transforms: dict[str, Any]
-    transcript: list[dict[str, Any]] | None = None
+    seed: int
+    width: int = 1080
+    height: int = 1920
+    fps: int = 30
+    subtitles: list[SubtitleIn] = []
+    subtitle_style: str = "tiktok"
     bgm_storage_key: str | None = None
-    tts_storage_key: str | None = None
+    bgm_volume: float = 0.16
+    voiceover_volume: float = 1.0
+    beat_sync: bool = True
 
 
 class RenderResponse(BaseModel):
@@ -83,15 +114,7 @@ class RenderResponse(BaseModel):
     width: int
     height: int
     phash: str | None = None
-
-
-class GenerateTransformsRequest(BaseModel):
-    count: int = Field(default=10, ge=1, le=100)
-    seed: int | None = None
-
-
-class GenerateTransformsResponse(BaseModel):
-    transforms: list[dict[str, Any]]
+    segment_count: int = 0
 
 
 # ── Router ────────────────────────────────────────────────────────────────────
@@ -99,18 +122,12 @@ class GenerateTransformsResponse(BaseModel):
 def create_router() -> APIRouter:
     router = APIRouter(prefix="/uniquify", tags=["uniquify"])
 
-    @router.post(
-        "/analyze",
-        response_model=AnalyzeResponse,
-        summary="Analyze source video",
-    )
+    @router.post("/analyze", response_model=AnalyzeResponse, summary="Analyze source clip(s)")
     async def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
-        """
-        Download source video from storage, run analysis:
-        - FFprobe for metadata (duration, resolution, fps)
-        - Scene detection (scene change timestamps)
-        - Audio loudness profiling
-        """
+        keys = list(req.storage_keys) or ([req.storage_key] if req.storage_key else [])
+        if not keys:
+            raise HTTPException(status_code=400, detail="No storage_key(s) provided")
+
         work_dir: str | None = None
         try:
             storage = _get_storage()
@@ -118,19 +135,32 @@ def create_router() -> APIRouter:
             work_dir = os.path.join(base, f"analyze_{req.source_video_id}_{int(time.time())}")
             os.makedirs(work_dir, exist_ok=True)
 
-            src_path = os.path.join(work_dir, "source.mp4")
-            logger.info("Downloading source video %s", req.storage_key)
-            await storage.download(req.storage_key, src_path)
+            sources: list[SourceMeta] = []
+            primary_profile: dict[str, Any] = {}
+            for i, key in enumerate(keys):
+                src_path = os.path.join(work_dir, f"source_{i}.mp4")
+                await storage.download(key, src_path)
+                result = await analyze_video(src_path)
+                sources.append(SourceMeta(
+                    storage_key=key,
+                    duration_sec=result.duration_sec,
+                    width=result.width,
+                    height=result.height,
+                    fps=result.fps,
+                    scene_breaks=result.scene_breaks,
+                ))
+                if i == 0:
+                    primary_profile = result.audio_profile
 
-            result = await analyze_video(src_path)
-
+            p = sources[0]
             return AnalyzeResponse(
-                duration_sec=result.duration_sec,
-                width=result.width,
-                height=result.height,
-                fps=result.fps,
-                scene_breaks=result.scene_breaks,
-                audio_profile=result.audio_profile,
+                duration_sec=p.duration_sec,
+                width=p.width,
+                height=p.height,
+                fps=p.fps,
+                scene_breaks=p.scene_breaks,
+                audio_profile=primary_profile,
+                sources=sources,
             )
         except Exception as e:
             logger.exception("Analyze failed for %s", req.source_video_id)
@@ -139,15 +169,8 @@ def create_router() -> APIRouter:
             if work_dir and os.path.exists(work_dir):
                 shutil.rmtree(work_dir, ignore_errors=True)
 
-    @router.post(
-        "/render",
-        response_model=RenderResponse,
-        summary="Render unique variant",
-    )
+    @router.post("/render", response_model=RenderResponse, summary="Render unique montage variant")
     async def render(req: RenderRequest) -> RenderResponse:
-        """
-        Download source video, apply transforms, upload unique variant.
-        """
         work_dir: str | None = None
         try:
             sem = _get_semaphore()
@@ -157,42 +180,45 @@ def create_router() -> APIRouter:
             work_dir = os.path.join(base, f"uniquify_{req.variant_id}_{int(time.time())}")
             os.makedirs(work_dir, exist_ok=True)
 
-            # Download source
-            src_path = os.path.join(work_dir, "source.mp4")
-            logger.info("Downloading source for variant %s", req.variant_id)
-            await storage.download(req.source_storage_key, src_path)
+            # Download sources.
+            source_paths: list[str] = []
+            for i, key in enumerate(req.source_storage_keys):
+                p = os.path.join(work_dir, f"source_{i}.mp4")
+                await storage.download(key, p)
+                source_paths.append(p)
 
-            # Parse transforms
-            transforms = VariantTransforms.from_dict(req.transforms)
+            # Download the shared voiceover.
+            voiceover_path = os.path.join(work_dir, "voiceover.mp3")
+            await storage.download(req.voiceover_storage_key, voiceover_path)
 
-            # Download BGM if provided
+            # Download this variant's background music (if any).
+            bgm_path: str | None = None
             if req.bgm_storage_key:
                 bgm_path = os.path.join(work_dir, "bgm.mp3")
                 await storage.download(req.bgm_storage_key, bgm_path)
-                transforms.bgm_track_path = bgm_path
-
-            # Download TTS if provided
-            if req.tts_storage_key:
-                tts_path = os.path.join(work_dir, "tts.mp3")
-                await storage.download(req.tts_storage_key, tts_path)
-                transforms.tts_audio_path = tts_path
 
             output_path = os.path.join(work_dir, "output.mp4")
 
             async with sem:
-                result = await render_unique_variant(
-                    source_path=src_path,
+                result = await render_montage(
+                    source_paths=source_paths,
+                    voiceover_path=voiceover_path,
                     output_path=output_path,
-                    transforms=transforms,
-                    transcript=req.transcript,
                     work_dir=work_dir,
+                    seed=req.seed,
+                    width=req.width,
+                    height=req.height,
+                    fps=req.fps,
+                    subtitles=[s.model_dump() for s in req.subtitles],
+                    subtitle_style=req.subtitle_style,
+                    bgm_path=bgm_path,
+                    bgm_volume=req.bgm_volume,
+                    voiceover_volume=req.voiceover_volume,
+                    beat_sync=req.beat_sync,
                 )
 
-            # Upload output
-            logger.info("Uploading variant %s → %s", req.variant_id, req.output_key)
+            # Upload output + thumbnail.
             await storage.upload(req.output_key, result.output_path, "video/mp4")
-
-            # Upload thumbnail
             thumbnail_key = None
             if result.thumbnail_path and os.path.exists(result.thumbnail_path):
                 thumbnail_key = req.output_key.rsplit(".", 1)[0] + "_thumb.jpg"
@@ -206,6 +232,7 @@ def create_router() -> APIRouter:
                 width=result.width,
                 height=result.height,
                 phash=result.phash,
+                segment_count=result.segment_count,
             )
         except Exception as e:
             logger.exception("Render failed for variant %s", req.variant_id)
@@ -213,21 +240,5 @@ def create_router() -> APIRouter:
         finally:
             if work_dir and os.path.exists(work_dir):
                 shutil.rmtree(work_dir, ignore_errors=True)
-
-    @router.post(
-        "/generate-transforms",
-        response_model=GenerateTransformsResponse,
-        summary="Generate N random transform sets",
-    )
-    async def gen_transforms(req: GenerateTransformsRequest) -> GenerateTransformsResponse:
-        """
-        Generate N sets of random transforms for batch uniquification.
-        Each set is guaranteed to be different.
-        """
-        results = []
-        for i in range(req.count):
-            seed = (req.seed or 42) + i if req.seed is not None else None
-            results.append(generate_random_transforms(seed))
-        return GenerateTransformsResponse(transforms=results)
 
     return router

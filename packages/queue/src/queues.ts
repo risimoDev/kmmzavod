@@ -249,46 +249,39 @@ export interface UniquifyAnalyzeJobPayload {
   uniquifyJobId: string;
 }
 
-/** Configuration for visual transforms applied to each variant */
-export interface VariantTransforms {
-  // Visual
-  cropPercent: number;       // 0.01–0.05 random crop
-  cropOffsetX: number;       // normalized 0–1
-  cropOffsetY: number;       // normalized 0–1
-  hFlip: boolean;            // horizontal mirror
-  speed: number;             // 0.95–1.05
-  hueShift: number;          // -10 to +10 degrees
-  saturationShift: number;   // 0.9–1.1
-  brightnessShift: number;   // -0.05 to +0.05
-  contrastShift: number;     // 0.95–1.05
-  crf: number;               // 19–25 (encoder quality variation)
-  // Audio
-  bgmTrackKey?: string;      // MinIO key of BGM track
-  bgmVolume: number;         // 0.05–0.20
-  pitchShift: number;        // -2 to +2 semitones
-  // Subtitles
-  subtitleStyle: 'tiktok' | 'cinematic' | 'minimal' | 'default' | 'none';
-  subtitleFontSize: number;  // 18–32
-  subtitleColor: string;     // hex color
-  subtitlePosition: 'bottom' | 'top' | 'center';
-  // TTS
-  ttsVoiceId?: string;
-  ttsSpeed?: number;         // 0.9–1.1
-  ttsText?: string;          // script for TTS generation
-  // Intro/outro
-  trimStartSec: number;      // 0–2 sec trim from start
-  trimEndSec: number;        // 0–2 sec trim from end
+/** One subtitle line, timed to the shared voiceover. */
+export interface SubtitleLine {
+  start_sec: number;
+  end_sec: number;
+  text: string;
 }
 
+/**
+ * Per-variant montage render payload.
+ *
+ * The creative assets (voiceover + subtitle transcript) are shared across all
+ * variants and stored ONCE on the UniquifyJob — the render worker reads them
+ * from the DB. The payload only carries the per-variant uniqueness levers:
+ * the montage `seed`, the background-music track, and the subtitle style.
+ */
 export interface UniquifyRenderJobPayload {
   uniquifyJobId: string;
   variantId: string;
   tenantId: string;
-  sourceVideoStorageKey: string;
+  /** One or more source clips (pool mode reorders across several). */
+  sourceStorageKeys: string[];
   outputKey: string;
-  transforms: VariantTransforms;
-  /** Whisper transcript for subtitle generation */
-  transcript?: unknown;
+  /** Determines the montage variation — different per variant. */
+  seed: number;
+  subtitleStyle: 'tiktok' | 'cinematic' | 'minimal' | 'default' | 'none';
+  /** Per-variant background music (different track → different audio fingerprint). */
+  bgmStorageKey?: string;
+  bgmVolume: number;
+  voiceoverVolume: number;
+  width: number;
+  height: number;
+  fps: number;
+  beatSync: boolean;
 }
 
 export interface UniquifyStateJobPayload {

@@ -1,8 +1,10 @@
 /**
- * Uniquify-render worker.
+ * Uniquify-render worker (montage pipeline).
  *
- * Calls video-processor POST /uniquify/render to apply transforms and produce
- * a unique variant. On completion, enqueues a uniquify-state event.
+ * Renders one unique montage variant. The shared voiceover + subtitle transcript
+ * are read from the UniquifyJob (generated once in the analyze step); the payload
+ * carries only the per-variant uniqueness levers (montage seed, BGM, style).
+ * No AI calls happen here — producing N variants is N FFmpeg renders, 0 tokens.
  */
 
 import { Worker, Queue, type ConnectionOptions } from 'bullmq';
@@ -11,6 +13,7 @@ import {
   QUEUES,
   type UniquifyRenderJobPayload,
   type UniquifyStateJobPayload,
+  type SubtitleLine,
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
@@ -32,48 +35,38 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         uniquifyJobId,
         variantId,
         tenantId,
-        sourceVideoStorageKey,
+        sourceStorageKeys,
         outputKey,
-        transforms,
-        transcript,
+        seed,
+        subtitleStyle,
+        bgmStorageKey,
+        bgmVolume,
+        voiceoverVolume,
+        width,
+        height,
+        fps,
+        beatSync,
       } = job.data;
 
-      logger.info({ variantId, uniquifyJobId }, 'Uniquify-render: starting');
+      logger.info({ variantId, uniquifyJobId, seed }, 'Uniquify-render: starting');
 
-      // 1. Verify job wasn't cancelled before we start
-      const jobCheck = await db.uniquifyJob.findUnique({
+      const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({
         where: { id: uniquifyJobId },
-        select: { status: true },
+        select: { status: true, voiceoverKey: true, transcript: true },
       });
-      if (jobCheck?.status === 'cancelled') {
+      if (uniquifyJob.status === 'cancelled') {
         logger.info({ uniquifyJobId, variantId }, 'Uniquify-render: job cancelled, aborting');
         return;
       }
+      if (!uniquifyJob.voiceoverKey) {
+        throw new Error('Uniquify-render: job has no voiceover (analyze step did not complete)');
+      }
 
-      // 2. Mark variant as rendering
-      await db.uniqueVariant.update({
-        where: { id: variantId },
-        data: { status: 'rendering' },
-      });
+      await db.uniqueVariant.update({ where: { id: variantId }, data: { status: 'rendering' } });
 
       try {
-        // 2. Get variant record for TTS key and config for BGM
-        const variantRecord = await db.uniqueVariant.findUniqueOrThrow({
-          where: { id: variantId },
-          select: { ttsStorageKey: true, bgmTrackKey: true },
-        });
-        const uniquifyJob = await db.uniquifyJob.findUniqueOrThrow({
-          where: { id: uniquifyJobId },
-        });
+        const subtitles = (uniquifyJob.transcript ?? []) as SubtitleLine[];
 
-        const config = uniquifyJob.config as Record<string, unknown>;
-        const bgmKeys = (config.bgmTrackKeys ?? []) as string[];
-
-        // Pick a random BGM key for this variant (if available)
-        const bgmKey = variantRecord.bgmTrackKey
-          ?? (bgmKeys.length > 0 ? bgmKeys[job.data.transforms.crf % bgmKeys.length] : undefined);
-
-        // 3. Call video-processor /uniquify/render
         const renderResp = await axios.post<{
           output_key: string;
           thumbnail_key: string | null;
@@ -82,76 +75,66 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           width: number;
           height: number;
           phash: string | null;
+          segment_count: number;
         }>(`${videoProcessorUrl}/uniquify/render`, {
           variant_id: variantId,
           uniquify_job_id: uniquifyJobId,
           tenant_id: tenantId,
-          source_storage_key: sourceVideoStorageKey,
+          source_storage_keys: sourceStorageKeys,
+          voiceover_storage_key: uniquifyJob.voiceoverKey,
           output_key: outputKey,
-          transforms,
-          transcript: transcript,
-          bgm_storage_key: bgmKey ?? null,
-          tts_storage_key: variantRecord.ttsStorageKey ?? null,
-        }, { timeout: 600_000 });
+          seed,
+          width,
+          height,
+          fps,
+          subtitles,
+          subtitle_style: subtitleStyle,
+          bgm_storage_key: bgmStorageKey ?? null,
+          bgm_volume: bgmVolume,
+          voiceover_volume: voiceoverVolume,
+          beat_sync: beatSync,
+        }, { timeout: 900_000 });
 
         const result = renderResp.data;
 
-        // 4. Update variant with results
         await db.uniqueVariant.update({
           where: { id: variantId },
           data: {
             status: 'completed',
             outputKey: result.output_key,
-            outputUrl: result.output_key, // Will be resolved to presigned URL by API
+            outputUrl: result.output_key,
             thumbnailKey: result.thumbnail_key,
             durationSec: result.duration_sec,
-            fileSizeBytes: result.file_size_bytes != null ? BigInt(Math.round(result.file_size_bytes)) : null,
+            fileSizeBytes:
+              result.file_size_bytes != null ? BigInt(Math.round(result.file_size_bytes)) : null,
             width: result.width,
             height: result.height,
-            bgmTrackKey: bgmKey,
             pHash: result.phash ?? null,
           },
         });
 
-        // 5. Enqueue state update
         await uniquifyStateQueue.add(
           `uniquify-state-${variantId}`,
-          {
-            uniquifyJobId,
-            variantId,
-            tenantId,
-            status: 'completed',
-          } satisfies UniquifyStateJobPayload,
+          { uniquifyJobId, variantId, tenantId, status: 'completed' } satisfies UniquifyStateJobPayload,
           QUEUES['uniquify-state'].defaultJobOptions,
         );
 
         logger.info(
-          { variantId, uniquifyJobId, outputKey: result.output_key },
+          { variantId, uniquifyJobId, outputKey: result.output_key, segments: result.segment_count },
           'Uniquify-render: variant completed',
         );
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-
-        // Mark variant as failed
         await db.uniqueVariant.update({
           where: { id: variantId },
           data: { status: 'failed', error: errorMsg },
         });
-
-        // Enqueue state update for failure tracking
         await uniquifyStateQueue.add(
           `uniquify-state-fail-${variantId}`,
-          {
-            uniquifyJobId,
-            variantId,
-            tenantId,
-            status: 'failed',
-            error: errorMsg,
-          } satisfies UniquifyStateJobPayload,
+          { uniquifyJobId, variantId, tenantId, status: 'failed', error: errorMsg } satisfies UniquifyStateJobPayload,
           QUEUES['uniquify-state'].defaultJobOptions,
         );
-
-        throw err; // Re-throw for BullMQ retry
+        throw err;
       }
     },
     {

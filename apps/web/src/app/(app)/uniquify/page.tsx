@@ -2,7 +2,6 @@
 
 import { Suspense, useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { TopBar } from "@/components/layout/AppShell";
 import {
   Button,
@@ -19,17 +18,17 @@ import { relativeTime } from "@/lib/utils";
 import {
   uniquifyApi,
   getAccessToken,
-  socialAccountsApi,
   type SourceVideo,
   type UniquifyJob,
   type Pagination,
-  type SocialAccount,
+  type BgmTrack,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const TABS = [
   { value: "sources", label: "Source Videos" },
   { value: "jobs", label: "Jobs" },
+  { value: "music", label: "Music" },
 ];
 
 const JOB_STATUSES = [
@@ -69,11 +68,16 @@ function UniquifyContent() {
   const [jobs, setJobs] = useState<UniquifyJob[]>([]);
   const [jobPagination, setJobPagination] = useState<Pagination | null>(null);
 
+  const [tracks, setTracks] = useState<BgmTrack[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+
+  const [createFor, setCreateFor] = useState<SourceVideo | null>(null);
 
   const statusFilter = searchParams.get("status") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
@@ -86,6 +90,9 @@ function UniquifyContent() {
         const res = await uniquifyApi.listSourceVideos({ page, limit: 18 });
         setSources(res.items);
         setSourcePagination(res.pagination);
+      } else if (tab === "music") {
+        const res = await uniquifyApi.listBgm();
+        setTracks(res.items);
       } else {
         const res = await uniquifyApi.listJobs({
           status: statusFilter || undefined,
@@ -136,8 +143,6 @@ function UniquifyContent() {
     }
     setUploading(true);
     try {
-      // Server-side multipart upload: browser → API → MinIO
-      // Avoids presigned PUT failures caused by internal MinIO hostnames / CORS.
       await uniquifyApi.upload(file, { title: file.name });
       load();
     } catch (e: any) {
@@ -148,15 +153,31 @@ function UniquifyContent() {
     }
   };
 
-  const handleCreateJob = async (sourceVideoId: string) => {
+  const handleAudioSelect = async (file: File) => {
+    const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|aac|m4a|ogg|flac)$/i.test(file.name);
+    if (!isAudio) {
+      alert("Please select an audio file");
+      return;
+    }
+    setUploading(true);
     try {
-      await uniquifyApi.createJob({
-        sourceVideoId,
-        variantCount: 5,
-      });
-      setTab("jobs");
+      await uniquifyApi.uploadBgm(file);
+      load();
     } catch (e: any) {
-      alert(e.message ?? "Failed to create job");
+      alert(e.message ?? "Upload failed");
+    } finally {
+      setUploading(false);
+      if (audioInputRef.current) audioInputRef.current.value = "";
+    }
+  };
+
+  const handleDeleteTrack = async (key: string) => {
+    if (!confirm("Удалить трек из библиотеки?")) return;
+    try {
+      await uniquifyApi.deleteBgm(key);
+      setTracks((prev) => prev.filter((t) => t.key !== key));
+    } catch (e: any) {
+      alert(e.message ?? "Failed to delete");
     }
   };
 
@@ -166,28 +187,52 @@ function UniquifyContent() {
         title="Uniquify"
         subtitle="Upload source videos and generate unique variants"
         actions={
-          tab === "sources" && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="video/*"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleFileSelect(f);
-                }}
-              />
-              <Button
-                variant="primary"
-                size="sm"
-                loading={uploading}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <UploadIcon /> Upload Video
-              </Button>
-            </>
-          )
+          <>
+            {tab === "sources" && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleFileSelect(f);
+                  }}
+                />
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={uploading}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <UploadIcon /> Upload Video
+                </Button>
+              </>
+            )}
+            {tab === "music" && (
+              <>
+                <input
+                  ref={audioInputRef}
+                  type="file"
+                  accept="audio/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleAudioSelect(f);
+                  }}
+                />
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={uploading}
+                  onClick={() => audioInputRef.current?.click()}
+                >
+                  <UploadIcon /> Upload Track
+                </Button>
+              </>
+            )}
+          </>
         }
       />
 
@@ -241,6 +286,12 @@ function UniquifyContent() {
               Retry
             </Button>
           </div>
+        ) : tab === "music" ? (
+          <MusicLibrary
+            tracks={tracks}
+            onDelete={handleDeleteTrack}
+            onUpload={() => audioInputRef.current?.click()}
+          />
         ) : tab === "sources" ? (
           sources.length === 0 ? (
             <EmptyState
@@ -263,7 +314,7 @@ function UniquifyContent() {
                   <SourceVideoCard
                     key={sv.id}
                     source={sv}
-                    onCreateJob={() => handleCreateJob(sv.id)}
+                    onCreateJob={() => setCreateFor(sv)}
                   />
                 ))}
               </div>
@@ -303,7 +354,286 @@ function UniquifyContent() {
           </>
         )}
       </main>
+
+      {createFor && (
+        <CreateJobModal
+          source={createFor}
+          onClose={() => setCreateFor(null)}
+          onCreated={() => {
+            setCreateFor(null);
+            setTab("jobs");
+          }}
+        />
+      )}
     </>
+  );
+}
+
+// ── Create Job modal ──────────────────────────────────────────────────────────
+
+const ASPECTS = [
+  { value: "9:16", label: "9:16 (TikTok/Reels/Shorts)" },
+  { value: "1:1", label: "1:1 (квадрат)" },
+  { value: "4:5", label: "4:5 (лента)" },
+  { value: "16:9", label: "16:9 (YouTube)" },
+];
+
+function CreateJobModal({
+  source,
+  onClose,
+  onCreated,
+}: {
+  source: SourceVideo;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [variantCount, setVariantCount] = useState(10);
+  const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9" | "4:5">("9:16");
+  const [language, setLanguage] = useState("ru");
+  const [voiceId, setVoiceId] = useState("");
+  const [targetSeconds, setTargetSeconds] = useState(30);
+  const [enableSubtitles, setEnableSubtitles] = useState(true);
+  const [enableBgm, setEnableBgm] = useState(true);
+  const [beatSync, setBeatSync] = useState(true);
+
+  const [tracks, setTracks] = useState<BgmTrack[]>([]);
+  const [selectedTracks, setSelectedTracks] = useState<string[]>([]);
+  const [loadingTracks, setLoadingTracks] = useState(true);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    uniquifyApi
+      .listBgm()
+      .then((res) => {
+        setTracks(res.items);
+        setSelectedTracks(res.items.map((t) => t.key)); // default: use all
+      })
+      .catch(() => setTracks([]))
+      .finally(() => setLoadingTracks(false));
+  }, []);
+
+  const toggleTrack = (key: string) => {
+    setSelectedTracks((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const submit = async () => {
+    setSubmitting(true);
+    setErr(null);
+    try {
+      await uniquifyApi.createJob({
+        sourceVideoId: source.id,
+        variantCount,
+        config: {
+          aspectRatio,
+          language,
+          voiceId: voiceId.trim() || undefined,
+          targetSeconds,
+          enableSubtitles,
+          enableBgm,
+          beatSync,
+          bgmTrackKeys: enableBgm ? selectedTracks : [],
+        },
+      });
+      onCreated();
+    } catch (e: any) {
+      setErr(e.message ?? "Не удалось создать задачу");
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl bg-surface-1 ring-1 ring-border p-5 space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div>
+          <h2 className="text-sm font-semibold text-text-primary">Создать задачу уникализации</h2>
+          <p className="text-xs text-text-tertiary mt-0.5 truncate">{source.title}</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Кол-во вариантов">
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              value={variantCount}
+              onChange={(e) => setVariantCount(Math.max(1, Math.min(100, +e.target.value || 1)))}
+            />
+          </Field>
+          <Field label="Длительность, сек">
+            <Input
+              type="number"
+              min={8}
+              max={120}
+              value={targetSeconds}
+              onChange={(e) => setTargetSeconds(Math.max(8, Math.min(120, +e.target.value || 30)))}
+            />
+          </Field>
+          <Field label="Формат">
+            <select
+              value={aspectRatio}
+              onChange={(e) => setAspectRatio(e.target.value as any)}
+              className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary"
+            >
+              {ASPECTS.map((a) => (
+                <option key={a.value} value={a.value}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Язык (ISO)">
+            <Input value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="ru" />
+          </Field>
+        </div>
+
+        <Field label="ID голоса (GPTunnel, необязательно)">
+          <Input
+            value={voiceId}
+            onChange={(e) => setVoiceId(e.target.value)}
+            placeholder="оставьте пустым для голоса по умолчанию"
+          />
+        </Field>
+
+        <div className="space-y-2">
+          <Checkbox checked={enableSubtitles} onChange={setEnableSubtitles} label="Субтитры (по озвучке)" />
+          <Checkbox checked={beatSync} onChange={setBeatSync} label="Нарезка под ритм музыки" />
+          <Checkbox checked={enableBgm} onChange={setEnableBgm} label="Фоновая музыка (разная на вариант)" />
+        </div>
+
+        {enableBgm && (
+          <div className="rounded-lg bg-surface-2 ring-1 ring-border p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-text-secondary">
+                Треки для ротации ({selectedTracks.length})
+              </span>
+            </div>
+            {loadingTracks ? (
+              <LoadingSpinner size={16} />
+            ) : tracks.length === 0 ? (
+              <p className="text-xs text-text-tertiary">
+                Библиотека пуста — загрузите треки на вкладке «Music». Без музыки аудио будет
+                одинаковым во всех вариантах.
+              </p>
+            ) : (
+              <div className="max-h-32 overflow-y-auto space-y-1">
+                {tracks.map((t) => (
+                  <label key={t.key} className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedTracks.includes(t.key)}
+                      onChange={() => toggleTrack(t.key)}
+                      className="rounded"
+                    />
+                    <span className="truncate">{t.name}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {err && <p className="text-xs text-rose-400">{err}</p>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" size="sm" onClick={onClose} disabled={submitting}>
+            Отмена
+          </Button>
+          <Button variant="primary" size="sm" loading={submitting} onClick={submit}>
+            Создать
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block space-y-1">
+      <span className="text-xs font-medium text-text-secondary">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Checkbox({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="rounded" />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+// ── Music library ───────────────────────────────────────────────────────────
+
+function MusicLibrary({
+  tracks,
+  onDelete,
+  onUpload,
+}: {
+  tracks: BgmTrack[];
+  onDelete: (key: string) => void;
+  onUpload: () => void;
+}) {
+  if (tracks.length === 0) {
+    return (
+      <EmptyState
+        title="Библиотека музыки пуста"
+        description="Загрузите royalty-free треки — каждый вариант получит свой, чтобы аудио-фингерпринт отличался"
+        action={
+          <Button variant="primary" size="sm" onClick={onUpload}>
+            <UploadIcon /> Upload Track
+          </Button>
+        }
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-text-tertiary">
+        {tracks.length} треков · используются в монтаже по очереди (разный трек на каждый вариант)
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {tracks.map((t) => (
+          <Card key={t.key}>
+            <CardContent className="flex items-center gap-3">
+              <div className="shrink-0 w-9 h-9 rounded-lg bg-brand-500/15 text-brand-400 flex items-center justify-center">
+                <MusicIcon />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-text-primary truncate">{t.name}</p>
+                {t.url && (
+                  <audio controls src={t.url} className="mt-1 w-full h-8" preload="none" />
+                )}
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => onDelete(t.key)}>
+                <TrashIcon />
+              </Button>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -433,6 +763,24 @@ function SparklesIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M12 3v18M3 12h18"/>
       <circle cx="12" cy="12" r="9" strokeDasharray="4 4"/>
+    </svg>
+  );
+}
+
+function MusicIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m2 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6" />
     </svg>
   );
 }
