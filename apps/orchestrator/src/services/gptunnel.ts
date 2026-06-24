@@ -14,6 +14,33 @@ function authHeaders() {
   return { Authorization: API_KEY, 'Content-Type': 'application/json' };
 }
 
+/** Count words in a string. */
+function countWords(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * Truncate a script to at most `maxWords`, cutting on sentence boundaries so the
+ * narration never ends mid-thought. Falls back to a hard word cut for a single
+ * over-long sentence.
+ */
+function truncateToWords(script: string, maxWords: number): string {
+  if (countWords(script) <= maxWords) return script;
+  const sentences = script.match(/[^.!?…]+[.!?…]+|\S[^.!?…]*$/g) ?? [script];
+  const kept: string[] = [];
+  let total = 0;
+  for (const sentence of sentences) {
+    const w = countWords(sentence);
+    if (total + w > maxWords) break;
+    kept.push(sentence.trim());
+    total += w;
+  }
+  if (kept.length === 0) {
+    return script.trim().split(/\s+/).slice(0, maxWords).join(' ') + '.';
+  }
+  return kept.join(' ');
+}
+
 /** Extract a JSON object from a model reply that may be wrapped in prose / ``` fences. */
 function extractJsonObject(raw: string): string {
   let s = raw.trim();
@@ -69,12 +96,27 @@ export class GptunnelService {
   async generateScript(opts: {
     title: string;
     description?: string;
+    /** Free-form product info entered by the user — drives a more accurate script. */
+    productInfo?: string;
     language?: string; // ISO code, e.g. 'ru'
     variantCount: number;
     targetSeconds?: number;
   }): Promise<{ script: string; captions: Array<{ caption: string; hashtags: string[] }> }> {
     const lang = opts.language ?? 'ru';
     const seconds = opts.targetSeconds ?? 30;
+    // Tie script length to the requested duration. Speech ~2.5 words/sec, so the
+    // word budget controls the eventual voiceover (and therefore video) length.
+    const WORDS_PER_SEC = 2.5;
+    const targetWords = Math.round(seconds * WORDS_PER_SEC);
+    const maxWords = Math.round(targetWords * 1.15);
+    const minWords = Math.round(targetWords * 0.85);
+
+    const productBlock = [
+      `Product title: "${opts.title}".`,
+      opts.description ? `Description: "${opts.description}".` : '',
+      opts.productInfo ? `What the product is / key facts: "${opts.productInfo}".` : '',
+    ].filter(Boolean).join('\n');
+
     // NB: we deliberately do NOT send response_format here — some OpenAI-compatible
     // proxies reject `response_format: json_object` with HTTP 400. We ask for JSON
     // in the prompt and parse it leniently below instead.
@@ -88,17 +130,18 @@ export class GptunnelService {
           content:
             'You are a senior short-form video copywriter for product marketing. ' +
             'You write punchy, natural-sounding voiceover scripts and platform captions. ' +
-            'Always respond with a single valid JSON object and nothing else.',
+            'You strictly respect length limits. Always respond with a single valid JSON object and nothing else.',
         },
         {
           role: 'user',
           content:
             `Language: ${lang}. Write content for a product video.\n` +
-            `Product title: "${opts.title}".\n` +
-            `Details: "${opts.description ?? ''}".\n\n` +
+            `${productBlock}\n\n` +
+            `LENGTH IS A HARD REQUIREMENT: the "script" MUST be between ${minWords} and ${maxWords} ` +
+            `words (target ${targetWords}) so it reads aloud in about ${seconds} seconds. Do NOT exceed ${maxWords} words.\n\n` +
             `Return JSON with this exact shape:\n` +
             `{\n` +
-            `  "script": "<a spoken voiceover narration in ${lang}, ~${seconds} seconds when read aloud, ` +
+            `  "script": "<spoken voiceover narration in ${lang}, ${minWords}-${maxWords} words, ` +
             `with a strong hook in the first sentence, 2-3 concrete benefits, and a short call to action. ` +
             `Plain sentences only — no scene directions, no emojis, no markdown>",\n` +
             `  "captions": [ ${opts.variantCount} objects like ` +
@@ -116,9 +159,12 @@ export class GptunnelService {
     } catch {
       logger.warn('Gptunnel.generateScript: failed to parse JSON, using fallback');
     }
-    const script: string = typeof parsed.script === 'string' && parsed.script.trim()
+    let script: string = typeof parsed.script === 'string' && parsed.script.trim()
       ? parsed.script.trim()
-      : `${opts.title}. ${opts.description ?? ''}`.trim();
+      : `${opts.title}. ${opts.productInfo ?? opts.description ?? ''}`.trim();
+    // Hard-cap length so the voiceover (and video) cannot overshoot the requested
+    // duration — models routinely ignore "~N seconds" hints, so we enforce it.
+    script = truncateToWords(script, maxWords);
     let captions: Array<{ caption: string; hashtags: string[] }> = Array.isArray(parsed.captions)
       ? parsed.captions
       : [];

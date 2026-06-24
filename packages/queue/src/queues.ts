@@ -109,7 +109,10 @@ export const QUEUE_DEFS = {
       removeOnComplete: { count: 500 },
       removeOnFail: false,
     },
-    concurrency: 2, // 4-core server: 2 render + 1 analyze + 1 spare for API/DB
+    // Sequential: one variant at a time. Each montage render already uses
+    // multiple cores internally (parallel segment prep), so running renders
+    // back-to-back keeps CPU saturated without thrashing RAM/IO.
+    concurrency: 1,
   },
   UNIQUIFY_STATE: {
     name: 'uniquify-state',
@@ -282,6 +285,8 @@ export interface UniquifyRenderJobPayload {
   height: number;
   fps: number;
   beatSync: boolean;
+  /** Scene-break timestamps per source (aligned to sourceStorageKeys) for scene-aware cuts. */
+  sceneBreaks?: number[][];
 }
 
 export interface UniquifyStateJobPayload {

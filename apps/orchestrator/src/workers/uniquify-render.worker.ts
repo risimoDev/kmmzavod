@@ -46,6 +46,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         height,
         fps,
         beatSync,
+        sceneBreaks,
       } = job.data;
 
       logger.info({ variantId, uniquifyJobId, seed }, 'Uniquify-render: starting');
@@ -93,6 +94,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           bgm_volume: bgmVolume,
           voiceover_volume: voiceoverVolume,
           beat_sync: beatSync,
+          scene_breaks: sceneBreaks ?? [],
         }, { timeout: 900_000 });
 
         const result = renderResp.data;

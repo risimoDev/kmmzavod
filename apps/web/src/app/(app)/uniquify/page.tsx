@@ -10,6 +10,7 @@ import {
   Card,
   CardContent,
   Input,
+  Textarea,
   Progress,
   EmptyState,
 } from "@/components/ui/primitives";
@@ -83,8 +84,8 @@ function UniquifyContent() {
   const statusFilter = searchParams.get("status") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       if (tab === "sources") {
@@ -104,9 +105,9 @@ function UniquifyContent() {
         setJobPagination(res.pagination);
       }
     } catch (e: any) {
-      setError(e.message ?? "Failed to load");
+      if (!silent) setError(e.message ?? "Failed to load");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [tab, statusFilter, page]);
 
@@ -117,6 +118,19 @@ function UniquifyContent() {
     }
     load();
   }, [load, router]);
+
+  // Live updates: silently re-poll while there is active work (no page reload).
+  const SOURCE_BUSY = ["uploading", "analyzing"];
+  const JOB_BUSY = ["pending", "analyzing", "generating"];
+  const hasActiveWork =
+    (tab === "sources" && sources.some((s) => SOURCE_BUSY.includes(s.status))) ||
+    (tab === "jobs" && jobs.some((j) => JOB_BUSY.includes(j.status)));
+
+  useEffect(() => {
+    if (!hasActiveWork) return;
+    const id = setInterval(() => load(true), 4000);
+    return () => clearInterval(id);
+  }, [hasActiveWork, load]);
 
   const setTab = (t: string) => {
     router.push(`/uniquify?tab=${t}`);
@@ -283,7 +297,7 @@ function UniquifyContent() {
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <p className="text-text-secondary text-sm">{error}</p>
-            <Button variant="outline" size="sm" onClick={load}>
+            <Button variant="outline" size="sm" onClick={() => load()}>
               Retry
             </Button>
           </div>
@@ -393,6 +407,7 @@ function CreateJobModal({
   const [language, setLanguage] = useState("ru");
   const [voiceId, setVoiceId] = useState("");
   const [targetSeconds, setTargetSeconds] = useState(30);
+  const [productInfo, setProductInfo] = useState("");
   const [enableSubtitles, setEnableSubtitles] = useState(true);
   const [enableBgm, setEnableBgm] = useState(true);
   const [beatSync, setBeatSync] = useState(true);
@@ -439,6 +454,7 @@ function CreateJobModal({
           language,
           voiceId: voiceId.trim() || undefined,
           targetSeconds,
+          productInfo: productInfo.trim() || undefined,
           enableSubtitles,
           enableBgm,
           beatSync,
@@ -465,6 +481,15 @@ function CreateJobModal({
           <h2 className="text-sm font-semibold text-text-primary">Создать задачу уникализации</h2>
           <p className="text-xs text-text-tertiary mt-0.5 truncate">{source.title}</p>
         </div>
+
+        <Field label="Что за товар (для точной озвучки)">
+          <Textarea
+            value={productInfo}
+            onChange={(e) => setProductInfo(e.target.value)}
+            placeholder="Опишите товар: что это, для кого, ключевые преимущества, цена/акция — нейросеть напишет сценарий точнее"
+            rows={3}
+          />
+        </Field>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Кол-во вариантов">

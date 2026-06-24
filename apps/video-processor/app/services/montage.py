@@ -62,6 +62,23 @@ class SourceInfo:
     duration: float
     width: int
     height: int
+    scene_breaks: list[float] = field(default_factory=list)
+
+
+def _scene_spans(src: SourceInfo) -> list[tuple[float, float]]:
+    """
+    Turn a source's scene-break timestamps into (start, duration) spans so cuts
+    land on natural scene boundaries instead of arbitrary mid-action points.
+    Falls back to one whole-clip span when no scene breaks were detected.
+    """
+    bounds = [0.0] + [b for b in src.scene_breaks if 0.0 < b < src.duration] + [src.duration]
+    bounds = sorted({round(b, 3) for b in bounds})
+    spans: list[tuple[float, float]] = []
+    for i in range(len(bounds) - 1):
+        start, dur = bounds[i], bounds[i + 1] - bounds[i]
+        if dur >= 0.8:
+            spans.append((start, dur))
+    return spans or [(0.0, max(0.8, src.duration))]
 
 
 @dataclass
@@ -133,9 +150,13 @@ def build_plan(
         saturation=round(rng.uniform(0.92, 1.12), 3),
     )
 
+    # Pre-compute scene spans per source so cuts align to real scene boundaries.
+    scene_spans = [_scene_spans(s) for s in sources]
+
     goal = target_duration + OVERSHOOT_SEC
     segments: list[Segment] = []
     accumulated = 0.0          # on-screen seconds minus transition overlaps
+    last_pick: tuple[int, int] | None = None  # (src_idx, span_idx) to avoid repeats
     guard = 0
 
     while accumulated < goal and guard < 2000:
@@ -145,14 +166,28 @@ def build_plan(
         if src.duration < 0.6:
             continue
 
+        # Pick a scene span, avoiding an immediate repeat of the same one.
+        spans = scene_spans[src_idx]
+        choices = list(range(len(spans)))
+        if last_pick and last_pick[0] == src_idx and len(choices) > 1:
+            choices.remove(last_pick[1])
+        span_idx = rng.choice(choices)
+        scene_start, scene_dur = spans[span_idx]
+        last_pick = (src_idx, span_idx)
+
         speed = rng.choice(SPEED_LEVELS)
-        desired_screen = rng.uniform(MIN_BEAT_SEC, MAX_BEAT_SEC)
-        span = min(desired_screen * speed, src.duration)
+        if not segments:
+            # First segment is the hook: longer and from the start of its scene.
+            desired_screen = min(MAX_BEAT_SEC, max(2.2, scene_dur * 0.8))
+        else:
+            desired_screen = rng.uniform(MIN_BEAT_SEC, max(MIN_BEAT_SEC, min(MAX_BEAT_SEC, scene_dur)))
+        span = min(desired_screen * speed, scene_dur, src.duration)
         # Avoid sub-second crumbs that look like glitches.
         if span < 0.6:
-            span = min(0.6, src.duration)
-        max_start = max(0.0, src.duration - span)
-        start = rng.uniform(0.0, max_start)
+            span = min(0.8, scene_dur, src.duration)
+        # In-point: at (or just after) the scene start for a clean cut-in.
+        room = max(0.0, scene_dur - span)
+        start = scene_start + rng.uniform(0.0, room * 0.5)
 
         if segments:
             transition = rng.choice(TRANSITIONS)
@@ -423,6 +458,7 @@ async def render_montage(
     crf: int | None = None,
     threads: int | None = None,
     beat_sync: bool = True,
+    scene_breaks_by_source: list[list[float]] | None = None,
 ) -> MontageResult:
     """
     Render one unique montage variant.
@@ -437,9 +473,14 @@ async def render_montage(
 
     # 1. Probe inputs.
     sources: list[SourceInfo] = []
-    for p in source_paths:
+    for i, p in enumerate(source_paths):
         info = fx.probe(p)
-        sources.append(SourceInfo(path=p, duration=info.duration, width=info.width, height=info.height))
+        breaks = (scene_breaks_by_source[i]
+                  if scene_breaks_by_source and i < len(scene_breaks_by_source) else [])
+        sources.append(SourceInfo(
+            path=p, duration=info.duration, width=info.width, height=info.height,
+            scene_breaks=breaks,
+        ))
     if not sources:
         raise ValueError("render_montage: no source clips provided")
 

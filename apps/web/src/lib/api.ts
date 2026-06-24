@@ -817,6 +817,7 @@ export const uniquifyApi = {
       voiceId?: string;
       language?: string;
       targetSeconds?: number;
+      productInfo?: string;
       enableSubtitles?: boolean;
       aspectRatio?: "9:16" | "1:1" | "16:9" | "4:5";
       fps?: number;

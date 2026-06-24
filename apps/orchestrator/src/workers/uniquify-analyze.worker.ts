@@ -156,6 +156,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           fps: number;
           scene_breaks: number[];
           audio_profile: Record<string, unknown>;
+          sources?: Array<{ storage_key: string; scene_breaks: number[] }>;
         };
         try {
           const analyzeResp = await axios.post(`${videoProcessorUrl}/uniquify/analyze`, {
@@ -166,6 +167,13 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         } catch (e) {
           throw new Error(`video-analyze: ${describeAxios(e)}`);
         }
+
+        // Scene breaks per source (aligned to sourceStorageKeys) for scene-aware cuts.
+        const sceneBreaksByKey = new Map<string, number[]>();
+        for (const s of analysis.sources ?? []) {
+          sceneBreaksByKey.set(s.storage_key, s.scene_breaks ?? []);
+        }
+        const sceneBreaksBySource = sourceStorageKeys.map((k) => sceneBreaksByKey.get(k) ?? []);
 
         await db.sourceVideo.update({
           where: { id: sourceVideoId },
@@ -199,6 +207,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           ({ script, captions } = await gptunnelService.generateScript({
             title: sourceVideo.title ?? 'video',
             description: sourceVideo.description ?? '',
+            productInfo: (config.productInfo as string) ?? undefined,
             language,
             variantCount,
             targetSeconds,
@@ -312,6 +321,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               height,
               fps,
               beatSync,
+              sceneBreaks: sceneBreaksBySource,
             },
             opts: QUEUES['uniquify-render'].defaultJobOptions as any,
           });

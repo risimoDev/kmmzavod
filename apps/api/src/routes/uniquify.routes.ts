@@ -44,6 +44,8 @@ const CreateUniquifyJobBody = z.object({
     voiceId: z.string().optional(),
     language: z.string().min(2).max(8).default('ru'),
     targetSeconds: z.number().int().min(8).max(120).default(30),
+    // Free-form product description to make the AI script more accurate.
+    productInfo: z.string().max(2000).optional(),
     enableSubtitles: z.boolean().default(true),
     // Output format.
     aspectRatio: z.enum(['9:16', '1:1', '16:9', '4:5']).default('9:16'),

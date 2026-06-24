@@ -104,6 +104,9 @@ class RenderRequest(BaseModel):
     bgm_volume: float = 0.16
     voiceover_volume: float = 1.0
     beat_sync: bool = True
+    # Scene-break timestamps per source clip (aligned to source_storage_keys),
+    # so the montage cuts on real scene boundaries.
+    scene_breaks: list[list[float]] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):
@@ -215,6 +218,7 @@ def create_router() -> APIRouter:
                     bgm_volume=req.bgm_volume,
                     voiceover_volume=req.voiceover_volume,
                     beat_sync=req.beat_sync,
+                    scene_breaks_by_source=req.scene_breaks,
                 )
 
             # Upload output + thumbnail.

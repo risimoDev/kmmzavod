@@ -60,8 +60,8 @@ function JobDetailContent({ jobId }: { jobId: string }) {
   const [captionTemplate, setCaptionTemplate] = useState("");
   const [hashtags, setHashtags] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const [jobData, variantsData, distData, accData] = await Promise.all([
@@ -75,9 +75,9 @@ function JobDetailContent({ jobId }: { jobId: string }) {
       setDistributes(distData.items);
       setAccounts(accData);
     } catch (e: any) {
-      setError(e.message ?? "Failed to load job");
+      if (!silent) setError(e.message ?? "Failed to load job");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [jobId]);
 
@@ -88,6 +88,18 @@ function JobDetailContent({ jobId }: { jobId: string }) {
     }
     load();
   }, [load, router]);
+
+  // Live updates: silently re-poll while the job (or any distribution) is active.
+  const jobActive =
+    !!job && ["pending", "analyzing", "generating"].includes(job.status);
+  const distActive = distributes.some((d) =>
+    ["pending", "distributing"].includes(d.status),
+  );
+  useEffect(() => {
+    if (!jobActive && !distActive) return;
+    const id = setInterval(() => load(true), 4000);
+    return () => clearInterval(id);
+  }, [jobActive, distActive, load]);
 
   const handleCreateDistribute = async () => {
     if (selectedAccounts.length === 0) return;
@@ -139,7 +151,7 @@ function JobDetailContent({ jobId }: { jobId: string }) {
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <p className="text-text-secondary text-sm">{error}</p>
-            <Button variant="outline" size="sm" onClick={load}>
+            <Button variant="outline" size="sm" onClick={() => load()}>
               Retry
             </Button>
           </div>
