@@ -101,6 +101,24 @@ export function createSchedulerWorker(deps: Deps): Worker {
     async () => {
       const now = new Date();
 
+      // ── Daily reset of per-account post counters ──────────────────────────
+      // The distribute worker blocks accounts once dailyPostCount >= maxPostsPerDay.
+      // Nothing else resets it, so without this accounts would stay blocked forever.
+      // Idempotent: only touches accounts whose last post was before today (UTC).
+      try {
+        const startOfTodayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+        const reset = await db.socialAccount.updateMany({
+          where: {
+            dailyPostCount: { gt: 0 },
+            OR: [{ lastPostAt: null }, { lastPostAt: { lt: startOfTodayUTC } }],
+          },
+          data: { dailyPostCount: 0 },
+        });
+        if (reset.count > 0) logger.info({ reset: reset.count }, 'Scheduler: daily post counters reset');
+      } catch (err: any) {
+        logger.error({ err: err.message }, 'Scheduler: daily reset failed');
+      }
+
       // Find all due presets
       const duePresets = await db.videoPreset.findMany({
         where: {
