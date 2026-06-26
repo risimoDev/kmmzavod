@@ -19,6 +19,7 @@ import { PostBridgeClient } from '../clients/social/postbridge.client';
 import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
+import { publisherService, describePublisherError } from '../services/publisher';
 
 const logger = rootLogger.child({ worker: 'publish' });
 
@@ -147,6 +148,54 @@ export function createPublishWorker(deps: Deps): Worker {
 
         let externalPostId: string | undefined;
 
+        // ── Private path (unofficial publisher microservice) ───────────────────
+        // Routes Instagram/TikTok through apps/publisher (instagrapi / tiktok-uploader)
+        // using the account's stored session + proxy, instead of the official API.
+        const isPrivate =
+          accountRaw.authMethod === 'private' && (platform === 'instagram' || platform === 'tiktok');
+
+        if (isPrivate) {
+          let sessionData: Record<string, unknown> = {};
+          if (accountRaw.sessionData) {
+            try {
+              sessionData = JSON.parse(decrypt(accountRaw.sessionData));
+            } catch (e) {
+              throw new Error(`private-${platform}: cannot read stored session (${(e as Error).message})`);
+            }
+          }
+          const presignedUrl = await storage.presignedUrl(storageKey, 3600);
+          const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
+
+          try {
+            const result =
+              platform === 'instagram'
+                ? await publisherService.instagramPublish({
+                    videoUrl: presignedUrl,
+                    caption: fullCaption,
+                    proxyUrl: accountRaw.proxyUrl,
+                    deviceFingerprint: accountRaw.deviceFingerprint as Record<string, unknown> | null,
+                    sessionData,
+                  })
+                : await publisherService.tiktokPublish({
+                    videoUrl: presignedUrl,
+                    caption: fullCaption,
+                    proxyUrl: accountRaw.proxyUrl,
+                    sessionData,
+                  });
+
+            externalPostId = result.externalId ?? undefined;
+
+            // Persist the refreshed session so the next post reuses it (no re-login).
+            if (result.sessionData && Object.keys(result.sessionData).length > 0) {
+              await db.socialAccount.update({
+                where: { id: socialAccountId },
+                data: { sessionData: encrypt(JSON.stringify(result.sessionData)) },
+              });
+            }
+          } catch (err: unknown) {
+            throw new Error(`publisher-${platform}: ${describePublisherError(err)}`);
+          }
+        } else
         switch (platform) {
           // ── TikTok: download to temp file → upload ──────────────────────────
           case 'tiktok': {

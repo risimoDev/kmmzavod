@@ -150,6 +150,7 @@ services:
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       AI_PROXY_URL: ${AI_PROXY_URL:-}
+      PUBLISHER_URL: http://publisher:8200
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -165,6 +166,36 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Private (non-official-API) publisher: Instagram (instagrapi) + TikTok (tiktok-uploader).
+  publisher:
+    build:
+      context: apps/publisher
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    shm_size: "1gb"  # headless Chromium needs more than the 64MB default
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      LOG_LEVEL: ${PUBLISHER_LOG_LEVEL:-INFO}
+      MAX_CONCURRENT: ${PUBLISHER_MAX_CONCURRENT:-2}
+      MAX_DOWNLOAD_MB: ${PUBLISHER_MAX_DOWNLOAD_MB:-300}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.5"
+    depends_on:
       minio:
         condition: service_healthy
 

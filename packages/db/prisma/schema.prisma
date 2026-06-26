@@ -831,6 +831,12 @@ model SocialAccount {
     accountName       String         @map("account_name")
     igUserId          String?        @map("ig_user_id")
     proxyUrl          String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
+    // ── Publishing method ──────────────────────────────────────────────
+    // 'official' = OAuth APIs (default); 'private' = unofficial publisher
+    // microservice (instagrapi / tiktok-uploader). sessionData holds the
+    // encrypted credentials + live session blob for the private path.
+    authMethod        String         @default("official") @map("auth_method")
+    sessionData       String?        @map("session_data") @db.Text
     // ── Farm fields ────────────────────────────────────────────────────
     accountGroupId    String?        @map("account_group_id") @db.Uuid
     proxyId           String?        @map("proxy_id") @db.Uuid

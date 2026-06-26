@@ -46,16 +46,49 @@ const BulkSocialAccountBody = z.object({
   accounts: z.array(z.object({
     platform: z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge']),
     accountName: z.string().min(1).max(200),
-    accessToken: z.string().min(1),
+    // Publishing method: 'official' (OAuth) or 'private' (unofficial publisher).
+    authMethod: z.enum(['official', 'private']).default('official'),
+    // Official-path credentials.
+    accessToken: z.string().optional(),
     refreshToken: z.string().optional(),
     expiresAt: z.string().datetime().optional(),
     igUserId: z.string().optional(),
+    // Private-path credentials (instagram: username+password; tiktok: sessionId).
+    username: z.string().optional(),
+    password: z.string().optional(),
+    sessionId: z.string().optional(),
     accountGroupId: z.string().uuid().optional(),
     niche: z.string().optional(),
     language: z.string().max(10).default('en'),
   })).min(1).max(500),
   autoAssign: z.boolean().default(true),
 });
+
+const SetCredentialsBody = z.object({
+  authMethod: z.enum(['official', 'private']).default('private'),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  sessionId: z.string().optional(),
+  accessToken: z.string().optional(),
+});
+
+/**
+ * Build the private-publisher session blob from import/credential input.
+ * Stored encrypted; the publisher microservice reads it to log in.
+ */
+function buildPrivateSession(platform: string, acc: { username?: string; password?: string; sessionId?: string }): Record<string, unknown> {
+  if (platform === 'instagram') {
+    if (!acc.username || !acc.password) {
+      throw new Error('Instagram private account needs username and password');
+    }
+    return { username: acc.username, password: acc.password };
+  }
+  if (platform === 'tiktok') {
+    if (!acc.sessionId) throw new Error('TikTok private account needs sessionId');
+    return { sessionid: acc.sessionId };
+  }
+  throw new Error(`Private publishing is not supported for platform "${platform}"`);
+}
 
 // ── Device fingerprint generator ─────────────────────────────────────────────
 
@@ -251,12 +284,26 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           }
         }
 
+        // Resolve credentials per publishing method.
+        let accessTokenEnc: string;
+        let sessionDataEnc: string | undefined;
+        if (acc.authMethod === 'private') {
+          const sd = buildPrivateSession(acc.platform, acc); // throws → recorded as failed below
+          sessionDataEnc = encrypt(JSON.stringify(sd));
+          accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
+        } else {
+          if (!acc.accessToken) throw new Error('Official account needs accessToken');
+          accessTokenEnc = encrypt(acc.accessToken);
+        }
+
         await db.socialAccount.create({
           data: {
             tenantId,
             platform: acc.platform,
             accountName: acc.accountName,
-            accessToken: encrypt(acc.accessToken),
+            authMethod: acc.authMethod,
+            accessToken: accessTokenEnc,
+            sessionData: sessionDataEnc,
             refreshToken: acc.refreshToken ? encrypt(acc.refreshToken) : undefined,
             expiresAt: acc.expiresAt ? new Date(acc.expiresAt) : undefined,
             igUserId: acc.igUserId,
@@ -287,6 +334,39 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
 
     return reply.status(201).send({ imported: results.filter((r) => r.status === 'created').length, results });
+  });
+
+  // ── Set / update an account's publishing method + credentials ─────────────
+
+  app.put('/social-accounts/:id/credentials', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = SetCredentialsBody.parse(request.body);
+
+    const account = await db.socialAccount.findFirst({
+      where: { id, tenantId },
+      select: { id: true, platform: true },
+    });
+    if (!account) return reply.status(404).send({ error: 'Account not found' });
+
+    const data: Record<string, unknown> = { authMethod: body.authMethod };
+    if (body.authMethod === 'private') {
+      try {
+        const sd = buildPrivateSession(account.platform, body);
+        data.sessionData = encrypt(JSON.stringify(sd));
+        data.accessToken = encrypt('private');
+      } catch (err: unknown) {
+        return reply.status(400).send({ error: err instanceof Error ? err.message : 'Invalid credentials' });
+      }
+    } else {
+      if (!body.accessToken) return reply.status(400).send({ error: 'Official account needs accessToken' });
+      data.accessToken = encrypt(body.accessToken);
+      data.sessionData = null;
+    }
+
+    await db.socialAccount.update({ where: { id }, data });
+    logger.info({ accountId: id, authMethod: body.authMethod }, 'Account credentials updated');
+    return reply.send({ updated: true, authMethod: body.authMethod });
   });
 
   // ── Reset Daily Post Counts (call via cron every midnight per timezone) ────

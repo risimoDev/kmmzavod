@@ -26,6 +26,7 @@ const schema = z.object({
   IMAGE_GEN_API_KEY: z.string(),
   GEMINI_API_KEY: z.string().optional(),
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
+  PUBLISHER_URL: z.string().url().default('http://localhost:8200'),
   KLING_ACCESS_KEY: z.string().default(''),
   KLING_SECRET_KEY: z.string().default(''),
   AI_PROXY_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),

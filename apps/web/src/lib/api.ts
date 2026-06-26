@@ -441,6 +441,7 @@ export interface FarmSocialAccount {
   id: string;
   platform: string;
   accountName: string;
+  authMethod?: string;
   isActive: boolean;
   healthScore: number;
   warmupStatus: string;
@@ -537,10 +538,15 @@ export const accountFarmApi = {
     accounts: Array<{
       platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
       accountName: string;
-      accessToken: string;
+      authMethod?: 'official' | 'private';
+      accessToken?: string;
       refreshToken?: string;
       expiresAt?: string;
       igUserId?: string;
+      // Private-path credentials
+      username?: string;
+      password?: string;
+      sessionId?: string;
       accountGroupId?: string;
       niche?: string;
       language?: string;
@@ -549,6 +555,17 @@ export const accountFarmApi = {
   }) => apiFetch<{ imported: number; results: Array<{ accountName: string; status: string; error?: string }> }>(
     '/api/v1/farm/social-accounts/bulk',
     { method: 'POST', body: JSON.stringify(body) }
+  ),
+
+  setAccountCredentials: (id: string, body: {
+    authMethod: 'official' | 'private';
+    username?: string;
+    password?: string;
+    sessionId?: string;
+    accessToken?: string;
+  }) => apiFetch<{ updated: boolean; authMethod: string }>(
+    `/api/v1/farm/social-accounts/${id}/credentials`,
+    { method: 'PUT', body: JSON.stringify(body) }
   ),
 
   resetDaily: (timezone?: string) => {

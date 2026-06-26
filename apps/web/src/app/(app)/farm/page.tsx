@@ -441,6 +441,7 @@ function AccountsTab() {
   const [importing, setImporting] = useState(false);
   const [raw, setRaw] = useState("");
   const [platform, setPlatform] = useState<"tiktok" | "instagram" | "youtube_shorts" | "postbridge">("tiktok");
+  const [authMethod, setAuthMethod] = useState<"official" | "private">("official");
   const [groupId, setGroupId] = useState("");
 
   const load = useCallback(async () => {
@@ -463,27 +464,36 @@ function AccountsTab() {
   useEffect(() => { load(); }, [load]);
 
   const handleImport = async () => {
-    // Parse lines: accountName:accessToken[:refreshToken]
-    const accounts = raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [accountName, accessToken, refreshToken] = line.split(":");
-        return {
-          platform,
-          accountName,
-          accessToken,
-          refreshToken: refreshToken || undefined,
-          accountGroupId: groupId || undefined,
-        };
-      })
-      .filter((a) => a.accountName && a.accessToken);
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let accounts: Array<Record<string, unknown>>;
+
+    if (authMethod === "private") {
+      accounts = lines
+        .map((line) => {
+          const parts = line.split(":");
+          const accountName = parts[0];
+          if (platform === "instagram") {
+            // accountName:username:password
+            return { platform, accountName, authMethod, username: parts[1], password: parts[2], accountGroupId: groupId || undefined };
+          }
+          // tiktok → accountName:sessionId  (sessionId may not contain ':')
+          return { platform, accountName, authMethod, sessionId: parts.slice(1).join(":"), accountGroupId: groupId || undefined };
+        })
+        .filter((a: any) => a.accountName && (platform === "instagram" ? a.username && a.password : a.sessionId));
+    } else {
+      // official → accountName:accessToken[:refreshToken]
+      accounts = lines
+        .map((line) => {
+          const [accountName, accessToken, refreshToken] = line.split(":");
+          return { platform, accountName, accessToken, refreshToken: refreshToken || undefined, accountGroupId: groupId || undefined };
+        })
+        .filter((a: any) => a.accountName && a.accessToken);
+    }
 
     if (accounts.length === 0) { alert("No valid accounts parsed"); return; }
     setImporting(true);
     try {
-      const res = await accountFarmApi.bulkImportAccounts({ accounts, autoAssign: true });
+      const res = await accountFarmApi.bulkImportAccounts({ accounts: accounts as any, autoAssign: true });
       const failed = res.results.filter((r) => r.status === "failed");
       alert(`Imported ${res.imported}.${failed.length ? ` ${failed.length} failed.` : ""}`);
       setShowImport(false);
@@ -517,6 +527,7 @@ function AccountsTab() {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-text-primary truncate">{a.accountName}</span>
                     <Badge variant="outline" className="text-2xs capitalize">{a.platform}</Badge>
+                    {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
                     {a.shadowBanDetected && <Badge variant="danger" className="text-2xs">shadow-ban</Badge>}
                     {!a.isActive && <Badge variant="default" className="text-2xs">paused</Badge>}
                   </div>
@@ -537,7 +548,7 @@ function AccountsTab() {
 
       {showImport && (
         <Modal title="Bulk Import Accounts" onClose={() => setShowImport(false)}>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="text-sm font-medium text-text-primary block mb-1.5">Platform</label>
               <select
@@ -552,6 +563,17 @@ function AccountsTab() {
               </select>
             </div>
             <div>
+              <label className="text-sm font-medium text-text-primary block mb-1.5">Method</label>
+              <select
+                value={authMethod}
+                onChange={(e) => setAuthMethod(e.target.value as any)}
+                className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-sm text-text-primary"
+              >
+                <option value="official">Official API</option>
+                <option value="private">Private (no API)</option>
+              </select>
+            </div>
+            <div>
               <label className="text-sm font-medium text-text-primary block mb-1.5">Group (auto-assign)</label>
               <select
                 value={groupId}
@@ -563,15 +585,35 @@ function AccountsTab() {
               </select>
             </div>
           </div>
+
+          {authMethod === "private" && (platform === "youtube_shorts" || platform === "postbridge") && (
+            <p className="text-xs text-warning">
+              Приватный метод поддерживается только для TikTok и Instagram. Для {platform} используйте Official API.
+            </p>
+          )}
+
           <p className="text-xs text-text-tertiary">
-            One per line: <code>accountName:accessToken:refreshToken</code> (refreshToken optional). Tokens are encrypted at rest.
+            {authMethod === "official" ? (
+              <>One per line: <code>accountName:accessToken:refreshToken</code> (refreshToken optional).</>
+            ) : platform === "instagram" ? (
+              <>One per line: <code>accountName:username:password</code> — публикация через приватный сервис (instagrapi).</>
+            ) : (
+              <>One per line: <code>accountName:sessionId</code> — TikTok <code>sessionid</code> cookie из браузера.</>
+            )}{" "}
+            Всё шифруется at rest. Для приватного метода назначьте аккаунту прокси (через группу).
           </p>
           <Textarea
             label="Accounts"
             rows={8}
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
-            placeholder={"my_account:ACCESS_TOKEN:REFRESH_TOKEN"}
+            placeholder={
+              authMethod === "official"
+                ? "my_account:ACCESS_TOKEN:REFRESH_TOKEN"
+                : platform === "instagram"
+                ? "my_account:my_login:my_password"
+                : "my_account:SESSIONID_COOKIE"
+            }
           />
           <ModalActions onCancel={() => setShowImport(false)} onConfirm={handleImport} loading={importing} disabled={!raw.trim()} confirmLabel="Import" />
         </Modal>
