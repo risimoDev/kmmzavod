@@ -1,16 +1,14 @@
+# Minimal pins only. instagrapi / tiktok-uploader pin their own exact versions of
+# pydantic, requests, selenium, Pillow, moviepy — pinning those here just causes
+# ResolutionImpossible conflicts. Let the two heavy libs drive those transitively.
+
 # Web framework
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pydantic-settings==2.5.2
+pydantic-settings>=2.4,<3
 
-# HTTP (download video from MinIO presigned URL)
-requests==2.32.3
-
-# Instagram private API (pure HTTP, no browser).
-# instagrapi pulls its own compatible moviepy/Pillow — don't pin them here.
+# Instagram private API (pure HTTP) — pulls pydantic==2.7.1, requests, Pillow, etc.
 instagrapi==2.1.2
 
-# TikTok upload (Selenium + headless Chromium)
+# TikTok upload (Selenium + headless Chromium) — pulls selenium, etc.
 tiktok-uploader==1.0.2
-selenium==4.25.0
