@@ -44,6 +44,7 @@ model Tenant {
     distributeJobs     DistributeJob[]
     accountGroups      AccountGroup[]
     proxies            Proxy[]
+    editProjects       EditProject[]
 
     @@map("tenants")
 }
@@ -1185,4 +1186,119 @@ model VideoSchedule {
     @@index([tenantId, isActive])
     @@index([nextRunAt])
     @@map("video_schedules")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART EDITOR (интеллектуальная нарезка / монтаж — apps/editor)
+// Два продукта на одном движке: uniquify_source (сырьё для уникализации) и
+// smart_montage (готовое субтитрированное видео). См. docs/SMART_EDITOR_PLAN.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum EditMode {
+    uniquify_source // нарезка/склейка → SourceVideo для уникализации
+    smart_montage   // готовое красивое видео: субтитры по речи, умный монтаж
+
+    @@map("edit_mode")
+}
+
+enum EditGeometry {
+    highlights // 1 длинное → K непересекающихся клипов
+    mix        // N источников → одна сборка
+
+    @@map("edit_geometry")
+}
+
+enum EditAudioMode {
+    keep    // оригинальный звук источника (+ опц. музыка)
+    replace // общая TTS-озвучка + музыка
+
+    @@map("edit_audio_mode")
+}
+
+enum EditProjectStatus {
+    draft     // создан, ожидает анализа
+    analyzing // идёт анализ источников
+    ready     // раскадровка готова, ждёт правки/подтверждения
+    rendering // идёт рендер подтверждённых клипов
+    completed // все клипы отрендерены
+    failed    // ошибка
+
+    @@map("edit_project_status")
+}
+
+model EditProject {
+    id                String            @id @default(uuid()) @db.Uuid
+    tenantId          String            @map("tenant_id") @db.Uuid
+    createdBy         String?           @map("created_by") @db.Uuid
+    name              String
+    mode              EditMode          @default(smart_montage)
+    geometry          EditGeometry      @default(highlights)
+    status            EditProjectStatus @default(draft)
+    // Render settings
+    aspect            String            @default("9:16") // 9:16 | 1:1 | 16:9 | 4:5
+    fps               Int               @default(30)
+    smartCrop         Boolean           @default(true) @map("smart_crop")
+    audioMode         EditAudioMode     @default(keep) @map("audio_mode")
+    subtitleStyle     String            @default("tiktok") @map("subtitle_style")
+    useVision         Boolean           @default(false) @map("use_vision")
+    // Selection targets
+    targetClipCount   Int               @default(5) @map("target_clip_count")
+    targetClipSeconds Decimal           @default(30) @map("target_clip_seconds") @db.Decimal(6, 2)
+    // Misc config (presets, music keys, voiceover key, etc.)
+    config            Json              @default("{}")
+    error             String?
+    createdAt         DateTime          @default(now()) @map("created_at")
+    updatedAt         DateTime          @updatedAt @map("updated_at")
+
+    tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    sources EditSource[]
+    clips   EditClip[]
+
+    @@index([tenantId, status])
+    @@map("edit_projects")
+}
+
+model EditSource {
+    id          String   @id @default(uuid()) @db.Uuid
+    projectId   String   @map("project_id") @db.Uuid
+    storageKey  String   @map("storage_key")
+    order       Int      @default(0)
+    durationSec Decimal? @map("duration_sec") @db.Decimal(8, 2)
+    width       Int?
+    height      Int?
+    fps         Decimal? @db.Decimal(5, 2)
+    // Full SourceAnalysis JSON (scene_breaks, audio_energy, beats, transcript, face/motion)
+    analysis    Json?
+    createdAt   DateTime @default(now()) @map("created_at")
+    updatedAt   DateTime @updatedAt @map("updated_at")
+
+    project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+    @@index([projectId])
+    @@map("edit_sources")
+}
+
+model EditClip {
+    id                  String   @id @default(uuid()) @db.Uuid
+    projectId           String   @map("project_id") @db.Uuid
+    title               String   @default("")
+    order               Int      @default(0)
+    included            Boolean  @default(true)
+    score               Decimal  @default(0) @db.Decimal(5, 4)
+    // EDL: ordered segments [{src_idx,start,end,score}], plus snippet/thumb
+    edl                 Json     @default("{}")
+    transcriptSnippet   String?  @map("transcript_snippet")
+    thumbnailKey        String?  @map("thumbnail_key")
+    // Set once rendered + (optionally) promoted into the uniquify pipeline
+    outputKey           String?  @map("output_key")
+    outputSourceVideoId String?  @map("output_source_video_id") @db.Uuid
+    durationSec         Decimal? @map("duration_sec") @db.Decimal(8, 2)
+    phash               String?
+    createdAt           DateTime @default(now()) @map("created_at")
+    updatedAt           DateTime @updatedAt @map("updated_at")
+
+    project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+    @@index([projectId, included])
+    @@map("edit_clips")
 }

@@ -1,6 +1,25 @@
-# kmmzavod — AI Video Generation SaaS Platform
+# kmmzavod — AI Video Factory SaaS Platform
 
-Мультитенантная SaaS-платформа для автоматической генерации видео с использованием HeyGen, Kling AI и других AI-провайдеров.
+Мультитенантная SaaS-платформа полного цикла для коротких видео: **AI-генерация** роликов
+(аватары HeyGen, видео Runway, изображения, GPT-сценарии через GPTunnel), **уникализация**
+отснятого материала (ИИ-озвучка + умный монтаж + субтитры + музыка), массовая **ферма
+аккаунтов** с прокси и fingerprint, и **раздача/публикация** в соцсети — официально (OAuth)
+или приватно (instagrapi / tiktok-uploader).
+
+## Возможности
+
+- **AI-генерация видео.** GPT-сценарий → аватар (HeyGen) / клипы (Runway) / изображения →
+  монтаж (FFmpeg: beat-sync, Ken Burns, переходы, субтитры, ducking музыки) → авто-публикация.
+- **Уникализация (Uniquify).** Загружаете своё видео товара → система пишет сценарий по теме
+  (1 вызов GPT), озвучивает его один раз (TTS, переиспользуется), делает **разный качественный
+  монтаж** под каждый аккаунт + разную фоновую музыку (разный аудио-фингерпринт) + субтитры по
+  озвучке. 30 аккаунтов = 30 уникальных видео с одной озвучкой и нулём лишних токенов.
+- **Музыкальная библиотека.** Загрузка royalty-free треков на тенант; ротация по вариантам.
+- **Ферма аккаунтов.** Группы, массовый импорт, авто-привязка прокси + device fingerprint,
+  health-score, дневные лимиты, warmup, анти-бан гейты (паузы, jitter, лимиты).
+- **Раздача (Distribute).** Round-robin вариантов по аккаунтам со staggered-расписанием.
+- **Публикация.** Официальные API (TikTok / Instagram / YouTube Shorts / PostBridge) **или**
+  приватный путь через сервис `publisher` (без ревью приложений, через сессии + прокси).
 
 ---
 
@@ -23,12 +42,14 @@
 │ Postgres│ │Redis │ │   Orchestrator    │
 │  :5433  │ │:6379 │ │  (BullMQ workers) │
 └─────────┘ └──────┘ └────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Video Processor    │
-                    │  Python/FastAPI :8000│
-                    └─────────────────────┘
-                  + MinIO S3 :9000/:9001
+                              │
+                  ┌───────────┴───────────┐
+       ┌──────────▼──────────┐ ┌──────────▼──────────┐
+       │  Video Processor    │ │     Publisher       │
+       │ Python/FastAPI :8000│ │ Python/FastAPI :8200│
+       │ FFmpeg montage/TTS  │ │ instagrapi/tiktok   │
+       └─────────────────────┘ └─────────────────────┘
+              + MinIO S3 :9000/:9001
 ```
 
 ### Сервисы
@@ -37,8 +58,9 @@
 | ----------------- | -------------------- | ------ | ------------------------------------ |
 | `api`             | Fastify + TypeScript | 3000   | REST API, авторизация, бизнес-логика |
 | `web`             | Next.js 14           | 3001   | Веб-интерфейс                        |
-| `orchestrator`    | Node.js + BullMQ     | —      | Очереди задач, AI-пайплайн           |
-| `video-processor` | Python + FastAPI     | 8000   | Сборка видео через FFmpeg            |
+| `orchestrator`    | Node.js + BullMQ     | —      | Очереди задач, AI/уникализация/публикация |
+| `video-processor` | Python + FastAPI     | 8000   | Монтаж/уникализация, FFmpeg, Whisper, beat-detect |
+| `publisher`       | Python + FastAPI     | 8200   | Приватная публикация (instagrapi / tiktok-uploader) |
 | `postgres`        | PostgreSQL 15        | 5433   | Основная БД                          |
 | `redis`           | Redis 7              | 6379   | Очереди, кэш, сессии                 |
 | `minio`           | MinIO                | 9000   | S3-совместимое хранилище файлов      |
@@ -112,18 +134,36 @@ REDIS_PASSWORD=              # пароль Redis
 MINIO_ROOT_USER=             # логин MinIO (например: kmmzavod)
 MINIO_ROOT_PASSWORD=         # пароль MinIO (мин. 8 символов)
 JWT_SECRET=                  # секрет JWT (мин. 32 символа, любая строка)
+ENCRYPTION_KEY=              # 32 байта hex (64 симв.) — шифрование токенов/сессий (обяз. в prod)
 
-# AI-провайдеры (нужны для генерации видео)
-OPENAI_API_KEY=sk-...        # OpenAI (GPT для сценариев)
+# AI-провайдеры
+GPTUNNEL_API_KEY=...         # GPTunnel: GPT-сценарии, TTS-озвучка, генерация изображений
+GPTUNNEL_BASE_URL=https://gptunnel.ru/v1
 HEYGEN_API_KEY=...           # HeyGen (аватар-видео)
-KLING_ACCESS_KEY=...         # Kling AI (video generation)
-KLING_SECRET_KEY=...
-IMAGE_GEN_API_KEY=...        # fal.ai / Replicate (генерация изображений)
-IMAGE_GEN_PROVIDER=fal       # fal | replicate | comfyui
+RUNWAY_API_KEY=...           # Runway (клипы / image-to-video)
+RUNWAY_VIDEO_MODEL=gen4_turbo
+IMAGE_GEN_API_KEY=...        # ключ провайдера изображений
+IMAGE_GEN_PROVIDER=runway    # runway | fal | replicate | comfyui | gemini | gptunnel
+GEMINI_API_KEY=              # опционально (если IMAGE_GEN_PROVIDER=gemini)
+
+# Соцсети — официальная публикация (опционально, по платформам)
+TIKTOK_CLIENT_KEY=
+TIKTOK_CLIENT_SECRET=
+INSTAGRAM_APP_ID=
+INSTAGRAM_APP_SECRET=
+YOUTUBE_CLIENT_ID=
+YOUTUBE_CLIENT_SECRET=
+POST_BRIDGE_API_KEY=
+
+# Приватная публикация (сервис publisher) — ключи не нужны, креды задаются на аккаунт в UI
+PUBLISHER_URL=http://publisher:8200
 
 # URL сервера (для production — ваш домен)
 PUBLIC_API_URL=https://api.yourdomain.com
 ```
+
+> **Уникализация и приватная публикация** не требуют отдельных ключей: озвучка/сценарии идут
+> через `GPTUNNEL_API_KEY`, а приватная публикация — через сессии аккаунтов (вводятся в UI фермы).
 
 ---
 
@@ -207,8 +247,9 @@ kmmzavod/
 │   │       ├── app/    # App Router страницы
 │   │       ├── components/ # UI компоненты
 │   │       └── lib/    # API клиенты, утилиты
-│   ├── orchestrator/   # BullMQ воркеры, AI-пайплайн
-│   └── video-processor/ # Python FastAPI + FFmpeg
+│   ├── orchestrator/   # BullMQ воркеры (AI-пайплайн, uniquify, distribute, publish)
+│   ├── video-processor/ # Python FastAPI: монтаж/уникализация (FFmpeg, Whisper, librosa)
+│   └── publisher/      # Python FastAPI: приватная публикация (instagrapi / tiktok-uploader)
 ├── packages/
 │   ├── db/             # Prisma схема и клиент
 │   │   └── prisma/
@@ -218,6 +259,7 @@ kmmzavod/
 ├── infra/
 │   ├── nginx/          # Nginx конфигурация
 │   └── postgres/       # Инициализация БД
+├── docs/               # Документация (в т.ч. PRIVATE_PUBLISHING_PLAN.md)
 ├── scripts/
 │   ├── setup.sh        # Локальная установка
 │   ├── server-setup.sh # Настройка сервера
@@ -273,6 +315,16 @@ docker compose down -v
 | GET   | `/api/v1/videos/:id`          | Детали видео + статус        |
 | GET   | `/api/v1/projects`            | Список проектов              |
 | POST  | `/api/v1/projects`            | Создать проект               |
+| POST  | `/api/v1/uniquify/source-videos/upload` | Загрузить исходное видео |
+| POST  | `/api/v1/uniquify/uniquify-jobs` | Создать задачу уникализации |
+| GET   | `/api/v1/uniquify/uniquify-jobs/:id` | Статус задачи + варианты |
+| POST  | `/api/v1/uniquify/uniquify-jobs/:id/distribute` | Раздать варианты по аккаунтам |
+| GET/POST | `/api/v1/uniquify/bgm`     | Библиотека фоновой музыки     |
+| GET   | `/api/v1/uniquify/voices`     | Список TTS-голосов (GPTunnel) |
+| POST  | `/api/v1/farm/social-accounts/bulk` | Массовый импорт аккаунтов (official/private) |
+| PUT   | `/api/v1/farm/social-accounts/:id/credentials` | Сменить метод/креды аккаунта |
+| POST  | `/api/v1/farm/proxies/bulk`   | Импорт прокси                |
+| GET   | `/api/v1/farm/metrics`        | Метрики фермы                |
 | GET   | `/api/v1/admin/stats`         | Статистика платформы (admin) |
 | GET   | `/api/v1/admin/users`         | Все пользователи (admin)     |
 | GET   | `/api/v1/admin/tenants`       | Все тенанты (admin)          |

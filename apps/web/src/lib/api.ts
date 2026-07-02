@@ -989,3 +989,113 @@ export const presetsApi: {
   pause: (id: string) =>
     apiFetch<{ preset: VideoPreset }>(`/api/v1/presets/${id}/pause`, { method: 'POST' }),
 };
+
+// ── Smart editor (intelligent cutting / montage) ──────────────────────────────
+
+export type EditMode = 'uniquify_source' | 'smart_montage';
+export type EditGeometry = 'highlights' | 'mix';
+export type EditAspect = '9:16' | '1:1' | '16:9' | '4:5';
+export type EditAudioMode = 'keep' | 'replace';
+export type EditProjectStatus =
+  | 'draft' | 'analyzing' | 'ready' | 'rendering' | 'completed' | 'failed';
+
+export interface EditProject {
+  id: string;
+  name: string;
+  mode: EditMode;
+  geometry: EditGeometry;
+  status: EditProjectStatus;
+  aspect: EditAspect;
+  fps: number;
+  smartCrop: boolean;
+  audioMode: EditAudioMode;
+  subtitleStyle: string;
+  useVision: boolean;
+  targetClipCount: number;
+  targetClipSeconds: number;
+  error?: string | null;
+  createdAt: string;
+  _count?: { sources: number; clips: number };
+}
+
+export interface EditSource {
+  id: string;
+  storageKey: string;
+  order: number;
+  durationSec?: number | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface EditClip {
+  id: string;
+  title: string;
+  order: number;
+  included: boolean;
+  score: number;
+  transcriptSnippet?: string | null;
+  thumbnailKey?: string | null;
+  thumbnailUrl?: string | null;
+  outputKey?: string | null;
+  outputUrl?: string | null;
+  durationSec?: number | null;
+  edl?: { segments?: { src_idx: number; start: number; end: number; score: number }[] };
+}
+
+export interface EditProjectDetail extends EditProject {
+  sources: EditSource[];
+  clips: EditClip[];
+}
+
+export interface EditOutput {
+  id: string;
+  title: string;
+  durationSec?: number | null;
+  phash?: string | null;
+  sourceVideoId?: string | null;
+  url: string | null;
+  thumbnailUrl: string | null;
+}
+
+export const editorApi = {
+  listProjects: () => apiFetch<{ projects: EditProject[] }>('/api/v1/editor/projects'),
+
+  getProject: (id: string) => apiFetch<EditProjectDetail>(`/api/v1/editor/projects/${id}`),
+
+  createProject: (body: Partial<EditProject> & { name: string }) =>
+    apiFetch<EditProject>('/api/v1/editor/projects', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+
+  uploadSource: async (projectId: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE}/api/v1/editor/projects/${projectId}/sources/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAccessToken()}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error((b as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<EditSource>;
+  },
+
+  analyze: (id: string) =>
+    apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/analyze`, { method: 'POST' }),
+
+  updateClip: (id: string, clipId: string, body: { included?: boolean; title?: string; order?: number }) =>
+    apiFetch<EditClip>(`/api/v1/editor/projects/${id}/clips/${clipId}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    }),
+
+  render: (id: string) =>
+    apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/render`, { method: 'POST' }),
+
+  outputs: (id: string) =>
+    apiFetch<{ outputs: EditOutput[] }>(`/api/v1/editor/projects/${id}/outputs`),
+
+  remove: (id: string) =>
+    apiFetch<void>(`/api/v1/editor/projects/${id}`, { method: 'DELETE' }),
+};

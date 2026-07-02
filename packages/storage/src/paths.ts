@@ -63,4 +63,12 @@ export const StoragePaths = {
   /** Uniquified variant thumbnail */
   uniqueVariantThumb: (tenantId: string, uniquifyJobId: string, variantId: string) =>
     `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variantId}_thumb.jpg`,
+
+  /** Smart-editor uploaded source video */
+  editorSource: (tenantId: string, projectId: string, sourceId: string, filename: string) =>
+    `tenants/${tenantId}/editor/${projectId}/sources/${sourceId}/${sanitizeFilename(filename)}`,
+
+  /** Smart-editor render output prefix (worker appends clip_NNN.mp4) */
+  editorOutputPrefix: (tenantId: string, projectId: string) =>
+    `tenants/${tenantId}/editor/${projectId}`,
 } as const;

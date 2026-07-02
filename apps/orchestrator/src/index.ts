@@ -42,6 +42,8 @@ import { createSchedulerWorker } from './workers/scheduler.worker';
 import { createUniquifyAnalyzeWorker } from './workers/uniquify-analyze.worker';
 import { createUniquifyRenderWorker } from './workers/uniquify-render.worker';
 import { createUniquifyStateWorker } from './workers/uniquify-state.worker';
+import { createEditorAnalyzeWorker } from './workers/editor-analyze.worker';
+import { createEditorRenderWorker } from './workers/editor-render.worker';
 import { createDistributeWorker } from './workers/distribute.worker';
 import { createShadowBanWorker } from './workers/shadow-ban.worker';
 import { startPipeline } from './pipeline/coordinator';
@@ -197,6 +199,10 @@ async function main() {
     db,
     connection,
   });
+
+  // ── Smart editor workers (intelligent cutting / montage) ───────────────────
+  const editorAnalyzeWorker = createEditorAnalyzeWorker({ db, storage, connection });
+  const editorRenderWorker = createEditorRenderWorker({ db, storage, connection });
 
   const distributeWorker = createDistributeWorker({
     db,
@@ -356,6 +362,8 @@ async function main() {
     uniquifyAnalyzeWorker,
     uniquifyRenderWorker,
     uniquifyStateWorker,
+    editorAnalyzeWorker,
+    editorRenderWorker,
     distributeWorker,
     shadowBanWorker,
   ];

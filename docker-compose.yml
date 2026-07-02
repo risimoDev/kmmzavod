@@ -151,6 +151,7 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       AI_PROXY_URL: ${AI_PROXY_URL:-}
       PUBLISHER_URL: http://publisher:8200
+      EDITOR_URL: http://editor:8300
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -228,6 +229,42 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Intelligent cutting / montage: analyse multiple sources → highlights / mixes
+  # for uniquification or finished subtitled videos. Local Whisper + ffmpeg/CV;
+  # LLM moment selection + vision via GPTunnel.
+  editor:
+    build:
+      context: apps/editor
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_SECURE: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-kmmzavod}
+      GPTUNNEL_API_KEY: ${GPTUNNEL_API_KEY}
+      GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
+      WHISPER_MODEL: ${EDITOR_WHISPER_MODEL:-small}
+      WHISPER_LANGUAGE: ${EDITOR_WHISPER_LANGUAGE:-ru}
+      LOG_LEVEL: ${EDITOR_LOG_LEVEL:-INFO}
+      MAX_CONCURRENT_JOBS: ${EDITOR_MAX_CONCURRENT_JOBS:-2}
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: "2.0"
+    depends_on:
       minio:
         condition: service_healthy
 

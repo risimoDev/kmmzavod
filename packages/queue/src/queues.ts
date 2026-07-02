@@ -142,6 +142,27 @@ export const QUEUE_DEFS = {
     },
     concurrency: 3,
   },
+  // ── Smart editor (intelligent cutting / montage — apps/editor) ────────────
+  EDITOR_ANALYZE: {
+    name: 'editor-analyze',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'exponential' as const, delay: 5000 },
+      removeOnComplete: { count: 200 },
+      removeOnFail: false,
+    },
+    concurrency: 1, // CPU-bound (ffmpeg + Whisper); leave cores for render + API
+  },
+  EDITOR_RENDER: {
+    name: 'editor-render',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'fixed' as const, delay: 10000 },
+      removeOnComplete: { count: 500 },
+      removeOnFail: false,
+    },
+    concurrency: 1, // sequential renders keep CPU saturated without thrashing
+  },
 } as const;
 
 export type QueueName = typeof QUEUE_DEFS[keyof typeof QUEUE_DEFS]['name'];
@@ -311,6 +332,31 @@ export interface ShadowBanCheckPayload {
   hashtags: string[];
 }
 
+// ── Smart editor payloads ─────────────────────────────────────────────────────
+
+/**
+ * Analyse all sources of an EditProject and produce a storyboard (EditClip rows).
+ * The worker loads the project + sources from the DB, presigns each source from
+ * MinIO, calls the editor /analyze endpoint, then persists EditSource.analysis +
+ * the proposed EditClip rows and flips the project to `ready`.
+ */
+export interface EditorAnalyzeJobPayload {
+  projectId: string;
+  tenantId: string;
+}
+
+/**
+ * Render the included (user-confirmed) clips of an EditProject. The worker
+ * presigns the sources (+ optional shared voiceover / BGM for audio_mode=replace),
+ * calls the editor /render endpoint, stores each output in MinIO and — for
+ * mode=uniquify_source — creates a SourceVideo row so the result is immediately
+ * selectable in the uniquification pipeline.
+ */
+export interface EditorRenderJobPayload {
+  projectId: string;
+  tenantId: string;
+}
+
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
 // Workers and index.ts use QUEUES['name'].foo to access config.
 
@@ -352,4 +398,6 @@ export const QUEUES: Record<string, QueueEntry> = {
   'uniquify-state':    flatten(QUEUE_DEFS.UNIQUIFY_STATE),
   'uniquify-distribute': flatten(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE),
   'shadow-ban-check':    flatten(QUEUE_DEFS.SHADOW_BAN_CHECK),
+  'editor-analyze':      flatten(QUEUE_DEFS.EDITOR_ANALYZE),
+  'editor-render':       flatten(QUEUE_DEFS.EDITOR_RENDER),
 };

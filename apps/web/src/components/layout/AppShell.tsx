@@ -78,6 +78,17 @@ const NAV_ITEMS = [
     ),
   },
   {
+    href: "/editor",
+    label: "Editor",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M3 5h18M3 12h18M3 19h18"/>
+        <rect x="6" y="3" width="4" height="4" rx="1"/>
+        <rect x="14" y="10" width="4" height="4" rx="1"/>
+      </svg>
+    ),
+  },
+  {
     href: "/farm",
     label: "Account Farm",
     icon: (
