@@ -69,17 +69,21 @@ def _detect_beats(path: str) -> list[float]:
         return []
 
 
-def _face_and_motion(path: str, duration: float) -> tuple[float, float]:
-    """Sampled face-presence ratio and average inter-frame motion (0..1). Optional."""
+def _face_and_motion(
+    path: str, duration: float,
+) -> tuple[float, float, list[tuple[float, float]], list[tuple[float, float]]]:
+    """Sampled face presence and inter-frame motion, both as whole-source
+    aggregates AND per-sample time series (so scoring can discriminate moments
+    within one video). Optional — returns zeros/empties without the CV stack."""
     try:
         import cv2
         import numpy as np
     except Exception:  # noqa: BLE001
-        return 0.0, 0.0
+        return 0.0, 0.0, [], []
     try:
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            return 0.0, 0.0
+            return 0.0, 0.0, [], []
         cascade_path = os.path.join(
             cv2.data.haarcascades, "haarcascade_frontalface_default.xml"
         )
@@ -88,6 +92,8 @@ def _face_and_motion(path: str, duration: float) -> tuple[float, float]:
         t, frames, face_hits = 0.0, 0, 0
         prev = None
         motion_sum = 0.0
+        motion_series: list[tuple[float, float]] = []
+        face_series: list[tuple[float, float]] = []
         while t < duration:
             cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
             ok, frame = cap.read()
@@ -97,22 +103,26 @@ def _face_and_motion(path: str, duration: float) -> tuple[float, float]:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             small = cv2.resize(gray, (160, 90))
             if prev is not None:
-                motion_sum += float(np.mean(cv2.absdiff(small, prev))) / 255.0
+                m = float(np.mean(cv2.absdiff(small, prev))) / 255.0
+                motion_sum += m
+                # Raw absdiff means are small (~0..0.2); ×5 spreads them over 0..1.
+                motion_series.append((round(t, 2), round(min(1.0, m * 5.0), 3)))
             prev = small
             if not face_cascade.empty():
                 faces = face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(60, 60))
+                face_series.append((round(t, 2), 1.0 if len(faces) > 0 else 0.0))
                 if len(faces) > 0:
                     face_hits += 1
             t += step
         cap.release()
         if frames == 0:
-            return 0.0, 0.0
+            return 0.0, 0.0, [], []
         face_ratio = round(face_hits / frames, 3)
         motion = round(min(1.0, motion_sum / max(1, frames - 1)), 3)
-        return face_ratio, motion
+        return face_ratio, motion, motion_series, face_series
     except Exception as e:  # noqa: BLE001
         logger.warning("Face/motion analysis failed for %s: %s", path, e)
-        return 0.0, 0.0
+        return 0.0, 0.0, [], []
 
 
 async def analyze_source(local_path: str, storage_key: str, *,
@@ -137,13 +147,14 @@ async def analyze_source(local_path: str, storage_key: str, *,
         else asyncio.sleep(0, result=[])
     )
 
-    scenes, energy, (face_ratio, motion), transcript, beats = await asyncio.gather(
-        scene_t, energy_t, motion_t, transcript_t, beats_t,
-    )
+    scenes, energy, (face_ratio, motion, motion_series, face_series), transcript, beats = \
+        await asyncio.gather(scene_t, energy_t, motion_t, transcript_t, beats_t)
     result.scene_breaks = scenes
     result.audio_energy = energy
     result.face_ratio = face_ratio
     result.motion_score = motion
+    result.motion_series = motion_series
+    result.face_series = face_series
     result.transcript = transcript
     result.beats = beats
     return result

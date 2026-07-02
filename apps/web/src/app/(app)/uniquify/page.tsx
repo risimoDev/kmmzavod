@@ -203,6 +203,13 @@ function UniquifyContent() {
         subtitle="Upload source videos and generate unique variants"
         actions={
           <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => router.push("/uniquify/schedules")}
+            >
+              Автопубликация
+            </Button>
             {tab === "sources" && (
               <>
                 <input

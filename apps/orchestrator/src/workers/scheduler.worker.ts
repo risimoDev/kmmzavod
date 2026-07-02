@@ -11,7 +11,13 @@
  * Uses a minimal built-in cron parser (5-field) with tz support.
  */
 import { Worker, type ConnectionOptions, type Queue } from 'bullmq';
-import { QUEUES, type SchedulerTickPayload, type PipelineJobPayload } from '@kmmzavod/queue';
+import {
+  QUEUES,
+  type SchedulerTickPayload,
+  type PipelineJobPayload,
+  type AccountWarmupPayload,
+  type DistributeJobPayload,
+} from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 
@@ -20,6 +26,8 @@ const logger = rootLogger.child({ worker: 'scheduler' });
 interface Deps {
   db: PrismaClient;
   pipelineQueue: Queue<PipelineJobPayload>;
+  warmupQueue?: Queue<AccountWarmupPayload>;
+  distributeQueue?: Queue<DistributeJobPayload>;
   connection: ConnectionOptions;
 }
 
@@ -94,12 +102,30 @@ function resolveEditStyle(editStyle: string): string {
 }
 
 export function createSchedulerWorker(deps: Deps): Worker {
-  const { db, pipelineQueue, connection } = deps;
+  const { db, pipelineQueue, warmupQueue, distributeQueue, connection } = deps;
 
   return new Worker<SchedulerTickPayload>(
     QUEUES['scheduler'].name,
     async () => {
       const now = new Date();
+
+      // ── Warmup promoter (ферма, приватные аккаунты) ──────────────────────
+      if (warmupQueue) {
+        try {
+          await runWarmupTick(db, warmupQueue, now);
+        } catch (err: any) {
+          logger.error({ err: err.message }, 'Scheduler: warmup tick failed');
+        }
+      }
+
+      // ── Distribute schedules (автопубликация уникализированных вариантов) ─
+      if (distributeQueue) {
+        try {
+          await runDistributeSchedulesTick(db, distributeQueue, now);
+        } catch (err: any) {
+          logger.error({ err: err.message }, 'Scheduler: distribute schedules tick failed');
+        }
+      }
 
       // ── Daily reset of per-account post counters ──────────────────────────
       // The distribute worker blocks accounts once dailyPostCount >= maxPostsPerDay.
@@ -216,4 +242,217 @@ export function createSchedulerWorker(deps: Deps): Worker {
       concurrency: QUEUES['scheduler'].concurrency,
     },
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Warmup promoter — прогрев приватных аккаунтов фермы (cold → warming → warm)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Re-warm an account no more often than every ~22h (worker adds day-level dedupe). */
+const WARMUP_INTERVAL_MS = 22 * 3600_000;
+/** TikTok has no safe automated warmup action — promote by account age instead. */
+const TIKTOK_WARMING_AFTER_MS = 24 * 3600_000;
+const TIKTOK_WARM_AFTER_MS = 72 * 3600_000;
+
+async function runWarmupTick(
+  db: PrismaClient,
+  warmupQueue: Queue<AccountWarmupPayload>,
+  now: Date,
+): Promise<void> {
+  // 1. Instagram private: schedule a warmup session ~once a day per account.
+  const igAccounts = await db.socialAccount.findMany({
+    where: {
+      isActive: true,
+      authMethod: 'private',
+      platform: 'instagram',
+      warmupStatus: { in: ['cold', 'warming'] },
+      healthScore: { gte: 30 },
+      OR: [
+        { lastWarmupAt: null },
+        { lastWarmupAt: { lt: new Date(now.getTime() - WARMUP_INTERVAL_MS) } },
+      ],
+    },
+    select: { id: true, tenantId: true },
+    take: 200,
+  });
+
+  for (const acc of igAccounts) {
+    // Daily jobId dedupes against repeatable 60s ticks; random delay up to 3h
+    // spreads sessions across the day so the farm does not act in lock-step.
+    const day = now.toISOString().slice(0, 10);
+    await warmupQueue.add(
+      `warmup:${acc.id}`,
+      { socialAccountId: acc.id, tenantId: acc.tenantId },
+      {
+        jobId: `warmup-${acc.id}-${day}`,
+        delay: Math.floor(Math.random() * 3 * 3600_000),
+      },
+    );
+  }
+  if (igAccounts.length > 0) {
+    logger.info({ count: igAccounts.length }, 'Scheduler: warmup sessions enqueued');
+  }
+
+  // 2. TikTok private: no publisher warmup action exists (session comes from a
+  //    real logged-in account), so promote purely by account age.
+  const [tkWarming, tkWarm] = await Promise.all([
+    db.socialAccount.updateMany({
+      where: {
+        isActive: true,
+        authMethod: 'private',
+        platform: 'tiktok',
+        warmupStatus: 'cold',
+        createdAt: { lt: new Date(now.getTime() - TIKTOK_WARMING_AFTER_MS) },
+      },
+      data: { warmupStatus: 'warming' },
+    }),
+    db.socialAccount.updateMany({
+      where: {
+        isActive: true,
+        authMethod: 'private',
+        platform: 'tiktok',
+        warmupStatus: 'warming',
+        createdAt: { lt: new Date(now.getTime() - TIKTOK_WARM_AFTER_MS) },
+      },
+      data: { warmupStatus: 'warm' },
+    }),
+  ]);
+  if (tkWarming.count > 0 || tkWarm.count > 0) {
+    logger.info({ toWarming: tkWarming.count, toWarm: tkWarm.count }, 'Scheduler: TikTok accounts promoted by age');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Distribute schedules — автопубликация готовых уникализированных вариантов
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runDistributeSchedulesTick(
+  db: PrismaClient,
+  distributeQueue: Queue<DistributeJobPayload>,
+  now: Date,
+): Promise<void> {
+  const dueSchedules = await db.distributeSchedule.findMany({
+    where: { isActive: true, nextRunAt: { lte: now } },
+  });
+  if (dueSchedules.length === 0) return;
+
+  for (const schedule of dueSchedules) {
+    // Always advance the schedule first so a failing run cannot re-fire every tick.
+    const nextRun = nextCronDate(schedule.cronExpression, schedule.timezone ?? 'Europe/Moscow', now);
+    await db.distributeSchedule.update({
+      where: { id: schedule.id },
+      data: { lastRunAt: now, nextRunAt: nextRun, totalRuns: { increment: 1 } },
+    });
+
+    try {
+      // 1. Resolve target accounts: explicit ids ∪ account group members.
+      //    Cheap pre-filters only — the distribute worker re-checks daily limit,
+      //    health, 3h gap and warmup gate at send time.
+      const accounts = await db.socialAccount.findMany({
+        where: {
+          tenantId: schedule.tenantId,
+          isActive: true,
+          healthScore: { gte: 30 },
+          NOT: { AND: [{ authMethod: 'private' }, { warmupStatus: 'cold' }] },
+          OR: [
+            ...(schedule.socialAccountIds.length > 0 ? [{ id: { in: schedule.socialAccountIds } }] : []),
+            ...(schedule.accountGroupId ? [{ accountGroupId: schedule.accountGroupId }] : []),
+          ],
+        },
+        select: { id: true },
+      });
+      if (accounts.length === 0) {
+        await db.distributeSchedule.update({
+          where: { id: schedule.id },
+          data: { lastError: 'No eligible accounts (inactive, cold or low health)' },
+        });
+        continue;
+      }
+
+      // 2. Pick fresh variants: completed, never scheduled or published anywhere.
+      const variants = await db.uniqueVariant.findMany({
+        where: {
+          tenantId: schedule.tenantId,
+          status: 'completed',
+          outputKey: { not: null },
+          ...(schedule.uniquifyJobId ? { uniquifyJobId: schedule.uniquifyJobId } : {}),
+          publishJobs: { none: {} },
+          distributeItems: { none: {} },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: accounts.length * schedule.variantsPerAccount,
+        select: { id: true, uniquifyJobId: true },
+      });
+      if (variants.length === 0) {
+        await db.distributeSchedule.update({
+          where: { id: schedule.id },
+          data: { lastError: 'No unpublished completed variants available' },
+        });
+        continue;
+      }
+
+      // 3. Round-robin variants across accounts (≤ variantsPerAccount each),
+      //    grouped by uniquify job because DistributeJob is scoped to one.
+      const assignments = variants.map((v, i) => ({
+        variantId: v.id,
+        uniquifyJobId: v.uniquifyJobId,
+        socialAccountId: accounts[i % accounts.length].id,
+      }));
+      const byUniquifyJob = new Map<string, typeof assignments>();
+      for (const a of assignments) {
+        const list = byUniquifyJob.get(a.uniquifyJobId) ?? [];
+        list.push(a);
+        byUniquifyJob.set(a.uniquifyJobId, list);
+      }
+
+      for (const [uniquifyJobId, items] of byUniquifyJob) {
+        const distJob = await db.$transaction(async (tx) => {
+          const dj = await tx.distributeJob.create({
+            data: {
+              tenantId: schedule.tenantId,
+              uniquifyJobId,
+              status: 'pending',
+              staggerMinutes: schedule.staggerMinutes,
+              captionTemplate: schedule.captionTemplate,
+              hashtags: schedule.hashtags,
+              totalItems: items.length,
+            },
+          });
+          await tx.distributeItem.createMany({
+            data: items.map((item) => ({
+              distributeJobId: dj.id,
+              uniqueVariantId: item.variantId,
+              socialAccountId: item.socialAccountId,
+              status: 'pending' as const,
+            })),
+          });
+          return dj;
+        });
+
+        await distributeQueue.add(
+          `distribute-${distJob.id}`,
+          { distributeJobId: distJob.id, tenantId: schedule.tenantId } satisfies DistributeJobPayload,
+        );
+
+        logger.info(
+          { scheduleId: schedule.id, distributeJobId: distJob.id, uniquifyJobId, items: items.length, nextRun },
+          'Scheduler: auto-distribute job created',
+        );
+      }
+
+      // Clear stale error from previous runs
+      if (schedule.lastError) {
+        await db.distributeSchedule.update({
+          where: { id: schedule.id },
+          data: { lastError: null },
+        });
+      }
+    } catch (err: any) {
+      logger.error({ scheduleId: schedule.id, err: err.message }, 'Scheduler: distribute schedule failed');
+      await db.distributeSchedule.update({
+        where: { id: schedule.id },
+        data: { lastError: String(err.message ?? err).slice(0, 1000) },
+      }).catch(() => {});
+    }
+  }
 }

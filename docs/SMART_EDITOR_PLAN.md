@@ -13,15 +13,38 @@
 - ✅ **Инфра (Фаза 0):** docker-compose `editor:8300` + env; Prisma `EditProject/EditSource/EditClip`
   + миграция `20260626120000_add_smart_editor` (схема валидна); orchestrator очереди
   `editor-analyze`/`editor-render` + payloads + `services/editor.ts`.
-- 🟦 **Orchestrator-воркеры** (Фаза 4): `editor-analyze.worker.ts` + `editor-render.worker.ts`,
-  зарегистрированы в `index.ts`. Сверены по паттернам, **не скомпилированы** (нет установленных deps).
-- 🟦 **Fastify API `/editor/*`** (Фаза 4): `editor.routes.ts` — projects CRUD, sources/upload,
+- ✅ **Orchestrator-воркеры** (Фаза 4): `editor-analyze.worker.ts` + `editor-render.worker.ts`,
+  зарегистрированы в `index.ts`. **Скомпилированы 2026-07-03**: `tsc --noEmit` чисто.
+- ✅ **Fastify API `/editor/*`** (Фаза 4): `editor.routes.ts` — projects CRUD, sources/upload,
   analyze, clips PATCH, render, outputs; очереди в `lib/queues.ts`, пути в `StoragePaths`,
-  зарегистрирован в `app.ts`. Сверено по паттернам, не скомпилировано.
-- 🟦 **Web UI** (Фаза 4): `apps/web/src/app/(app)/editor/page.tsx` (список+создание) и
+  зарегистрирован в `app.ts`. **Скомпилировано 2026-07-03**: `tsc --noEmit` чисто.
+- ✅ **Web UI** (Фаза 4): `apps/web/src/app/(app)/editor/page.tsx` (список+создание) и
   `editor/[id]/page.tsx` (загрузка → раскадровка с thumbnails/транскриптом → правка вкл-выкл/титры
   → render с поллингом → выходы: плееры/скачать/«в уникализацию»). `editorApi` в `lib/api.ts`,
-  пункт «Editor» в `AppShell.tsx`. Сверено по паттернам, не скомпилировано.
+  пункт «Editor» в `AppShell.tsx`. **`next build` прошёл 2026-07-03.**
+
+- ✅ **Апгрейд движка (2026-07-03)** — качество отбора и рендера:
+  - **Time-series анализ**: motion/face теперь временные ряды (`motion_series`/`face_series`
+    в SourceAnalysis), скоринг различает моменты ВНУТРИ видео (раньше 40% веса были
+    константой на весь ролик). Скаляры сохранены для совместимости/фолбэка.
+  - **Речевой скоринг**: `speech_salience` (покрытие речью + hook-маркеры: вопросы,
+    числа, «секрет/ошибка/способ»...) с весом 0.30 — раньше транскрипт в скоринге
+    не участвовал вовсе.
+  - **Снап границ**: `snap_window` двигает границы клипа к паузам речи (гэпы между
+    словами ≥0.35с) и scene breaks — клип не начинается с полуслова.
+  - **LLM-отбор по полному транскрипту**: `_llm_propose` отдаёт модели всю
+    расшифровку с таймкодами → она сама предлагает диапазоны (хук/конфликт/панчлайн);
+    мерж с эвристикой, fallback на старый re-rank. Дедуп кандидатов по pHash кадров.
+  - **Трекинг smart-crop**: 6 сэмплов лица на сегмент → EMA-сглаженный путь →
+    кусочно-линейный ffmpeg-expr в crop (кроп следует за лицом, не прыгает).
+    **Проверено ffmpeg-прогоном с движущимся треком (RC 0).**
+  - **Karaoke-субтитры**: word-timestamps из Whisper → короткие строки 2–4 слова,
+    активное слово подсвечивается (`\k`-теги, SecondaryColour→Primary).
+    **Проверено: ASS генерится и жжётся ffmpeg (RC 0).**
+  - **Beat-snap в mix**: границы сегментов по бит-сетке librosa (было: только сцены).
+  - **Sidechain-ducking в keep+BGM** (музыка приседает под речь, как в replace).
+  - **Проверено e2e**: CLI render на синтетике → 1080×1920 и 1080×1080 mp4, quality
+    gate ok; юнит-прогон скоринга: hook-окно 0.808 vs скучное 0.105 (было ~равно).
 
 **ИТОГ: фича реализована end-to-end** (сервис + воркеры + API + web). Осталось опционально:
 media-core (3b) и полировка (5). Backend-движок проверен реальным ffmpeg-рендером; TS-слои

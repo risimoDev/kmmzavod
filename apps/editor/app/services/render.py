@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from app.config import settings
 from app.models import AudioMode, EditMode
 from app.services import ffmpeg as fx
-from app.services.subtitle import SubLine, generate_ass
+from app.services.subtitle import SubLine, SubWord, generate_ass
 
 logger = logging.getLogger(__name__)
 
@@ -55,36 +55,72 @@ class RenderResult:
     quality_reason: str = ""
 
 
-def _face_center_x(src_path: str, t: float) -> float:
-    """Detect a face near time ``t`` and return its horizontal centre (0..1)."""
+def _face_track(src_path: str, start: float, end: float,
+                samples: int = 6) -> list[tuple[float, float]]:
+    """Sample the largest face across the segment → EMA-smoothed keyframes of
+    (t_rel_sec, bias_x 0..1). One capture, N seeks. Gaps are filled from the
+    nearest detection so the crop holds position while the face is hidden."""
+    dur = max(0.1, end - start)
     try:
         import cv2
-        cap = cv2.VideoCapture(src_path)
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok:
-            return 0.5
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         cascade = cv2.CascadeClassifier(
             os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
-        if cascade.empty():
-            return 0.5
-        faces = cascade.detectMultiScale(gray, 1.2, 5, minSize=(50, 50))
-        if len(faces) == 0:
-            return 0.5
-        # Largest face.
-        x, _y, w, _h = max(faces, key=lambda f: f[2] * f[3])
-        return min(1.0, max(0.0, (x + w / 2.0) / max(1, frame.shape[1])))
+        cap = cv2.VideoCapture(src_path)
+        if cascade.empty() or not cap.isOpened():
+            return [(0.0, 0.5)]
+        times = [start + dur * (i + 0.5) / samples for i in range(samples)]
+        raw: list[float | None] = []
+        for t in times:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
+            ok, frame = cap.read()
+            if not ok:
+                raw.append(None)
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, 1.2, 5, minSize=(50, 50))
+            if len(faces) == 0:
+                raw.append(None)
+                continue
+            x, _y, w, _h = max(faces, key=lambda f: f[2] * f[3])
+            raw.append(min(1.0, max(0.0, (x + w / 2.0) / max(1, frame.shape[1]))))
+        cap.release()
+        if all(v is None for v in raw):
+            return [(0.0, 0.5)]
+        # Fill gaps from the nearest detection, then EMA-smooth.
+        known = [(i, v) for i, v in enumerate(raw) if v is not None]
+        filled = [v if v is not None
+                  else min(known, key=lambda kv: abs(kv[0] - i))[1]
+                  for i, v in enumerate(raw)]
+        smoothed: list[float] = []
+        for v in filled:
+            smoothed.append(v if not smoothed else 0.6 * smoothed[-1] + 0.4 * v)
+        track = [(round(t - start, 3), round(b, 3)) for t, b in zip(times, smoothed)]
+        # Static shot → collapse to one keyframe (cheap constant crop).
+        if max(b for _t, b in track) - min(b for _t, b in track) < 0.04:
+            return [(0.0, track[len(track) // 2][1])]
+        return track
     except Exception:  # noqa: BLE001
-        return 0.5
+        return [(0.0, 0.5)]
 
 
-def _reframe_vf(out_w: int, out_h: int, bias_x: float) -> str:
-    """Cover-scale to fill the target box, then crop with a horizontal bias."""
+def _bias_expr(track: list[tuple[float, float]]) -> str:
+    """Piecewise-linear ffmpeg expression bias(t) through the track keyframes
+    (constant before the first and after the last)."""
+    if len(track) == 1:
+        return f"{track[0][1]:.3f}"
+    expr = f"{track[-1][1]:.3f}"
+    for (t0, b0), (t1, b1) in reversed(list(zip(track, track[1:]))):
+        seg = f"({b0:.3f}+({b1:.3f}-{b0:.3f})*(t-{t0:.3f})/{max(t1 - t0, 0.01):.3f})"
+        expr = f"if(lt(t\\,{t1:.3f})\\,{seg}\\,{expr})"
+    return f"if(lt(t\\,{track[0][0]:.3f})\\,{track[0][1]:.3f}\\,{expr})"
+
+
+def _reframe_vf(out_w: int, out_h: int, track: list[tuple[float, float]]) -> str:
+    """Cover-scale to fill the target box, then crop along the (possibly moving)
+    horizontal bias path — the crop follows the tracked face."""
     return (
         f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={out_w}:{out_h}:(in_w-{out_w})*{bias_x:.3f}:(in_h-{out_h})/2,"
+        f"crop={out_w}:{out_h}:x=(in_w-{out_w})*{_bias_expr(track)}:y=(in_h-{out_h})/2,"
         f"format=yuv420p"
     )
 
@@ -92,8 +128,8 @@ def _reframe_vf(out_w: int, out_h: int, bias_x: float) -> str:
 def _prepare_segment(src_path: str, start: float, end: float, out_path: str,
                      out_w: int, out_h: int, fps: int, keep_audio: bool,
                      smart_crop: bool, threads: int) -> None:
-    bias_x = _face_center_x(src_path, (start + end) / 2.0) if smart_crop else 0.5
-    vf = _reframe_vf(out_w, out_h, bias_x) + f",fps={fps}"
+    track = _face_track(src_path, start, end) if smart_crop else [(0.0, 0.5)]
+    vf = _reframe_vf(out_w, out_h, track) + f",fps={fps}"
     dur = max(0.1, end - start)
 
     cmd = [fx._bin("ffmpeg"), "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", src_path]
@@ -223,7 +259,8 @@ def _build_voiceover_bed(video_path: str, voiceover_path: str, bgm_path: str | N
 
 
 def _transcribe_for_subs(audio_path: str) -> list[SubLine]:
-    """Transcribe the final audio into subtitle lines (output timeline). Optional."""
+    """Transcribe the final audio into subtitle lines with word timestamps
+    (output timeline) — enables karaoke-style word highlighting. Optional."""
     try:
         from faster_whisper import WhisperModel
     except Exception:  # noqa: BLE001
@@ -231,9 +268,16 @@ def _transcribe_for_subs(audio_path: str) -> list[SubLine]:
     try:
         model = WhisperModel(settings.whisper_model, device=settings.whisper_device,
                              compute_type=settings.whisper_compute_type)
-        segments, _ = model.transcribe(audio_path, language=settings.whisper_language)
-        return [SubLine(start=s.start, end=s.end, text=s.text.strip())
-                for s in segments if s.text.strip()]
+        segments, _ = model.transcribe(audio_path, language=settings.whisper_language,
+                                       word_timestamps=True, vad_filter=True)
+        return [
+            SubLine(
+                start=s.start, end=s.end, text=s.text.strip(),
+                words=[SubWord(start=w.start, end=w.end, text=w.word.strip())
+                       for w in (s.words or []) if w.word.strip()],
+            )
+            for s in segments if s.text.strip()
+        ]
     except Exception as e:  # noqa: BLE001
         logger.warning("subtitle transcription failed: %s", e)
         return []
@@ -288,14 +332,17 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
         pre_final = os.path.join(work_dir, "with_voice.mp4")
         _build_voiceover_bed(assembled, voiceover_path, bgm_path, pre_final, threads)
     elif keep_audio and bgm_path:
-        # Mix a quiet ducked BGM under the original audio.
+        # BGM under the original audio, side-chain-ducked by the speech so the
+        # music breathes: quiet under voice, fuller in the gaps.
         pre_final = os.path.join(work_dir, "with_bgm.mp4")
         dur = fx.probe(assembled).duration
         fade = max(0.0, dur - 2.0)
-        fc = (f"[1:a]aloop=loop=-1:size=2147483647,aformat=sample_rates=44100:channel_layouts=stereo,"
-              f"atrim=duration={dur:.3f},volume=0.10,afade=t=in:st=0:d=1.2,"
+        fc = (f"[0:a]asplit=2[orig][sc];"
+              f"[1:a]aloop=loop=-1:size=2147483647,aformat=sample_rates=44100:channel_layouts=stereo,"
+              f"atrim=duration={dur:.3f},volume=0.14,afade=t=in:st=0:d=1.2,"
               f"afade=t=out:st={fade:.3f}:d=2.0[bg];"
-              f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]")
+              f"[bg][sc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[bgd];"
+              f"[orig][bgd]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]")
         _run([fx._bin("ffmpeg"), "-y", "-i", assembled, "-i", bgm_path,
               "-filter_complex", fc, "-map", "0:v", "-map", "[a]",
               "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.3f}",

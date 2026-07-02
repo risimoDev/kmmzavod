@@ -30,6 +30,7 @@ import { presetRoutes } from './routes/presets.routes';
 import { uniquifyRoutes } from './routes/uniquify.routes';
 import { accountFarmRoutes } from './routes/account-farm.routes';
 import { editorRoutes } from './routes/editor.routes';
+import { distributeScheduleRoutes } from './routes/distribute-schedules.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -135,6 +136,7 @@ export async function buildApp() {
   app.register(uniquifyRoutes,  { prefix: '/api/v1/uniquify' });
   app.register(editorRoutes,    { prefix: '/api/v1/editor' });
   app.register(accountFarmRoutes, { prefix: '/api/v1/farm' });
+  app.register(distributeScheduleRoutes, { prefix: '/api/v1/distribute-schedules' });
 
   // Health check — includes Redis and DB liveness
   app.get('/health', { logLevel: 'warn' }, async (_req, reply) => {

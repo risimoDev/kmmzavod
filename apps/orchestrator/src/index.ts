@@ -29,6 +29,7 @@ import type {
   UniquifyStateJobPayload,
   DistributeJobPayload,
   ShadowBanCheckPayload,
+  AccountWarmupPayload,
 } from '@kmmzavod/queue';
 
 import { createGptScriptWorker } from './workers/gpt-script.worker';
@@ -46,6 +47,7 @@ import { createEditorAnalyzeWorker } from './workers/editor-analyze.worker';
 import { createEditorRenderWorker } from './workers/editor-render.worker';
 import { createDistributeWorker } from './workers/distribute.worker';
 import { createShadowBanWorker } from './workers/shadow-ban.worker';
+import { createAccountWarmupWorker } from './workers/account-warmup.worker';
 import { startPipeline } from './pipeline/coordinator';
 import { loadProxyConfig } from './lib/proxy';
 
@@ -107,6 +109,7 @@ async function main() {
   const uniquifyStateQueue = new Queue<UniquifyStateJobPayload>(QUEUES['uniquify-state'].name, { connection });
   const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection });
   const shadowBanCheckQueue = new Queue<ShadowBanCheckPayload>(QUEUES['shadow-ban-check'].name, { connection });
+  const accountWarmupQueue = new Queue<AccountWarmupPayload>(QUEUES['account-warmup'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -172,10 +175,13 @@ async function main() {
     youtubeClientSecret: config.YOUTUBE_CLIENT_SECRET,
   });
 
-  // Scheduler worker — fires every 60 seconds, checks for due VideoSchedule rows
+  // Scheduler worker — fires every 60 seconds: due presets, warmup promoter,
+  // distribute schedules (auto-publish of uniquified variants)
   const schedulerWorker = createSchedulerWorker({
     db,
     pipelineQueue,
+    warmupQueue: accountWarmupQueue,
+    distributeQueue,
     connection,
   });
 
@@ -211,6 +217,12 @@ async function main() {
   });
 
   const shadowBanWorker = createShadowBanWorker({
+    db,
+    connection,
+  });
+
+  // Warmup worker — прогрев приватных аккаунтов фермы (ставится scheduler'ом)
+  const accountWarmupWorker = createAccountWarmupWorker({
     db,
     connection,
   });
@@ -352,6 +364,7 @@ async function main() {
 
   const allWorkers = [
     pipelineWorker,
+    schedulerWorker,
     gptWorker,
     heygenWorker,
     runwayWorker,
@@ -366,6 +379,7 @@ async function main() {
     editorRenderWorker,
     distributeWorker,
     shadowBanWorker,
+    accountWarmupWorker,
   ];
 
   // Логируем активные воркеры
@@ -438,6 +452,7 @@ async function main() {
       uniquifyStateQueue.close(),
       distributeQueue.close(),
       shadowBanCheckQueue.close(),
+      accountWarmupQueue.close(),
     ]);
     await db.$disconnect();
     try { await connection.del(HEARTBEAT_KEY); } catch {}

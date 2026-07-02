@@ -60,7 +60,7 @@ def analyze(sources, geometry, clip_count, target_seconds, no_transcript, output
     async def _run():
         analyses: list[SourceAnalysis] = []
         for src in sources:
-            click.echo(f"Analysing {src} …")
+            click.echo(f"Analysing {src} ...")
             analyses.append(await analyze_source(src, storage_key=src,
                                                  with_transcript=not no_transcript))
         clips = selector.build_clips(
@@ -85,9 +85,9 @@ def analyze(sources, geometry, clip_count, target_seconds, no_transcript, output
         seg_desc = ", ".join(
             f"src{s.src_idx}[{s.start:.1f}-{s.end:.1f}] {s.score:.2f}" for s in c.segments
         )
-        click.echo(f"  • {c.title}: {seg_desc}")
+        click.echo(f"  - {c.title}: {seg_desc}")
         if c.transcript_snippet:
-            click.echo(f"      “{c.transcript_snippet}”")
+            click.echo(f'      "{c.transcript_snippet}"')
 
     if output:
         payload = {
@@ -95,7 +95,7 @@ def analyze(sources, geometry, clip_count, target_seconds, no_transcript, output
             "clips": [c.model_dump() for c in clips],
         }
         Path(output).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        click.secho(f"\n✓ JSON written to {output}", fg="green")
+        click.secho(f"\n[done] JSON written to {output}", fg="green")
 
 
 @cli.command()
@@ -123,7 +123,7 @@ def render(sources, geometry, mode, aspect, audio, target_seconds, clip_count,
         analyses = []
         locals_by_idx = list(sources)
         for src in sources:
-            click.echo(f"Analysing {src} …")
+            click.echo(f"Analysing {src} ...")
             analyses.append(await analyze_source(src, storage_key=src))
         clips = selector.build_clips(analyses, Geometry(geometry),
                                      target_count=clip_count, target_seconds=target_seconds)
@@ -145,8 +145,9 @@ def render(sources, geometry, mode, aspect, audio, target_seconds, clip_count,
     outputs = asyncio.run(_run())
     for r in outputs:
         q = "ok" if r.quality_ok else f"FLAGGED: {r.quality_reason}"
+        # ASCII marker: Windows consoles with cp1251 crash on fancy glyphs.
         click.secho(
-            f"✓ {r.output_path} ({r.duration_sec:.1f}s {r.width}x{r.height} "
+            f"[done] {r.output_path} ({r.duration_sec:.1f}s {r.width}x{r.height} "
             f"{r.file_size_bytes // 1024} KB phash={r.phash} quality={q})",
             fg="green" if r.quality_ok else "yellow")
 

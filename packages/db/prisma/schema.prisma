@@ -45,6 +45,7 @@ model Tenant {
     accountGroups      AccountGroup[]
     proxies            Proxy[]
     editProjects       EditProject[]
+    distributeSchedules DistributeSchedule[]
 
     @@map("tenants")
 }
@@ -843,6 +844,9 @@ model SocialAccount {
     proxyId           String?        @map("proxy_id") @db.Uuid
     deviceFingerprint Json?          @map("device_fingerprint")
     warmupStatus      String         @default("cold") @map("warmup_status") // cold, warming, warm
+    warmupStartedAt   DateTime?      @map("warmup_started_at") // first successful warmup action
+    lastWarmupAt      DateTime?      @map("last_warmup_at") // last warmup action (scheduler paces ~1/day)
+    warmupCount       Int            @default(0) @map("warmup_count") // successful warmup actions total
     healthScore       Int            @default(100) @map("health_score") // 0-100
     dailyPostCount    Int            @default(0) @map("daily_post_count")
     lastPostAt        DateTime?      @map("last_post_at")
@@ -1186,6 +1190,45 @@ model VideoSchedule {
     @@index([tenantId, isActive])
     @@index([nextRunAt])
     @@map("video_schedules")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISTRIBUTE SCHEDULES (CRON автопубликация готовых уникализированных вариантов)
+// Каждый тик: берём ещё не публиковавшиеся completed UniqueVariant и раздаём их
+// по аккаунтам фермы через стандартный DistributeJob (все анти-бан гейты в силе).
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DistributeSchedule {
+    id                 String    @id @default(uuid()) @db.Uuid
+    tenantId           String    @map("tenant_id") @db.Uuid
+    name               String    @default("Auto-distribute")
+    isActive           Boolean   @default(true) @map("is_active")
+    cronExpression     String    @map("cron_expression") // e.g. "0 12,18 * * *"
+    timezone           String    @default("Europe/Moscow")
+    // Source filter: only variants of this uniquify job (null = any completed
+    // variant of the tenant that was never scheduled/published before)
+    uniquifyJobId      String?   @map("uniquify_job_id") @db.Uuid
+    // Target accounts: explicit ids and/or an entire account group
+    socialAccountIds   String[]  @map("social_account_ids") @db.Uuid
+    accountGroupId     String?   @map("account_group_id") @db.Uuid
+    // How many variants each account receives per tick
+    variantsPerAccount Int       @default(1) @map("variants_per_account")
+    staggerMinutes     Int       @default(15) @map("stagger_minutes")
+    captionTemplate    String?   @map("caption_template") @db.Text
+    hashtags           String[]  @default([])
+    // Stats
+    lastRunAt          DateTime? @map("last_run_at")
+    nextRunAt          DateTime? @map("next_run_at")
+    totalRuns          Int       @default(0) @map("total_runs")
+    lastError          String?   @map("last_error")
+    createdAt          DateTime  @default(now()) @map("created_at")
+    updatedAt          DateTime  @updatedAt @map("updated_at")
+
+    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+    @@index([tenantId, isActive])
+    @@index([nextRunAt])
+    @@map("distribute_schedules")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

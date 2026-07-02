@@ -133,6 +133,16 @@ export const QUEUE_DEFS = {
     },
     concurrency: 2,
   },
+  ACCOUNT_WARMUP: {
+    name: 'account-warmup',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'fixed' as const, delay: 60000 },
+      removeOnComplete: { count: 500 },
+      removeOnFail: { count: 200 },
+    },
+    concurrency: 1, // warmup is anti-ban pacing — never hammer accounts in parallel
+  },
   SHADOW_BAN_CHECK: {
     name: 'shadow-ban-check',
     defaultJobOptions: {
@@ -323,6 +333,12 @@ export interface DistributeJobPayload {
   tenantId: string;
 }
 
+/** Run one warmup session for a private farm account (scheduler paces ~1/day). */
+export interface AccountWarmupPayload {
+  socialAccountId: string;
+  tenantId: string;
+}
+
 export interface ShadowBanCheckPayload {
   publishJobId: string;
   socialAccountId: string;
@@ -398,6 +414,7 @@ export const QUEUES: Record<string, QueueEntry> = {
   'uniquify-state':    flatten(QUEUE_DEFS.UNIQUIFY_STATE),
   'uniquify-distribute': flatten(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE),
   'shadow-ban-check':    flatten(QUEUE_DEFS.SHADOW_BAN_CHECK),
+  'account-warmup':      flatten(QUEUE_DEFS.ACCOUNT_WARMUP),
   'editor-analyze':      flatten(QUEUE_DEFS.EDITOR_ANALYZE),
   'editor-render':       flatten(QUEUE_DEFS.EDITOR_RENDER),
 };

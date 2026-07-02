@@ -790,6 +790,63 @@ export interface DistributeJobDetail extends DistributeJob {
   items: DistributeItem[];
 }
 
+// ── Distribute schedules (CRON автопубликация уникализированных вариантов) ───
+
+export interface DistributeSchedule {
+  id: string;
+  name: string;
+  isActive: boolean;
+  cronExpression: string;
+  timezone: string;
+  uniquifyJobId: string | null;
+  socialAccountIds: string[];
+  accountGroupId: string | null;
+  variantsPerAccount: number;
+  staggerMinutes: number;
+  captionTemplate: string | null;
+  hashtags: string[];
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  totalRuns: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DistributeScheduleInput {
+  name?: string;
+  cronExpression: string;
+  timezone?: string;
+  isActive?: boolean;
+  uniquifyJobId?: string;
+  socialAccountIds?: string[];
+  accountGroupId?: string;
+  variantsPerAccount?: number;
+  staggerMinutes?: number;
+  captionTemplate?: string;
+  hashtags?: string[];
+}
+
+export const distributeSchedulesApi = {
+  list: () =>
+    apiFetch<{ schedules: DistributeSchedule[] }>('/api/v1/distribute-schedules').then(r => r.schedules),
+
+  create: (body: DistributeScheduleInput) =>
+    apiFetch<{ schedule: DistributeSchedule }>('/api/v1/distribute-schedules', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(r => r.schedule),
+
+  update: (id: string, body: Partial<DistributeScheduleInput>) =>
+    apiFetch<{ schedule: DistributeSchedule }>(`/api/v1/distribute-schedules/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }).then(r => r.schedule),
+
+  remove: (id: string) =>
+    apiFetch<void>(`/api/v1/distribute-schedules/${id}`, { method: 'DELETE' }),
+};
+
 // ── Uniquify API ──────────────────────────────────────────────────────────────
 
 export const uniquifyApi = {

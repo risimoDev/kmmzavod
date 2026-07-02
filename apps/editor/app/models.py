@@ -92,6 +92,11 @@ class SourceAnalysis(BaseModel):
     face_ratio: float = 0.0
     # Average inter-frame motion score (0..1), higher = more dynamic.
     motion_score: float = 0.0
+    # Time-series counterparts sampled at analysis_sample_fps: [(t_sec, v_0_1)].
+    # These let the scorer discriminate moments WITHIN a source; the scalars
+    # above stay as whole-source aggregates (and as fallback for old analyses).
+    motion_series: list[tuple[float, float]] = []
+    face_series: list[tuple[float, float]] = []
 
 
 # ── Edit Decision List ────────────────────────────────────────────────────────

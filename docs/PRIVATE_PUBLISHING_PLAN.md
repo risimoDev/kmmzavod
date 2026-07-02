@@ -17,10 +17,18 @@ Status legend: ⬜ todo · 🟦 in progress · ✅ done
 ✅ docker-compose `publisher` service (+ shm_size for Chromium) + `.env.example`
 ✅ Front-end farm import: method selector + per-method credential parsing + `private` badge
 
+UPDATE (2026-07-03) — warmup promoter + gate DONE:
+✅ Warmup promoter: scheduler tick enqueues `account-warmup` jobs (~1/day/account,
+   jitter ≤3h) for private IG accounts; `account-warmup.worker.ts` calls publisher
+   `/instagram/warmup`, persists refreshed session, promotes cold→warming (первый
+   успех) → warm (≥5 прогревов и ≥5 дней). TikTok private промоутится по возрасту
+   (cold→warming 24ч, warming→warm 72ч) — у publisher нет tiktok-warmup действия.
+   Поля `warmupStartedAt/lastWarmupAt/warmupCount` + миграция `20260703000000`.
+✅ Warmup gate ENFORCED in distribute.worker: private + warmupStatus==='cold' → skip.
+✅ Авторасписание публикаций: `DistributeSchedule` (миграция `20260703000100`),
+   тик в scheduler.worker, API `/api/v1/distribute-schedules`, UI `/uniquify/schedules`.
+
 REMAINING / NOTES:
-- Warmup gate intentionally NOT enforced in distribute.worker — there is no automated
-  warmup promoter yet, so gating on `warmupStatus==='cold'` would block all posting.
-  Warmup endpoint exists; wiring a scheduler to promote cold→warming→warm is a follow-up.
 - NOT runnable/tested here (needs real accounts + proxies). Validate via checklist below.
 - After deploy: `prisma migrate deploy && prisma generate`, then rebuild publisher+orchestrator+api+web.
 

@@ -39,6 +39,7 @@ export function createDistributeWorker(deps: Deps): Worker {
               socialAccount: {
                 select: {
                   id: true, platform: true, isActive: true,
+                  authMethod: true, warmupStatus: true,
                   dailyPostCount: true, lastPostAt: true, healthScore: true,
                   accountGroup: { select: { maxPostsPerDay: true, timezone: true, staggerMinutes: true } },
                 },
@@ -94,6 +95,15 @@ export function createDistributeWorker(deps: Deps): Worker {
         }
 
         // Anti-ban guards
+        // Warmup gate: private accounts must be warmed up before posting.
+        // The scheduler's warmup promoter moves them cold → warming → warm.
+        if (item.socialAccount.authMethod === 'private' && item.socialAccount.warmupStatus === 'cold') {
+          await db.distributeItem.update({
+            where: { id: item.id },
+            data: { status: 'skipped', error: 'Account not warmed up yet (warmupStatus=cold)' },
+          });
+          skippedCount++; itemIndex++; continue;
+        }
         const maxPosts = item.socialAccount.accountGroup?.maxPostsPerDay ?? 3;
         if ((item.socialAccount.healthScore ?? 100) < 30) {
           await db.distributeItem.update({
