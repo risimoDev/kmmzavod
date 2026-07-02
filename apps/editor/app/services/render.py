@@ -125,26 +125,76 @@ def _prepare_segment(src_path: str, start: float, end: float, out_path: str,
     _run(cmd, "prepare_segment")
 
 
-def _concat(parts: list[str], out_path: str, with_audio: bool, threads: int) -> None:
-    if len(parts) == 1:
+TRANSITIONS = ["fade", "dissolve", "smoothleft", "smoothright", "slideup", "wipeleft", "circleopen"]
+
+
+def _concat(parts: list[str], out_path: str, with_audio: bool, threads: int,
+            transitions: bool = True, tdur: float = 0.35, seed: int = 0) -> None:
+    """Concatenate prepared segments. With ``transitions`` (default) each cut uses
+    an xfade video transition (+ acrossfade audio) so the result reads as an edited
+    montage rather than plain hard cuts. Falls back to a hard concat if disabled."""
+    import random as _random
+    n = len(parts)
+    if n == 1:
         _run([fx._bin("ffmpeg"), "-y", "-i", parts[0], "-c", "copy", out_path], "concat_copy")
         return
+
     cmd = [fx._bin("ffmpeg"), "-y"]
     for p in parts:
         cmd += ["-i", p]
-    n = len(parts)
+
+    if not transitions:
+        if with_audio:
+            streams = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+            fc = f"{streams}concat=n={n}:v=1:a=1[vout][aout]"
+            maps = ["-map", "[vout]", "-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
+        else:
+            streams = "".join(f"[{i}:v]" for i in range(n))
+            fc = f"{streams}concat=n={n}:v=1:a=0[vout]"
+            maps = ["-map", "[vout]"]
+        cmd += ["-filter_complex", fc, *maps,
+                "-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
+                "-pix_fmt", "yuv420p", "-threads", str(threads), out_path]
+        _run(cmd, "concat")
+        return
+
+    rng = _random.Random(seed)
+    durs = [max(0.1, fx.probe(p).duration) for p in parts]
+    fc_parts: list[str] = []
+
+    # ── Video xfade chain: offset[i] = Σdur[0..i] − Σtd[1..i] ──
+    v_prev = "[0:v]"
+    cum = durs[0]
+    cumt = 0.0
+    tds: list[float] = []
+    for i in range(1, n):
+        td = min(tdur, durs[i - 1] * 0.5, durs[i] * 0.5)
+        td = max(0.1, round(td, 3))
+        tds.append(td)
+        cumt += td
+        offset = max(cum - cumt, 0.05)
+        tr = rng.choice(TRANSITIONS)
+        v_next = "[vout]" if i == n - 1 else f"[v{i}]"
+        fc_parts.append(
+            f"{v_prev}[{i}:v]xfade=transition={tr}:duration={td:.3f}:offset={offset:.3f}{v_next}")
+        cum += durs[i]
+        v_prev = v_next
+    total = cum - cumt
+
     if with_audio:
-        streams = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-        fc = f"{streams}concat=n={n}:v=1:a=1[v][a]"
-        maps = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "128k"]
+        a_prev = "[0:a]"
+        for i in range(1, n):
+            a_next = "[aout]" if i == n - 1 else f"[a{i}]"
+            fc_parts.append(f"{a_prev}[{i}:a]acrossfade=d={tds[i - 1]:.3f}:c1=tri:c2=tri{a_next}")
+            a_prev = a_next
+        maps = ["-map", "[vout]", "-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
     else:
-        streams = "".join(f"[{i}:v]" for i in range(n))
-        fc = f"{streams}concat=n={n}:v=1:a=0[v]"
-        maps = ["-map", "[v]"]
-    cmd += ["-filter_complex", fc, *maps,
+        maps = ["-map", "[vout]"]
+
+    cmd += ["-filter_complex", ";".join(fc_parts), *maps,
             "-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
-            "-pix_fmt", "yuv420p", "-threads", str(threads), out_path]
-    _run(cmd, "concat")
+            "-pix_fmt", "yuv420p", "-t", f"{total:.3f}", "-threads", str(threads), out_path]
+    _run(cmd, "concat_transitions")
 
 
 def _build_voiceover_bed(video_path: str, voiceover_path: str, bgm_path: str | None,
@@ -227,9 +277,10 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
                          keep_audio, smart_crop, 1)
         seg_paths.append(out)
 
-    # 2. Concat.
+    # 2. Concat with transitions (montage feel). Seed varies transitions per clip.
     assembled = os.path.join(work_dir, "assembled.mp4")
-    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads)
+    seed = abs(hash((clip.title, len(clip.segments)))) % 100000
+    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads, seed=seed)
 
     # 3. Audio bed for replace mode.
     pre_final = assembled
@@ -250,13 +301,18 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
               "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.3f}",
               "-threads", str(threads), pre_final], "keep_bgm")
 
-    # 4. Subtitles (smart_montage only) + final encode.
+    # 4. Subtitles: burn whenever a style is chosen (user's explicit choice),
+    #    independent of mode. Transcribes the FINAL audio for perfect sync.
     ass_path: str | None = None
-    if mode == EditMode.SMART_MONTAGE and subtitle_style and subtitle_style != "none":
+    if subtitle_style and subtitle_style != "none":
         lines = _transcribe_for_subs(pre_final)
         if lines:
             ass_path = os.path.join(work_dir, "subs.ass")
             generate_ass(lines, ass_path, out_w, out_h, subtitle_style)
+            logger.info("Subtitles: burned %d lines (style=%s)", len(lines), subtitle_style)
+        else:
+            logger.warning("Subtitles requested (style=%s) but transcription produced no lines "
+                           "(no speech / Whisper unavailable)", subtitle_style)
     _final_encode(pre_final, output_path, out_w, out_h, fps, ass_path, crf, threads)
 
     # 5. Thumbnail + phash.

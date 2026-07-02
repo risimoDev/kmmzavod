@@ -102,6 +102,23 @@ export default function EditorProjectDetailPage() {
           {project.error && <span className="text-sm text-destructive">{project.error}</span>}
         </div>
 
+        {/* What will happen */}
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="default">{project.geometry === "highlights" ? "Хайлайты" : "Микс"}</Badge>
+          <Badge variant="default">{project.aspect}</Badge>
+          <Badge variant={project.subtitleStyle !== "none" ? "brand" : "outline"}>
+            {project.subtitleStyle !== "none" ? `Субтитры: ${project.subtitleStyle}` : "Без субтитров"}
+          </Badge>
+          <Badge variant="default">
+            {project.audioMode === "keep" ? "Ориг. звук" : "Озвучка+музыка"}
+          </Badge>
+          <Badge variant="outline">~{Math.round(Number(project.targetClipSeconds))}с</Badge>
+          {project.geometry === "highlights" && (
+            <Badge variant="outline">{project.targetClipCount} клип.</Badge>
+          )}
+          {project.smartCrop && <Badge variant="outline">smart-crop</Badge>}
+        </div>
+
         {/* Sources + analyze */}
         <Card>
           <CardContent className="p-4 space-y-3">
