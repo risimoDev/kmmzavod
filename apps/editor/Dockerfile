@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
 # FFmpeg + libass (subtitle burn at render phase) + fonts.
-# libgl1/libglib2.0-0 are required by opencv-python-headless and mediapipe.
+# libgl1/libglib2.0-0 are required by opencv-python-headless.
+# libsndfile1 is required by soundfile (librosa beat detection).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libass9 \
@@ -9,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     libgl1 \
     libglib2.0-0 \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

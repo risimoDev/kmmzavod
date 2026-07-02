@@ -19,10 +19,9 @@ faster-whisper==1.1.0
 librosa>=0.10.0
 soundfile>=0.12.0
 
-# Light CV: face detection (smart-crop), motion score, thumbnails/phash
+# Light CV: face detection (OpenCV Haar cascade for smart-crop), motion, phash
 opencv-python-headless>=4.8.0
-numpy>=1.24.0
-mediapipe>=0.10.9
+numpy>=1.24.0,<2.0.0
 
 # LLM moment selection + vision via GPTunnel (OpenAI-compatible)
 httpx>=0.27.0
