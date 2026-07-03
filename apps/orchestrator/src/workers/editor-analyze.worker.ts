@@ -55,11 +55,25 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
           targetClipSeconds: Number(project.targetClipSeconds),
         });
 
-        // Persist per-source analysis (match presigned URL back to its EditSource by index).
-        const analysisByKey = new Map<string, unknown>();
-        result.sources.forEach((a, i) => {
-          if (sources[i]) analysisByKey.set(sources[i].id, a);
-        });
+        // Upload storyboard thumbnails (editor returns them as base64) and strip
+        // the heavy payload from the EDL before it goes into the DB.
+        const thumbKeys: (string | null)[] = await Promise.all(
+          result.clips.map(async (c, i) => {
+            if (!c.thumb_b64) return null;
+            const key = `tenants/${tenantId}/editor/${projectId}/thumbs/clip_${String(i).padStart(3, '0')}.jpg`;
+            try {
+              await storage.uploadBuffer(key, Buffer.from(c.thumb_b64, 'base64'), {
+                contentType: 'image/jpeg',
+              });
+              return key;
+            } catch (e) {
+              logger.warn({ projectId, i, err: (e as Error).message }, 'Editor-analyze: thumb upload failed');
+              return null;
+            } finally {
+              delete (c as { thumb_b64?: string | null }).thumb_b64;
+            }
+          }),
+        );
 
         await db.$transaction([
           ...sources.map((s, i) =>
@@ -86,6 +100,7 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
                 score: c.segments?.[0]?.score ?? 0,
                 edl: c as unknown as any,
                 transcriptSnippet: c.transcript_snippet ?? null,
+                thumbnailKey: thumbKeys[order],
               },
             }),
           ),

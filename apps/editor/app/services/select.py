@@ -35,8 +35,6 @@ _HOOK_RE = re.compile(
 PAUSE_GAP = 0.35
 # How far (sec) a boundary may move while snapping to a pause / scene break.
 SNAP_TOL = 1.2
-# Minimum silence gap (sec) between two chosen highlights of the same source.
-MIN_CLIP_GAP = 2.0
 
 
 def _series_in(window: tuple[float, float], series: list[tuple[float, float]],
@@ -127,12 +125,13 @@ def snap_window(src: SourceAnalysis, start: float, end: float,
 
 def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
                      target_seconds: float) -> list[EdlClip]:
-    """Slide a window over each source, score, take top non-overlapping windows
-    (with a minimum gap between picks of the same source), snap to pauses."""
+    """Slide a window over each source, score, take top non-overlapping windows,
+    snap boundaries to speech pauses / scene breaks."""
     candidates: list[tuple[float, int, float, float]] = []  # (score, src_idx, start, end)
     for idx, src in enumerate(sources):
-        if src.duration_sec < target_seconds * 0.5:
-            # Source shorter than a clip → use it whole.
+        if src.duration_sec <= target_seconds:
+            # Source not longer than one clip → use it whole (avoids the dead zone
+            # 0.5·T…T where neither branch produced any candidate).
             candidates.append((_window_score(src, 0, src.duration_sec), idx, 0.0, src.duration_sec))
             continue
         step = max(2.0, target_seconds / 2)
@@ -144,25 +143,38 @@ def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
 
     candidates.sort(key=lambda c: c[0], reverse=True)
 
+    # Top non-overlapping windows. Adjacent (touching) windows are fine — they
+    # are different content; snapping below separates the cut points naturally.
     chosen: list[tuple[float, int, float, float]] = []
     for score, idx, start, end in candidates:
-        clash = any(
-            i == idx and not (end + MIN_CLIP_GAP <= s or start >= e + MIN_CLIP_GAP)
+        overlap = any(
+            i == idx and not (end <= s or start >= e)
             for (_sc, i, s, e) in chosen
         )
-        if clash:
+        if overlap:
             continue
         chosen.append((score, idx, start, end))
         if len(chosen) >= target_count:
             break
 
+    # Snap to pauses, then clamp so clips of one source never overlap after the move.
+    taken: dict[int, list[tuple[float, float]]] = {}
     clips: list[EdlClip] = []
     for order, (score, idx, start, end) in enumerate(chosen):
         start, end = snap_window(sources[idx], start, end)
+        for (s, e) in taken.get(idx, []):
+            if start < e and end > s:  # overlap introduced by snapping
+                if start >= s:
+                    start = min(e, end - 0.5)
+                else:
+                    end = max(s, start + 0.5)
+        if end - start < 2.0:
+            continue
+        taken.setdefault(idx, []).append((start, end))
         clips.append(EdlClip(
             title=f"Highlight {order + 1}",
             order=order,
-            segments=[EdlSegment(src_idx=idx, start=start, end=end, score=score)],
+            segments=[EdlSegment(src_idx=idx, start=round(start, 2), end=round(end, 2), score=score)],
             transcript_snippet=_transcript_snippet(sources[idx], start, end),
         ))
     return clips

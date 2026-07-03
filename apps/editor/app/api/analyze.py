@@ -30,10 +30,11 @@ def _hamming(a: str, b: str) -> int:
 
 
 def _dedupe_visual(clips: list[EdlClip], locals_by_idx: list[str],
-                   max_dist: int = 6) -> list[EdlClip]:
-    """Drop near-duplicate candidates: hash the midpoint frame of each clip and
-    keep only the first (highest-ranked) of visually identical ones. Applies to
-    single-segment (highlight) clips; best-effort — clips without a hash stay."""
+                   max_dist: int = 4) -> list[EdlClip]:
+    """Drop near-duplicate SILENT candidates: hash the midpoint frame and keep
+    only the first of visually identical ones. Clips WITH speech are exempt —
+    different moments of a talking-head video look identical frame-wise but are
+    distinguished by what is said (deduping them collapsed everything to one)."""
     if len(clips) < 2 or any(len(c.segments) != 1 for c in clips):
         return clips
     work = tempfile.mkdtemp(prefix="editor_dedupe_")
@@ -41,6 +42,9 @@ def _dedupe_visual(clips: list[EdlClip], locals_by_idx: list[str],
     hashes: list[str] = []
     try:
         for i, clip in enumerate(clips):
+            if clip.transcript_snippet.strip():
+                kept.append(clip)  # speech ⇒ a distinct moment by definition
+                continue
             seg = clip.segments[0]
             h = None
             if seg.src_idx < len(locals_by_idx):
@@ -52,7 +56,7 @@ def _dedupe_visual(clips: list[EdlClip], locals_by_idx: list[str],
                 except Exception:  # noqa: BLE001
                     h = None
             if h and any(_hamming(h, other) <= max_dist for other in hashes):
-                logger.info("Dedupe: dropped visually duplicate clip %r", clip.title)
+                logger.info("Dedupe: dropped visually duplicate silent clip %r", clip.title)
                 continue
             if h:
                 hashes.append(h)
@@ -61,6 +65,31 @@ def _dedupe_visual(clips: list[EdlClip], locals_by_idx: list[str],
         import shutil
         shutil.rmtree(work, ignore_errors=True)
     return kept
+
+
+def _attach_thumbs(clips: list[EdlClip], locals_by_idx: list[str]) -> None:
+    """Fill ``thumb_b64`` (JPEG, ~360px) from each clip's midpoint frame so the
+    storyboard has previews. Best-effort per clip; must run while temp sources
+    still exist. The orchestrator uploads these to MinIO and strips the base64."""
+    import base64
+
+    work = tempfile.mkdtemp(prefix="editor_thumbs_")
+    try:
+        for i, clip in enumerate(clips):
+            seg = clip.segments[0] if clip.segments else None
+            if seg is None or seg.src_idx >= len(locals_by_idx):
+                continue
+            frame = os.path.join(work, f"t{i}.jpg")
+            try:
+                fx.extract_frame(locals_by_idx[seg.src_idx],
+                                 (seg.start + seg.end) / 2.0, frame, width=360)
+                with open(frame, "rb") as f:
+                    clip.thumb_b64 = base64.b64encode(f.read()).decode()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Thumbnail failed for clip %d: %s", i, e)
+    finally:
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def create_router() -> APIRouter:
@@ -101,6 +130,9 @@ def create_router() -> APIRouter:
                 target_count=req.target_clip_count,
                 target_seconds=req.target_clip_seconds,
             )
+            # Storyboard previews (midpoint frames) — after enrich so LLM-proposed
+            # ranges get thumbs too; while temp sources still exist.
+            _attach_thumbs(clips, locals_by_idx)
         finally:
             for t in temps:
                 try:
