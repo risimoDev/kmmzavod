@@ -110,6 +110,22 @@ class EdlSegment(BaseModel):
     score: float = 0.0
 
 
+class SubtitleWord(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
+class SubtitleLine(BaseModel):
+    """One subtitle line on the OUTPUT timeline of a clip. Proposed at analyze
+    time from the source transcript; user-editable in the storyboard; consumed
+    verbatim by the render (no re-transcription when present)."""
+    start: float
+    end: float
+    text: str
+    words: list[SubtitleWord] = []
+
+
 class EdlClip(BaseModel):
     """A proposed/edited output clip = ordered list of segments + its own metadata."""
     title: str = ""
@@ -119,6 +135,8 @@ class EdlClip(BaseModel):
     # Transcript snippet shown in the storyboard preview (no proxy render).
     transcript_snippet: str = ""
     thumb_b64: str | None = None
+    # Output-timeline subtitles (editable in the storyboard).
+    subtitles: list[SubtitleLine] | None = None
 
 
 # ── Requests / Responses ──────────────────────────────────────────────────────

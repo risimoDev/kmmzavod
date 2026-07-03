@@ -196,34 +196,47 @@ def _beat_bounds(src: SourceAnalysis, min_beat: float, max_beat: float) -> list[
 
 def build_mix(sources: list[SourceAnalysis], *, target_seconds: float,
               min_beat: float = 1.6, max_beat: float = 4.0) -> list[EdlClip]:
-    """Assemble one clip from the best short beats across all sources. Segment
-    bounds ride the musical beat grid when available (beat-synced montage)."""
-    beats: list[tuple[float, int, float, float]] = []  # (score, src_idx, start, end)
+    """Assemble ONE montage of ~target_seconds from short chunks across all
+    sources. Long spans between beat/scene bounds are SUBDIVIDED into
+    beat-sized chunks — a single-scene talking-head video still yields enough
+    material to fill the target (раньше давало один 4-сек кусок и всё)."""
+    candidates: list[tuple[float, int, float, float]] = []  # (score, src_idx, start, end)
     for idx, src in enumerate(sources):
         bounds = _beat_bounds(src, min_beat, max_beat)
         for i in range(len(bounds) - 1):
-            s, e = bounds[i], bounds[i + 1]
-            span = e - s
-            if span < min_beat:
-                continue
-            e = s + min(span, max_beat)
-            beats.append((_window_score(src, s, e), idx, round(s, 2), round(e, 2)))
+            t, e = bounds[i], bounds[i + 1]
+            while e - t >= min_beat:
+                c_end = min(t + max_beat, e)
+                candidates.append((_window_score(src, t, c_end), idx, round(t, 2), round(c_end, 2)))
+                t = c_end
 
-    beats.sort(key=lambda b: b[0], reverse=True)
+    candidates.sort(key=lambda b: b[0], reverse=True)
 
-    segments: list[EdlSegment] = []
+    # Greedy top-score, non-overlapping, until the montage is long enough.
+    chosen: list[tuple[float, int, float, float]] = []
     total = 0.0
-    for score, idx, s, e in beats:
+    for score, idx, s, e in candidates:
         if total >= target_seconds:
             break
-        segments.append(EdlSegment(src_idx=idx, start=s, end=e, score=score))
+        if any(i == idx and not (e <= cs or s >= ce) for (_x, i, cs, ce) in chosen):
+            continue
+        chosen.append((score, idx, s, e))
         total += e - s
+
+    # Chronological order keeps the narrative watchable (не рваный шаффл).
+    chosen.sort(key=lambda c: (c[1], c[2]))
+    segments = [EdlSegment(src_idx=idx, start=s, end=e, score=score)
+                for score, idx, s, e in chosen]
 
     if not segments and sources:
         segments = [EdlSegment(src_idx=0, start=0.0,
                                end=min(target_seconds, sources[0].duration_sec), score=0.0)]
 
-    return [EdlClip(title="Mix", order=0, segments=segments)]
+    snippet = ""
+    if segments:
+        src0 = sources[segments[0].src_idx]
+        snippet = _transcript_snippet(src0, segments[0].start, segments[0].end)
+    return [EdlClip(title="Mix", order=0, segments=segments, transcript_snippet=snippet)]
 
 
 def build_clips(sources: list[SourceAnalysis], geometry: Geometry, *,
@@ -231,3 +244,49 @@ def build_clips(sources: list[SourceAnalysis], geometry: Geometry, *,
     if geometry == Geometry.MIX:
         return build_mix(sources, target_seconds=target_seconds)
     return build_highlights(sources, target_count=target_count, target_seconds=target_seconds)
+
+
+# ── Subtitle mapping: source transcript → clip output timeline ────────────────
+
+# xfade transition consumed between consecutive segments (mirrors render._concat).
+TRANSITION_SEC = 0.35
+
+
+def map_clip_subtitles(clip: EdlClip, sources: list[SourceAnalysis]):
+    """Project the source transcripts onto the clip's OUTPUT timeline (per-word),
+    compensating for the xfade overlap between segments. The result is stored on
+    the clip, shown/edited in the storyboard, and burned verbatim at render."""
+    from app.models import SubtitleLine, SubtitleWord  # local: avoid import cycle
+
+    lines: list[SubtitleLine] = []
+    offset = 0.0
+    for k, seg in enumerate(clip.segments):
+        if k > 0:
+            offset -= TRANSITION_SEC
+        if seg.src_idx >= len(sources):
+            offset += seg.end - seg.start
+            continue
+        src = sources[seg.src_idx]
+        for ts in src.transcript:
+            if ts.end <= seg.start or ts.start >= seg.end:
+                continue
+            words = [
+                SubtitleWord(
+                    start=round(offset + max(w.start, seg.start) - seg.start, 2),
+                    end=round(offset + min(w.end, seg.end) - seg.start, 2),
+                    text=w.text.strip(),
+                )
+                for w in ts.words
+                if w.end > seg.start and w.start < seg.end and w.text.strip()
+            ]
+            text = " ".join(w.text for w in words) if words else ts.text.strip()
+            if not text:
+                continue
+            lines.append(SubtitleLine(
+                start=round(offset + max(ts.start, seg.start) - seg.start, 2),
+                end=round(offset + min(ts.end, seg.end) - seg.start, 2),
+                text=text,
+                words=words,
+            ))
+        offset += seg.end - seg.start
+    return lines

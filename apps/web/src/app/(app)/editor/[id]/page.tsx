@@ -21,6 +21,7 @@ import {
   type EditProjectDetail,
   type EditClip,
   type EditOutput,
+  type EdlSubtitleLine,
 } from "@/lib/api";
 
 const POLL_MS = 4000;
@@ -53,6 +54,132 @@ function fmtTime(sec: number): string {
 function clipDuration(c: EditClip): number {
   if (c.durationSec) return Number(c.durationSec);
   return (c.edl?.segments ?? []).reduce((acc, s) => acc + (s.end - s.start), 0);
+}
+
+/**
+ * Панель правки клипа: границы сегментов (где ИИ порезал) и субтитры
+ * (что и когда написано). Сохранение — PATCH; при смене границ сервер сам
+ * пересчитывает субтитры из транскрипта источника.
+ */
+function ClipEditor({ projectId, clip, onSaved, onClose }: {
+  projectId: string;
+  clip: EditClip;
+  onSaved: (updated: EditClip) => void;
+  onClose: () => void;
+}) {
+  const [segments, setSegments] = useState(
+    (clip.edl?.segments ?? []).map((s) => ({ src_idx: s.src_idx, start: s.start, end: s.end })));
+  const [subs, setSubs] = useState<EdlSubtitleLine[]>(
+    (clip.edl?.subtitles ?? []).map((l) => ({ start: l.start, end: l.end, text: l.text })));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const patchSeg = (i: number, field: "start" | "end", v: number) =>
+    setSegments((prev) => prev.map((s, j) => (j === i ? { ...s, [field]: Math.max(0, v) } : s)));
+  const patchSub = (i: number, patch: Partial<EdlSubtitleLine>) =>
+    setSubs((prev) => prev.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+
+  async function save(kind: "segments" | "subtitles") {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await editorApi.updateClip(projectId, clip.id,
+        kind === "segments" ? { segments } : { subtitles: subs });
+      onSaved(updated);
+      if (kind === "segments" && updated.edl?.subtitles) {
+        setSubs(updated.edl.subtitles.map((l) => ({ start: l.start, end: l.end, text: l.text })));
+      }
+    } catch (e: any) {
+      setError(e.message ?? "Не удалось сохранить");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const numCls = "w-16 bg-surface-2 border border-border rounded px-1.5 py-1 text-xs font-mono text-text-primary";
+
+  return (
+    <div className="border-t border-border bg-surface-2/50 p-2.5 space-y-3 animate-fade-in">
+      {/* Границы */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <p className="text-2xs font-semibold text-text-tertiary uppercase">Границы (сек)</p>
+          <Button size="xs" variant="secondary" loading={saving} onClick={() => save("segments")}>
+            Сохранить границы
+          </Button>
+        </div>
+        {segments.map((s, i) => (
+          <div key={i} className="flex items-center gap-1.5 text-xs">
+            <span className="text-text-tertiary w-10">#{s.src_idx + 1}</span>
+            <input type="number" step={0.1} min={0} value={s.start} className={numCls}
+              onChange={(e) => patchSeg(i, "start", Number(e.target.value))} />
+            <span className="text-text-tertiary">→</span>
+            <input type="number" step={0.1} min={0} value={s.end} className={numCls}
+              onChange={(e) => patchSeg(i, "end", Number(e.target.value))} />
+            <span className="text-text-tertiary font-mono">{Math.max(0, s.end - s.start).toFixed(1)}с</span>
+            {segments.length > 1 && (
+              <button className="text-danger hover:underline ml-auto"
+                onClick={() => setSegments((prev) => prev.filter((_, j) => j !== i))}>
+                убрать
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Субтитры */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <p className="text-2xs font-semibold text-text-tertiary uppercase">
+            Субтитры ({subs.length} фраз)
+          </p>
+          <div className="flex gap-1.5">
+            <Button size="xs" variant="ghost"
+              onClick={() => setSubs((p) => [...p, {
+                start: p.length ? p[p.length - 1].end : 0,
+                end: (p.length ? p[p.length - 1].end : 0) + 2,
+                text: "",
+              }])}>
+              + строка
+            </Button>
+            <Button size="xs" variant="secondary" loading={saving} onClick={() => save("subtitles")}>
+              Сохранить субтитры
+            </Button>
+          </div>
+        </div>
+        {subs.length === 0 && (
+          <p className="text-xs text-text-tertiary">
+            Нет фраз — речь не распознана. Добавьте строки вручную или проверьте, что в видео есть речь.
+          </p>
+        )}
+        <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+          {subs.map((l, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <input type="number" step={0.1} min={0} value={l.start} className={numCls}
+                onChange={(e) => patchSub(i, { start: Number(e.target.value) })} />
+              <input type="number" step={0.1} min={0} value={l.end} className={numCls}
+                onChange={(e) => patchSub(i, { end: Number(e.target.value) })} />
+              <input value={l.text} placeholder="текст фразы"
+                className="flex-1 bg-surface-2 border border-border rounded px-2 py-1 text-xs text-text-primary"
+                onChange={(e) => patchSub(i, { text: e.target.value })} />
+              <button className="text-danger text-xs hover:underline"
+                onClick={() => setSubs((prev) => prev.filter((_, j) => j !== i))}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+        <p className="text-2xs text-text-tertiary">
+          Отредактированные фразы будут вжжены в видео как есть (пословная подсветка сохранится).
+        </p>
+      </div>
+
+      {error && <p className="text-xs text-danger">{error}</p>}
+      <div className="flex justify-end">
+        <Button size="xs" variant="ghost" onClick={onClose}>Свернуть</Button>
+      </div>
+    </div>
+  );
 }
 
 function Stepper({ active, failed }: { active: number; failed: boolean }) {
@@ -93,6 +220,7 @@ export default function EditorProjectDetailPage() {
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [editingClipId, setEditingClipId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -179,8 +307,21 @@ export default function EditorProjectDetailPage() {
     ]);
   }
 
+  function mergeClip(updated: EditClip) {
+    setProject((p) => p && {
+      ...p,
+      clips: p.clips.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)),
+    });
+  }
+
   const included = useMemo(() => project?.clips.filter((c) => c.included) ?? [], [project]);
   const totalSec = useMemo(() => included.reduce((a, c) => a + clipDuration(c), 0), [included]);
+  // Субтитры включены, но ни у одного клипа нет распознанных фраз → Whisper не
+  // отработал (нет модели в образе) или в видео нет речи. Предупреждаем заранее.
+  const noTranscript = useMemo(() =>
+    project != null && project.subtitleStyle !== "none" && project.clips.length > 0 &&
+    project.clips.every((c) => (c.edl?.subtitles ?? []).length === 0 && !c.transcriptSnippet),
+  [project]);
 
   if (!project) {
     return <div className="flex justify-center py-20"><LoadingSpinner size={28} /></div>;
@@ -335,6 +476,14 @@ export default function EditorProjectDetailPage() {
                 </div>
               </div>
 
+              {noTranscript && (
+                <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                  Выбраны субтитры, но речь не распознана ни в одном клипе: либо в видео нет
+                  голоса, либо Whisper недоступен в editor-сервисе. Субтитры можно вписать
+                  вручную через «Правка» на клипе.
+                </div>
+              )}
+
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {project.clips.map((c, idx) => {
                   const seg = c.edl?.segments?.[0];
@@ -399,8 +548,23 @@ export default function EditorProjectDetailPage() {
                           </p>
                         )}
                         <div className="flex items-center justify-between text-2xs text-text-tertiary">
-                          <span className="font-mono">score {Number(c.score).toFixed(2)}</span>
-                          <span className="flex gap-0.5">
+                          <span className="font-mono">
+                            score {Number(c.score).toFixed(2)}
+                            {(c.edl?.subtitles?.length ?? 0) > 0 && (
+                              <> · {c.edl!.subtitles!.length} фраз</>
+                            )}
+                          </span>
+                          <span className="flex gap-0.5 items-center">
+                            <button
+                              onClick={() => setEditingClipId(editingClipId === c.id ? null : c.id)}
+                              className={cn(
+                                "px-1.5 py-0.5 rounded transition-colors",
+                                editingClipId === c.id
+                                  ? "bg-brand-500/15 text-brand-400"
+                                  : "hover:bg-surface-2"
+                              )}>
+                              ✎ правка
+                            </button>
                             <button onClick={() => moveClip(idx, -1)} disabled={idx === 0}
                               className="px-1.5 py-0.5 rounded hover:bg-surface-2 disabled:opacity-30">←</button>
                             <button onClick={() => moveClip(idx, 1)} disabled={idx === project.clips.length - 1}
@@ -408,6 +572,15 @@ export default function EditorProjectDetailPage() {
                           </span>
                         </div>
                       </div>
+
+                      {editingClipId === c.id && (
+                        <ClipEditor
+                          projectId={id}
+                          clip={c}
+                          onSaved={mergeClip}
+                          onClose={() => setEditingClipId(null)}
+                        />
+                      )}
                     </div>
                   );
                 })}

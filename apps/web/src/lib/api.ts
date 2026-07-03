@@ -1084,6 +1084,13 @@ export interface EditSource {
   height?: number | null;
 }
 
+export interface EdlSubtitleLine {
+  start: number;
+  end: number;
+  text: string;
+  words?: { start: number; end: number; text: string }[];
+}
+
 export interface EditClip {
   id: string;
   title: string;
@@ -1096,7 +1103,10 @@ export interface EditClip {
   outputKey?: string | null;
   outputUrl?: string | null;
   durationSec?: number | null;
-  edl?: { segments?: { src_idx: number; start: number; end: number; score: number }[] };
+  edl?: {
+    segments?: { src_idx: number; start: number; end: number; score: number }[];
+    subtitles?: EdlSubtitleLine[];
+  };
 }
 
 export interface EditProjectDetail extends EditProject {
@@ -1142,7 +1152,11 @@ export const editorApi = {
   analyze: (id: string) =>
     apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/analyze`, { method: 'POST' }),
 
-  updateClip: (id: string, clipId: string, body: { included?: boolean; title?: string; order?: number }) =>
+  updateClip: (id: string, clipId: string, body: {
+    included?: boolean; title?: string; order?: number;
+    segments?: { src_idx: number; start: number; end: number }[];
+    subtitles?: { start: number; end: number; text: string }[];
+  }) =>
     apiFetch<EditClip>(`/api/v1/editor/projects/${id}/clips/${clipId}`, {
       method: 'PATCH', body: JSON.stringify(body),
     }),

@@ -24,6 +24,13 @@ export interface EdlSegment {
   score: number;
 }
 
+export interface SubtitleLine {
+  start: number;
+  end: number;
+  text: string;
+  words?: { start: number; end: number; text: string }[];
+}
+
 export interface EdlClip {
   title: string;
   included: boolean;
@@ -31,6 +38,8 @@ export interface EdlClip {
   segments: EdlSegment[];
   transcript_snippet: string;
   thumb_b64?: string | null;
+  /** Output-timeline subtitles (proposed at analyze, user-editable, burned at render). */
+  subtitles?: SubtitleLine[] | null;
 }
 
 export interface SourceAnalysis {

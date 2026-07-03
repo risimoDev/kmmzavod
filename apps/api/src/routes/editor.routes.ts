@@ -38,7 +38,59 @@ const updateClipSchema = z.object({
   included: z.boolean().optional(),
   title: z.string().max(200).optional(),
   order: z.number().int().min(0).optional(),
+  // Storyboard editing: move clip boundaries / rewrite subtitle lines.
+  segments: z.array(z.object({
+    src_idx: z.number().int().min(0),
+    start: z.number().min(0),
+    end: z.number().positive(),
+  })).min(1).max(50).optional(),
+  subtitles: z.array(z.object({
+    start: z.number().min(0),
+    end: z.number().positive(),
+    text: z.string().max(500),
+  })).max(300).optional(),
 });
+
+// ── Subtitle mapping (mirror of editor select.map_clip_subtitles) ─────────────
+// Projects the source transcripts onto the clip's output timeline so edited
+// segment boundaries immediately refresh the proposed subtitles.
+
+const TRANSITION_SEC = 0.35;
+
+interface TWord { start: number; end: number; text: string }
+interface TSeg { start: number; end: number; text: string; words?: TWord[] }
+interface SegIn { src_idx: number; start: number; end: number; score?: number }
+
+function mapSubtitles(segments: SegIn[], transcripts: TSeg[][]): Array<{
+  start: number; end: number; text: string; words: TWord[];
+}> {
+  const lines: Array<{ start: number; end: number; text: string; words: TWord[] }> = [];
+  let offset = 0;
+  segments.forEach((seg, k) => {
+    if (k > 0) offset -= TRANSITION_SEC;
+    const transcript = transcripts[seg.src_idx] ?? [];
+    for (const ts of transcript) {
+      if (ts.end <= seg.start || ts.start >= seg.end) continue;
+      const words = (ts.words ?? [])
+        .filter((w) => w.end > seg.start && w.start < seg.end && w.text.trim())
+        .map((w) => ({
+          start: Math.round((offset + Math.max(w.start, seg.start) - seg.start) * 100) / 100,
+          end: Math.round((offset + Math.min(w.end, seg.end) - seg.start) * 100) / 100,
+          text: w.text.trim(),
+        }));
+      const text = words.length > 0 ? words.map((w) => w.text).join(' ') : ts.text.trim();
+      if (!text) continue;
+      lines.push({
+        start: Math.round((offset + Math.max(ts.start, seg.start) - seg.start) * 100) / 100,
+        end: Math.round((offset + Math.min(ts.end, seg.end) - seg.start) * 100) / 100,
+        text,
+        words,
+      });
+    }
+    offset += seg.end - seg.start;
+  });
+  return lines;
+}
 
 export async function editorRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
@@ -168,7 +220,7 @@ export async function editorRoutes(app: FastifyInstance) {
     return reply.code(202).send({ status: 'analyzing' });
   });
 
-  // ── Edit a storyboard clip (include/exclude, title, order) ──────────────────
+  // ── Edit a storyboard clip (include/exclude, title, order, segments, subs) ──
   app.patch('/projects/:id/clips/:clipId', async (req, reply) => {
     const { tenantId } = req.user;
     const { id: projectId, clipId } = req.params as { id: string; clipId: string };
@@ -179,12 +231,53 @@ export async function editorRoutes(app: FastifyInstance) {
     });
     if (!clip) return reply.code(404).send({ error: 'NotFound' });
 
+    const edl = (clip.edl ?? {}) as Record<string, unknown>;
+    let edlChanged = false;
+    let durationSec: number | undefined;
+    let transcriptSnippet: string | undefined;
+
+    if (body.segments) {
+      const sources = await db.editSource.findMany({
+        where: { projectId }, orderBy: { order: 'asc' },
+        select: { durationSec: true, analysis: true },
+      });
+      for (const s of body.segments) {
+        if (s.src_idx >= sources.length) {
+          return reply.code(400).send({ error: 'BadRequest', message: `Источник #${s.src_idx + 1} не существует` });
+        }
+        const max = Number(sources[s.src_idx].durationSec ?? Infinity);
+        if (s.end <= s.start || s.end - s.start < 0.5 || s.end > max + 0.05) {
+          return reply.code(400).send({ error: 'BadRequest', message: 'Некорректные границы сегмента' });
+        }
+      }
+      edl.segments = body.segments.map((s) => ({ ...s, score: 0 }));
+      // Boundaries moved → refresh proposed subtitles + snippet from the transcript.
+      const transcripts = sources.map((s) =>
+        (((s.analysis ?? {}) as Record<string, unknown>).transcript ?? []) as TSeg[]);
+      const lines = mapSubtitles(body.segments, transcripts);
+      edl.subtitles = lines;
+      transcriptSnippet = lines.map((l) => l.text).join(' ').slice(0, 160);
+      durationSec = Math.round(body.segments.reduce((a, s) => a + (s.end - s.start), 0) * 100) / 100;
+      edlChanged = true;
+    }
+
+    if (body.subtitles) {
+      // User-authored lines: no word timings (render spreads words evenly for karaoke).
+      edl.subtitles = body.subtitles
+        .filter((l) => l.text.trim() && l.end > l.start)
+        .map((l) => ({ ...l, text: l.text.trim(), words: [] }));
+      edlChanged = true;
+    }
+
     const updated = await db.editClip.update({
       where: { id: clipId },
       data: {
         included: body.included ?? clip.included,
         title: body.title ?? clip.title,
         order: body.order ?? clip.order,
+        ...(edlChanged ? { edl: edl as never } : {}),
+        ...(durationSec !== undefined ? { durationSec } : {}),
+        ...(transcriptSnippet !== undefined ? { transcriptSnippet } : {}),
       },
     });
     return updated;

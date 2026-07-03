@@ -60,6 +60,7 @@ export function createEditorRenderWorker(deps: Deps): Worker {
             order: row.order,
             segments: edl.segments ?? [],
             transcript_snippet: edl.transcript_snippet ?? row.transcriptSnippet ?? '',
+            subtitles: edl.subtitles ?? null,
           };
         });
 

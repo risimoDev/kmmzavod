@@ -133,6 +133,9 @@ def create_router() -> APIRouter:
             # Storyboard previews (midpoint frames) — after enrich so LLM-proposed
             # ranges get thumbs too; while temp sources still exist.
             _attach_thumbs(clips, locals_by_idx)
+            # Proposed subtitles on each clip's output timeline (user-editable).
+            for c in clips:
+                c.subtitles = selector.map_clip_subtitles(c, sources)
         finally:
             for t in temps:
                 try:

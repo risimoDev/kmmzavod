@@ -258,6 +258,34 @@ def _build_voiceover_bed(video_path: str, voiceover_path: str, bgm_path: str | N
     _run(cmd, "voiceover_bed")
 
 
+def _lines_from_clip(clip) -> list[SubLine]:
+    """Build subtitle lines from the clip's (possibly user-edited) EDL subtitles.
+    Lines without word timings (typed by the user) get evenly-spread word timings
+    so the karaoke highlight still works."""
+    raw = getattr(clip, "subtitles", None) or []
+    lines: list[SubLine] = []
+    for ln in raw:
+        get = (lambda o, k, d=None: getattr(o, k, o.get(k, d) if isinstance(o, dict) else d))
+        start, end = float(get(ln, "start", 0.0)), float(get(ln, "end", 0.0))
+        text = str(get(ln, "text", "") or "").strip()
+        if not text or end <= start:
+            continue
+        words_raw = get(ln, "words", None) or []
+        words = [
+            SubWord(start=float(get(w, "start", 0.0)), end=float(get(w, "end", 0.0)),
+                    text=str(get(w, "text", "")).strip())
+            for w in words_raw if str(get(w, "text", "")).strip()
+        ]
+        if not words:
+            tokens = text.split()
+            step = (end - start) / max(1, len(tokens))
+            words = [SubWord(start=round(start + i * step, 2),
+                             end=round(start + (i + 1) * step, 2), text=t)
+                     for i, t in enumerate(tokens)]
+        lines.append(SubLine(start=start, end=end, text=text, words=words))
+    return lines
+
+
 def _transcribe_for_subs(audio_path: str) -> list[SubLine]:
     """Transcribe the final audio into subtitle lines with word timestamps
     (output timeline) — enables karaoke-style word highlighting. Optional."""
@@ -349,10 +377,11 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
               "-threads", str(threads), pre_final], "keep_bgm")
 
     # 4. Subtitles: burn whenever a style is chosen (user's explicit choice),
-    #    independent of mode. Transcribes the FINAL audio for perfect sync.
+    #    independent of mode. EDL subtitles (proposed at analyze, possibly edited
+    #    by the user) win; otherwise transcribe the FINAL audio.
     ass_path: str | None = None
     if subtitle_style and subtitle_style != "none":
-        lines = _transcribe_for_subs(pre_final)
+        lines = _lines_from_clip(clip) or _transcribe_for_subs(pre_final)
         if lines:
             ass_path = os.path.join(work_dir, "subs.ass")
             generate_ass(lines, ass_path, out_w, out_h, subtitle_style)
