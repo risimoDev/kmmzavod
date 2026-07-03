@@ -31,7 +31,14 @@ app.include_router(render_router())
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")
 def health() -> dict:
-    return {"status": "ok", "uptime_sec": round(time.time() - _startup_time)}
+    from app.services.stt import whisper_status
+    return {
+        "status": "ok",
+        "uptime_sec": round(time.time() - _startup_time),
+        # Субтитры зависят от Whisper — сломанный STT должен быть виден здесь,
+        # а не обнаруживаться по беззвучным роликам.
+        "whisper": whisper_status(),
+    }
 
 
 @app.get("/metrics", tags=["ops"], summary="Basic service metrics")

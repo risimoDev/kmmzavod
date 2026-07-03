@@ -1082,6 +1082,8 @@ export interface EditSource {
   durationSec?: number | null;
   width?: number | null;
   height?: number | null;
+  /** Полный SourceAnalysis JSON; здесь типизировано только нужное UI. */
+  analysis?: { transcript_error?: string | null } | null;
 }
 
 export interface EdlSubtitleLine {

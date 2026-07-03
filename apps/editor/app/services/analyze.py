@@ -23,19 +23,18 @@ from app.services import ffmpeg as fx
 logger = logging.getLogger(__name__)
 
 
-def _transcribe(path: str) -> list[TranscriptSegment]:
-    """Whisper transcript with word timestamps (faster-whisper, RU). Optional."""
+def _transcribe(path: str) -> tuple[list[TranscriptSegment], str | None]:
+    """Whisper transcript with word timestamps. Returns (segments, error) — the
+    error string is persisted on the analysis so the UI can explain exactly WHY
+    subtitles are missing instead of failing silently."""
     try:
-        from faster_whisper import WhisperModel
+        from app.services.stt import get_model
+        model = get_model()
     except Exception as e:  # noqa: BLE001
-        logger.warning("faster-whisper unavailable, skipping transcript: %s", e)
-        return []
+        msg = f"Whisper unavailable: {e}"
+        logger.warning("%s — skipping transcript", msg)
+        return [], msg
     try:
-        model = WhisperModel(
-            settings.whisper_model,
-            device=settings.whisper_device,
-            compute_type=settings.whisper_compute_type,
-        )
         segments, _info = model.transcribe(
             path, language=settings.whisper_language, word_timestamps=True,
         )
@@ -48,10 +47,13 @@ def _transcribe(path: str) -> list[TranscriptSegment]:
             out.append(TranscriptSegment(
                 start=seg.start, end=seg.end, text=seg.text.strip(), words=words,
             ))
-        return out
+        if not out:
+            return [], "Речь в аудио не обнаружена (Whisper вернул пустой транскрипт)"
+        return out, None
     except Exception as e:  # noqa: BLE001
-        logger.warning("Transcription failed for %s: %s", path, e)
-        return []
+        msg = f"Transcription failed: {e}"
+        logger.warning("%s (%s)", msg, path)
+        return [], msg
 
 
 def _detect_beats(path: str) -> list[float]:
@@ -135,19 +137,21 @@ async def analyze_source(local_path: str, storage_key: str, *,
         width=info.width, height=info.height, fps=round(info.fps, 2),
     )
 
+    no_audio = (None if info.has_audio else "В видео нет аудиодорожки")
     scene_t = asyncio.to_thread(fx.detect_scene_breaks, local_path)
     energy_t = asyncio.to_thread(fx.audio_energy_envelope, local_path)
     motion_t = asyncio.to_thread(_face_and_motion, local_path, info.duration)
     transcript_t = (
         asyncio.to_thread(_transcribe, local_path) if with_transcript and info.has_audio
-        else asyncio.sleep(0, result=[])
+        else asyncio.sleep(0, result=([], no_audio))
     )
     beats_t = (
         asyncio.to_thread(_detect_beats, local_path) if info.has_audio
         else asyncio.sleep(0, result=[])
     )
 
-    scenes, energy, (face_ratio, motion, motion_series, face_series), transcript, beats = \
+    scenes, energy, (face_ratio, motion, motion_series, face_series), \
+        (transcript, transcript_error), beats = \
         await asyncio.gather(scene_t, energy_t, motion_t, transcript_t, beats_t)
     result.scene_breaks = scenes
     result.audio_energy = energy
@@ -156,5 +160,6 @@ async def analyze_source(local_path: str, storage_key: str, *,
     result.motion_series = motion_series
     result.face_series = face_series
     result.transcript = transcript
+    result.transcript_error = transcript_error
     result.beats = beats
     return result

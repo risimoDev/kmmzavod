@@ -239,6 +239,11 @@ services:
     build:
       context: apps/editor
       dockerfile: Dockerfile
+      args:
+        # Модель Whisper запекается в образ на этапе сборки (иначе первый
+        # транскрипт тянет её с HuggingFace в рантайме и молча падает без сети).
+        WHISPER_PRELOAD: ${EDITOR_WHISPER_MODEL:-small}
+        HF_ENDPOINT: ${HF_ENDPOINT:-}
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -255,8 +260,13 @@ services:
       GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
       WHISPER_MODEL: ${EDITOR_WHISPER_MODEL:-small}
       WHISPER_LANGUAGE: ${EDITOR_WHISPER_LANGUAGE:-ru}
+      # Зеркало HuggingFace на случай докачки модели в рантайме (напр. https://hf-mirror.com)
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       LOG_LEVEL: ${EDITOR_LOG_LEVEL:-INFO}
       MAX_CONCURRENT_JOBS: ${EDITOR_MAX_CONCURRENT_JOBS:-2}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     networks:
       - backend
     deploy:

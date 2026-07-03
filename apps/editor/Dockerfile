@@ -19,10 +19,23 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the Whisper model into the image at BUILD time. Without this the model
+# is downloaded on the first transcription — if the host has no/flaky access to
+# HuggingFace (типично для RU-сетей), transcription silently fails and videos
+# come out without subtitles. download_model.py fetches via plain HTTPS with a
+# mirror fallback (huggingface.co → hf-mirror.com), so the build works even
+# where huggingface_hub does not. Set WHISPER_PRELOAD=none to skip.
+ENV HF_HOME=/app/.hf
+ARG WHISPER_PRELOAD=small
+ARG HF_ENDPOINT=""
+COPY download_model.py .
+RUN HF_ENDPOINT="$HF_ENDPOINT" python download_model.py "$WHISPER_PRELOAD"
+
 COPY . .
 
 # Non-root user for security
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
+    && mkdir -p /app/.hf && chown -R appuser:appgroup /app/.hf
 USER appuser
 
 EXPOSE 8300

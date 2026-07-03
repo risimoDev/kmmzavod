@@ -88,6 +88,9 @@ class SourceAnalysis(BaseModel):
     # Beat timestamps (librosa), for rhythm-aware cutting.
     beats: list[float] = []
     transcript: list[TranscriptSegment] = []
+    # Why the transcript is empty (Whisper broken / no audio / no speech) —
+    # surfaced to the UI so missing subtitles are explainable, not silent.
+    transcript_error: str | None = None
     # Fraction of sampled frames containing a detectable face (0..1).
     face_ratio: float = 0.0
     # Average inter-frame motion score (0..1), higher = more dynamic.

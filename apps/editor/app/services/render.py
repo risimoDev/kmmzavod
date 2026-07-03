@@ -290,12 +290,12 @@ def _transcribe_for_subs(audio_path: str) -> list[SubLine]:
     """Transcribe the final audio into subtitle lines with word timestamps
     (output timeline) — enables karaoke-style word highlighting. Optional."""
     try:
-        from faster_whisper import WhisperModel
-    except Exception:  # noqa: BLE001
+        from app.services.stt import get_model
+        model = get_model()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("subtitle transcription unavailable: %s", e)
         return []
     try:
-        model = WhisperModel(settings.whisper_model, device=settings.whisper_device,
-                             compute_type=settings.whisper_compute_type)
         segments, _ = model.transcribe(audio_path, language=settings.whisper_language,
                                        word_timestamps=True, vad_filter=True)
         return [

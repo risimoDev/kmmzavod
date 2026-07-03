@@ -317,10 +317,13 @@ export default function EditorProjectDetailPage() {
   const included = useMemo(() => project?.clips.filter((c) => c.included) ?? [], [project]);
   const totalSec = useMemo(() => included.reduce((a, c) => a + clipDuration(c), 0), [included]);
   // Субтитры включены, но ни у одного клипа нет распознанных фраз → Whisper не
-  // отработал (нет модели в образе) или в видео нет речи. Предупреждаем заранее.
+  // отработал или в видео нет речи. Показываем точную причину из анализа.
   const noTranscript = useMemo(() =>
     project != null && project.subtitleStyle !== "none" && project.clips.length > 0 &&
     project.clips.every((c) => (c.edl?.subtitles ?? []).length === 0 && !c.transcriptSnippet),
+  [project]);
+  const transcriptError = useMemo(() =>
+    project?.sources.map((s) => s.analysis?.transcript_error).find(Boolean) ?? null,
   [project]);
 
   if (!project) {
@@ -477,10 +480,15 @@ export default function EditorProjectDetailPage() {
               </div>
 
               {noTranscript && (
-                <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-                  Выбраны субтитры, но речь не распознана ни в одном клипе: либо в видео нет
-                  голоса, либо Whisper недоступен в editor-сервисе. Субтитры можно вписать
-                  вручную через «Правка» на клипе.
+                <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning space-y-0.5">
+                  <p>Выбраны субтитры, но речь не распознана ни в одном клипе.</p>
+                  {transcriptError ? (
+                    <p className="font-mono break-all">Причина: {transcriptError}</p>
+                  ) : (
+                    <p>Либо в видео нет голоса, либо Whisper недоступен в editor-сервисе
+                      (см. GET /health editor'а).</p>
+                  )}
+                  <p>Субтитры можно вписать вручную через «✎ правка» на клипе.</p>
                 </div>
               )}
 

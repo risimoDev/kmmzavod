@@ -79,7 +79,16 @@ media-core (3b) и полировка (5). Backend-движок проверен
   статичный клип как frozen**), быстрые пресеты в UI. Перф-тюнинг — по факту нагрузки.
 
 ПРИМЕЧАНИЯ К ДЕПЛОЮ: `prisma migrate deploy && prisma generate`, пересобрать `editor` + `orchestrator`.
-faster-whisper тянет модель при первом запуске (кэш HF). GPTunnel — ключ `GPTUNNEL_API_KEY`.
+GPTunnel — ключ `GPTUNNEL_API_KEY`.
+
+WHISPER (2026-07-03): huggingface.co блокируется из RU-сетей → раньше модель
+молча не скачивалась и видео выходили без субтитров. Теперь модель **запекается
+в образ при сборке** (`download_model.py`: чистый HTTPS с фолбэком
+huggingface.co → hf-mirror.com, обходит несовместимость huggingface_hub с
+зеркалами; ARG `WHISPER_PRELOAD`, env `HF_ENDPOINT`). Статус Whisper виден в
+`GET /health` editor'а (`whisper.available/cached`), причина пустого транскрипта
+пишется в `SourceAnalysis.transcript_error` и показывается в UI-баннере.
+Проверено e2e на живой русской речи (karaoke-ASS вжигается).
 
 ---
 
