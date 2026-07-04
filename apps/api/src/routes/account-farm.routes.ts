@@ -53,10 +53,17 @@ const BulkSocialAccountBody = z.object({
     refreshToken: z.string().optional(),
     expiresAt: z.string().datetime().optional(),
     igUserId: z.string().optional(),
-    // Private-path credentials (instagram: username+password; tiktok: sessionId).
+    // Private-path credentials. Instagram: username+password (+ optional cookie,
+    // techData). TikTok: sessionId/cookie for posting, and/or username+password
+    // (+ twoFactorSeed / email+emailPassword) for the account record & future login.
     username: z.string().optional(),
     password: z.string().optional(),
     sessionId: z.string().optional(),
+    cookie: z.string().optional(),
+    techData: z.string().optional(),
+    twoFactorSeed: z.string().optional(),
+    email: z.string().optional(),
+    emailPassword: z.string().optional(),
     accountGroupId: z.string().uuid().optional(),
     niche: z.string().optional(),
     language: z.string().max(10).default('en'),
@@ -69,23 +76,62 @@ const SetCredentialsBody = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   sessionId: z.string().optional(),
+  cookie: z.string().optional(),
+  techData: z.string().optional(),
+  twoFactorSeed: z.string().optional(),
+  email: z.string().optional(),
+  emailPassword: z.string().optional(),
   accessToken: z.string().optional(),
 });
+
+type PrivateCreds = {
+  username?: string; password?: string; sessionId?: string; cookie?: string;
+  techData?: string; twoFactorSeed?: string; email?: string; emailPassword?: string;
+};
+
+/** Pull the sessionid value out of a raw Cookie header string, if present. */
+function sessionidFromCookie(cookie?: string): string | undefined {
+  if (!cookie) return undefined;
+  const m = cookie.match(/sessionid=([^;|\s]+)/i);
+  return m ? decodeURIComponent(m[1]) : undefined;
+}
 
 /**
  * Build the private-publisher session blob from import/credential input.
  * Stored encrypted; the publisher microservice reads it to log in.
+ * Returns { session, note } — note surfaces a non-fatal caveat (e.g. a TikTok
+ * account stored without a posting session).
  */
-function buildPrivateSession(platform: string, acc: { username?: string; password?: string; sessionId?: string }): Record<string, unknown> {
+function buildPrivateSession(platform: string, acc: PrivateCreds): { session: Record<string, unknown>; note?: string } {
   if (platform === 'instagram') {
     if (!acc.username || !acc.password) {
       throw new Error('Instagram private account needs username and password');
     }
-    return { username: acc.username, password: acc.password };
+    const session: Record<string, unknown> = { username: acc.username, password: acc.password };
+    const sid = acc.sessionId || sessionidFromCookie(acc.cookie);
+    if (sid) session.sessionid = sid;
+    if (acc.cookie) session.cookie = acc.cookie;
+    if (acc.techData) session.tech_data = acc.techData;
+    return { session };
   }
   if (platform === 'tiktok') {
-    if (!acc.sessionId) throw new Error('TikTok private account needs sessionId');
-    return { sessionid: acc.sessionId };
+    const sid = acc.sessionId || sessionidFromCookie(acc.cookie);
+    const session: Record<string, unknown> = {};
+    if (sid) session.sessionid = sid;
+    if (acc.cookie) session.cookie = acc.cookie;
+    // Store login material for the account record + future automated login.
+    if (acc.username) session.username = acc.username;
+    if (acc.password) session.password = acc.password;
+    if (acc.twoFactorSeed) session.two_factor_seed = acc.twoFactorSeed;
+    if (acc.email) session.email = acc.email;
+    if (acc.emailPassword) session.email_password = acc.emailPassword;
+    if (Object.keys(session).length === 0) {
+      throw new Error('TikTok private account needs a sessionId/cookie or username+password');
+    }
+    // Posting via tiktok-uploader requires a sessionid; flag creds-only imports.
+    const note = sid ? undefined
+      : 'stored without posting session — add a TikTok sessionid/cookie before publishing';
+    return { session, note };
   }
   throw new Error(`Private publishing is not supported for platform "${platform}"`);
 }
@@ -252,7 +298,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { tenantId } = request.user;
     const { accounts, autoAssign } = BulkSocialAccountBody.parse(request.body);
 
-    const results: Array<{ accountName: string; status: 'created' | 'failed'; error?: string }> = [];
+    const results: Array<{ accountName: string; status: 'created' | 'failed'; error?: string; note?: string }> = [];
 
     for (const acc of accounts) {
       try {
@@ -287,10 +333,12 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         // Resolve credentials per publishing method.
         let accessTokenEnc: string;
         let sessionDataEnc: string | undefined;
+        let importNote: string | undefined;
         if (acc.authMethod === 'private') {
-          const sd = buildPrivateSession(acc.platform, acc); // throws → recorded as failed below
-          sessionDataEnc = encrypt(JSON.stringify(sd));
+          const { session, note } = buildPrivateSession(acc.platform, acc); // throws → recorded as failed below
+          sessionDataEnc = encrypt(JSON.stringify(session));
           accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
+          importNote = note;
         } else {
           if (!acc.accessToken) throw new Error('Official account needs accessToken');
           accessTokenEnc = encrypt(acc.accessToken);
@@ -325,7 +373,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           });
         }
 
-        results.push({ accountName: acc.accountName, status: 'created' });
+        results.push({ accountName: acc.accountName, status: 'created', ...(importNote ? { note: importNote } : {}) });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ err: msg, accountName: acc.accountName }, 'Bulk import failed for account');
@@ -350,11 +398,13 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     if (!account) return reply.status(404).send({ error: 'Account not found' });
 
     const data: Record<string, unknown> = { authMethod: body.authMethod };
+    let credNote: string | undefined;
     if (body.authMethod === 'private') {
       try {
-        const sd = buildPrivateSession(account.platform, body);
-        data.sessionData = encrypt(JSON.stringify(sd));
+        const { session, note } = buildPrivateSession(account.platform, body);
+        data.sessionData = encrypt(JSON.stringify(session));
         data.accessToken = encrypt('private');
+        credNote = note;
       } catch (err: unknown) {
         return reply.status(400).send({ error: err instanceof Error ? err.message : 'Invalid credentials' });
       }
@@ -366,7 +416,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
 
     await db.socialAccount.update({ where: { id }, data });
     logger.info({ accountId: id, authMethod: body.authMethod }, 'Account credentials updated');
-    return reply.send({ updated: true, authMethod: body.authMethod });
+    return reply.send({ updated: true, authMethod: body.authMethod, ...(credNote ? { note: credNote } : {}) });
   });
 
   // ── Reset Daily Post Counts (call via cron every midnight per timezone) ────

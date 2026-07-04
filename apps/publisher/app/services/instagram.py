@@ -12,11 +12,20 @@ fresh login challenge. The account proxy + device must be applied BEFORE login.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from instagrapi import Client
 
 logger = logging.getLogger(__name__)
+
+
+def _sessionid_from_cookie(cookie: str | None) -> str | None:
+    """Extract the sessionid value from a raw Cookie header string."""
+    if not cookie:
+        return None
+    m = re.search(r"sessionid=([^;|\s]+)", cookie, re.IGNORECASE)
+    return m.group(1) if m else None
 
 
 def _make_client(
@@ -55,7 +64,8 @@ def _login(
 ) -> Client:
     username = session_data.get("username")
     password = session_data.get("password")
-    sessionid = session_data.get("sessionid")
+    # sessionid may be explicit or embedded in a raw cookie string from import.
+    sessionid = session_data.get("sessionid") or _sessionid_from_cookie(session_data.get("cookie"))
     cl = _make_client(session_data, proxy_url, fingerprint)
 
     try:

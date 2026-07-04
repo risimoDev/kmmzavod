@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { TopBar } from "@/components/layout/AppShell";
 import {
@@ -432,6 +432,129 @@ function ProxiesTab() {
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
 
+// ── Import formats ────────────────────────────────────────────────────────────
+// Each parser turns one raw line into the credential fields the bulk-import API
+// expects. accountName defaults to the login when the format has no separate name.
+
+type ParsedCreds = Record<string, string | undefined> & { accountName?: string };
+type ImportFormat = {
+  id: string;
+  label: string;
+  template: string;
+  placeholder: string;
+  parse: (line: string) => ParsedCreds | null;
+};
+
+/** Split on the FIRST colon only (passwords/tokens may contain none, but be safe). */
+function splitFirst(s: string, sep: string): [string, string] {
+  const i = s.indexOf(sep);
+  return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + sep.length)];
+}
+
+function getImportFormats(
+  platform: string,
+  method: "official" | "private",
+): ImportFormat[] {
+  if (method === "official") {
+    return [{
+      id: "token",
+      label: "accountName:accessToken[:refreshToken]",
+      template: "accountName:accessToken:refreshToken",
+      placeholder: "my_account:ACCESS_TOKEN:REFRESH_TOKEN",
+      parse: (line) => {
+        const [accountName, accessToken, refreshToken] = line.split(":");
+        if (!accountName || !accessToken) return null;
+        return { accountName, accessToken, refreshToken: refreshToken || undefined };
+      },
+    }];
+  }
+  if (platform === "instagram") {
+    return [
+      {
+        id: "login_pass_tech_cookie",
+        label: "Login:Pass|Tech_data|Cookie|",
+        template: "Login:Pass|Tech_data|Cookie|",
+        placeholder: "ivan_p:qwerty123|Android device...|sessionid=123%3Aabc; csrftoken=...|",
+        parse: (line) => {
+          const segs = line.split("|");
+          const [login, password] = splitFirst(segs[0] ?? "", ":");
+          if (!login || !password) return null;
+          return {
+            accountName: login, username: login, password,
+            techData: segs[1]?.trim() || undefined,
+            cookie: segs[2]?.trim() || undefined,
+          };
+        },
+      },
+      {
+        id: "name_user_pass",
+        label: "accountName:username:password",
+        template: "accountName:username:password",
+        placeholder: "my_account:my_login:my_password",
+        parse: (line) => {
+          const parts = line.split(":");
+          if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+          return { accountName: parts[0], username: parts[1], password: parts.slice(2).join(":") };
+        },
+      },
+      {
+        id: "login_pass",
+        label: "login:password",
+        template: "login:password",
+        placeholder: "my_login:my_password",
+        parse: (line) => {
+          const [login, password] = splitFirst(line, ":");
+          if (!login || !password) return null;
+          return { accountName: login, username: login, password };
+        },
+      },
+    ];
+  }
+  // TikTok
+  return [
+    {
+      id: "user_pass_2fa",
+      label: "username:password:2FA",
+      template: "username:password:2FA_token",
+      placeholder: "my_login:my_password:JBSWY3DPEHPK3PXP",
+      parse: (line) => {
+        const parts = line.split(":");
+        if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+        return {
+          accountName: parts[0], username: parts[0], password: parts[1],
+          twoFactorSeed: parts[2]?.trim() || undefined,
+        };
+      },
+    },
+    {
+      id: "user_pass_mail",
+      label: "login:password:mail:mailpassword",
+      template: "login:password:mail:mailpassword",
+      placeholder: "my_login:my_password:box@mail.com:mailpass",
+      parse: (line) => {
+        const parts = line.split(":");
+        if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+        return {
+          accountName: parts[0], username: parts[0], password: parts[1],
+          email: parts[2]?.trim() || undefined,
+          emailPassword: parts[3]?.trim() || undefined,
+        };
+      },
+    },
+    {
+      id: "name_sessionid",
+      label: "accountName:sessionId (готов к постингу)",
+      template: "accountName:sessionId",
+      placeholder: "my_account:SESSIONID_COOKIE",
+      parse: (line) => {
+        const [accountName, sessionId] = splitFirst(line, ":");
+        if (!accountName || !sessionId) return null;
+        return { accountName, sessionId };
+      },
+    },
+  ];
+}
+
 function AccountsTab() {
   const [data, setData] = useState<{ accounts: FarmSocialAccount[]; total: number } | null>(null);
   const [groups, setGroups] = useState<AccountGroup[]>([]);
@@ -443,6 +566,14 @@ function AccountsTab() {
   const [platform, setPlatform] = useState<"tiktok" | "instagram" | "youtube_shorts" | "postbridge">("tiktok");
   const [authMethod, setAuthMethod] = useState<"official" | "private">("official");
   const [groupId, setGroupId] = useState("");
+  const [formatId, setFormatId] = useState("");
+
+  const formats = useMemo(() => getImportFormats(platform, authMethod), [platform, authMethod]);
+  const activeFormat = formats.find((f) => f.id === formatId) ?? formats[0];
+  // Keep the selected format valid whenever platform/method changes.
+  useEffect(() => {
+    if (!formats.some((f) => f.id === formatId)) setFormatId(formats[0]?.id ?? "");
+  }, [formats, formatId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -464,38 +595,32 @@ function AccountsTab() {
   useEffect(() => { load(); }, [load]);
 
   const handleImport = async () => {
+    if (!activeFormat) { alert("Выберите формат"); return; }
     const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    let accounts: Array<Record<string, unknown>>;
 
-    if (authMethod === "private") {
-      accounts = lines
-        .map((line) => {
-          const parts = line.split(":");
-          const accountName = parts[0];
-          if (platform === "instagram") {
-            // accountName:username:password
-            return { platform, accountName, authMethod, username: parts[1], password: parts[2], accountGroupId: groupId || undefined };
-          }
-          // tiktok → accountName:sessionId  (sessionId may not contain ':')
-          return { platform, accountName, authMethod, sessionId: parts.slice(1).join(":"), accountGroupId: groupId || undefined };
-        })
-        .filter((a: any) => a.accountName && (platform === "instagram" ? a.username && a.password : a.sessionId));
-    } else {
-      // official → accountName:accessToken[:refreshToken]
-      accounts = lines
-        .map((line) => {
-          const [accountName, accessToken, refreshToken] = line.split(":");
-          return { platform, accountName, accessToken, refreshToken: refreshToken || undefined, accountGroupId: groupId || undefined };
-        })
-        .filter((a: any) => a.accountName && a.accessToken);
+    let skipped = 0;
+    const accounts = lines
+      .map((line) => {
+        const parsed = activeFormat.parse(line);
+        if (!parsed) { skipped++; return null; }
+        return { platform, authMethod, accountGroupId: groupId || undefined, ...parsed };
+      })
+      .filter(Boolean) as Array<Record<string, unknown>>;
+
+    if (accounts.length === 0) {
+      alert("Ни одной строки не распознано под выбранный формат — проверьте формат.");
+      return;
     }
-
-    if (accounts.length === 0) { alert("No valid accounts parsed"); return; }
     setImporting(true);
     try {
       const res = await accountFarmApi.bulkImportAccounts({ accounts: accounts as any, autoAssign: true });
       const failed = res.results.filter((r) => r.status === "failed");
-      alert(`Imported ${res.imported}.${failed.length ? ` ${failed.length} failed.` : ""}`);
+      const notes = res.results.filter((r) => r.note);
+      let msg = `Импортировано: ${res.imported}.`;
+      if (skipped) msg += ` Пропущено (не распознано): ${skipped}.`;
+      if (failed.length) msg += `\nОшибок: ${failed.length} — ${failed.slice(0, 3).map((f) => `${f.accountName}: ${f.error}`).join("; ")}`;
+      if (notes.length) msg += `\n⚠ ${notes.length} без сессии постинга: ${notes[0].note}`;
+      alert(msg);
       setShowImport(false);
       setRaw("");
       load();
@@ -592,28 +717,43 @@ function AccountsTab() {
             </p>
           )}
 
+          {/* Формат строки — выбор под конкретную выгрузку */}
+          {formats.length > 1 && (
+            <div>
+              <label className="text-sm font-medium text-text-primary block mb-1.5">Формат строки</label>
+              <select
+                value={activeFormat?.id ?? ""}
+                onChange={(e) => setFormatId(e.target.value)}
+                className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-sm text-text-primary"
+              >
+                {formats.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+              </select>
+            </div>
+          )}
+
           <p className="text-xs text-text-tertiary">
-            {authMethod === "official" ? (
-              <>One per line: <code>accountName:accessToken:refreshToken</code> (refreshToken optional).</>
-            ) : platform === "instagram" ? (
-              <>One per line: <code>accountName:username:password</code> — публикация через приватный сервис (instagrapi).</>
-            ) : (
-              <>One per line: <code>accountName:sessionId</code> — TikTok <code>sessionid</code> cookie из браузера.</>
-            )}{" "}
-            Всё шифруется at rest. Для приватного метода назначьте аккаунту прокси (через группу).
+            По одной строке: <code>{activeFormat?.template}</code>. Всё шифруется at rest.
+            {authMethod === "private" && <> Назначьте аккаунтам прокси (через группу).</>}
+            {authMethod === "private" && platform === "tiktok" && activeFormat?.id !== "name_sessionid" && (
+              <span className="block text-warning mt-1">
+                ⚠ TikTok постит только по <code>sessionid</code>-куке. Логин/пароль/2FA/почта
+                сохранятся зашифрованно, но чтобы аккаунт публиковал — добавьте ему sessionid
+                (формат «accountName:sessionId» или позже через правку аккаунта).
+              </span>
+            )}
+            {authMethod === "private" && platform === "instagram" && activeFormat?.id === "login_pass_tech_cookie" && (
+              <span className="block text-text-secondary mt-1">
+                Из <code>Cookie</code> автоматически берётся <code>sessionid</code> (переиспользование
+                сессии без повторного логина); <code>Tech_data</code> сохраняется как параметры устройства.
+              </span>
+            )}
           </p>
           <Textarea
             label="Accounts"
             rows={8}
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
-            placeholder={
-              authMethod === "official"
-                ? "my_account:ACCESS_TOKEN:REFRESH_TOKEN"
-                : platform === "instagram"
-                ? "my_account:my_login:my_password"
-                : "my_account:SESSIONID_COOKIE"
-            }
+            placeholder={activeFormat?.placeholder}
           />
           <ModalActions onCancel={() => setShowImport(false)} onConfirm={handleImport} loading={importing} disabled={!raw.trim()} confirmLabel="Import" />
         </Modal>

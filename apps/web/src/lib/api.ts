@@ -547,12 +547,17 @@ export const accountFarmApi = {
       username?: string;
       password?: string;
       sessionId?: string;
+      cookie?: string;
+      techData?: string;
+      twoFactorSeed?: string;
+      email?: string;
+      emailPassword?: string;
       accountGroupId?: string;
       niche?: string;
       language?: string;
     }>;
     autoAssign?: boolean;
-  }) => apiFetch<{ imported: number; results: Array<{ accountName: string; status: string; error?: string }> }>(
+  }) => apiFetch<{ imported: number; results: Array<{ accountName: string; status: string; error?: string; note?: string }> }>(
     '/api/v1/farm/social-accounts/bulk',
     { method: 'POST', body: JSON.stringify(body) }
   ),

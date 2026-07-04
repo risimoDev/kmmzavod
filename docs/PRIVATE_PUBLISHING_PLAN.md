@@ -28,6 +28,17 @@ UPDATE (2026-07-03) — warmup promoter + gate DONE:
 ✅ Авторасписание публикаций: `DistributeSchedule` (миграция `20260703000100`),
    тик в scheduler.worker, API `/api/v1/distribute-schedules`, UI `/uniquify/schedules`.
 
+UPDATE (2026-07-03) — real-world import formats:
+✅ Bulk import теперь format-aware (farm page dropdown «Формат строки»).
+   Instagram: `Login:Pass|Tech_data|Cookie|` (из Cookie автоизвлекается sessionid,
+   Tech_data → device), плюс `accountName:username:password` и `login:password`.
+   TikTok: `username:password:2FA`, `login:password:mail:mailpassword`,
+   `accountName:sessionId`. buildPrivateSession расширен (cookie/techData/
+   twoFactorSeed/email/emailPassword) и возвращает {session, note}. publisher
+   instagram.py достаёт sessionid из raw cookie. ВАЖНО: TikTok постит только по
+   sessionid — creds-only импорты сохраняются зашифрованно и помечаются note
+   «add a TikTok sessionid/cookie before publishing»; UI показывает предупреждение.
+
 REMAINING / NOTES:
 - NOT runnable/tested here (needs real accounts + proxies). Validate via checklist below.
 - After deploy: `prisma migrate deploy && prisma generate`, then rebuild publisher+orchestrator+api+web.
