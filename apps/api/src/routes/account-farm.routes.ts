@@ -96,6 +96,45 @@ function sessionidFromCookie(cookie?: string): string | undefined {
   return m ? decodeURIComponent(m[1]) : undefined;
 }
 
+type CookieObj = { name: string; value: string; domain?: string; path?: string };
+
+/**
+ * Parse a TikTok cookie payload (browser-extension JSON array OR a `Cookie:`
+ * header string) into a normalized cookie list + the sessionid.
+ *
+ * TikTok often exports without an explicit `sessionid` cookie but WITH `sid_guard`
+ * (whose value embeds the sessionid: `<sessionid>|<ts>|...`, URL-encoded). We
+ * derive the sessionid from it and inject a `sessionid` cookie so tiktok-uploader
+ * — which authenticates by that cookie — has what it needs.
+ */
+function parseTikTokCookies(raw?: string): { cookies?: CookieObj[]; sessionid?: string } {
+  if (!raw) return {};
+  const trimmed = raw.trim();
+
+  if (trimmed.startsWith('[')) {
+    let arr: unknown;
+    try { arr = JSON.parse(trimmed); } catch { return {}; }
+    if (!Array.isArray(arr)) return {};
+    const cookies: CookieObj[] = arr
+      .filter((c): c is CookieObj =>
+        !!c && typeof (c as any).name === 'string' && typeof (c as any).value === 'string')
+      .map((c) => ({ name: c.name, value: c.value, domain: c.domain ?? '.tiktok.com', path: c.path ?? '/' }));
+
+    let sessionid = cookies.find((c) => c.name === 'sessionid')?.value;
+    if (!sessionid) {
+      const guard = cookies.find((c) => c.name === 'sid_guard')?.value;
+      if (guard) sessionid = decodeURIComponent(guard).split('|')[0] || undefined;
+    }
+    if (sessionid && !cookies.some((c) => c.name === 'sessionid')) {
+      cookies.push({ name: 'sessionid', value: sessionid, domain: '.tiktok.com', path: '/' });
+    }
+    return { cookies: cookies.length ? cookies : undefined, sessionid };
+  }
+
+  // Header-style string: `sessionid=...; csrftoken=...`
+  return { sessionid: sessionidFromCookie(trimmed) };
+}
+
 /**
  * Build the private-publisher session blob from import/credential input.
  * Stored encrypted; the publisher microservice reads it to log in.
@@ -115,10 +154,13 @@ function buildPrivateSession(platform: string, acc: PrivateCreds): { session: Re
     return { session };
   }
   if (platform === 'tiktok') {
-    const sid = acc.sessionId || sessionidFromCookie(acc.cookie);
+    const parsed = parseTikTokCookies(acc.cookie);
+    const sid = acc.sessionId || parsed.sessionid;
     const session: Record<string, unknown> = {};
     if (sid) session.sessionid = sid;
-    if (acc.cookie) session.cookie = acc.cookie;
+    // Full cookie list authenticates the headless browser (preferred over sessionid alone).
+    if (parsed.cookies?.length) session.cookies = parsed.cookies;
+    else if (acc.cookie) session.cookie = acc.cookie;
     // Store login material for the account record + future automated login.
     if (acc.username) session.username = acc.username;
     if (acc.password) session.password = acc.password;
@@ -128,8 +170,9 @@ function buildPrivateSession(platform: string, acc: PrivateCreds): { session: Re
     if (Object.keys(session).length === 0) {
       throw new Error('TikTok private account needs a sessionId/cookie or username+password');
     }
-    // Posting via tiktok-uploader requires a sessionid; flag creds-only imports.
-    const note = sid ? undefined
+    // Posting via tiktok-uploader needs a sessionid or a cookie list.
+    const postReady = Boolean(sid || parsed.cookies?.length);
+    const note = postReady ? undefined
       : 'stored without posting session — add a TikTok sessionid/cookie before publishing';
     return { session, note };
   }

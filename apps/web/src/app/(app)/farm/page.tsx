@@ -513,6 +513,26 @@ function getImportFormats(
   // TikTok
   return [
     {
+      id: "user_pass_mail_cookies",
+      label: "login:password:mail:mailpass + cookies JSON (готов к постингу)",
+      template: "login:password:mail:mailpassword [{cookies JSON из браузера}]",
+      placeholder: 'crispgecko140:wK2KE&tQ08:box@mail.com:GIZh8k6tYb [{"name":"sid_guard","value":"6d55...%7C..."},{"name":"msToken","value":"..."}]',
+      parse: (line) => {
+        // Creds section ends where the JSON cookie array starts.
+        const br = line.indexOf("[");
+        const credPart = (br >= 0 ? line.slice(0, br) : line).trim();
+        const cookie = br >= 0 ? line.slice(br).trim() : undefined;
+        const parts = credPart.split(":");
+        if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+        return {
+          accountName: parts[0], username: parts[0], password: parts[1],
+          email: parts[2]?.trim() || undefined,
+          emailPassword: parts[3]?.trim() || undefined,
+          cookie,  // backend parses JSON, derives sessionid from sid_guard
+        };
+      },
+    },
+    {
       id: "user_pass_2fa",
       label: "username:password:2FA",
       template: "username:password:2FA_token",
@@ -554,6 +574,9 @@ function getImportFormats(
     },
   ];
 }
+
+/** TikTok formats that carry a posting session (sessionid or cookies). */
+const TIKTOK_POST_READY = new Set(["user_pass_mail_cookies", "name_sessionid"]);
 
 function AccountsTab() {
   const [data, setData] = useState<{ accounts: FarmSocialAccount[]; total: number } | null>(null);
@@ -734,11 +757,18 @@ function AccountsTab() {
           <p className="text-xs text-text-tertiary">
             По одной строке: <code>{activeFormat?.template}</code>. Всё шифруется at rest.
             {authMethod === "private" && <> Назначьте аккаунтам прокси (через группу).</>}
-            {authMethod === "private" && platform === "tiktok" && activeFormat?.id !== "name_sessionid" && (
+            {authMethod === "private" && platform === "tiktok" && activeFormat && !TIKTOK_POST_READY.has(activeFormat.id) && (
               <span className="block text-warning mt-1">
                 ⚠ TikTok постит только по <code>sessionid</code>-куке. Логин/пароль/2FA/почта
                 сохранятся зашифрованно, но чтобы аккаунт публиковал — добавьте ему sessionid
-                (формат «accountName:sessionId» или позже через правку аккаунта).
+                (формат с cookies, «accountName:sessionId» или позже через правку аккаунта).
+              </span>
+            )}
+            {authMethod === "private" && platform === "tiktok" && activeFormat?.id === "user_pass_mail_cookies" && (
+              <span className="block text-text-secondary mt-1">
+                Cookies целиком передаются в браузер для входа; <code>sessionid</code> автоматически
+                извлекается из <code>sid_guard</code>. Экспорт должен быть полным — частичный набор
+                кук может не пройти авторизацию (проверяется живым постингом).
               </span>
             )}
             {authMethod === "private" && platform === "instagram" && activeFormat?.id === "login_pass_tech_cookie" && (
