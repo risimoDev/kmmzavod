@@ -13,7 +13,7 @@ import {
   Textarea,
   EmptyState,
 } from "@/components/ui/primitives";
-import { relativeTime, cn } from "@/lib/utils";
+import { relativeTime, cn, accountUrl } from "@/lib/utils";
 import {
   accountFarmApi,
   getAccessToken,
@@ -359,6 +359,8 @@ function ProxiesTab() {
     }
   };
 
+  const [assigning, setAssigning] = useState(false);
+
   const handleHealthCheck = async (id: string) => {
     setCheckingId(id);
     try {
@@ -372,13 +374,38 @@ function ProxiesTab() {
     }
   };
 
+  const handleAutoAssign = async () => {
+    setAssigning(true);
+    try {
+      const res = await accountFarmApi.autoAssignProxies();
+      alert(
+        `Назначено прокси: ${res.assigned}.` +
+        (res.remaining ? ` Без прокси осталось: ${res.remaining}.` : "") +
+        (res.note ? `\n${res.note}` : "")
+      );
+      load();
+    } catch (e: any) {
+      alert(e.message ?? "Auto-assign failed");
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   if (loading) return <CenterSpinner />;
   if (error) return <ErrorRetry error={error} onRetry={load} />;
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button variant="primary" size="sm" onClick={() => setShowImport(true)}>Bulk Import</Button>
+      <div className="flex justify-between items-center">
+        <p className="text-xs text-text-tertiary">
+          Правило: 1 прокси = максимум 1 аккаунт на платформу (TikTok+Instagram могут делить один IP)
+        </p>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" loading={assigning} onClick={handleAutoAssign}>
+            Распределить прокси
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => setShowImport(true)}>Bulk Import</Button>
+        </div>
       </div>
 
       {proxies.length === 0 ? (
@@ -673,7 +700,14 @@ function AccountsTab() {
               <CardContent className="px-5 py-3 flex items-center gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-text-primary truncate">{a.accountName}</span>
+                    {accountUrl(a.platform, a.accountName) ? (
+                      <a href={accountUrl(a.platform, a.accountName)!} target="_blank" rel="noreferrer"
+                        className="text-sm font-medium text-brand-400 hover:underline truncate">
+                        {a.accountName} ↗
+                      </a>
+                    ) : (
+                      <span className="text-sm font-medium text-text-primary truncate">{a.accountName}</span>
+                    )}
                     <Badge variant="outline" className="text-2xs capitalize">{a.platform}</Badge>
                     {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
                     {a.readiness && (a.readiness.canPublish

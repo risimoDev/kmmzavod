@@ -209,6 +209,32 @@ function buildProxyUrl(proxy: {
   return `${scheme}://${auth}${proxy.host}:${proxy.port}`;
 }
 
+/**
+ * Pick a proxy for a new account of `platform`, enforcing "one account per
+ * platform per proxy" (so a single proxy hosts at most 1 TikTok + 1 Instagram +
+ * 1 YouTube …). Prefers proxies that ALREADY host accounts of other platforms so
+ * the fleet pairs up (1 TikTok + 1 IG on the same IP) instead of scattering.
+ * Returns the proxy row or null when none is free for this platform.
+ */
+async function pickProxyForPlatform(
+  tx: typeof db,
+  tenantId: string,
+  platform: string,
+): Promise<{ id: string; type: string; host: string; port: number; username: string | null; password: string | null } | null> {
+  const proxy = await tx.proxy.findFirst({
+    where: {
+      tenantId,
+      isActive: true,
+      assignedAccounts: { lt: tx.proxy.fields.maxAccounts },
+      accounts: { none: { platform: platform as any } }, // no same-platform account yet
+    },
+    // Most-loaded-but-still-free first → completes 1-of-each-platform pairings.
+    orderBy: [{ assignedAccounts: 'desc' }],
+    select: { id: true, type: true, host: true, port: true, username: true, password: true },
+  });
+  return proxy;
+}
+
 function generateFingerprint() {
   return {
     deviceId: randomUUID(),
@@ -338,6 +364,46 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     return reply.send({ id, ok });
   });
 
+  // ── Auto-assign proxies to accounts that don't have one ─────────────────────
+  // Enforces "1 account per platform per proxy". Idempotent — accounts that
+  // already have a proxy are left untouched.
+  app.post('/proxies/auto-assign', async (request, reply) => {
+    const { tenantId } = request.user;
+
+    const unassigned = await db.socialAccount.findMany({
+      where: { tenantId, isActive: true, proxyId: null },
+      select: { id: true, platform: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    let assigned = 0;
+    const noProxyFor: string[] = [];
+    for (const acc of unassigned) {
+      const proxy = await pickProxyForPlatform(db, tenantId, acc.platform);
+      if (!proxy) { noProxyFor.push(acc.platform); continue; }
+      await db.$transaction([
+        db.socialAccount.update({
+          where: { id: acc.id },
+          data: { proxyId: proxy.id, proxyUrl: buildProxyUrl(proxy) },
+        }),
+        db.proxy.update({
+          where: { id: proxy.id },
+          data: { assignedAccounts: { increment: 1 } },
+        }),
+      ]);
+      assigned++;
+    }
+
+    logger.info({ tenantId, assigned, unassigned: unassigned.length }, 'Proxies auto-assigned');
+    return reply.send({
+      assigned,
+      remaining: unassigned.length - assigned,
+      note: noProxyFor.length
+        ? `Не хватило свободных прокси для платформ: ${[...new Set(noProxyFor)].join(', ')} (нужен ещё 1 прокси на каждый такой аккаунт)`
+        : undefined,
+    });
+  });
+
   // ── Social Accounts Bulk Import with Auto-Assignment ───────────────────────
 
   app.post('/social-accounts/bulk', async (request, reply) => {
@@ -357,23 +423,21 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         // Build proxyUrl string used by the publish worker (decrypt password for URL)
         let proxyUrl: string | null = null;
 
-        if (autoAssign && accountGroupId) {
+        if (accountGroupId) {
           groupRecord = await db.accountGroup.findFirst({
             where: { id: accountGroupId, tenantId },
           });
-          if (groupRecord) {
-            timezone = groupRecord.timezone;
-            // Pick least-loaded active proxy within this tenant
-            const proxy = await db.proxy.findFirst({
-              where: { tenantId, isActive: true, assignedAccounts: { lt: db.proxy.fields.maxAccounts } },
-              orderBy: { assignedAccounts: 'asc' },
-            });
-            if (proxy) {
-              proxyId = proxy.id;
-              proxyUrl = buildProxyUrl(proxy);
-            }
-            deviceFingerprint = generateFingerprint();
+          if (groupRecord) timezone = groupRecord.timezone;
+        }
+        // Auto-assign a proxy per the "1 account per platform per proxy" rule
+        // (independent of group — every private account should get its own IP).
+        if (autoAssign) {
+          const proxy = await pickProxyForPlatform(db, tenantId, acc.platform);
+          if (proxy) {
+            proxyId = proxy.id;
+            proxyUrl = buildProxyUrl(proxy);
           }
+          deviceFingerprint = generateFingerprint();
         }
 
         // Resolve credentials per publishing method.

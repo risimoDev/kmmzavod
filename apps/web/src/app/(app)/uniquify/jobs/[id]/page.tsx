@@ -15,7 +15,7 @@ import {
   EmptyState,
 } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { relativeTime } from "@/lib/utils";
+import { relativeTime, accountUrl, postUrl, cn } from "@/lib/utils";
 import {
   uniquifyApi,
   socialAccountsApi,
@@ -23,9 +23,9 @@ import {
   type UniquifyJobDetail,
   type UniqueVariant,
   type DistributeJob,
+  type DistributeItem,
   type SocialAccount,
 } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 export default function JobDetailPage({ params }: { params: { id: string } }) {
   return (
@@ -408,30 +408,102 @@ function VariantCard({ variant }: { variant: UniqueVariant }) {
 
 function DistributeRow({ dist }: { dist: DistributeJob }) {
   const progress = dist.totalItems > 0 ? Math.round((dist.publishedCount / dist.totalItems) * 100) : 0;
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<DistributeItem[]>([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+
+  const loadItems = useCallback(async () => {
+    try {
+      const detail = await uniquifyApi.getDistribute(dist.id);
+      setItems(detail.items ?? []);
+    } catch { /* keep last items */ } finally {
+      setLoadingItems(false);
+    }
+  }, [dist.id]);
+
+  // Live log: poll item statuses while the distribution is active and expanded.
+  const active = ["pending", "distributing"].includes(dist.status);
+  useEffect(() => {
+    if (!open) return;
+    setLoadingItems(items.length === 0);
+    loadItems();
+    if (!active) return;
+    const t = setInterval(loadItems, 4000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, active, loadItems]);
+
   return (
     <Card className="p-4">
-      <div className="flex items-center justify-between gap-4">
+      <button className="w-full flex items-center justify-between gap-4 text-left"
+        onClick={() => setOpen((v) => !v)}>
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex items-center gap-2">
+            <span className="text-text-tertiary text-xs">{open ? "▾" : "▸"}</span>
             <p className="text-sm font-medium text-text-primary truncate">
-              Distribution {dist.id.slice(0, 8)}
+              Публикация {dist.id.slice(0, 8)}
             </p>
             <StatusBadge status={dist.status} />
           </div>
-          <p className="text-xs text-text-tertiary">
-            {dist.totalItems} items · {dist.staggerMinutes}min stagger
-            {dist._count?.items !== undefined ? ` · ${dist._count.items} items` : ""}
+          <p className="text-xs text-text-tertiary pl-4">
+            {dist.publishedCount}/{dist.totalItems} опубликовано
+            {dist.failedCount > 0 ? ` · ${dist.failedCount} ошибок` : ""} · стаггер {dist.staggerMinutes}мин
           </p>
-          {dist.totalItems > 0 && (
-            <Progress value={progress} max={100} size="sm" showLabel />
-          )}
+          {dist.totalItems > 0 && <div className="pl-4"><Progress value={progress} max={100} size="sm" showLabel /></div>}
         </div>
         <div className="text-right shrink-0">
           <p className="text-xs text-text-tertiary">{relativeTime(dist.createdAt)}</p>
           {dist.error && <p className="text-xs text-danger truncate max-w-[180px]">{dist.error}</p>}
         </div>
-      </div>
+      </button>
+
+      {open && (
+        <div className="mt-3 border-t border-border pt-3 space-y-1.5">
+          {loadingItems ? (
+            <div className="flex justify-center py-4"><LoadingSpinner size={18} /></div>
+          ) : items.length === 0 ? (
+            <p className="text-xs text-text-tertiary">Нет позиций.</p>
+          ) : (
+            items.map((it) => <PublishLogRow key={it.id} item={it} />)
+          )}
+        </div>
+      )}
     </Card>
+  );
+}
+
+/** One line of the real-time publish log: account link, status, post link, error. */
+function PublishLogRow({ item }: { item: DistributeItem }) {
+  const acc = item.socialAccount;
+  const pj = item.publishJob;
+  const profile = accountUrl(acc.platform, acc.accountName);
+  const post = postUrl(acc.platform, acc.accountName, pj?.externalPostId);
+  const status = pj?.status ?? item.status;
+
+  return (
+    <div className="flex items-start gap-2 text-xs py-1 rounded hover:bg-surface-2 px-1.5">
+      <span className="text-text-tertiary shrink-0 w-8 font-mono">#{item.uniqueVariant.variantIndex + 1}</span>
+      <span className="shrink-0 capitalize text-text-tertiary w-16">{acc.platform}</span>
+      <span className="min-w-0 flex-1">
+        {profile ? (
+          <a href={profile} target="_blank" rel="noreferrer" className="text-brand-400 hover:underline">
+            {acc.accountName}
+          </a>
+        ) : (
+          <span className="text-text-primary">{acc.accountName}</span>
+        )}
+        {pj?.error && <span className="block text-danger">{pj.error}</span>}
+        {item.error && !pj?.error && <span className="block text-warning">{item.error}</span>}
+      </span>
+      {post && (
+        <a href={post} target="_blank" rel="noreferrer"
+          className="shrink-0 text-brand-400 hover:underline">видео ↗</a>
+      )}
+      {pj?.publishedAt && (
+        <span className="shrink-0 text-text-tertiary">{relativeTime(pj.publishedAt)}</span>
+      )}
+      <StatusBadge status={status} className="shrink-0" />
+    </div>
   );
 }
 

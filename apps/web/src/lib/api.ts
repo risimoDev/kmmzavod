@@ -534,6 +534,11 @@ export const accountFarmApi = {
   healthCheckProxy: (id: string) =>
     apiFetch<{ id: string; ok: boolean }>(`/api/v1/farm/proxies/${id}/health-check`, { method: 'POST' }),
 
+  // Auto-assign proxies to accounts without one (1 account per platform per proxy)
+  autoAssignProxies: () =>
+    apiFetch<{ assigned: number; remaining: number; note?: string }>(
+      '/api/v1/farm/proxies/auto-assign', { method: 'POST' }),
+
   // Social accounts
   listAccounts: (params: { platform?: string; accountGroupId?: string; isActive?: boolean; page?: number; limit?: number } = {}) => {
     const q = new URLSearchParams();
