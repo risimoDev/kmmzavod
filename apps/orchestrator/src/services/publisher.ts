@@ -22,15 +22,31 @@ export interface WarmupResult {
   sessionData: Record<string, unknown>;
 }
 
-/** Extract a precise message from an axios/other error (status + body). */
+/** Extract a precise, actionable message from an axios/other error. */
 export function describePublisherError(err: unknown): string {
   if (axios.isAxiosError(err)) {
+    // Connection-level failures = the publisher service is not reachable.
+    const code = err.code;
+    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ECONNABORTED') {
+      return `Publisher service unreachable at ${BASE} (${code}). ` +
+        `Is the "publisher" container running? Check: docker compose up -d publisher && docker compose logs publisher`;
+    }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string } | string | undefined;
     const body = typeof data === 'string' ? data : data?.detail ?? err.message;
     return `HTTP ${status ?? '?'}: ${String(body).slice(0, 800)}`;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Liveness ping for the publisher service. Returns null if OK, else a reason. */
+export async function checkPublisherHealth(): Promise<string | null> {
+  try {
+    await axios.get(`${BASE}/health`, { timeout: 5_000 });
+    return null;
+  } catch (err: unknown) {
+    return describePublisherError(err);
+  }
 }
 
 export const publisherService = {

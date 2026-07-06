@@ -125,6 +125,13 @@ export function createSchedulerWorker(deps: Deps): Worker {
         } catch (err: any) {
           logger.error({ err: err.message }, 'Scheduler: distribute schedules tick failed');
         }
+
+        // ── Campaigns (сквозной автопилот, Фаза 1: распределение) ──────────
+        try {
+          await runCampaignsTick(db, distributeQueue, now);
+        } catch (err: any) {
+          logger.error({ err: err.message }, 'Scheduler: campaigns tick failed');
+        }
       }
 
       // ── Self-heal uniquify jobs stuck in generating/analyzing ────────────
@@ -502,6 +509,225 @@ async function runDistributeSchedulesTick(
         where: { id: schedule.id },
         data: { lastError: String(err.message ?? err).slice(0, 1000) },
       }).catch(() => {});
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Campaigns control loop (Phase 1 — distribute ready variants).
+// See docs/CAMPAIGNS_PLAN.md. Reuses the same anti-ban gates as distribution:
+// readiness is re-checked in distribute.worker; here we do cheap pre-filters,
+// per-account daily cadence, and pHash dedup so we don't create doomed items.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Hamming distance on equal-length hex/binary phash strings (best-effort). */
+function phashClose(a: string | null, b: string | null, maxDist = 6): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+  return d <= maxDist;
+}
+
+async function runCampaignsTick(
+  db: PrismaClient,
+  distributeQueue: Queue<DistributeJobPayload>,
+  now: Date,
+): Promise<void> {
+  const due = await db.campaign.findMany({
+    where: {
+      status: 'active',
+      nextRunAt: { lte: now },
+      OR: [{ startAt: null }, { startAt: { lte: now } }],
+    },
+  });
+  if (due.length === 0) return;
+
+  const startOfDayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+  for (const c of due) {
+    // Auto-complete when the end date has passed.
+    if (c.endAt && c.endAt <= now) {
+      await db.campaign.update({ where: { id: c.id }, data: { status: 'completed' } });
+      continue;
+    }
+
+    const nextRun = nextCronDate(c.cronExpression, c.timezone ?? 'Europe/Moscow', now);
+    await db.campaign.update({
+      where: { id: c.id },
+      data: { lastRunAt: now, nextRunAt: nextRun },
+    });
+
+    const run = await db.campaignRun.create({
+      data: { campaignId: c.id, tenantId: c.tenantId, kind: 'distribute' },
+    });
+    const summary: Record<string, unknown> = {};
+
+    try {
+      // 1. Eligible accounts: active, healthy, has session (private), warmup ok.
+      const accounts = await db.socialAccount.findMany({
+        where: {
+          tenantId: c.tenantId,
+          isActive: true,
+          healthScore: { gte: c.minHealth },
+          ...(c.platforms.length ? { platform: { in: c.platforms } } : {}),
+          OR: [
+            ...(c.socialAccountIds.length ? [{ id: { in: c.socialAccountIds } }] : []),
+            ...(c.accountGroupId ? [{ accountGroupId: c.accountGroupId }] : []),
+          ],
+        },
+        select: {
+          id: true, platform: true, authMethod: true, sessionData: true,
+          warmupStatus: true, dailyPostCount: true,
+          accountGroup: { select: { enforceWarmup: true } },
+        },
+      });
+
+      const eligible = accounts.filter((a) => {
+        if (a.authMethod === 'private' && !a.sessionData) return false;
+        const warmupBlocks = a.authMethod === 'private' && a.warmupStatus === 'cold' &&
+          (c.respectWarmup || a.accountGroup?.enforceWarmup === true);
+        return !warmupBlocks;
+      });
+
+      if (eligible.length === 0) {
+        summary.skipped = 'no eligible accounts';
+        await db.campaign.update({ where: { id: c.id }, data: { lastError: 'Нет пригодных аккаунтов (сессия/health/warmup)' } });
+        await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), summary: summary as any } });
+        continue;
+      }
+
+      // 2. Per-account daily slots (postsPerAccountPerDay − already posted today).
+      const slotsByAccount = new Map<string, number>();
+      for (const a of eligible) {
+        const postedToday = await db.publishJob.count({
+          where: { socialAccountId: a.id, status: 'published', publishedAt: { gte: startOfDayUTC } },
+        });
+        const free = c.postsPerAccountPerDay - postedToday;
+        if (free > 0) slotsByAccount.set(a.id, free);
+      }
+      const totalSlots = [...slotsByAccount.values()].reduce((s, n) => s + n, 0);
+      if (totalSlots === 0) {
+        summary.skipped = 'daily quota reached for all accounts';
+        await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), summary: summary as any } });
+        continue;
+      }
+
+      // 3. Fresh ready variants (completed, never scheduled/published).
+      const cfg = (c.sourceConfig ?? {}) as { uniquifyJobIds?: string[] };
+      const variants = await db.uniqueVariant.findMany({
+        where: {
+          tenantId: c.tenantId,
+          status: 'completed',
+          outputKey: { not: null },
+          publishJobs: { none: {} },
+          distributeItems: { none: {} },
+          ...(cfg.uniquifyJobIds?.length ? { uniquifyJobId: { in: cfg.uniquifyJobIds } } : {}),
+        },
+        orderBy: { createdAt: 'asc' },
+        take: totalSlots * 2, // headroom for dedup rejects
+        select: { id: true, uniquifyJobId: true, pHash: true },
+      });
+      if (variants.length === 0) {
+        summary.skipped = 'no ready variants in buffer';
+        await db.campaign.update({ where: { id: c.id }, data: { lastError: 'Буфер пуст: нет готовых неопубликованных вариантов' } });
+        await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), summary: summary as any } });
+        continue;
+      }
+
+      // 4. Assign variants to accounts (round-robin over slots) with pHash dedup:
+      //    don't send an account a variant close to one it already received.
+      const sentPhashes = new Map<string, string[]>(); // accountId → phashes
+      if (c.dedupPerAccount) {
+        const prior = await db.distributeItem.findMany({
+          where: { socialAccount: { tenantId: c.tenantId }, uniqueVariant: { pHash: { not: null } } },
+          select: { socialAccountId: true, uniqueVariant: { select: { pHash: true } } },
+          take: 5000,
+        });
+        for (const p of prior) {
+          const list = sentPhashes.get(p.socialAccountId) ?? [];
+          if (p.uniqueVariant.pHash) list.push(p.uniqueVariant.pHash);
+          sentPhashes.set(p.socialAccountId, list);
+        }
+      }
+
+      const accountIds = [...slotsByAccount.keys()];
+      const assignments: { variantId: string; uniquifyJobId: string; socialAccountId: string }[] = [];
+      let vIdx = 0;
+      for (const accId of accountIds) {
+        let slots = slotsByAccount.get(accId) ?? 0;
+        while (slots > 0 && vIdx < variants.length) {
+          const v = variants[vIdx];
+          // dedup check
+          const seen = sentPhashes.get(accId) ?? [];
+          if (c.dedupPerAccount && v.pHash && seen.some((h) => phashClose(h, v.pHash))) {
+            vIdx++; continue;
+          }
+          assignments.push({ variantId: v.id, uniquifyJobId: v.uniquifyJobId, socialAccountId: accId });
+          seen.push(v.pHash ?? '');
+          sentPhashes.set(accId, seen);
+          slots--; vIdx++;
+        }
+      }
+
+      if (assignments.length === 0) {
+        summary.skipped = 'all candidate variants were dedup-filtered';
+        await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), summary: summary as any } });
+        continue;
+      }
+
+      // 5. Group by uniquify job (DistributeJob is scoped to one) and enqueue.
+      const byJob = new Map<string, typeof assignments>();
+      for (const a of assignments) {
+        const list = byJob.get(a.uniquifyJobId) ?? [];
+        list.push(a);
+        byJob.set(a.uniquifyJobId, list);
+      }
+
+      let created = 0;
+      for (const [uniquifyJobId, items] of byJob) {
+        const distJob = await db.$transaction(async (tx) => {
+          const dj = await tx.distributeJob.create({
+            data: {
+              tenantId: c.tenantId,
+              uniquifyJobId,
+              campaignId: c.id,
+              status: 'pending',
+              staggerMinutes: c.staggerMinutes,
+              captionTemplate: c.captionTemplate,
+              hashtags: c.hashtags,
+              totalItems: items.length,
+            },
+          });
+          await tx.distributeItem.createMany({
+            data: items.map((it) => ({
+              distributeJobId: dj.id,
+              uniqueVariantId: it.variantId,
+              socialAccountId: it.socialAccountId,
+              status: 'pending' as const,
+            })),
+          });
+          return dj;
+        });
+        await distributeQueue.add(
+          `distribute-${distJob.id}`,
+          { distributeJobId: distJob.id, tenantId: c.tenantId } satisfies DistributeJobPayload,
+        );
+        created += items.length;
+      }
+
+      summary.distributed = created;
+      summary.accounts = accountIds.length;
+      await db.campaign.update({
+        where: { id: c.id },
+        data: { lastError: null },
+      });
+      await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), summary: summary as any } });
+      logger.info({ campaignId: c.id, distributed: created, nextRun }, 'Scheduler: campaign distributed');
+    } catch (err: any) {
+      const msg = String(err.message ?? err).slice(0, 1000);
+      logger.error({ campaignId: c.id, err: msg }, 'Scheduler: campaign tick failed');
+      await db.campaignRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), error: msg, summary: summary as any } }).catch(() => {});
+      await db.campaign.update({ where: { id: c.id }, data: { lastError: msg } }).catch(() => {});
     }
   }
 }

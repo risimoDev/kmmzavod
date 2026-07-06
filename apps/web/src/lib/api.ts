@@ -848,6 +848,94 @@ export interface DistributeScheduleInput {
   hashtags?: string[];
 }
 
+// ── Campaigns (сквозной автопилот) ───────────────────────────────────────────
+
+export type CampaignStatus = 'draft' | 'active' | 'paused' | 'completed' | 'archived';
+export type CampaignContentSource = 'uniquify' | 'generate' | 'montage' | 'manual';
+
+export interface Campaign {
+  id: string;
+  name: string;
+  status: CampaignStatus;
+  productId: string | null;
+  contentSource: CampaignContentSource;
+  sourceConfig: Record<string, unknown>;
+  bufferDays: number;
+  accountGroupId: string | null;
+  socialAccountIds: string[];
+  platforms: string[];
+  postsPerAccountPerDay: number;
+  cronExpression: string;
+  timezone: string;
+  staggerMinutes: number;
+  captionTemplate: string | null;
+  hashtags: string[];
+  minHealth: number;
+  dedupPerAccount: boolean;
+  respectWarmup: boolean;
+  startAt: string | null;
+  endAt: string | null;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  variantsPublished: number;
+  postsPublished: number;
+  postsFailed: number;
+  lastError: string | null;
+  createdAt: string;
+  product?: { name: string } | null;
+}
+
+export interface CampaignRun {
+  id: string;
+  kind: string;
+  summary: Record<string, unknown>;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface CampaignInput {
+  name: string;
+  productId?: string;
+  contentSource?: CampaignContentSource;
+  sourceConfig?: Record<string, unknown>;
+  bufferDays?: number;
+  accountGroupId?: string;
+  socialAccountIds?: string[];
+  platforms?: string[];
+  postsPerAccountPerDay?: number;
+  cronExpression: string;
+  timezone?: string;
+  staggerMinutes?: number;
+  captionTemplate?: string;
+  hashtags?: string[];
+  minHealth?: number;
+  dedupPerAccount?: boolean;
+  respectWarmup?: boolean;
+  startAt?: string;
+  endAt?: string;
+}
+
+export interface CampaignDetail {
+  campaign: Campaign & { runs: CampaignRun[]; product?: { id: string; name: string } | null };
+  distributeJobs: DistributeJob[];
+  bufferReady: number;
+}
+
+export const campaignsApi = {
+  list: () => apiFetch<{ campaigns: Campaign[] }>('/api/v1/campaigns').then(r => r.campaigns),
+  get: (id: string) => apiFetch<CampaignDetail>(`/api/v1/campaigns/${id}`),
+  create: (body: CampaignInput) =>
+    apiFetch<{ campaign: Campaign }>('/api/v1/campaigns', { method: 'POST', body: JSON.stringify(body) }).then(r => r.campaign),
+  update: (id: string, body: Partial<CampaignInput>) =>
+    apiFetch<{ campaign: Campaign }>(`/api/v1/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(body) }).then(r => r.campaign),
+  activate: (id: string) => apiFetch<{ campaign: Campaign }>(`/api/v1/campaigns/${id}/activate`, { method: 'POST' }).then(r => r.campaign),
+  pause: (id: string) => apiFetch<{ campaign: Campaign }>(`/api/v1/campaigns/${id}/pause`, { method: 'POST' }).then(r => r.campaign),
+  complete: (id: string) => apiFetch<{ campaign: Campaign }>(`/api/v1/campaigns/${id}/complete`, { method: 'POST' }).then(r => r.campaign),
+  runNow: (id: string) => apiFetch<{ queued: boolean }>(`/api/v1/campaigns/${id}/run-now`, { method: 'POST' }),
+  remove: (id: string) => apiFetch<void>(`/api/v1/campaigns/${id}`, { method: 'DELETE' }),
+};
+
 export const distributeSchedulesApi = {
   list: () =>
     apiFetch<{ schedules: DistributeSchedule[] }>('/api/v1/distribute-schedules').then(r => r.schedules),

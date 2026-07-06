@@ -169,6 +169,15 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # Downstream microservices the workers call. Without these, private
+      # publishing fails with "getaddrinfo ENOTFOUND publisher" because the
+      # container isn't running when the worker tries to reach it.
+      publisher:
+        condition: service_started
+      editor:
+        condition: service_started
+      video-processor:
+        condition: service_started
 
   # Private (non-official-API) publisher: Instagram (instagrapi) + TikTok (tiktok-uploader).
   publisher:

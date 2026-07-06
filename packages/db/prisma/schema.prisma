@@ -46,6 +46,7 @@ model Tenant {
     proxies            Proxy[]
     editProjects       EditProject[]
     distributeSchedules DistributeSchedule[]
+    campaigns          Campaign[]
 
     @@map("tenants")
 }
@@ -163,10 +164,11 @@ model Product {
     createdAt      DateTime @default(now()) @map("created_at")
     updatedAt      DateTime @updatedAt @map("updated_at")
 
-    tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project Project?      @relation(fields: [projectId], references: [id])
-    videos  Video[]
-    presets VideoPreset[]
+    tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    project   Project?      @relation(fields: [projectId], references: [id])
+    videos    Video[]
+    presets   VideoPreset[]
+    campaigns Campaign[]
 
     @@index([tenantId])
     @@index([tenantId, isArchived])
@@ -1112,6 +1114,7 @@ model DistributeJob {
     tenantId        String              @map("tenant_id") @db.Uuid
     uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
     createdBy       String?             @map("created_by") @db.Uuid
+    campaignId      String?             @map("campaign_id") @db.Uuid // если раздачу создала кампания
     status          DistributeJobStatus @default(pending)
     // Config
     staggerMinutes  Int                 @default(15) @map("stagger_minutes") // задержка между публикациями
@@ -1132,6 +1135,7 @@ model DistributeJob {
 
     @@index([tenantId, status])
     @@index([uniquifyJobId])
+    @@index([campaignId])
     @@map("distribute_jobs")
 }
 
@@ -1194,6 +1198,95 @@ model VideoSchedule {
     @@index([tenantId, isActive])
     @@index([nextRunAt])
     @@map("video_schedules")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGNS (сквозной автопилот: SUPPLY контента + DEMAND публикаций).
+// Дирижирует существующими движками (uniquify/editor/farm/distribute), не дублируя.
+// См. docs/CAMPAIGNS_PLAN.md. Фаза 1 — распределение готового контента.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum CampaignStatus {
+    draft
+    active
+    paused
+    completed
+    archived
+
+    @@map("campaign_status")
+}
+
+enum CampaignContentSource {
+    uniquify // исходники → N уникальных вариантов (default)
+    generate // HeyGen/Runway-пайплайн из пресета → uniquify
+    montage  // smart editor → SourceVideo → uniquify
+    manual   // пользователь сам заливает готовые варианты
+
+    @@map("campaign_content_source")
+}
+
+model Campaign {
+    id            String                @id @default(uuid()) @db.Uuid
+    tenantId      String                @map("tenant_id") @db.Uuid
+    name          String
+    status        CampaignStatus        @default(draft)
+    productId     String?               @map("product_id") @db.Uuid
+    // ── SUPPLY (Фаза 2 использует, Фаза 1 хранит) ──────────────────────
+    contentSource CampaignContentSource @default(uniquify) @map("content_source")
+    sourceConfig  Json                  @default("{}") @map("source_config") // preset/uniquify снапшот + uniquifyJobIds[]
+    bufferDays    Int                   @default(2) @map("buffer_days")
+    maxBuildAhead Int                   @default(50) @map("max_build_ahead")
+    // ── DEMAND ─────────────────────────────────────────────────────────
+    accountGroupId        String?          @map("account_group_id") @db.Uuid
+    socialAccountIds      String[]         @map("social_account_ids") @db.Uuid
+    platforms             SocialPlatform[]
+    postsPerAccountPerDay Int              @default(1) @map("posts_per_account_per_day")
+    cronExpression        String           @map("cron_expression")
+    timezone              String           @default("Europe/Moscow")
+    staggerMinutes        Int              @default(15) @map("stagger_minutes")
+    // ── Гардрейлы ──────────────────────────────────────────────────────
+    captionTemplate String?  @map("caption_template") @db.Text
+    hashtags        String[] @default([])
+    minHealth       Int      @default(30) @map("min_health")
+    dedupPerAccount Boolean  @default(true) @map("dedup_per_account")
+    respectWarmup   Boolean  @default(false) @map("respect_warmup")
+    // ── Жизненный цикл ─────────────────────────────────────────────────
+    startAt   DateTime? @map("start_at")
+    endAt     DateTime? @map("end_at")
+    lastRunAt DateTime? @map("last_run_at")
+    nextRunAt DateTime? @map("next_run_at")
+    // ── Денормализованная статистика ───────────────────────────────────
+    variantsReady     Int     @default(0) @map("variants_ready")
+    variantsPublished Int     @default(0) @map("variants_published")
+    postsPublished    Int     @default(0) @map("posts_published")
+    postsFailed       Int     @default(0) @map("posts_failed")
+    lastError         String? @map("last_error")
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    product Product?      @relation(fields: [productId], references: [id])
+    runs    CampaignRun[]
+
+    @@index([tenantId, status])
+    @@index([nextRunAt])
+    @@map("campaigns")
+}
+
+model CampaignRun {
+    id         String    @id @default(uuid()) @db.Uuid
+    campaignId String    @map("campaign_id") @db.Uuid
+    tenantId   String    @map("tenant_id") @db.Uuid
+    kind       String // buffer_topup | distribute | reconcile
+    summary    Json      @default("{}") // {produced, distributed, skipped, reasons[]}
+    error      String?
+    startedAt  DateTime  @default(now()) @map("started_at")
+    finishedAt DateTime? @map("finished_at")
+
+    campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+    @@index([campaignId, startedAt(sort: Desc)])
+    @@map("campaign_runs")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

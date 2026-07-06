@@ -400,6 +400,17 @@ async function main() {
     'Все workers запущены'
   );
 
+  // ── Downstream service reachability (non-fatal) ─────────────────────────
+  // Private publishing needs the publisher microservice. Ping it once at
+  // startup so a misconfigured/absent container is obvious in the logs instead
+  // of surfacing later as "getaddrinfo ENOTFOUND publisher" on every post.
+  void (async () => {
+    const { checkPublisherHealth } = await import('./services/publisher');
+    const reason = await checkPublisherHealth();
+    if (reason) logger.warn({ reason, publisherUrl: config.PUBLISHER_URL }, 'Publisher service NOT reachable — private publishing will fail until it is up');
+    else logger.info({ publisherUrl: config.PUBLISHER_URL }, 'Publisher service reachable');
+  })();
+
   // ── Heartbeat: write TTL key every 15s ──────────────────────────────────
   const HEARTBEAT_KEY = 'kmmzavod:heartbeat:orchestrator';
   const sendHeartbeat = () => {

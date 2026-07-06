@@ -100,6 +100,16 @@ const NAV_ITEMS = [
     ),
   },
   {
+    href: "/campaigns",
+    label: "Campaigns",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M3 11l18-5v12L3 14v-3z"/>
+        <path d="M11.6 16.8a3 3 0 01-5.8-1.6"/>
+      </svg>
+    ),
+  },
+  {
     href: "/products",
     label: "Products",
     icon: (
