@@ -243,34 +243,65 @@ function JobDetailContent({ jobId }: { jobId: string }) {
 
             <div className="space-y-4">
               <div>
-                <label className="text-sm font-medium text-text-primary block mb-1.5">Social Accounts</label>
-                <div className="space-y-1.5 max-h-48 overflow-y-auto border border-border rounded-md p-2 bg-surface-0">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-sm font-medium text-text-primary">Аккаунты для публикации</label>
+                  <div className="flex gap-2">
+                    <button type="button" className="text-2xs text-brand-400 hover:underline"
+                      onClick={() => setSelectedAccounts(accounts.filter((a) => a.readiness?.canPublish !== false).map((a) => a.id))}>
+                      Выбрать готовые
+                    </button>
+                    <button type="button" className="text-2xs text-text-tertiary hover:underline"
+                      onClick={() => setSelectedAccounts([])}>Сброс</button>
+                  </div>
+                </div>
+                <div className="space-y-1 max-h-56 overflow-y-auto border border-border rounded-md p-2 bg-surface-0">
                   {accounts.length === 0 ? (
-                    <p className="text-xs text-text-tertiary p-2">No active accounts. Add accounts in Settings.</p>
+                    <p className="text-xs text-text-tertiary p-2">Нет аккаунтов. Импортируйте их на странице «Account Farm».</p>
                   ) : (
-                    accounts.map((acc) => (
-                      <label
-                        key={acc.id}
-                        className="flex items-center gap-2 p-1.5 rounded hover:bg-surface-2 cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selectedAccounts.includes(acc.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedAccounts((prev) => [...prev, acc.id]);
-                            } else {
-                              setSelectedAccounts((prev) => prev.filter((id) => id !== acc.id));
-                            }
-                          }}
-                          className="rounded border-border"
-                        />
-                        <span className="text-xs text-text-primary capitalize">{acc.platform}</span>
-                        <span className="text-xs text-text-tertiary">{acc.accountName}</span>
-                      </label>
-                    ))
+                    accounts.map((acc) => {
+                      const r = acc.readiness;
+                      const blocked = r?.canPublish === false;
+                      return (
+                        <label
+                          key={acc.id}
+                          className={cn(
+                            "flex items-start gap-2 p-1.5 rounded",
+                            blocked ? "opacity-60 cursor-not-allowed" : "hover:bg-surface-2 cursor-pointer"
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            disabled={blocked}
+                            checked={selectedAccounts.includes(acc.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) setSelectedAccounts((prev) => [...prev, acc.id]);
+                              else setSelectedAccounts((prev) => prev.filter((id) => id !== acc.id));
+                            }}
+                            className="rounded border-border mt-0.5"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              <span className="text-xs text-text-primary capitalize">{acc.platform}</span>
+                              <span className="text-xs text-text-tertiary truncate">{acc.accountName}</span>
+                              {r && (r.canPublish
+                                ? <Badge variant="success" className="text-2xs">готов</Badge>
+                                : <Badge variant="danger" className="text-2xs">нельзя</Badge>)}
+                            </span>
+                            {blocked && r && (
+                              <span className="block text-2xs text-danger">{r.blockers.join(" · ")}</span>
+                            )}
+                            {!blocked && r && r.warnings.length > 0 && (
+                              <span className="block text-2xs text-warning">{r.warnings.join(" · ")}</span>
+                            )}
+                          </span>
+                        </label>
+                      );
+                    })
                   )}
                 </div>
+                <p className="text-2xs text-text-tertiary mt-1">
+                  «нельзя» — аккаунт не опубликует (нет сессии, пауза, бан, низкий health). Причина показана рядом.
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

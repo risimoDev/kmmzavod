@@ -201,6 +201,12 @@ export interface PublishJob {
   socialAccountId: string;
 }
 
+export interface PublishReadiness {
+  canPublish: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
 export interface SocialAccount {
   id: string;
   platform: string;
@@ -209,6 +215,10 @@ export interface SocialAccount {
   expiresAt: string | null;
   proxyUrl: string | null;
   createdAt: string;
+  authMethod?: string;
+  warmupStatus?: string;
+  healthScore?: number;
+  readiness?: PublishReadiness;
   _count?: { publishJobs: number };
 }
 
@@ -453,7 +463,8 @@ export interface FarmSocialAccount {
   accountGroupId: string | null;
   proxyId: string | null;
   createdAt: string;
-  accountGroup?: { name: string } | null;
+  readiness?: PublishReadiness;
+  accountGroup?: { name: string; enforceWarmup?: boolean } | null;
   proxy?: { host: string; port: number; type: string } | null;
 }
 

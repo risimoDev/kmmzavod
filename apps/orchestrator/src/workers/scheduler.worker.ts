@@ -127,6 +127,15 @@ export function createSchedulerWorker(deps: Deps): Worker {
         }
       }
 
+      // ── Self-heal uniquify jobs stuck in generating/analyzing ────────────
+      // Safety net: if a state event was ever lost, finalize jobs whose variants
+      // are all done. Idempotent and cheap (only touches active jobs).
+      try {
+        await reconcileStuckUniquifyJobs(db);
+      } catch (err: any) {
+        logger.error({ err: err.message }, 'Scheduler: uniquify reconcile failed');
+      }
+
       // ── Daily reset of per-account post counters ──────────────────────────
       // The distribute worker blocks accounts once dailyPostCount >= maxPostsPerDay.
       // Nothing else resets it, so without this accounts would stay blocked forever.
@@ -245,6 +254,40 @@ export function createSchedulerWorker(deps: Deps): Worker {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Self-heal: finalize uniquify jobs whose variants are all done but that never
+// flipped out of generating/analyzing (lost state event / historical bug).
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function reconcileStuckUniquifyJobs(db: PrismaClient): Promise<void> {
+  const stuck = await db.uniquifyJob.findMany({
+    where: { status: { in: ['generating', 'analyzing'] } },
+    select: { id: true, variantCount: true },
+  });
+  for (const job of stuck) {
+    const [completed, failed, total] = await Promise.all([
+      db.uniqueVariant.count({ where: { uniquifyJobId: job.id, status: 'completed' } }),
+      db.uniqueVariant.count({ where: { uniquifyJobId: job.id, status: 'failed' } }),
+      db.uniqueVariant.count({ where: { uniquifyJobId: job.id } }),
+    ]);
+    // All expected variants exist AND all have terminal status.
+    if (total >= job.variantCount && completed + failed >= job.variantCount) {
+      const allFailed = completed === 0;
+      await db.uniquifyJob.update({
+        where: { id: job.id },
+        data: {
+          status: allFailed ? 'failed' : 'completed',
+          completedCount: completed,
+          failedCount: failed,
+          completedAt: new Date(),
+          error: allFailed ? `All ${failed} variants failed` : null,
+        },
+      });
+      logger.info({ uniquifyJobId: job.id, completed, failed }, 'Scheduler: reconciled stuck uniquify job');
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Warmup promoter — прогрев приватных аккаунтов фермы (cold → warming → warm)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -345,26 +388,32 @@ async function runDistributeSchedulesTick(
     });
 
     try {
-      // 1. Resolve target accounts: explicit ids ∪ account group members.
-      //    Cheap pre-filters only — the distribute worker re-checks daily limit,
-      //    health, 3h gap and warmup gate at send time.
+      // 1. Resolve target accounts. Only the hard, non-recoverable filters here
+      //    (active, healthy) — the distribute worker applies the per-account
+      //    warmup gate, session check, daily limit and 3h-gap at send time.
+      const scope = {
+        tenantId: schedule.tenantId,
+        OR: [
+          ...(schedule.socialAccountIds.length > 0 ? [{ id: { in: schedule.socialAccountIds } }] : []),
+          ...(schedule.accountGroupId ? [{ accountGroupId: schedule.accountGroupId }] : []),
+        ],
+      };
       const accounts = await db.socialAccount.findMany({
-        where: {
-          tenantId: schedule.tenantId,
-          isActive: true,
-          healthScore: { gte: 30 },
-          NOT: { AND: [{ authMethod: 'private' }, { warmupStatus: 'cold' }] },
-          OR: [
-            ...(schedule.socialAccountIds.length > 0 ? [{ id: { in: schedule.socialAccountIds } }] : []),
-            ...(schedule.accountGroupId ? [{ accountGroupId: schedule.accountGroupId }] : []),
-          ],
-        },
+        where: { ...scope, isActive: true, healthScore: { gte: 30 } },
         select: { id: true },
       });
       if (accounts.length === 0) {
+        // Explain precisely why (helps the user fix it, e.g. all inactive).
+        const [total, inactive, lowHealth] = await Promise.all([
+          db.socialAccount.count({ where: scope }),
+          db.socialAccount.count({ where: { ...scope, isActive: false } }),
+          db.socialAccount.count({ where: { ...scope, healthScore: { lt: 30 } } }),
+        ]);
+        const reason = total === 0
+          ? 'No accounts match this schedule (check group / selected accounts)'
+          : `No eligible accounts of ${total}: ${inactive} inactive, ${lowHealth} low-health (<30)`;
         await db.distributeSchedule.update({
-          where: { id: schedule.id },
-          data: { lastError: 'No eligible accounts (inactive, cold or low health)' },
+          where: { id: schedule.id }, data: { lastError: reason },
         });
         continue;
       }

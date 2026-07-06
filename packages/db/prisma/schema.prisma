@@ -787,6 +787,10 @@ model AccountGroup {
     maxPostsPerDay Int       @default(3) @map("max_posts_per_day")
     staggerMinutes Int       @default(120) @map("stagger_minutes")
     bgmPool        String[]  @default([]) @map("bgm_pool")
+    // Anti-ban warmup gate: when true, cold private accounts in this group are
+    // held back from posting until warmed up. Default OFF so freshly imported
+    // accounts can publish immediately (warmup still runs to improve standing).
+    enforceWarmup  Boolean   @default(false) @map("enforce_warmup")
     isActive       Boolean   @default(true) @map("is_active")
     createdAt      DateTime  @default(now()) @map("created_at")
     updatedAt      DateTime  @updatedAt @map("updated_at")

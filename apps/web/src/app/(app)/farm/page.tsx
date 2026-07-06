@@ -676,6 +676,9 @@ function AccountsTab() {
                     <span className="text-sm font-medium text-text-primary truncate">{a.accountName}</span>
                     <Badge variant="outline" className="text-2xs capitalize">{a.platform}</Badge>
                     {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
+                    {a.readiness && (a.readiness.canPublish
+                      ? <Badge variant="success" className="text-2xs">готов к постингу</Badge>
+                      : <Badge variant="danger" className="text-2xs">нельзя постить</Badge>)}
                     {a.shadowBanDetected && <Badge variant="danger" className="text-2xs">shadow-ban</Badge>}
                     {!a.isActive && <Badge variant="default" className="text-2xs">paused</Badge>}
                   </div>
@@ -686,6 +689,12 @@ function AccountsTab() {
                     <span>{a.dailyPostCount} today</span>
                     <span>warmup: {a.warmupStatus}</span>
                   </div>
+                  {a.readiness && !a.readiness.canPublish && (
+                    <p className="text-[11px] text-danger mt-0.5">{a.readiness.blockers.join(" · ")}</p>
+                  )}
+                  {a.readiness && a.readiness.canPublish && a.readiness.warnings.length > 0 && (
+                    <p className="text-[11px] text-warning mt-0.5">{a.readiness.warnings.join(" · ")}</p>
+                  )}
                 </div>
                 <HealthBadge score={a.healthScore} />
               </CardContent>

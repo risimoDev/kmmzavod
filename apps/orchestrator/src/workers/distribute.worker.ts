@@ -39,9 +39,9 @@ export function createDistributeWorker(deps: Deps): Worker {
               socialAccount: {
                 select: {
                   id: true, platform: true, isActive: true,
-                  authMethod: true, warmupStatus: true,
+                  authMethod: true, warmupStatus: true, sessionData: true,
                   dailyPostCount: true, lastPostAt: true, healthScore: true,
-                  accountGroup: { select: { maxPostsPerDay: true, timezone: true, staggerMinutes: true } },
+                  accountGroup: { select: { maxPostsPerDay: true, timezone: true, staggerMinutes: true, enforceWarmup: true } },
                 },
               },
             },
@@ -95,12 +95,26 @@ export function createDistributeWorker(deps: Deps): Worker {
         }
 
         // Anti-ban guards
-        // Warmup gate: private accounts must be warmed up before posting.
-        // The scheduler's warmup promoter moves them cold → warming → warm.
-        if (item.socialAccount.authMethod === 'private' && item.socialAccount.warmupStatus === 'cold') {
+        // Private accounts need a stored publisher session to post at all
+        // (e.g. TikTok imported with only login/password and no sessionid/cookie).
+        if (item.socialAccount.authMethod === 'private' && !item.socialAccount.sessionData) {
           await db.distributeItem.update({
             where: { id: item.id },
-            data: { status: 'skipped', error: 'Account not warmed up yet (warmupStatus=cold)' },
+            data: { status: 'skipped', error: 'No publisher session — add a sessionid/cookie to this account' },
+          });
+          skippedCount++; itemIndex++; continue;
+        }
+        // Warmup gate: only enforced for groups that opt in (default OFF), so
+        // freshly imported accounts publish immediately. When enabled, cold
+        // accounts wait for the scheduler's warmup promoter (cold→warming→warm).
+        if (
+          item.socialAccount.authMethod === 'private' &&
+          item.socialAccount.warmupStatus === 'cold' &&
+          item.socialAccount.accountGroup?.enforceWarmup === true
+        ) {
+          await db.distributeItem.update({
+            where: { id: item.id },
+            data: { status: 'skipped', error: 'Account not warmed up yet (group requires warmup)' },
           });
           skippedCount++; itemIndex++; continue;
         }

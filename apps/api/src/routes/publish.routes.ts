@@ -7,6 +7,7 @@ import { db } from '../lib/db';
 import { encrypt } from '../lib/crypto';
 import { createOAuthState, verifyOAuthState } from '../lib/oauth-state';
 import { publishQueue } from '../lib/queues';
+import { computeReadiness } from '../lib/publish-readiness';
 import { logger } from '../logger';
 import { config } from '../config';
 import type { PublishJobPayload } from '@kmmzavod/queue';
@@ -268,12 +269,28 @@ export async function publishRoutes(app: FastifyInstance) {
 
   app.get('/social-accounts', async (req) => {
     const { tenantId } = req.user;
-    const accounts = await db.socialAccount.findMany({
+    const rows = await db.socialAccount.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, platform: true, accountName: true, isActive: true, expiresAt: true, proxyUrl: true, createdAt: true, _count: { select: { publishJobs: true } } },
+      select: {
+        id: true, platform: true, accountName: true, isActive: true, expiresAt: true,
+        proxyUrl: true, createdAt: true, authMethod: true, healthScore: true,
+        warmupStatus: true, shadowBanDetected: true, sessionData: true,
+        accountGroup: { select: { enforceWarmup: true } },
+        _count: { select: { publishJobs: true } },
+      },
     });
-    return { data: accounts };
+    // Attach publish-readiness; never leak sessionData (only its presence).
+    const data = rows.map(({ sessionData, accountGroup, ...a }) => ({
+      ...a,
+      readiness: computeReadiness({
+        isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
+        warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
+        hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
+        enforceWarmup: accountGroup?.enforceWarmup ?? false,
+      }),
+    }));
+    return { data };
   });
 
   app.delete<{ Params: { id: string } }>('/social-accounts/:id', async (req, reply) => {

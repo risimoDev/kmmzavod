@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/db';
 import { encrypt, decrypt } from '../lib/crypto';
+import { computeReadiness } from '../lib/publish-readiness';
 import { logger } from '../logger';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ const CreateAccountGroupBody = z.object({
   maxPostsPerDay: z.number().int().min(1).max(100).default(3),
   staggerMinutes: z.number().int().min(1).max(1440).default(120),
   bgmPool: z.array(z.string().url()).default([]),
+  enforceWarmup: z.boolean().default(false),
 });
 
 const UpdateAccountGroupBody = z.object({
@@ -26,6 +28,7 @@ const UpdateAccountGroupBody = z.object({
   maxPostsPerDay: z.number().int().min(1).max(100).optional(),
   staggerMinutes: z.number().int().min(1).max(1440).optional(),
   bgmPool: z.array(z.string().url()).optional(),
+  enforceWarmup: z.boolean().optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -505,16 +508,30 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       ...(isActive !== undefined ? { isActive: isActive === 'true' } : {}),
     };
 
-    const [accounts, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       db.socialAccount.findMany({
         where,
-        include: { accountGroup: { select: { name: true } }, proxy: { select: { host: true, port: true, type: true } } },
+        include: {
+          accountGroup: { select: { name: true, enforceWarmup: true } },
+          proxy: { select: { host: true, port: true, type: true } },
+        },
         skip: (page - 1) * limit,
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
       db.socialAccount.count({ where }),
     ]);
+
+    // Attach publish-readiness; strip secrets from the response.
+    const accounts = rows.map(({ accessToken: _at, refreshToken: _rt, sessionData, ...a }) => ({
+      ...a,
+      readiness: computeReadiness({
+        isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
+        warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
+        hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
+        enforceWarmup: a.accountGroup?.enforceWarmup ?? false,
+      }),
+    }));
 
     return reply.send({ accounts, total, page, limit });
   });
