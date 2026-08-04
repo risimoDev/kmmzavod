@@ -13,6 +13,28 @@ export default function LoginPage() {
   );
 }
 
+const DEFAULT_REDIRECT = "/dashboard";
+
+/**
+ * Куда отправить пользователя после успешного входа.
+ *
+ * `?redirect=` приходит из middleware и из адресной строки, поэтому:
+ *  - отбрасываем всё, что не является относительным путём этого сайта
+ *    (`//evil.com`, `https://evil.com` — иначе получаем open redirect);
+ *  - лендинг и сами страницы авторизации подменяем на дашборд: они рендерят
+ *    разлогиненный UI, и после входа выглядят так, будто вход не сработал.
+ */
+function resolveRedirect(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
+    return DEFAULT_REDIRECT;
+  }
+  const path = raw.split(/[?#]/)[0];
+  if (path === "/" || ["/login", "/register", "/forgot-password"].includes(path)) {
+    return DEFAULT_REDIRECT;
+  }
+  return raw;
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -27,8 +49,8 @@ function LoginForm() {
     setLoading(true);
     try {
       await authApi.login(email, password);
-      const redirect = searchParams.get("redirect") || "/dashboard";
-      router.push(redirect);
+      // replace, а не push: кнопка «назад» не должна возвращать на форму входа
+      router.replace(resolveRedirect(searchParams.get("redirect")));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
