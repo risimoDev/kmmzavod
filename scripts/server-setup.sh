@@ -446,8 +446,9 @@ NGINX_CONF="$APP_DIR/infra/nginx/nginx.conf"
 if [ -f "$NGINX_CONF" ]; then
   if [ -n "$DOMAIN" ]; then
     info "Настраиваем nginx.conf на домен: $DOMAIN"
-    # Заменяем хардкод-домен k-m-m.ru на заданный
-    sed -i "s/k-m-m\.ru/${DOMAIN}/g" "$NGINX_CONF"
+    # Заменяем хардкод-домен в конфиге на заданный.
+    # Порядок важен: www.<домен> должен замениться раньше голого <домена>.
+    sed -i -E "s/(www\.)?k-m-m\.(online|ru)/\1${DOMAIN}/g" "$NGINX_CONF"
     success "nginx.conf настроен на $DOMAIN"
   else
     info "Домен не задан — создаём HTTP-only nginx.conf для IP"
@@ -570,32 +571,81 @@ else
     apt-get install -y -qq certbot
   fi
 
+  # Webroot для ACME-challenge (nginx отдаёт его из /var/www/certbot)
+  mkdir -p /var/www/certbot/.well-known/acme-challenge
+  chmod -R 755 /var/www/certbot
+
+  # Deploy-hook: после каждого продления перезагружаем nginx в контейнере,
+  # иначе он продолжит отдавать старый сертификат из :ro-монтирования.
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  RENEW_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/10-reload-kmmzavod-nginx.sh"
+  cat > "$RENEW_DEPLOY_HOOK" <<HOOKEOF
+#!/usr/bin/env bash
+set -euo pipefail
+COMPOSE_FILE="${APP_DIR}/docker-compose.yml"
+[ -f "\$COMPOSE_FILE" ] || exit 0
+if docker compose -f "\$COMPOSE_FILE" exec -T nginx nginx -s reload 2>/dev/null; then
+  echo "[certbot deploy-hook] nginx reloaded"
+else
+  docker compose -f "\$COMPOSE_FILE" restart nginx
+  echo "[certbot deploy-hook] nginx restarted"
+fi
+HOOKEOF
+  chmod 755 "$RENEW_DEPLOY_HOOK"
+
   if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     success "Сертификат уже существует: /etc/letsencrypt/live/$DOMAIN/"
   else
     info "Получаем сертификат (certbot standalone)..."
-    # nginx ещё не запущен — порт 80 свободен
+    # nginx ещё не запущен — порт 80 свободен.
+    # www.$DOMAIN тоже включаем: nginx.conf обслуживает оба имени.
+    CERT_DOMAIN_ARGS=(-d "$DOMAIN")
+    if getent hosts "www.${DOMAIN}" &>/dev/null; then
+      CERT_DOMAIN_ARGS+=(-d "www.${DOMAIN}")
+    else
+      warn "www.${DOMAIN} не резолвится — сертификат будет только на ${DOMAIN}"
+    fi
+
     if certbot certonly --standalone \
-      --email "admin@${DOMAIN}" --agree-tos --no-eff-email \
-      -d "$DOMAIN" \
+      --email "$ADMIN_EMAIL" --agree-tos --no-eff-email \
+      --cert-name "$DOMAIN" "${CERT_DOMAIN_ARGS[@]}" \
       --non-interactive; then
       success "Сертификат получен: /etc/letsencrypt/live/$DOMAIN/"
     else
       warn "Не удалось получить SSL-сертификат."
       warn "Возможно, DNS для $DOMAIN ещё не указывает на $SERVER_IP."
-      warn "Получите позже: certbot certonly --standalone -d $DOMAIN"
+      warn "Получите позже: bash ${APP_DIR}/scripts/renew-certs.sh --domain $DOMAIN"
     fi
   fi
 
-  # Автообновление сертификата
-  RENEW_HOOK_FILE="/etc/cron.d/certbot-renew-kmmzavod"
-  cat > "$RENEW_HOOK_FILE" <<CRONEOF
-0 3 * * * root certbot renew --quiet \\
-  --pre-hook  "docker compose -f ${APP_DIR}/docker-compose.yml stop nginx" \\
-  --post-hook "docker compose -f ${APP_DIR}/docker-compose.yml up -d nginx"
+  # Автообновление сертификата.
+  # Продление идёт через webroot — nginx останавливать не нужно.
+  if [ -d "/etc/letsencrypt/renewal" ] && [ -f "/etc/letsencrypt/renewal/${DOMAIN}.conf" ]; then
+    sed -i \
+      -e 's/^authenticator = standalone/authenticator = webroot/' \
+      -e '/^webroot_path =/d' \
+      "/etc/letsencrypt/renewal/${DOMAIN}.conf"
+    grep -q '^webroot_path' "/etc/letsencrypt/renewal/${DOMAIN}.conf" \
+      || sed -i '/^authenticator = webroot/a webroot_path = /var/www/certbot,' \
+           "/etc/letsencrypt/renewal/${DOMAIN}.conf"
+  fi
+
+  if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
+    systemctl enable --now certbot.timer
+    success "Автообновление сертификата: systemd-таймер certbot.timer"
+  else
+    # ВАЖНО: команда должна быть В ОДНУ СТРОКУ.
+    # cron.d не поддерживает перенос строки через "\" — такая запись не работает.
+    RENEW_HOOK_FILE="/etc/cron.d/certbot-renew-kmmzavod"
+    cat > "$RENEW_HOOK_FILE" <<'CRONEOF'
+# Автопродление SSL (kmmzavod). Перезагрузка nginx — в renewal-hooks/deploy/.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3,15 * * * root perl -e 'sleep int(rand(3600))' && certbot renew --quiet
 CRONEOF
-  chmod 644 "$RENEW_HOOK_FILE"
-  success "Автообновление сертификата настроено"
+    chmod 644 "$RENEW_HOOK_FILE"
+    success "Автообновление сертификата: cron.d (03:17 и 15:17)"
+  fi
 fi
 
 # =============================================================================
