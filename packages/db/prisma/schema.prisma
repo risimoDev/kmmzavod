@@ -2,13 +2,13 @@
 // Полная изоляция данных по tenant_id на уровне каждой таблицы
 
 generator client {
-    provider      = "prisma-client-js"
-    binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
-    provider = "postgresql"
-    url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -16,39 +16,39 @@ datasource db {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Tenant {
-    id        String   @id @default(uuid()) @db.Uuid
-    name      String
-    slug      String   @unique
-    plan      String   @default("starter") // starter | pro | enterprise
-    isActive  Boolean  @default(true) @map("is_active")
-    credits   Int      @default(0) // текущий баланс кредитов
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @updatedAt @map("updated_at")
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  plan      String   @default("starter") // starter | pro | enterprise
+  isActive  Boolean  @default(true) @map("is_active")
+  credits   Int      @default(0) // текущий баланс кредитов
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-    users              User[]
-    projects           Project[]
-    products           Product[]
-    videoPresets       VideoPreset[]
-    jobs               Job[]
-    assets             Asset[]
-    videos             Video[]
-    generations        Generation[]
-    usageRecords       UsageRecord[]
-    billingPlans       TenantBillingPlan[]
-    socialAccounts     SocialAccount[]
-    publishJobs        PublishJob[]
-    creditTransactions CreditTransaction[]
-    notifications      Notification[]
-    sourceVideos       SourceVideo[]
-    uniquifyJobs       UniquifyJob[]
-    distributeJobs     DistributeJob[]
-    accountGroups      AccountGroup[]
-    proxies            Proxy[]
-    editProjects       EditProject[]
-    distributeSchedules DistributeSchedule[]
-    campaigns          Campaign[]
+  users               User[]
+  projects            Project[]
+  products            Product[]
+  videoPresets        VideoPreset[]
+  jobs                Job[]
+  assets              Asset[]
+  videos              Video[]
+  generations         Generation[]
+  usageRecords        UsageRecord[]
+  billingPlans        TenantBillingPlan[]
+  socialAccounts      SocialAccount[]
+  publishJobs         PublishJob[]
+  creditTransactions  CreditTransaction[]
+  notifications       Notification[]
+  sourceVideos        SourceVideo[]
+  uniquifyJobs        UniquifyJob[]
+  distributeJobs      DistributeJob[]
+  accountGroups       AccountGroup[]
+  proxies             Proxy[]
+  editProjects        EditProject[]
+  distributeSchedules DistributeSchedule[]
+  campaigns           Campaign[]
 
-    @@map("tenants")
+  @@map("tenants")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,63 +56,63 @@ model Tenant {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UserRole {
-    owner // полный доступ к tenant
-    admin // управление пользователями и проектами
-    member // только свои проекты
-    viewer // только чтение
+  owner // полный доступ к tenant
+  admin // управление пользователями и проектами
+  member // только свои проекты
+  viewer // только чтение
 
-    @@map("user_role")
+  @@map("user_role")
 }
 
 enum PlatformRole {
-    super_admin // доступ к платформенным маршрутам /admin
-    user // обычный пользователь
+  super_admin // доступ к платформенным маршрутам /admin
+  user // обычный пользователь
 
-    @@map("platform_role")
+  @@map("platform_role")
 }
 
 model User {
-    id              String       @id @default(uuid()) @db.Uuid
-    tenantId        String       @map("tenant_id") @db.Uuid
-    email           String       @unique
-    role            UserRole     @default(member)
-    passwordHash    String?      @map("password_hash")
-    displayName     String?      @map("display_name")
-    avatarUrl       String?      @map("avatar_url")
-    platformRole    PlatformRole @default(user) @map("platform_role")
-    isActive        Boolean      @default(true) @map("is_active")
-    lastLoginAt     DateTime?    @map("last_login_at")
-    emailVerifiedAt DateTime?    @map("email_verified_at")
-    createdAt       DateTime     @default(now()) @map("created_at")
-    updatedAt       DateTime     @updatedAt @map("updated_at")
+  id              String       @id @default(uuid()) @db.Uuid
+  tenantId        String       @map("tenant_id") @db.Uuid
+  email           String       @unique
+  role            UserRole     @default(member)
+  passwordHash    String?      @map("password_hash")
+  displayName     String?      @map("display_name")
+  avatarUrl       String?      @map("avatar_url")
+  platformRole    PlatformRole @default(user) @map("platform_role")
+  isActive        Boolean      @default(true) @map("is_active")
+  lastLoginAt     DateTime?    @map("last_login_at")
+  emailVerifiedAt DateTime?    @map("email_verified_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
 
-    tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    jobs             Job[]
-    videos           Video[]
-    generations      Generation[]
-    sessions         UserSession[]
-    pipelineTestRuns PipelineTestRun[]
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  jobs             Job[]
+  videos           Video[]
+  generations      Generation[]
+  sessions         UserSession[]
+  pipelineTestRuns PipelineTestRun[]
 
-    @@index([tenantId])
-    @@index([email])
-    @@map("users")
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
 }
 
 // Сессии пользователей (для управления refresh-токенами)
 model UserSession {
-    id           String   @id @default(uuid()) @db.Uuid
-    userId       String   @map("user_id") @db.Uuid
-    refreshToken String   @unique @map("refresh_token")
-    userAgent    String?  @map("user_agent")
-    ipAddress    String?  @map("ip_address")
-    expiresAt    DateTime @map("expires_at")
-    createdAt    DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  refreshToken String   @unique @map("refresh_token")
+  userAgent    String?  @map("user_agent")
+  ipAddress    String?  @map("ip_address")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
 
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-    @@index([userId])
-    @@index([expiresAt])
-    @@map("user_sessions")
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("user_sessions")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,25 +120,25 @@ model UserSession {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Project {
-    id          String   @id @default(uuid()) @db.Uuid
-    tenantId    String   @map("tenant_id") @db.Uuid
-    name        String
-    description String?
-    settings    Json     @default("{}") // аватар по умолчанию, разрешение, язык
-    isArchived  Boolean  @default(false) @map("is_archived")
-    createdAt   DateTime @default(now()) @map("created_at")
-    updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  name        String
+  description String?
+  settings    Json     @default("{}") // аватар по умолчанию, разрешение, язык
+  isArchived  Boolean  @default(false) @map("is_archived")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-    tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    jobs         Job[]
-    assets       Asset[]
-    videos       Video[]
-    products     Product[]
-    sourceVideos SourceVideo[]
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  jobs         Job[]
+  assets       Asset[]
+  videos       Video[]
+  products     Product[]
+  sourceVideos SourceVideo[]
 
-    @@index([tenantId])
-    @@index([tenantId, isArchived])
-    @@map("projects")
+  @@index([tenantId])
+  @@index([tenantId, isArchived])
+  @@map("projects")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,33 +146,33 @@ model Project {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Product {
-    id             String   @id @default(uuid()) @db.Uuid
-    tenantId       String   @map("tenant_id") @db.Uuid
-    projectId      String?  @map("project_id") @db.Uuid
-    createdBy      String?  @map("created_by") @db.Uuid
-    name           String
-    description    String?  @db.Text
-    features       String[] @default([]) // ключевые характеристики продукта
-    targetAudience String?  @map("target_audience")
-    brandVoice     String?  @map("brand_voice") // тон бренда: дружелюбный, экспертный и т.д.
-    category       String? // категория товара
-    price          String? // цена (строка, для отображения)
-    websiteUrl     String?  @map("website_url")
-    images         String[] @default([]) // ключи MinIO загруженных изображений
-    metadata       Json     @default("{}")
-    isArchived     Boolean  @default(false) @map("is_archived")
-    createdAt      DateTime @default(now()) @map("created_at")
-    updatedAt      DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  projectId      String?  @map("project_id") @db.Uuid
+  createdBy      String?  @map("created_by") @db.Uuid
+  name           String
+  description    String?  @db.Text
+  features       String[] @default([]) // ключевые характеристики продукта
+  targetAudience String?  @map("target_audience")
+  brandVoice     String?  @map("brand_voice") // тон бренда: дружелюбный, экспертный и т.д.
+  category       String? // категория товара
+  price          String? // цена (строка, для отображения)
+  websiteUrl     String?  @map("website_url")
+  images         String[] @default([]) // ключи MinIO загруженных изображений
+  metadata       Json     @default("{}")
+  isArchived     Boolean  @default(false) @map("is_archived")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
-    tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project   Project?      @relation(fields: [projectId], references: [id])
-    videos    Video[]
-    presets   VideoPreset[]
-    campaigns Campaign[]
+  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  project   Project?      @relation(fields: [projectId], references: [id])
+  videos    Video[]
+  presets   VideoPreset[]
+  campaigns Campaign[]
 
-    @@index([tenantId])
-    @@index([tenantId, isArchived])
-    @@map("products")
+  @@index([tenantId])
+  @@index([tenantId, isArchived])
+  @@map("products")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,58 +180,58 @@ model Product {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum PresetStatus {
-    draft // создан, ещё не генерировал превью
-    preview // превью сгенерировано, ждёт одобрения
-    active // завод запущен, генерирует по расписанию
-    paused // завод приостановлен
+  draft // создан, ещё не генерировал превью
+  preview // превью сгенерировано, ждёт одобрения
+  active // завод запущен, генерирует по расписанию
+  paused // завод приостановлен
 
-    @@map("preset_status")
+  @@map("preset_status")
 }
 
 model VideoPreset {
-    id                String           @id @default(uuid()) @db.Uuid
-    tenantId          String           @map("tenant_id") @db.Uuid
-    productId         String           @map("product_id") @db.Uuid
-    createdBy         String?          @map("created_by") @db.Uuid
-    name              String
-    status            PresetStatus     @default(draft)
-    // Настройки генерации
-    heygenAvatarId    String           @default("Anna_public_20240108") @map("heygen_avatar_id")
-    heygenVoiceId     String           @default("70856236390f4d0392d00187143d3900") @map("heygen_voice_id")
-    editStyle         String           @default("dynamic") @map("edit_style") // dynamic | smooth | minimal | random
-    targetDurationSec Int              @default(30) @map("target_duration_sec")
-    customPrompt      String?          @map("custom_prompt") @db.Text
-    language          String           @default("ru")
-    bgmEnabled        Boolean          @default(true) @map("bgm_enabled")
-    // Расписание завода
-    cronExpression    String?          @map("cron_expression")
-    timezone          String           @default("Europe/Moscow")
-    // Автопубликация
-    autoPublish       Boolean          @default(false) @map("auto_publish")
-    publishPlatforms  SocialPlatform[] @map("publish_platforms")
-    socialAccountIds  String[]         @map("social_account_ids") @db.Uuid
-    // Превью
-    previewVideoId    String?          @unique @map("preview_video_id") @db.Uuid
-    // Антиповтор идей: хеши уже использованных creative angles
-    usedIdeaHashes    String[]         @default([]) @map("used_idea_hashes")
-    // Статистика
-    totalRuns         Int              @default(0) @map("total_runs")
-    lastRunAt         DateTime?        @map("last_run_at")
-    nextRunAt         DateTime?        @map("next_run_at")
-    //
-    isArchived        Boolean          @default(false) @map("is_archived")
-    createdAt         DateTime         @default(now()) @map("created_at")
-    updatedAt         DateTime         @updatedAt @map("updated_at")
+  id                String           @id @default(uuid()) @db.Uuid
+  tenantId          String           @map("tenant_id") @db.Uuid
+  productId         String           @map("product_id") @db.Uuid
+  createdBy         String?          @map("created_by") @db.Uuid
+  name              String
+  status            PresetStatus     @default(draft)
+  // Настройки генерации
+  heygenAvatarId    String           @default("Anna_public_20240108") @map("heygen_avatar_id")
+  heygenVoiceId     String           @default("70856236390f4d0392d00187143d3900") @map("heygen_voice_id")
+  editStyle         String           @default("dynamic") @map("edit_style") // dynamic | smooth | minimal | random
+  targetDurationSec Int              @default(30) @map("target_duration_sec")
+  customPrompt      String?          @map("custom_prompt") @db.Text
+  language          String           @default("ru")
+  bgmEnabled        Boolean          @default(true) @map("bgm_enabled")
+  // Расписание завода
+  cronExpression    String?          @map("cron_expression")
+  timezone          String           @default("Europe/Moscow")
+  // Автопубликация
+  autoPublish       Boolean          @default(false) @map("auto_publish")
+  publishPlatforms  SocialPlatform[] @map("publish_platforms")
+  socialAccountIds  String[]         @map("social_account_ids") @db.Uuid
+  // Превью
+  previewVideoId    String?          @unique @map("preview_video_id") @db.Uuid
+  // Антиповтор идей: хеши уже использованных creative angles
+  usedIdeaHashes    String[]         @default([]) @map("used_idea_hashes")
+  // Статистика
+  totalRuns         Int              @default(0) @map("total_runs")
+  lastRunAt         DateTime?        @map("last_run_at")
+  nextRunAt         DateTime?        @map("next_run_at")
+  //
+  isArchived        Boolean          @default(false) @map("is_archived")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
 
-    tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    product      Product @relation(fields: [productId], references: [id])
-    previewVideo Video?  @relation("PresetPreview", fields: [previewVideoId], references: [id])
-    videos       Video[] @relation("PresetVideos")
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product      Product @relation(fields: [productId], references: [id])
+  previewVideo Video?  @relation("PresetPreview", fields: [previewVideoId], references: [id])
+  videos       Video[] @relation("PresetVideos")
 
-    @@index([tenantId, status])
-    @@index([tenantId, isArchived])
-    @@index([nextRunAt])
-    @@map("video_presets")
+  @@index([tenantId, status])
+  @@index([tenantId, isArchived])
+  @@index([nextRunAt])
+  @@map("video_presets")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -239,61 +239,61 @@ model VideoPreset {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum VideoStatus {
-    draft // создан, не запущен
-    pending // в очереди
-    processing // в процессе генерации
-    composing // финальный монтаж
-    completed // готов
-    failed // ошибка
-    cancelled // отменён
+  draft // создан, не запущен
+  pending // в очереди
+  processing // в процессе генерации
+  composing // финальный монтаж
+  completed // готов
+  failed // ошибка
+  cancelled // отменён
 
-    @@map("video_status")
+  @@map("video_status")
 }
 
 model Video {
-    id              String      @id @default(uuid()) @db.Uuid
-    tenantId        String      @map("tenant_id") @db.Uuid
-    projectId       String?     @map("project_id") @db.Uuid
-    productId       String?     @map("product_id") @db.Uuid
-    presetId        String?     @map("preset_id") @db.Uuid
-    createdBy       String?     @map("created_by") @db.Uuid
-    title           String
-    description     String?
-    status          VideoStatus @default(draft)
-    // Идея и фингерпринт (антиповтор)
-    ideaText        String?     @map("idea_text") @db.Text
-    ideaFingerprint String?     @map("idea_fingerprint")
-    outputUrl       String?     @map("output_url") // ключ в MinIO/S3
-    thumbnailUrl    String?     @map("thumbnail_url")
-    durationSec     Decimal?    @map("duration_sec") @db.Decimal(6, 2)
-    fileSizeBytes   BigInt?     @map("file_size_bytes")
-    resolution      String? // 1080x1920
-    fps             Int?        @default(30) @db.SmallInt
-    error           String?
-    creditsUsed     Int         @default(0) @map("credits_used")
-    metadata        Json        @default("{}") // любые дополнительные данные
-    publishedAt     DateTime?   @map("published_at")
-    createdAt       DateTime    @default(now()) @map("created_at")
-    updatedAt       DateTime    @updatedAt @map("updated_at")
-    completedAt     DateTime?   @map("completed_at")
+  id              String      @id @default(uuid()) @db.Uuid
+  tenantId        String      @map("tenant_id") @db.Uuid
+  projectId       String?     @map("project_id") @db.Uuid
+  productId       String?     @map("product_id") @db.Uuid
+  presetId        String?     @map("preset_id") @db.Uuid
+  createdBy       String?     @map("created_by") @db.Uuid
+  title           String
+  description     String?
+  status          VideoStatus @default(draft)
+  // Идея и фингерпринт (антиповтор)
+  ideaText        String?     @map("idea_text") @db.Text
+  ideaFingerprint String?     @map("idea_fingerprint")
+  outputUrl       String?     @map("output_url") // ключ в MinIO/S3
+  thumbnailUrl    String?     @map("thumbnail_url")
+  durationSec     Decimal?    @map("duration_sec") @db.Decimal(6, 2)
+  fileSizeBytes   BigInt?     @map("file_size_bytes")
+  resolution      String? // 1080x1920
+  fps             Int?        @default(30) @db.SmallInt
+  error           String?
+  creditsUsed     Int         @default(0) @map("credits_used")
+  metadata        Json        @default("{}") // любые дополнительные данные
+  publishedAt     DateTime?   @map("published_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  completedAt     DateTime?   @map("completed_at")
 
-    tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project       Project?       @relation(fields: [projectId], references: [id])
-    product       Product?       @relation(fields: [productId], references: [id])
-    preset        VideoPreset?   @relation("PresetVideos", fields: [presetId], references: [id])
-    creator       User?          @relation(fields: [createdBy], references: [id])
-    presetPreview VideoPreset?   @relation("PresetPreview")
-    job           Job?
-    scenes        Scene[]
-    variants      VideoVariant[]
-    publishJobs   PublishJob[]
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  project       Project?       @relation(fields: [projectId], references: [id])
+  product       Product?       @relation(fields: [productId], references: [id])
+  preset        VideoPreset?   @relation("PresetVideos", fields: [presetId], references: [id])
+  creator       User?          @relation(fields: [createdBy], references: [id])
+  presetPreview VideoPreset?   @relation("PresetPreview")
+  job           Job?
+  scenes        Scene[]
+  variants      VideoVariant[]
+  publishJobs   PublishJob[]
 
-    @@index([tenantId, status])
-    @@index([tenantId, createdAt(sort: Desc)])
-    @@index([projectId])
-    @@index([productId])
-    @@index([presetId])
-    @@map("videos")
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([projectId])
+  @@index([productId])
+  @@index([presetId])
+  @@map("videos")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,36 +301,36 @@ model Video {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum VariantStatus {
-    rendering
-    ready
-    failed
+  rendering
+  ready
+  failed
 
-    @@map("variant_status")
+  @@map("variant_status")
 }
 
 model VideoVariant {
-    id          String        @id @default(uuid()) @db.Uuid
-    jobId       String        @map("job_id") @db.Uuid
-    videoId     String        @map("video_id") @db.Uuid
-    tenantId    String        @map("tenant_id") @db.Uuid
-    preset      String // dynamic | smooth | minimal
-    outputKey   String        @map("output_key")
-    outputUrl   String?       @map("output_url")
-    durationSec Decimal?      @map("duration_sec") @db.Decimal(6, 2)
-    fileSizeMb  Decimal?      @map("file_size_mb") @db.Decimal(8, 2)
-    status      VariantStatus @default(rendering)
-    error       String?
-    selectedAt  DateTime?     @map("selected_at") // клиент выбирает этот вариант
-    createdAt   DateTime      @default(now()) @map("created_at")
-    updatedAt   DateTime      @updatedAt @map("updated_at")
+  id          String        @id @default(uuid()) @db.Uuid
+  jobId       String        @map("job_id") @db.Uuid
+  videoId     String        @map("video_id") @db.Uuid
+  tenantId    String        @map("tenant_id") @db.Uuid
+  preset      String // dynamic | smooth | minimal
+  outputKey   String        @map("output_key")
+  outputUrl   String?       @map("output_url")
+  durationSec Decimal?      @map("duration_sec") @db.Decimal(6, 2)
+  fileSizeMb  Decimal?      @map("file_size_mb") @db.Decimal(8, 2)
+  status      VariantStatus @default(rendering)
+  error       String?
+  selectedAt  DateTime?     @map("selected_at") // клиент выбирает этот вариант
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
 
-    video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
 
-    @@unique([videoId, preset])
-    @@index([jobId])
-    @@index([videoId])
-    @@index([tenantId, status])
-    @@map("video_variants")
+  @@unique([videoId, preset])
+  @@index([jobId])
+  @@index([videoId])
+  @@index([tenantId, status])
+  @@map("video_variants")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,60 +338,60 @@ model VideoVariant {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum JobStatus {
-    pending
-    running
-    scenes_ready
-    processing
-    composing
-    completed
-    failed
-    cancelled
+  pending
+  running
+  scenes_ready
+  processing
+  composing
+  completed
+  failed
+  cancelled
 
-    @@map("job_status")
+  @@map("job_status")
 }
 
 model Job {
-    id          String    @id @default(uuid()) @db.Uuid
-    tenantId    String    @map("tenant_id") @db.Uuid
-    videoId     String?   @unique @map("video_id") @db.Uuid
-    projectId   String?   @map("project_id") @db.Uuid
-    createdBy   String?   @map("created_by") @db.Uuid
-    status      JobStatus @default(pending)
-    payload     Json
-    error       String?
-    creditsUsed Int       @default(0) @map("credits_used")
-    createdAt   DateTime  @default(now()) @map("created_at")
-    updatedAt   DateTime  @updatedAt @map("updated_at")
-    completedAt DateTime? @map("completed_at")
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  videoId     String?   @unique @map("video_id") @db.Uuid
+  projectId   String?   @map("project_id") @db.Uuid
+  createdBy   String?   @map("created_by") @db.Uuid
+  status      JobStatus @default(pending)
+  payload     Json
+  error       String?
+  creditsUsed Int       @default(0) @map("credits_used")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
 
-    tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    video   Video?     @relation(fields: [videoId], references: [id])
-    project Project?   @relation(fields: [projectId], references: [id])
-    creator User?      @relation(fields: [createdBy], references: [id])
-    scenes  Scene[]
-    events  JobEvent[]
+  tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  video   Video?     @relation(fields: [videoId], references: [id])
+  project Project?   @relation(fields: [projectId], references: [id])
+  creator User?      @relation(fields: [createdBy], references: [id])
+  scenes  Scene[]
+  events  JobEvent[]
 
-    @@index([tenantId, status])
-    @@index([projectId])
-    @@index([createdAt(sort: Desc)])
-    @@map("jobs")
+  @@index([tenantId, status])
+  @@index([projectId])
+  @@index([createdAt(sort: Desc)])
+  @@map("jobs")
 }
 
 // Аудит лог событий задачи (неизменяемый)
 model JobEvent {
-    id        BigInt   @id @default(autoincrement())
-    jobId     String   @map("job_id") @db.Uuid
-    tenantId  String   @map("tenant_id") @db.Uuid
-    stage     String
-    status    String // started | completed | failed
-    message   String?
-    meta      Json?
-    createdAt DateTime @default(now()) @map("created_at")
+  id        BigInt   @id @default(autoincrement())
+  jobId     String   @map("job_id") @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  stage     String
+  status    String // started | completed | failed
+  message   String?
+  meta      Json?
+  createdAt DateTime @default(now()) @map("created_at")
 
-    job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
-    @@index([jobId, createdAt])
-    @@map("job_events")
+  @@index([jobId, createdAt])
+  @@map("job_events")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,64 +399,64 @@ model JobEvent {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum SceneType {
-    avatar // говорящий аватар (HeyGen)
-    clip // b-roll клип (Kling AI)
-    image // статичное изображение продукта
-    text // текстовая заставка
+  avatar // говорящий аватар (HeyGen)
+  clip // b-roll клип (Kling AI)
+  image // статичное изображение продукта
+  text // текстовая заставка
 
-    @@map("scene_type")
+  @@map("scene_type")
 }
 
 enum SceneStatus {
-    pending
-    processing
-    completed
-    failed
+  pending
+  processing
+  completed
+  failed
 
-    @@map("scene_status")
+  @@map("scene_status")
 }
 
 model Scene {
-    id             String      @id @default(uuid()) @db.Uuid
-    jobId          String      @map("job_id") @db.Uuid
-    videoId        String?     @map("video_id") @db.Uuid
-    tenantId       String      @map("tenant_id") @db.Uuid
-    sceneIndex     Int         @map("scene_index") @db.SmallInt
-    type           SceneType
-    status         SceneStatus @default(pending)
-    // Промпты и сценарий
-    script         String? // для avatar
-    bRollPrompt    String?     @map("b_roll_prompt") // для clip/image
-    // Длительность
-    durationSec    Decimal?    @map("duration_sec") @db.Decimal(5, 2)
-    // Флаги завершения по каждому провайдеру
-    avatarDone     Boolean     @default(false) @map("avatar_done")
-    clipDone       Boolean     @default(false) @map("clip_done")
-    imageDone      Boolean     @default(false) @map("image_done")
-    // Ссылки на артефакты в хранилище (ключи MinIO)
-    avatarUrl      String?     @map("avatar_url")
-    clipUrl        String?     @map("clip_url")
-    imageUrl       String?     @map("image_url")
-    frameUrl       String?     @map("frame_url") // сгенерированный кадр-фрейм для image→video
-    // Внешние ID провайдеров
-    heygenVideoId  String?     @map("heygen_video_id")
-    klingTaskId    String?     @map("kling_task_id")
-    runwayTaskId   String?     @map("runway_task_id")
-    imageGenTaskId String?     @map("image_gen_task_id")
-    // Стоимость сцены
-    costUsd        Decimal     @default(0) @map("cost_usd") @db.Decimal(10, 6)
-    error          String?
-    createdAt      DateTime    @default(now()) @map("created_at")
-    updatedAt      DateTime    @updatedAt @map("updated_at")
+  id             String      @id @default(uuid()) @db.Uuid
+  jobId          String      @map("job_id") @db.Uuid
+  videoId        String?     @map("video_id") @db.Uuid
+  tenantId       String      @map("tenant_id") @db.Uuid
+  sceneIndex     Int         @map("scene_index") @db.SmallInt
+  type           SceneType
+  status         SceneStatus @default(pending)
+  // Промпты и сценарий
+  script         String? // для avatar
+  bRollPrompt    String?     @map("b_roll_prompt") // для clip/image
+  // Длительность
+  durationSec    Decimal?    @map("duration_sec") @db.Decimal(5, 2)
+  // Флаги завершения по каждому провайдеру
+  avatarDone     Boolean     @default(false) @map("avatar_done")
+  clipDone       Boolean     @default(false) @map("clip_done")
+  imageDone      Boolean     @default(false) @map("image_done")
+  // Ссылки на артефакты в хранилище (ключи MinIO)
+  avatarUrl      String?     @map("avatar_url")
+  clipUrl        String?     @map("clip_url")
+  imageUrl       String?     @map("image_url")
+  frameUrl       String?     @map("frame_url") // сгенерированный кадр-фрейм для image→video
+  // Внешние ID провайдеров
+  heygenVideoId  String?     @map("heygen_video_id")
+  klingTaskId    String?     @map("kling_task_id")
+  runwayTaskId   String?     @map("runway_task_id")
+  imageGenTaskId String?     @map("image_gen_task_id")
+  // Стоимость сцены
+  costUsd        Decimal     @default(0) @map("cost_usd") @db.Decimal(10, 6)
+  error          String?
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
 
-    job         Job          @relation(fields: [jobId], references: [id], onDelete: Cascade)
-    video       Video?       @relation(fields: [videoId], references: [id])
-    generations Generation[]
+  job         Job          @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  video       Video?       @relation(fields: [videoId], references: [id])
+  generations Generation[]
 
-    @@unique([jobId, sceneIndex])
-    @@index([jobId])
-    @@index([videoId])
-    @@map("scenes")
+  @@unique([jobId, sceneIndex])
+  @@index([jobId])
+  @@index([videoId])
+  @@map("scenes")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,40 +464,40 @@ model Scene {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum AssetType {
-    product_image // фото продукта
-    logo // логотип бренда
-    audio // музыка / озвучка
-    avatar_ref // референс для аватара
-    font // шрифт для субтитров
-    other
+  product_image // фото продукта
+  logo // логотип бренда
+  audio // музыка / озвучка
+  avatar_ref // референс для аватара
+  font // шрифт для субтитров
+  other
 
-    @@map("asset_type")
+  @@map("asset_type")
 }
 
 model Asset {
-    id            String    @id @default(uuid()) @db.Uuid
-    tenantId      String    @map("tenant_id") @db.Uuid
-    projectId     String?   @map("project_id") @db.Uuid
-    uploadedBy    String?   @map("uploaded_by") @db.Uuid
-    type          AssetType
-    filename      String
-    storageKey    String    @map("storage_key")
-    mimeType      String?   @map("mime_type")
-    fileSizeBytes BigInt?   @map("file_size_bytes")
-    width         Int?
-    height        Int?
-    durationSec   Decimal?  @map("duration_sec") @db.Decimal(6, 2)
-    tags          String[]  @default([])
-    isDeleted     Boolean   @default(false) @map("is_deleted")
-    createdAt     DateTime  @default(now()) @map("created_at")
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  projectId     String?   @map("project_id") @db.Uuid
+  uploadedBy    String?   @map("uploaded_by") @db.Uuid
+  type          AssetType
+  filename      String
+  storageKey    String    @map("storage_key")
+  mimeType      String?   @map("mime_type")
+  fileSizeBytes BigInt?   @map("file_size_bytes")
+  width         Int?
+  height        Int?
+  durationSec   Decimal?  @map("duration_sec") @db.Decimal(6, 2)
+  tags          String[]  @default([])
+  isDeleted     Boolean   @default(false) @map("is_deleted")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
-    tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project Project? @relation(fields: [projectId], references: [id])
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id])
 
-    @@index([tenantId, type])
-    @@index([tenantId, isDeleted])
-    @@index([projectId])
-    @@map("assets")
+  @@index([tenantId, type])
+  @@index([tenantId, isDeleted])
+  @@index([projectId])
+  @@map("assets")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -505,66 +505,66 @@ model Asset {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum GenerationProvider {
-    openai
-    gptunnel
-    heygen
-    kling
-    runway
-    fal
-    replicate
-    comfyui
-    elevenlabs
-    gemini
+  openai
+  gptunnel
+  heygen
+  kling
+  runway
+  fal
+  replicate
+  comfyui
+  elevenlabs
+  gemini
 
-    @@map("generation_provider")
+  @@map("generation_provider")
 }
 
 enum GenerationStatus {
-    pending
-    processing
-    completed
-    failed
-    cancelled
+  pending
+  processing
+  completed
+  failed
+  cancelled
 
-    @@map("generation_status")
+  @@map("generation_status")
 }
 
 model Generation {
-    id               BigInt             @id @default(autoincrement())
-    tenantId         String             @map("tenant_id") @db.Uuid
-    userId           String?            @map("user_id") @db.Uuid
-    jobId            String?            @map("job_id") @db.Uuid
-    sceneId          String?            @map("scene_id") @db.Uuid
-    provider         GenerationProvider
-    model            String // gpt-4o, heygen-avatar-v2, kling-v1.5, etc.
-    status           GenerationStatus   @default(pending)
-    // Запрос / ответ
-    promptTokens     Int?               @map("prompt_tokens")
-    completionTokens Int?               @map("completion_tokens")
-    requestPayload   Json?              @map("request_payload") // сохраняем что отправили
-    responsePayload  Json?              @map("response_payload") // сохраняем что получили
-    // Внешний ID задачи у провайдера
-    externalTaskId   String?            @map("external_task_id")
-    // Стоимость
-    costUsd          Decimal            @default(0) @map("cost_usd") @db.Decimal(10, 6)
-    creditsCharged   Int                @default(0) @map("credits_charged")
-    // Время
-    latencyMs        Int?               @map("latency_ms")
-    startedAt        DateTime?          @map("started_at")
-    completedAt      DateTime?          @map("completed_at")
-    error            String?
-    createdAt        DateTime           @default(now()) @map("created_at")
+  id               BigInt             @id @default(autoincrement())
+  tenantId         String             @map("tenant_id") @db.Uuid
+  userId           String?            @map("user_id") @db.Uuid
+  jobId            String?            @map("job_id") @db.Uuid
+  sceneId          String?            @map("scene_id") @db.Uuid
+  provider         GenerationProvider
+  model            String // gpt-4o, heygen-avatar-v2, kling-v1.5, etc.
+  status           GenerationStatus   @default(pending)
+  // Запрос / ответ
+  promptTokens     Int?               @map("prompt_tokens")
+  completionTokens Int?               @map("completion_tokens")
+  requestPayload   Json?              @map("request_payload") // сохраняем что отправили
+  responsePayload  Json?              @map("response_payload") // сохраняем что получили
+  // Внешний ID задачи у провайдера
+  externalTaskId   String?            @map("external_task_id")
+  // Стоимость
+  costUsd          Decimal            @default(0) @map("cost_usd") @db.Decimal(10, 6)
+  creditsCharged   Int                @default(0) @map("credits_charged")
+  // Время
+  latencyMs        Int?               @map("latency_ms")
+  startedAt        DateTime?          @map("started_at")
+  completedAt      DateTime?          @map("completed_at")
+  error            String?
+  createdAt        DateTime           @default(now()) @map("created_at")
 
-    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    user   User?  @relation(fields: [userId], references: [id])
-    scene  Scene? @relation(fields: [sceneId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id])
+  scene  Scene? @relation(fields: [sceneId], references: [id])
 
-    @@index([tenantId, provider, createdAt(sort: Desc)])
-    @@index([tenantId, status])
-    @@index([jobId])
-    @@index([sceneId])
-    @@index([externalTaskId])
-    @@map("generations")
+  @@index([tenantId, provider, createdAt(sort: Desc)])
+  @@index([tenantId, status])
+  @@index([jobId])
+  @@index([sceneId])
+  @@index([externalTaskId])
+  @@map("generations")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -572,70 +572,70 @@ model Generation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model BillingPlan {
-    id                String   @id @default(uuid()) @db.Uuid
-    name              String   @unique // starter, pro, enterprise
-    displayName       String   @map("display_name")
-    priceMonthlyUsd   Decimal  @map("price_monthly_usd") @db.Decimal(10, 2)
-    priceYearlyUsd    Decimal? @map("price_yearly_usd") @db.Decimal(10, 2)
-    creditsPerMonth   Int      @map("credits_per_month")
-    maxVideosPerMonth Int?     @map("max_videos_per_month") // null = unlimited
-    maxScenesPer      Int?     @map("max_scenes_per_video")
-    maxResolution     String   @default("1080x1920") @map("max_resolution")
-    features          Json     @default("{}") // флаги фич: watermark, priority_queue, etc.
-    isActive          Boolean  @default(true) @map("is_active")
-    createdAt         DateTime @default(now()) @map("created_at")
+  id                String   @id @default(uuid()) @db.Uuid
+  name              String   @unique // starter, pro, enterprise
+  displayName       String   @map("display_name")
+  priceMonthlyUsd   Decimal  @map("price_monthly_usd") @db.Decimal(10, 2)
+  priceYearlyUsd    Decimal? @map("price_yearly_usd") @db.Decimal(10, 2)
+  creditsPerMonth   Int      @map("credits_per_month")
+  maxVideosPerMonth Int?     @map("max_videos_per_month") // null = unlimited
+  maxScenesPer      Int?     @map("max_scenes_per_video")
+  maxResolution     String   @default("1080x1920") @map("max_resolution")
+  features          Json     @default("{}") // флаги фич: watermark, priority_queue, etc.
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
 
-    tenantPlans TenantBillingPlan[]
+  tenantPlans TenantBillingPlan[]
 
-    @@map("billing_plans")
+  @@map("billing_plans")
 }
 
 // Активный тариф тенанта (история смен тарифа)
 model TenantBillingPlan {
-    id          String    @id @default(uuid()) @db.Uuid
-    tenantId    String    @map("tenant_id") @db.Uuid
-    planId      String    @map("plan_id") @db.Uuid
-    activatedAt DateTime  @default(now()) @map("activated_at")
-    expiresAt   DateTime? @map("expires_at")
-    isCurrent   Boolean   @default(true) @map("is_current")
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  planId      String    @map("plan_id") @db.Uuid
+  activatedAt DateTime  @default(now()) @map("activated_at")
+  expiresAt   DateTime? @map("expires_at")
+  isCurrent   Boolean   @default(true) @map("is_current")
 
-    tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    plan   BillingPlan @relation(fields: [planId], references: [id])
+  tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   BillingPlan @relation(fields: [planId], references: [id])
 
-    @@index([tenantId, isCurrent])
-    @@map("tenant_billing_plans")
+  @@index([tenantId, isCurrent])
+  @@map("tenant_billing_plans")
 }
 
 // Транзакции кредитов (пополнение и списание)
 enum CreditTxType {
-    purchase // покупка кредитов
-    monthly // ежемесячное начисление по тарифу
-    charge // списание за генерацию
-    reserve // мягкое резервирование перед стартом пайплайна
-    refund // возврат при ошибке
-    admin_grant // ручная выдача от администратора
-    expiry // сгорание неиспользованных кредитов
+  purchase // покупка кредитов
+  monthly // ежемесячное начисление по тарифу
+  charge // списание за генерацию
+  reserve // мягкое резервирование перед стартом пайплайна
+  refund // возврат при ошибке
+  admin_grant // ручная выдача от администратора
+  expiry // сгорание неиспользованных кредитов
 
-    @@map("credit_tx_type")
+  @@map("credit_tx_type")
 }
 
 model CreditTransaction {
-    id           BigInt       @id @default(autoincrement())
-    tenantId     String       @map("tenant_id") @db.Uuid
-    type         CreditTxType
-    amount       Int // положительное = начисление, отрицательное = списание
-    balanceAfter Int          @map("balance_after")
-    description  String?
-    jobId        String?      @map("job_id") @db.Uuid
-    invoiceId    String?      @map("invoice_id")
-    createdAt    DateTime     @default(now()) @map("created_at")
+  id           BigInt       @id @default(autoincrement())
+  tenantId     String       @map("tenant_id") @db.Uuid
+  type         CreditTxType
+  amount       Int // положительное = начисление, отрицательное = списание
+  balanceAfter Int          @map("balance_after")
+  description  String?
+  jobId        String?      @map("job_id") @db.Uuid
+  invoiceId    String?      @map("invoice_id")
+  createdAt    DateTime     @default(now()) @map("created_at")
 
-    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-    @@index([tenantId, createdAt(sort: Desc)])
-    @@index([tenantId, type])
-    @@index([jobId])
-    @@map("credit_transactions")
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, type])
+  @@index([jobId])
+  @@map("credit_transactions")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,23 +644,23 @@ model CreditTransaction {
 
 // Агрегат по дням: сколько потратил тенант за день
 model UsageRecord {
-    id               BigInt   @id @default(autoincrement())
-    tenantId         String   @map("tenant_id") @db.Uuid
-    date             DateTime @db.Date // только дата (без времени)
-    videosCreated    Int      @default(0) @map("videos_created")
-    scenesGenerated  Int      @default(0) @map("scenes_generated")
-    creditsUsed      Int      @default(0) @map("credits_used")
-    totalCostUsd     Decimal  @default(0) @map("total_cost_usd") @db.Decimal(10, 4)
-    storageUsedBytes BigInt   @default(0) @map("storage_used_bytes")
-    apiCallsCount    Int      @default(0) @map("api_calls_count")
-    // разбивка по провайдерам
-    costByProvider   Json     @default("{}") @map("cost_by_provider")
+  id               BigInt   @id @default(autoincrement())
+  tenantId         String   @map("tenant_id") @db.Uuid
+  date             DateTime @db.Date // только дата (без времени)
+  videosCreated    Int      @default(0) @map("videos_created")
+  scenesGenerated  Int      @default(0) @map("scenes_generated")
+  creditsUsed      Int      @default(0) @map("credits_used")
+  totalCostUsd     Decimal  @default(0) @map("total_cost_usd") @db.Decimal(10, 4)
+  storageUsedBytes BigInt   @default(0) @map("storage_used_bytes")
+  apiCallsCount    Int      @default(0) @map("api_calls_count")
+  // разбивка по провайдерам
+  costByProvider   Json     @default("{}") @map("cost_by_provider")
 
-    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-    @@unique([tenantId, date])
-    @@index([tenantId, date(sort: Desc)])
-    @@map("usage_records")
+  @@unique([tenantId, date])
+  @@index([tenantId, date(sort: Desc)])
+  @@map("usage_records")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -669,31 +669,31 @@ model UsageRecord {
 
 // Глобальные настройки платформы (ключ-значение)
 model AdminSetting {
-    key         String   @id
-    value       Json
-    description String?
-    isPublic    Boolean  @default(false) @map("is_public") // видно ли фронтенду
-    updatedBy   String?  @map("updated_by") @db.Uuid
-    updatedAt   DateTime @updatedAt @map("updated_at")
+  key         String   @id
+  value       Json
+  description String?
+  isPublic    Boolean  @default(false) @map("is_public") // видно ли фронтенду
+  updatedBy   String?  @map("updated_by") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-    @@map("admin_settings")
+  @@map("admin_settings")
 }
 
 // Журнал действий администратора (неизменяемый)
 model AdminAuditLog {
-    id         BigInt   @id @default(autoincrement())
-    adminId    String   @map("admin_id") @db.Uuid
-    action     String // tenant.suspend | user.reset_password | plan.change | etc.
-    targetType String?  @map("target_type") // tenant | user | job | billing_plan
-    targetId   String?  @map("target_id")
-    before     Json? // состояние до изменения
-    after      Json? // состояние после изменения
-    ipAddress  String?  @map("ip_address")
-    createdAt  DateTime @default(now()) @map("created_at")
+  id         BigInt   @id @default(autoincrement())
+  adminId    String   @map("admin_id") @db.Uuid
+  action     String // tenant.suspend | user.reset_password | plan.change | etc.
+  targetType String?  @map("target_type") // tenant | user | job | billing_plan
+  targetId   String?  @map("target_id")
+  before     Json? // состояние до изменения
+  after      Json? // состояние после изменения
+  ipAddress  String?  @map("ip_address")
+  createdAt  DateTime @default(now()) @map("created_at")
 
-    @@index([adminId, createdAt(sort: Desc)])
-    @@index([targetType, targetId])
-    @@map("admin_audit_logs")
+  @@index([adminId, createdAt(sort: Desc)])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -701,70 +701,70 @@ model AdminAuditLog {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model PipelineTestRun {
-    id             String  @id @default(uuid()) @db.Uuid
-    createdById    String  @map("created_by_id") @db.Uuid
-    productName    String  @map("product_name")
-    prompt         String
-    language       String  @default("ru")
-    avatarId       String  @map("avatar_id")
-    voiceId        String  @map("voice_id")
-    layoutTemplate String  @map("layout_template")
-    targetDuration Int     @default(30) @map("target_duration")
-    subtitleStyle  String? @map("subtitle_style")
+  id             String  @id @default(uuid()) @db.Uuid
+  createdById    String  @map("created_by_id") @db.Uuid
+  productName    String  @map("product_name")
+  prompt         String
+  language       String  @default("ru")
+  avatarId       String  @map("avatar_id")
+  voiceId        String  @map("voice_id")
+  layoutTemplate String  @map("layout_template")
+  targetDuration Int     @default(30) @map("target_duration")
+  subtitleStyle  String? @map("subtitle_style")
 
-    // Generated content
-    title      String?
-    fullScript String? @map("full_script")
+  // Generated content
+  title      String?
+  fullScript String? @map("full_script")
 
-    // Result
-    outputUrl     String? @map("output_url")
-    outputKey     String? @map("output_key")
-    durationSec   Float?  @map("duration_sec")
-    fileSizeBytes Int?    @map("file_size_bytes")
-    elapsedMs     Int?    @map("elapsed_ms")
+  // Result
+  outputUrl     String? @map("output_url")
+  outputKey     String? @map("output_key")
+  durationSec   Float?  @map("duration_sec")
+  fileSizeBytes Int?    @map("file_size_bytes")
+  elapsedMs     Int?    @map("elapsed_ms")
 
-    // Full params snapshot for re-creation
-    params Json @default("{}")
+  // Full params snapshot for re-creation
+  params Json @default("{}")
 
-    status String  @default("completed") // completed | failed
-    error  String?
+  status String  @default("completed") // completed | failed
+  error  String?
 
-    createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
-    createdBy User @relation(fields: [createdById], references: [id])
+  createdBy User @relation(fields: [createdById], references: [id])
 
-    @@index([createdById, createdAt(sort: Desc)])
-    @@map("pipeline_test_runs")
+  @@index([createdById, createdAt(sort: Desc)])
+  @@map("pipeline_test_runs")
 }
 
 // Уведомления (системные + от провайдеров)
 enum NotificationType {
-    system
-    billing
-    job_failed
-    credits_low
-    plan_expiring
+  system
+  billing
+  job_failed
+  credits_low
+  plan_expiring
 
-    @@map("notification_type")
+  @@map("notification_type")
 }
 
 model Notification {
-    id        String           @id @default(uuid()) @db.Uuid
-    tenantId  String           @map("tenant_id") @db.Uuid
-    userId    String?          @map("user_id") @db.Uuid
-    type      NotificationType
-    title     String
-    body      String
-    isRead    Boolean          @default(false) @map("is_read")
-    actionUrl String?          @map("action_url")
-    createdAt DateTime         @default(now()) @map("created_at")
-    readAt    DateTime?        @map("read_at")
+  id        String           @id @default(uuid()) @db.Uuid
+  tenantId  String           @map("tenant_id") @db.Uuid
+  userId    String?          @map("user_id") @db.Uuid
+  type      NotificationType
+  title     String
+  body      String
+  isRead    Boolean          @default(false) @map("is_read")
+  actionUrl String?          @map("action_url")
+  createdAt DateTime         @default(now()) @map("created_at")
+  readAt    DateTime?        @map("read_at")
 
-    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-    @@index([tenantId, isRead, createdAt(sort: Desc)])
-    @@index([userId, isRead])
-    @@map("notifications")
+  @@index([tenantId, isRead, createdAt(sort: Desc)])
+  @@index([userId, isRead])
+  @@map("notifications")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -772,114 +772,118 @@ model Notification {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum SocialPlatform {
-    tiktok
-    instagram
-    youtube_shorts
-    postbridge
+  tiktok
+  instagram
+  youtube_shorts
+  postbridge
 
-    @@map("social_platform")
+  @@map("social_platform")
 }
 
 model AccountGroup {
-    id             String    @id @default(uuid()) @db.Uuid
-    tenantId       String    @map("tenant_id") @db.Uuid
-    name           String
-    niche          String
-    timezone       String    @default("UTC")
-    maxPostsPerDay Int       @default(3) @map("max_posts_per_day")
-    staggerMinutes Int       @default(120) @map("stagger_minutes")
-    bgmPool        String[]  @default([]) @map("bgm_pool")
-    // Anti-ban warmup gate: when true, cold private accounts in this group are
-    // held back from posting until warmed up. Default OFF so freshly imported
-    // accounts can publish immediately (warmup still runs to improve standing).
-    enforceWarmup  Boolean   @default(false) @map("enforce_warmup")
-    isActive       Boolean   @default(true) @map("is_active")
-    createdAt      DateTime  @default(now()) @map("created_at")
-    updatedAt      DateTime  @updatedAt @map("updated_at")
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  name           String
+  niche          String
+  timezone       String   @default("UTC")
+  maxPostsPerDay Int      @default(3) @map("max_posts_per_day")
+  staggerMinutes Int      @default(120) @map("stagger_minutes")
+  bgmPool        String[] @default([]) @map("bgm_pool")
+  // Anti-ban warmup gate: when true, cold private accounts in this group are
+  // held back from posting until warmed up. Default OFF so freshly imported
+  // accounts can publish immediately (warmup still runs to improve standing).
+  enforceWarmup  Boolean  @default(false) @map("enforce_warmup")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
-    tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    accounts SocialAccount[]
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accounts SocialAccount[]
 
-    @@index([tenantId, isActive])
-    @@map("account_groups")
+  @@index([tenantId, isActive])
+  @@map("account_groups")
 }
 
 model Proxy {
-    id               String   @id @default(uuid()) @db.Uuid
-    tenantId         String   @map("tenant_id") @db.Uuid
-    host             String
-    port             Int
-    type             String // http, socks5, residential, mobile
-    country          String?
-    city             String?
-    username         String?
-    password         String? // encrypted
-    isActive         Boolean  @default(true) @map("is_active")
-    assignedAccounts Int      @default(0) @map("assigned_accounts")
-    maxAccounts      Int      @default(3) @map("max_accounts")
-    healthCheckAt    DateTime? @map("health_check_at")
-    failCount        Int      @default(0) @map("fail_count")
-    lastError        String?  @map("last_error")
-    createdAt        DateTime @default(now()) @map("created_at")
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  host             String
+  port             Int
+  type             String // http, socks5, residential, mobile
+  country          String?
+  city             String?
+  username         String?
+  password         String? // encrypted
+  isActive         Boolean   @default(true) @map("is_active")
+  assignedAccounts Int       @default(0) @map("assigned_accounts")
+  maxAccounts      Int       @default(3) @map("max_accounts")
+  healthCheckAt    DateTime? @map("health_check_at")
+  failCount        Int       @default(0) @map("fail_count")
+  lastError        String?   @map("last_error")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
-    tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    accounts SocialAccount[]
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accounts SocialAccount[]
 
-    @@index([tenantId, isActive, assignedAccounts])
-    @@map("proxies")
+  @@index([tenantId, isActive, assignedAccounts])
+  @@map("proxies")
 }
 
 model SocialAccount {
-    id                String         @id @default(uuid()) @db.Uuid
-    tenantId          String         @map("tenant_id") @db.Uuid
-    platform          SocialPlatform
-    accessToken       String         @map("access_token") // TODO: encrypt at rest using application-level encryption
-    refreshToken      String?        @map("refresh_token")
-    expiresAt         DateTime?      @map("expires_at")
-    accountName       String         @map("account_name")
-    igUserId          String?        @map("ig_user_id")
-    proxyUrl          String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
-    // ── Publishing method ──────────────────────────────────────────────
-    // 'official' = OAuth APIs (default); 'private' = unofficial publisher
-    // microservice (instagrapi / tiktok-uploader). sessionData holds the
-    // encrypted credentials + live session blob for the private path.
-    authMethod        String         @default("official") @map("auth_method")
-    sessionData       String?        @map("session_data") @db.Text
-    // ── Farm fields ────────────────────────────────────────────────────
-    accountGroupId    String?        @map("account_group_id") @db.Uuid
-    proxyId           String?        @map("proxy_id") @db.Uuid
-    deviceFingerprint Json?          @map("device_fingerprint")
-    warmupStatus      String         @default("cold") @map("warmup_status") // cold, warming, warm
-    warmupStartedAt   DateTime?      @map("warmup_started_at") // first successful warmup action
-    lastWarmupAt      DateTime?      @map("last_warmup_at") // last warmup action (scheduler paces ~1/day)
-    warmupCount       Int            @default(0) @map("warmup_count") // successful warmup actions total
-    healthScore       Int            @default(100) @map("health_score") // 0-100
-    dailyPostCount    Int            @default(0) @map("daily_post_count")
-    lastPostAt        DateTime?      @map("last_post_at")
-    niche             String?
-    language          String         @default("en")
-    actionLimits      Json?          @map("action_limits") // { maxPostsPerDay, maxLikesPerDay, ... }
-    // Shadow-ban detection
-    shadowBanDetected Boolean        @default(false) @map("shadow_ban_detected")
-    shadowBanCheckedAt DateTime?      @map("shadow_ban_checked_at")
-    lastError         String?        @map("last_error")
-    // ── Core fields ────────────────────────────────────────────────────
-    isActive          Boolean        @default(true) @map("is_active")
-    createdAt         DateTime       @default(now()) @map("created_at")
-    updatedAt         DateTime       @updatedAt @map("updated_at")
+  id                 String         @id @default(uuid()) @db.Uuid
+  tenantId           String         @map("tenant_id") @db.Uuid
+  platform           SocialPlatform
+  accessToken        String         @map("access_token") // TODO: encrypt at rest using application-level encryption
+  refreshToken       String?        @map("refresh_token")
+  expiresAt          DateTime?      @map("expires_at")
+  accountName        String         @map("account_name")
+  igUserId           String?        @map("ig_user_id")
+  proxyUrl           String?        @map("proxy_url") // per-account residential/ISP proxy (http/https/socks5)
+  // ── Publishing method ──────────────────────────────────────────────
+  // 'official' = OAuth APIs (default); 'private' = unofficial publisher
+  // microservice (instagrapi / tiktok-uploader); 'device' = real Android
+  // phone in a physical farm (Laixi), routed via apps/device-agent.
+  // sessionData holds the encrypted credentials + live session blob for
+  // the private path.
+  authMethod         String         @default("official") @map("auth_method")
+  sessionData        String?        @map("session_data") @db.Text
+  // Laixi device id — only set when authMethod='device'.
+  deviceId           String?        @map("device_id")
+  // ── Farm fields ────────────────────────────────────────────────────
+  accountGroupId     String?        @map("account_group_id") @db.Uuid
+  proxyId            String?        @map("proxy_id") @db.Uuid
+  deviceFingerprint  Json?          @map("device_fingerprint")
+  warmupStatus       String         @default("cold") @map("warmup_status") // cold, warming, warm
+  warmupStartedAt    DateTime?      @map("warmup_started_at") // first successful warmup action
+  lastWarmupAt       DateTime?      @map("last_warmup_at") // last warmup action (scheduler paces ~1/day)
+  warmupCount        Int            @default(0) @map("warmup_count") // successful warmup actions total
+  healthScore        Int            @default(100) @map("health_score") // 0-100
+  dailyPostCount     Int            @default(0) @map("daily_post_count")
+  lastPostAt         DateTime?      @map("last_post_at")
+  niche              String?
+  language           String         @default("en")
+  actionLimits       Json?          @map("action_limits") // { maxPostsPerDay, maxLikesPerDay, ... }
+  // Shadow-ban detection
+  shadowBanDetected  Boolean        @default(false) @map("shadow_ban_detected")
+  shadowBanCheckedAt DateTime?      @map("shadow_ban_checked_at")
+  lastError          String?        @map("last_error")
+  // ── Core fields ────────────────────────────────────────────────────
+  isActive           Boolean        @default(true) @map("is_active")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
 
-    tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    accountGroup    AccountGroup?    @relation(fields: [accountGroupId], references: [id])
-    proxy           Proxy?           @relation(fields: [proxyId], references: [id])
-    publishJobs     PublishJob[]
-    distributeItems DistributeItem[]
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accountGroup    AccountGroup?    @relation(fields: [accountGroupId], references: [id])
+  proxy           Proxy?           @relation(fields: [proxyId], references: [id])
+  publishJobs     PublishJob[]
+  distributeItems DistributeItem[]
 
-    @@unique([tenantId, platform, accountName])
-    @@index([tenantId])
-    @@index([tenantId, platform])
-    @@index([accountGroupId])
-    @@index([proxyId])
-    @@map("social_accounts")
+  @@unique([tenantId, platform, accountName])
+  @@index([tenantId])
+  @@index([tenantId, platform])
+  @@index([accountGroupId])
+  @@index([proxyId])
+  @@map("social_accounts")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -887,43 +891,43 @@ model SocialAccount {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum PublishStatus {
-    pending
-    scheduled
-    uploading
-    published
-    failed
+  pending
+  scheduled
+  uploading
+  published
+  failed
 
-    @@map("publish_status")
+  @@map("publish_status")
 }
 
 model PublishJob {
-    id              String         @id @default(uuid()) @db.Uuid
-    videoId         String?        @map("video_id") @db.Uuid
-    tenantId        String         @map("tenant_id") @db.Uuid
-    socialAccountId String         @map("social_account_id") @db.Uuid
-    variantId       String?        @map("variant_id") @db.Uuid
-    uniqueVariantId String?        @map("unique_variant_id") @db.Uuid
-    platform        SocialPlatform
-    status          PublishStatus  @default(pending)
-    caption         String?        @db.Text
-    hashtags        String[]       @default([])
-    scheduledAt     DateTime?      @map("scheduled_at")
-    publishedAt     DateTime?      @map("published_at")
-    externalPostId  String?        @map("external_post_id")
-    error           String?
-    createdAt       DateTime       @default(now()) @map("created_at")
-    updatedAt       DateTime       @updatedAt @map("updated_at")
+  id              String         @id @default(uuid()) @db.Uuid
+  videoId         String?        @map("video_id") @db.Uuid
+  tenantId        String         @map("tenant_id") @db.Uuid
+  socialAccountId String         @map("social_account_id") @db.Uuid
+  variantId       String?        @map("variant_id") @db.Uuid
+  uniqueVariantId String?        @map("unique_variant_id") @db.Uuid
+  platform        SocialPlatform
+  status          PublishStatus  @default(pending)
+  caption         String?        @db.Text
+  hashtags        String[]       @default([])
+  scheduledAt     DateTime?      @map("scheduled_at")
+  publishedAt     DateTime?      @map("published_at")
+  externalPostId  String?        @map("external_post_id")
+  error           String?
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
 
-    video           Video?           @relation(fields: [videoId], references: [id], onDelete: Cascade)
-    tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id])
-    uniqueVariant   UniqueVariant?   @relation(fields: [uniqueVariantId], references: [id])
-    distributeItems DistributeItem[]
+  video           Video?           @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id])
+  uniqueVariant   UniqueVariant?   @relation(fields: [uniqueVariantId], references: [id])
+  distributeItems DistributeItem[]
 
-    @@index([videoId])
-    @@index([tenantId, status])
-    @@index([scheduledAt])
-    @@map("publish_jobs")
+  @@index([videoId])
+  @@index([tenantId, status])
+  @@index([scheduledAt])
+  @@map("publish_jobs")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -931,49 +935,49 @@ model PublishJob {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum SourceVideoStatus {
-    uploading  // загрузка в storage
-    analyzing  // анализ: scene detection, транскрипт
-    ready      // готово к уникализации
-    failed     // ошибка анализа
+  uploading // загрузка в storage
+  analyzing // анализ: scene detection, транскрипт
+  ready // готово к уникализации
+  failed // ошибка анализа
 
-    @@map("source_video_status")
+  @@map("source_video_status")
 }
 
 model SourceVideo {
-    id            String            @id @default(uuid()) @db.Uuid
-    tenantId      String            @map("tenant_id") @db.Uuid
-    projectId     String?           @map("project_id") @db.Uuid
-    uploadedBy    String?           @map("uploaded_by") @db.Uuid
-    title         String
-    description   String?
-    status        SourceVideoStatus @default(uploading)
-    // Storage
-    storageKey    String            @map("storage_key")
-    mimeType      String?           @map("mime_type")
-    fileSizeBytes BigInt?           @map("file_size_bytes")
-    // Metadata extracted during analysis
-    durationSec   Decimal?          @map("duration_sec") @db.Decimal(8, 2)
-    width         Int?
-    height        Int?
-    fps           Decimal?          @db.Decimal(5, 2)
-    // Analysis results (populated by analyze step)
-    transcript    Json?             // Whisper transcript with word timestamps
-    sceneBreaks   Json?             @map("scene_breaks") // detected scene cut timestamps
-    audioProfile  Json?             @map("audio_profile") // volume levels, silence zones, etc.
-    //
-    error         String?
-    isArchived    Boolean           @default(false) @map("is_archived")
-    createdAt     DateTime          @default(now()) @map("created_at")
-    updatedAt     DateTime          @updatedAt @map("updated_at")
+  id            String            @id @default(uuid()) @db.Uuid
+  tenantId      String            @map("tenant_id") @db.Uuid
+  projectId     String?           @map("project_id") @db.Uuid
+  uploadedBy    String?           @map("uploaded_by") @db.Uuid
+  title         String
+  description   String?
+  status        SourceVideoStatus @default(uploading)
+  // Storage
+  storageKey    String            @map("storage_key")
+  mimeType      String?           @map("mime_type")
+  fileSizeBytes BigInt?           @map("file_size_bytes")
+  // Metadata extracted during analysis
+  durationSec   Decimal?          @map("duration_sec") @db.Decimal(8, 2)
+  width         Int?
+  height        Int?
+  fps           Decimal?          @db.Decimal(5, 2)
+  // Analysis results (populated by analyze step)
+  transcript    Json? // Whisper transcript with word timestamps
+  sceneBreaks   Json?             @map("scene_breaks") // detected scene cut timestamps
+  audioProfile  Json?             @map("audio_profile") // volume levels, silence zones, etc.
+  //
+  error         String?
+  isArchived    Boolean           @default(false) @map("is_archived")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
 
-    tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    project      Project?      @relation(fields: [projectId], references: [id])
-    uniquifyJobs UniquifyJob[]
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  project      Project?      @relation(fields: [projectId], references: [id])
+  uniquifyJobs UniquifyJob[]
 
-    @@index([tenantId, status])
-    @@index([tenantId, isArchived])
-    @@index([projectId])
-    @@map("source_videos")
+  @@index([tenantId, status])
+  @@index([tenantId, isArchived])
+  @@index([projectId])
+  @@map("source_videos")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -981,52 +985,52 @@ model SourceVideo {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UniquifyJobStatus {
-    pending     // создана, ожидает запуска
-    analyzing   // анализируем исходное видео
-    generating  // генерируем варианты
-    completed   // все варианты готовы
-    failed      // ошибка
-    cancelled   // отменена
+  pending // создана, ожидает запуска
+  analyzing // анализируем исходное видео
+  generating // генерируем варианты
+  completed // все варианты готовы
+  failed // ошибка
+  cancelled // отменена
 
-    @@map("uniquify_job_status")
+  @@map("uniquify_job_status")
 }
 
 model UniquifyJob {
-    id               String             @id @default(uuid()) @db.Uuid
-    tenantId         String             @map("tenant_id") @db.Uuid
-    sourceVideoId    String             @map("source_video_id") @db.Uuid
-    createdBy        String?            @map("created_by") @db.Uuid
-    status           UniquifyJobStatus  @default(pending)
-    // How many unique variants to produce
-    variantCount     Int                @default(10) @map("variant_count")
-    // Target platforms (affects aspect ratios & durations)
-    targetPlatforms  SocialPlatform[]   @map("target_platforms")
-    // Uniquification config
-    config           Json               @default("{}") // UniquifyConfig JSON
-    // Shared creative assets (generated ONCE per job, reused by every variant)
-    script           String?            @db.Text                 // AI voiceover script
-    voiceoverKey     String?            @map("voiceover_key")    // MinIO key of the shared voiceover
-    voiceId          String?            @map("voice_id")         // TTS voice used
-    language         String?            @default("ru")           // script/subtitle language
-    transcript       Json?              // subtitle lines timed to the voiceover
-    // Stats
-    completedCount   Int                @default(0) @map("completed_count")
-    failedCount      Int                @default(0) @map("failed_count")
-    creditsUsed      Int                @default(0) @map("credits_used")
-    error            String?
-    createdAt        DateTime           @default(now()) @map("created_at")
-    updatedAt        DateTime           @updatedAt @map("updated_at")
-    completedAt      DateTime?          @map("completed_at")
+  id              String            @id @default(uuid()) @db.Uuid
+  tenantId        String            @map("tenant_id") @db.Uuid
+  sourceVideoId   String            @map("source_video_id") @db.Uuid
+  createdBy       String?           @map("created_by") @db.Uuid
+  status          UniquifyJobStatus @default(pending)
+  // How many unique variants to produce
+  variantCount    Int               @default(10) @map("variant_count")
+  // Target platforms (affects aspect ratios & durations)
+  targetPlatforms SocialPlatform[]  @map("target_platforms")
+  // Uniquification config
+  config          Json              @default("{}") // UniquifyConfig JSON
+  // Shared creative assets (generated ONCE per job, reused by every variant)
+  script          String?           @db.Text // AI voiceover script
+  voiceoverKey    String?           @map("voiceover_key") // MinIO key of the shared voiceover
+  voiceId         String?           @map("voice_id") // TTS voice used
+  language        String?           @default("ru") // script/subtitle language
+  transcript      Json? // subtitle lines timed to the voiceover
+  // Stats
+  completedCount  Int               @default(0) @map("completed_count")
+  failedCount     Int               @default(0) @map("failed_count")
+  creditsUsed     Int               @default(0) @map("credits_used")
+  error           String?
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+  completedAt     DateTime?         @map("completed_at")
 
-    tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    sourceVideo    SourceVideo     @relation(fields: [sourceVideoId], references: [id])
-    variants       UniqueVariant[]
-    distributeJobs DistributeJob[]
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceVideo    SourceVideo     @relation(fields: [sourceVideoId], references: [id])
+  variants       UniqueVariant[]
+  distributeJobs DistributeJob[]
 
-    @@index([tenantId, status])
-    @@index([sourceVideoId])
-    @@index([createdAt(sort: Desc)])
-    @@map("uniquify_jobs")
+  @@index([tenantId, status])
+  @@index([sourceVideoId])
+  @@index([createdAt(sort: Desc)])
+  @@map("uniquify_jobs")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1034,54 +1038,54 @@ model UniquifyJob {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UniqueVariantStatus {
-    pending     // в очереди
-    rendering   // FFmpeg рендерит
-    tts         // генерируем озвучку
-    completed   // готов
-    failed      // ошибка
+  pending // в очереди
+  rendering // FFmpeg рендерит
+  tts // генерируем озвучку
+  completed // готов
+  failed // ошибка
 
-    @@map("unique_variant_status")
+  @@map("unique_variant_status")
 }
 
 model UniqueVariant {
-    id              String              @id @default(uuid()) @db.Uuid
-    uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
-    tenantId        String              @map("tenant_id") @db.Uuid
-    variantIndex    Int                 @map("variant_index") @db.SmallInt
-    status          UniqueVariantStatus @default(pending)
-    // Applied transforms (full recipe for reproducibility)
-    transforms      Json                @default("{}") // VariantTransforms JSON
-    // Output
-    outputKey       String?             @map("output_key")
-    outputUrl       String?             @map("output_url")
-    thumbnailKey    String?             @map("thumbnail_key")
-    durationSec     Decimal?            @map("duration_sec") @db.Decimal(8, 2)
-    fileSizeBytes   BigInt?             @map("file_size_bytes")
-    width           Int?
-    height          Int?
-    // Subtitle & voice info
-    subtitleStyle   String?             @map("subtitle_style")
-    ttsVoiceId      String?             @map("tts_voice_id")
-    ttsStorageKey   String?             @map("tts_storage_key")
-    bgmTrackKey     String?             @map("bgm_track_key")
-    // Auto-generated content
-    generatedCaption  String?             @map("generated_caption") @db.Text
-    generatedHashtags String[]            @default([]) @map("generated_hashtags")
-    // Perceptual hash for duplicate detection
-    pHash             String?             @map("phash")
-    //
-    error           String?
-    createdAt       DateTime            @default(now()) @map("created_at")
-    updatedAt       DateTime            @updatedAt @map("updated_at")
+  id                String              @id @default(uuid()) @db.Uuid
+  uniquifyJobId     String              @map("uniquify_job_id") @db.Uuid
+  tenantId          String              @map("tenant_id") @db.Uuid
+  variantIndex      Int                 @map("variant_index") @db.SmallInt
+  status            UniqueVariantStatus @default(pending)
+  // Applied transforms (full recipe for reproducibility)
+  transforms        Json                @default("{}") // VariantTransforms JSON
+  // Output
+  outputKey         String?             @map("output_key")
+  outputUrl         String?             @map("output_url")
+  thumbnailKey      String?             @map("thumbnail_key")
+  durationSec       Decimal?            @map("duration_sec") @db.Decimal(8, 2)
+  fileSizeBytes     BigInt?             @map("file_size_bytes")
+  width             Int?
+  height            Int?
+  // Subtitle & voice info
+  subtitleStyle     String?             @map("subtitle_style")
+  ttsVoiceId        String?             @map("tts_voice_id")
+  ttsStorageKey     String?             @map("tts_storage_key")
+  bgmTrackKey       String?             @map("bgm_track_key")
+  // Auto-generated content
+  generatedCaption  String?             @map("generated_caption") @db.Text
+  generatedHashtags String[]            @default([]) @map("generated_hashtags")
+  // Perceptual hash for duplicate detection
+  pHash             String?             @map("phash")
+  //
+  error             String?
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
 
-    uniquifyJob    UniquifyJob      @relation(fields: [uniquifyJobId], references: [id], onDelete: Cascade)
-    publishJobs    PublishJob[]
-    distributeItems DistributeItem[]
+  uniquifyJob     UniquifyJob      @relation(fields: [uniquifyJobId], references: [id], onDelete: Cascade)
+  publishJobs     PublishJob[]
+  distributeItems DistributeItem[]
 
-    @@unique([uniquifyJobId, variantIndex])
-    @@index([uniquifyJobId, status])
-    @@index([tenantId, status])
-    @@map("unique_variants")
+  @@unique([uniquifyJobId, variantIndex])
+  @@index([uniquifyJobId, status])
+  @@index([tenantId, status])
+  @@map("unique_variants")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1089,82 +1093,82 @@ model UniqueVariant {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum DistributeJobStatus {
-    pending     // создана, ожидает старта
-    distributing // раздаём публикации
-    completed   // все items обработаны
-    failed      // ошибка
-    cancelled   // отменена
+  pending // создана, ожидает старта
+  distributing // раздаём публикации
+  completed // все items обработаны
+  failed // ошибка
+  cancelled // отменена
 
-    @@map("distribute_job_status")
+  @@map("distribute_job_status")
 }
 
 enum DistributeItemStatus {
-    pending     // ожидает своей задержки
-    scheduled   // PublishJob создан, ожидает времени
-    publishing  // публикуется прямо сейчас
-    published   // успешно опубликовано
-    failed      // ошибка публикации
-    skipped     // пропущен (аккаунт неактивен, вариант не готов и т.д.)
+  pending // ожидает своей задержки
+  scheduled // PublishJob создан, ожидает времени
+  publishing // публикуется прямо сейчас
+  published // успешно опубликовано
+  failed // ошибка публикации
+  skipped // пропущен (аккаунт неактивен, вариант не готов и т.д.)
 
-    @@map("distribute_item_status")
+  @@map("distribute_item_status")
 }
 
 model DistributeJob {
-    id              String              @id @default(uuid()) @db.Uuid
-    tenantId        String              @map("tenant_id") @db.Uuid
-    uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
-    createdBy       String?             @map("created_by") @db.Uuid
-    campaignId      String?             @map("campaign_id") @db.Uuid // если раздачу создала кампания
-    status          DistributeJobStatus @default(pending)
-    // Config
-    staggerMinutes  Int                 @default(15) @map("stagger_minutes") // задержка между публикациями
-    captionTemplate String?             @map("caption_template") @db.Text   // шаблон описания ({{variant_index}}, {{platform}})
-    hashtags        String[]            @default([])
-    // Stats
-    totalItems      Int                 @default(0) @map("total_items")
-    publishedCount  Int                 @default(0) @map("published_count")
-    failedCount     Int                 @default(0) @map("failed_count")
-    error           String?
-    createdAt       DateTime            @default(now()) @map("created_at")
-    updatedAt       DateTime            @updatedAt @map("updated_at")
-    completedAt     DateTime?           @map("completed_at")
+  id              String              @id @default(uuid()) @db.Uuid
+  tenantId        String              @map("tenant_id") @db.Uuid
+  uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
+  createdBy       String?             @map("created_by") @db.Uuid
+  campaignId      String?             @map("campaign_id") @db.Uuid // если раздачу создала кампания
+  status          DistributeJobStatus @default(pending)
+  // Config
+  staggerMinutes  Int                 @default(15) @map("stagger_minutes") // задержка между публикациями
+  captionTemplate String?             @map("caption_template") @db.Text // шаблон описания ({{variant_index}}, {{platform}})
+  hashtags        String[]            @default([])
+  // Stats
+  totalItems      Int                 @default(0) @map("total_items")
+  publishedCount  Int                 @default(0) @map("published_count")
+  failedCount     Int                 @default(0) @map("failed_count")
+  error           String?
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  completedAt     DateTime?           @map("completed_at")
 
-    tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    uniquifyJob UniquifyJob     @relation(fields: [uniquifyJobId], references: [id])
-    items       DistributeItem[]
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  uniquifyJob UniquifyJob      @relation(fields: [uniquifyJobId], references: [id])
+  items       DistributeItem[]
 
-    @@index([tenantId, status])
-    @@index([uniquifyJobId])
-    @@index([campaignId])
-    @@map("distribute_jobs")
+  @@index([tenantId, status])
+  @@index([uniquifyJobId])
+  @@index([campaignId])
+  @@map("distribute_jobs")
 }
 
 model DistributeItem {
-    id               String              @id @default(uuid()) @db.Uuid
-    distributeJobId  String              @map("distribute_job_id") @db.Uuid
-    uniqueVariantId  String              @map("unique_variant_id") @db.Uuid
-    socialAccountId  String              @map("social_account_id") @db.Uuid
-    publishJobId     String?             @map("publish_job_id") @db.Uuid
-    status           DistributeItemStatus @default(pending)
-    // Scheduling
-    scheduledAt      DateTime?           @map("scheduled_at")
-    publishedAt      DateTime?           @map("published_at")
-    // Per-item overrides
-    caption          String?             @db.Text
-    hashtags         String[]            @default([])
-    error            String?
-    createdAt        DateTime            @default(now()) @map("created_at")
-    updatedAt        DateTime            @updatedAt @map("updated_at")
+  id              String               @id @default(uuid()) @db.Uuid
+  distributeJobId String               @map("distribute_job_id") @db.Uuid
+  uniqueVariantId String               @map("unique_variant_id") @db.Uuid
+  socialAccountId String               @map("social_account_id") @db.Uuid
+  publishJobId    String?              @map("publish_job_id") @db.Uuid
+  status          DistributeItemStatus @default(pending)
+  // Scheduling
+  scheduledAt     DateTime?            @map("scheduled_at")
+  publishedAt     DateTime?            @map("published_at")
+  // Per-item overrides
+  caption         String?              @db.Text
+  hashtags        String[]             @default([])
+  error           String?
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
 
-    distributeJob DistributeJob @relation(fields: [distributeJobId], references: [id], onDelete: Cascade)
-    uniqueVariant UniqueVariant @relation(fields: [uniqueVariantId], references: [id])
-    socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id])
-    publishJob    PublishJob?   @relation(fields: [publishJobId], references: [id])
+  distributeJob DistributeJob @relation(fields: [distributeJobId], references: [id], onDelete: Cascade)
+  uniqueVariant UniqueVariant @relation(fields: [uniqueVariantId], references: [id])
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id])
+  publishJob    PublishJob?   @relation(fields: [publishJobId], references: [id])
 
-    @@unique([distributeJobId, uniqueVariantId, socialAccountId])
-    @@index([distributeJobId, status])
-    @@index([scheduledAt])
-    @@map("distribute_items")
+  @@unique([distributeJobId, uniqueVariantId, socialAccountId])
+  @@index([distributeJobId, status])
+  @@index([scheduledAt])
+  @@map("distribute_items")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1172,32 +1176,32 @@ model DistributeItem {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model VideoSchedule {
-    id               String           @id @default(uuid()) @db.Uuid
-    tenantId         String           @map("tenant_id") @db.Uuid
-    productId        String           @map("product_id") @db.Uuid
-    name             String           @default("Auto-schedule")
-    cronExpression   String           @map("cron_expression") // e.g. "0 10 * * 1,3,5" = Mon/Wed/Fri at 10:00
-    timezone         String           @default("Europe/Moscow")
-    isActive         Boolean          @default(true) @map("is_active")
-    autoPublish      Boolean          @default(false) @map("auto_publish")
-    publishPlatforms SocialPlatform[] @map("publish_platforms") // platforms to auto-publish to
-    socialAccountIds String[]         @map("social_account_ids") @db.Uuid // IDs of SocialAccount to publish to
-    // Generation settings (same as create page)
-    avatarId         String?          @map("avatar_id")
-    voiceId          String?          @map("voice_id")
-    durationSec      Int              @default(30) @map("duration_sec")
-    language         String           @default("ru")
-    bgmEnabled       Boolean          @default(true) @map("bgm_enabled")
-    // Stats
-    lastRunAt        DateTime?        @map("last_run_at")
-    nextRunAt        DateTime?        @map("next_run_at")
-    totalRuns        Int              @default(0) @map("total_runs")
-    createdAt        DateTime         @default(now()) @map("created_at")
-    updatedAt        DateTime         @updatedAt @map("updated_at")
+  id               String           @id @default(uuid()) @db.Uuid
+  tenantId         String           @map("tenant_id") @db.Uuid
+  productId        String           @map("product_id") @db.Uuid
+  name             String           @default("Auto-schedule")
+  cronExpression   String           @map("cron_expression") // e.g. "0 10 * * 1,3,5" = Mon/Wed/Fri at 10:00
+  timezone         String           @default("Europe/Moscow")
+  isActive         Boolean          @default(true) @map("is_active")
+  autoPublish      Boolean          @default(false) @map("auto_publish")
+  publishPlatforms SocialPlatform[] @map("publish_platforms") // platforms to auto-publish to
+  socialAccountIds String[]         @map("social_account_ids") @db.Uuid // IDs of SocialAccount to publish to
+  // Generation settings (same as create page)
+  avatarId         String?          @map("avatar_id")
+  voiceId          String?          @map("voice_id")
+  durationSec      Int              @default(30) @map("duration_sec")
+  language         String           @default("ru")
+  bgmEnabled       Boolean          @default(true) @map("bgm_enabled")
+  // Stats
+  lastRunAt        DateTime?        @map("last_run_at")
+  nextRunAt        DateTime?        @map("next_run_at")
+  totalRuns        Int              @default(0) @map("total_runs")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
 
-    @@index([tenantId, isActive])
-    @@index([nextRunAt])
-    @@map("video_schedules")
+  @@index([tenantId, isActive])
+  @@index([nextRunAt])
+  @@map("video_schedules")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1207,86 +1211,86 @@ model VideoSchedule {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum CampaignStatus {
-    draft
-    active
-    paused
-    completed
-    archived
+  draft
+  active
+  paused
+  completed
+  archived
 
-    @@map("campaign_status")
+  @@map("campaign_status")
 }
 
 enum CampaignContentSource {
-    uniquify // исходники → N уникальных вариантов (default)
-    generate // HeyGen/Runway-пайплайн из пресета → uniquify
-    montage  // smart editor → SourceVideo → uniquify
-    manual   // пользователь сам заливает готовые варианты
+  uniquify // исходники → N уникальных вариантов (default)
+  generate // HeyGen/Runway-пайплайн из пресета → uniquify
+  montage // smart editor → SourceVideo → uniquify
+  manual // пользователь сам заливает готовые варианты
 
-    @@map("campaign_content_source")
+  @@map("campaign_content_source")
 }
 
 model Campaign {
-    id            String                @id @default(uuid()) @db.Uuid
-    tenantId      String                @map("tenant_id") @db.Uuid
-    name          String
-    status        CampaignStatus        @default(draft)
-    productId     String?               @map("product_id") @db.Uuid
-    // ── SUPPLY (Фаза 2 использует, Фаза 1 хранит) ──────────────────────
-    contentSource CampaignContentSource @default(uniquify) @map("content_source")
-    sourceConfig  Json                  @default("{}") @map("source_config") // preset/uniquify снапшот + uniquifyJobIds[]
-    bufferDays    Int                   @default(2) @map("buffer_days")
-    maxBuildAhead Int                   @default(50) @map("max_build_ahead")
-    // ── DEMAND ─────────────────────────────────────────────────────────
-    accountGroupId        String?          @map("account_group_id") @db.Uuid
-    socialAccountIds      String[]         @map("social_account_ids") @db.Uuid
-    platforms             SocialPlatform[]
-    postsPerAccountPerDay Int              @default(1) @map("posts_per_account_per_day")
-    cronExpression        String           @map("cron_expression")
-    timezone              String           @default("Europe/Moscow")
-    staggerMinutes        Int              @default(15) @map("stagger_minutes")
-    // ── Гардрейлы ──────────────────────────────────────────────────────
-    captionTemplate String?  @map("caption_template") @db.Text
-    hashtags        String[] @default([])
-    minHealth       Int      @default(30) @map("min_health")
-    dedupPerAccount Boolean  @default(true) @map("dedup_per_account")
-    respectWarmup   Boolean  @default(false) @map("respect_warmup")
-    // ── Жизненный цикл ─────────────────────────────────────────────────
-    startAt   DateTime? @map("start_at")
-    endAt     DateTime? @map("end_at")
-    lastRunAt DateTime? @map("last_run_at")
-    nextRunAt DateTime? @map("next_run_at")
-    // ── Денормализованная статистика ───────────────────────────────────
-    variantsReady     Int     @default(0) @map("variants_ready")
-    variantsPublished Int     @default(0) @map("variants_published")
-    postsPublished    Int     @default(0) @map("posts_published")
-    postsFailed       Int     @default(0) @map("posts_failed")
-    lastError         String? @map("last_error")
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @updatedAt @map("updated_at")
+  id                    String                @id @default(uuid()) @db.Uuid
+  tenantId              String                @map("tenant_id") @db.Uuid
+  name                  String
+  status                CampaignStatus        @default(draft)
+  productId             String?               @map("product_id") @db.Uuid
+  // ── SUPPLY (Фаза 2 использует, Фаза 1 хранит) ──────────────────────
+  contentSource         CampaignContentSource @default(uniquify) @map("content_source")
+  sourceConfig          Json                  @default("{}") @map("source_config") // preset/uniquify снапшот + uniquifyJobIds[]
+  bufferDays            Int                   @default(2) @map("buffer_days")
+  maxBuildAhead         Int                   @default(50) @map("max_build_ahead")
+  // ── DEMAND ─────────────────────────────────────────────────────────
+  accountGroupId        String?               @map("account_group_id") @db.Uuid
+  socialAccountIds      String[]              @map("social_account_ids") @db.Uuid
+  platforms             SocialPlatform[]
+  postsPerAccountPerDay Int                   @default(1) @map("posts_per_account_per_day")
+  cronExpression        String                @map("cron_expression")
+  timezone              String                @default("Europe/Moscow")
+  staggerMinutes        Int                   @default(15) @map("stagger_minutes")
+  // ── Гардрейлы ──────────────────────────────────────────────────────
+  captionTemplate       String?               @map("caption_template") @db.Text
+  hashtags              String[]              @default([])
+  minHealth             Int                   @default(30) @map("min_health")
+  dedupPerAccount       Boolean               @default(true) @map("dedup_per_account")
+  respectWarmup         Boolean               @default(false) @map("respect_warmup")
+  // ── Жизненный цикл ─────────────────────────────────────────────────
+  startAt               DateTime?             @map("start_at")
+  endAt                 DateTime?             @map("end_at")
+  lastRunAt             DateTime?             @map("last_run_at")
+  nextRunAt             DateTime?             @map("next_run_at")
+  // ── Денормализованная статистика ───────────────────────────────────
+  variantsReady         Int                   @default(0) @map("variants_ready")
+  variantsPublished     Int                   @default(0) @map("variants_published")
+  postsPublished        Int                   @default(0) @map("posts_published")
+  postsFailed           Int                   @default(0) @map("posts_failed")
+  lastError             String?               @map("last_error")
+  createdAt             DateTime              @default(now()) @map("created_at")
+  updatedAt             DateTime              @updatedAt @map("updated_at")
 
-    tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    product Product?      @relation(fields: [productId], references: [id])
-    runs    CampaignRun[]
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product Product?      @relation(fields: [productId], references: [id])
+  runs    CampaignRun[]
 
-    @@index([tenantId, status])
-    @@index([nextRunAt])
-    @@map("campaigns")
+  @@index([tenantId, status])
+  @@index([nextRunAt])
+  @@map("campaigns")
 }
 
 model CampaignRun {
-    id         String    @id @default(uuid()) @db.Uuid
-    campaignId String    @map("campaign_id") @db.Uuid
-    tenantId   String    @map("tenant_id") @db.Uuid
-    kind       String // buffer_topup | distribute | reconcile
-    summary    Json      @default("{}") // {produced, distributed, skipped, reasons[]}
-    error      String?
-    startedAt  DateTime  @default(now()) @map("started_at")
-    finishedAt DateTime? @map("finished_at")
+  id         String    @id @default(uuid()) @db.Uuid
+  campaignId String    @map("campaign_id") @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  kind       String // buffer_topup | distribute | reconcile
+  summary    Json      @default("{}") // {produced, distributed, skipped, reasons[]}
+  error      String?
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
 
-    campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-    @@index([campaignId, startedAt(sort: Desc)])
-    @@map("campaign_runs")
+  @@index([campaignId, startedAt(sort: Desc)])
+  @@map("campaign_runs")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1296,36 +1300,36 @@ model CampaignRun {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model DistributeSchedule {
-    id                 String    @id @default(uuid()) @db.Uuid
-    tenantId           String    @map("tenant_id") @db.Uuid
-    name               String    @default("Auto-distribute")
-    isActive           Boolean   @default(true) @map("is_active")
-    cronExpression     String    @map("cron_expression") // e.g. "0 12,18 * * *"
-    timezone           String    @default("Europe/Moscow")
-    // Source filter: only variants of this uniquify job (null = any completed
-    // variant of the tenant that was never scheduled/published before)
-    uniquifyJobId      String?   @map("uniquify_job_id") @db.Uuid
-    // Target accounts: explicit ids and/or an entire account group
-    socialAccountIds   String[]  @map("social_account_ids") @db.Uuid
-    accountGroupId     String?   @map("account_group_id") @db.Uuid
-    // How many variants each account receives per tick
-    variantsPerAccount Int       @default(1) @map("variants_per_account")
-    staggerMinutes     Int       @default(15) @map("stagger_minutes")
-    captionTemplate    String?   @map("caption_template") @db.Text
-    hashtags           String[]  @default([])
-    // Stats
-    lastRunAt          DateTime? @map("last_run_at")
-    nextRunAt          DateTime? @map("next_run_at")
-    totalRuns          Int       @default(0) @map("total_runs")
-    lastError          String?   @map("last_error")
-    createdAt          DateTime  @default(now()) @map("created_at")
-    updatedAt          DateTime  @updatedAt @map("updated_at")
+  id                 String    @id @default(uuid()) @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  name               String    @default("Auto-distribute")
+  isActive           Boolean   @default(true) @map("is_active")
+  cronExpression     String    @map("cron_expression") // e.g. "0 12,18 * * *"
+  timezone           String    @default("Europe/Moscow")
+  // Source filter: only variants of this uniquify job (null = any completed
+  // variant of the tenant that was never scheduled/published before)
+  uniquifyJobId      String?   @map("uniquify_job_id") @db.Uuid
+  // Target accounts: explicit ids and/or an entire account group
+  socialAccountIds   String[]  @map("social_account_ids") @db.Uuid
+  accountGroupId     String?   @map("account_group_id") @db.Uuid
+  // How many variants each account receives per tick
+  variantsPerAccount Int       @default(1) @map("variants_per_account")
+  staggerMinutes     Int       @default(15) @map("stagger_minutes")
+  captionTemplate    String?   @map("caption_template") @db.Text
+  hashtags           String[]  @default([])
+  // Stats
+  lastRunAt          DateTime? @map("last_run_at")
+  nextRunAt          DateTime? @map("next_run_at")
+  totalRuns          Int       @default(0) @map("total_runs")
+  lastError          String?   @map("last_error")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
-    tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-    @@index([tenantId, isActive])
-    @@index([nextRunAt])
-    @@map("distribute_schedules")
+  @@index([tenantId, isActive])
+  @@index([nextRunAt])
+  @@map("distribute_schedules")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1335,110 +1339,110 @@ model DistributeSchedule {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum EditMode {
-    uniquify_source // нарезка/склейка → SourceVideo для уникализации
-    smart_montage   // готовое красивое видео: субтитры по речи, умный монтаж
+  uniquify_source // нарезка/склейка → SourceVideo для уникализации
+  smart_montage // готовое красивое видео: субтитры по речи, умный монтаж
 
-    @@map("edit_mode")
+  @@map("edit_mode")
 }
 
 enum EditGeometry {
-    highlights // 1 длинное → K непересекающихся клипов
-    mix        // N источников → одна сборка
+  highlights // 1 длинное → K непересекающихся клипов
+  mix // N источников → одна сборка
 
-    @@map("edit_geometry")
+  @@map("edit_geometry")
 }
 
 enum EditAudioMode {
-    keep    // оригинальный звук источника (+ опц. музыка)
-    replace // общая TTS-озвучка + музыка
+  keep // оригинальный звук источника (+ опц. музыка)
+  replace // общая TTS-озвучка + музыка
 
-    @@map("edit_audio_mode")
+  @@map("edit_audio_mode")
 }
 
 enum EditProjectStatus {
-    draft     // создан, ожидает анализа
-    analyzing // идёт анализ источников
-    ready     // раскадровка готова, ждёт правки/подтверждения
-    rendering // идёт рендер подтверждённых клипов
-    completed // все клипы отрендерены
-    failed    // ошибка
+  draft // создан, ожидает анализа
+  analyzing // идёт анализ источников
+  ready // раскадровка готова, ждёт правки/подтверждения
+  rendering // идёт рендер подтверждённых клипов
+  completed // все клипы отрендерены
+  failed // ошибка
 
-    @@map("edit_project_status")
+  @@map("edit_project_status")
 }
 
 model EditProject {
-    id                String            @id @default(uuid()) @db.Uuid
-    tenantId          String            @map("tenant_id") @db.Uuid
-    createdBy         String?           @map("created_by") @db.Uuid
-    name              String
-    mode              EditMode          @default(smart_montage)
-    geometry          EditGeometry      @default(highlights)
-    status            EditProjectStatus @default(draft)
-    // Render settings
-    aspect            String            @default("9:16") // 9:16 | 1:1 | 16:9 | 4:5
-    fps               Int               @default(30)
-    smartCrop         Boolean           @default(true) @map("smart_crop")
-    audioMode         EditAudioMode     @default(keep) @map("audio_mode")
-    subtitleStyle     String            @default("tiktok") @map("subtitle_style")
-    useVision         Boolean           @default(false) @map("use_vision")
-    // Selection targets
-    targetClipCount   Int               @default(5) @map("target_clip_count")
-    targetClipSeconds Decimal           @default(30) @map("target_clip_seconds") @db.Decimal(6, 2)
-    // Misc config (presets, music keys, voiceover key, etc.)
-    config            Json              @default("{}")
-    error             String?
-    createdAt         DateTime          @default(now()) @map("created_at")
-    updatedAt         DateTime          @updatedAt @map("updated_at")
+  id                String            @id @default(uuid()) @db.Uuid
+  tenantId          String            @map("tenant_id") @db.Uuid
+  createdBy         String?           @map("created_by") @db.Uuid
+  name              String
+  mode              EditMode          @default(smart_montage)
+  geometry          EditGeometry      @default(highlights)
+  status            EditProjectStatus @default(draft)
+  // Render settings
+  aspect            String            @default("9:16") // 9:16 | 1:1 | 16:9 | 4:5
+  fps               Int               @default(30)
+  smartCrop         Boolean           @default(true) @map("smart_crop")
+  audioMode         EditAudioMode     @default(keep) @map("audio_mode")
+  subtitleStyle     String            @default("tiktok") @map("subtitle_style")
+  useVision         Boolean           @default(false) @map("use_vision")
+  // Selection targets
+  targetClipCount   Int               @default(5) @map("target_clip_count")
+  targetClipSeconds Decimal           @default(30) @map("target_clip_seconds") @db.Decimal(6, 2)
+  // Misc config (presets, music keys, voiceover key, etc.)
+  config            Json              @default("{}")
+  error             String?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
 
-    tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-    sources EditSource[]
-    clips   EditClip[]
+  tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sources EditSource[]
+  clips   EditClip[]
 
-    @@index([tenantId, status])
-    @@map("edit_projects")
+  @@index([tenantId, status])
+  @@map("edit_projects")
 }
 
 model EditSource {
-    id          String   @id @default(uuid()) @db.Uuid
-    projectId   String   @map("project_id") @db.Uuid
-    storageKey  String   @map("storage_key")
-    order       Int      @default(0)
-    durationSec Decimal? @map("duration_sec") @db.Decimal(8, 2)
-    width       Int?
-    height      Int?
-    fps         Decimal? @db.Decimal(5, 2)
-    // Full SourceAnalysis JSON (scene_breaks, audio_energy, beats, transcript, face/motion)
-    analysis    Json?
-    createdAt   DateTime @default(now()) @map("created_at")
-    updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String   @id @default(uuid()) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  storageKey  String   @map("storage_key")
+  order       Int      @default(0)
+  durationSec Decimal? @map("duration_sec") @db.Decimal(8, 2)
+  width       Int?
+  height      Int?
+  fps         Decimal? @db.Decimal(5, 2)
+  // Full SourceAnalysis JSON (scene_breaks, audio_energy, beats, transcript, face/motion)
+  analysis    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-    project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-    @@index([projectId])
-    @@map("edit_sources")
+  @@index([projectId])
+  @@map("edit_sources")
 }
 
 model EditClip {
-    id                  String   @id @default(uuid()) @db.Uuid
-    projectId           String   @map("project_id") @db.Uuid
-    title               String   @default("")
-    order               Int      @default(0)
-    included            Boolean  @default(true)
-    score               Decimal  @default(0) @db.Decimal(5, 4)
-    // EDL: ordered segments [{src_idx,start,end,score}], plus snippet/thumb
-    edl                 Json     @default("{}")
-    transcriptSnippet   String?  @map("transcript_snippet")
-    thumbnailKey        String?  @map("thumbnail_key")
-    // Set once rendered + (optionally) promoted into the uniquify pipeline
-    outputKey           String?  @map("output_key")
-    outputSourceVideoId String?  @map("output_source_video_id") @db.Uuid
-    durationSec         Decimal? @map("duration_sec") @db.Decimal(8, 2)
-    phash               String?
-    createdAt           DateTime @default(now()) @map("created_at")
-    updatedAt           DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default(uuid()) @db.Uuid
+  projectId           String   @map("project_id") @db.Uuid
+  title               String   @default("")
+  order               Int      @default(0)
+  included            Boolean  @default(true)
+  score               Decimal  @default(0) @db.Decimal(5, 4)
+  // EDL: ordered segments [{src_idx,start,end,score}], plus snippet/thumb
+  edl                 Json     @default("{}")
+  transcriptSnippet   String?  @map("transcript_snippet")
+  thumbnailKey        String?  @map("thumbnail_key")
+  // Set once rendered + (optionally) promoted into the uniquify pipeline
+  outputKey           String?  @map("output_key")
+  outputSourceVideoId String?  @map("output_source_video_id") @db.Uuid
+  durationSec         Decimal? @map("duration_sec") @db.Decimal(8, 2)
+  phash               String?
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
-    project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-    @@index([projectId, included])
-    @@map("edit_clips")
+  @@index([projectId, included])
+  @@map("edit_clips")
 }

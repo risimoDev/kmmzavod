@@ -400,16 +400,26 @@ async function main() {
     'Все workers запущены'
   );
 
-  // ── Downstream service reachability (non-fatal) ─────────────────────────
-  // Private publishing needs the publisher microservice. Ping it once at
-  // startup so a misconfigured/absent container is obvious in the logs instead
-  // of surfacing later as "getaddrinfo ENOTFOUND publisher" on every post.
-  void (async () => {
+  // ── Downstream service reachability (publisher) ─────────────────────────
+  // Private publishing needs the publisher microservice. Ping it periodically
+  // and publish the result to Redis so the API's diagnostics endpoint can show
+  // the user exactly why publishing fails ("publisher down") instead of a
+  // cryptic "getaddrinfo ENOTFOUND publisher" per post.
+  const PUBLISHER_HEALTH_KEY = 'kmmzavod:health:publisher';
+  const pingPublisher = async () => {
     const { checkPublisherHealth } = await import('./services/publisher');
     const reason = await checkPublisherHealth();
+    const payload = JSON.stringify({
+      ok: reason === null,
+      reason: reason ?? undefined,
+      url: config.PUBLISHER_URL,
+      checkedAt: new Date().toISOString(),
+    });
+    connection.set(PUBLISHER_HEALTH_KEY, payload, 'EX', 120).catch(() => {});
     if (reason) logger.warn({ reason, publisherUrl: config.PUBLISHER_URL }, 'Publisher service NOT reachable — private publishing will fail until it is up');
-    else logger.info({ publisherUrl: config.PUBLISHER_URL }, 'Publisher service reachable');
-  })();
+  };
+  void pingPublisher();
+  const publisherHealthTimer = setInterval(() => void pingPublisher(), 30_000);
 
   // ── Heartbeat: write TTL key every 15s ──────────────────────────────────
   const HEARTBEAT_KEY = 'kmmzavod:heartbeat:orchestrator';
@@ -447,6 +457,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Получен сигнал завершения, закрываем workers...');
     clearInterval(hbTimer);
+    clearInterval(publisherHealthTimer);
 
     await Promise.all(allWorkers.map((w) => w.close()));
     await Promise.all([

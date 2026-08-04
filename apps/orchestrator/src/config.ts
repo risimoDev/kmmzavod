@@ -28,6 +28,8 @@ const schema = z.object({
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
   PUBLISHER_URL: z.string().url().default('http://localhost:8200'),
   EDITOR_URL: z.string().url().default('http://localhost:8300'),
+  // Real phone-farm bridge (apps/device-agent), reached over AmneziaWG — see infra/amneziawg.
+  DEVICE_AGENT_URL: z.string().url().default('http://10.13.13.2:8300'),
   KLING_ACCESS_KEY: z.string().default(''),
   KLING_SECRET_KEY: z.string().default(''),
   AI_PROXY_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),

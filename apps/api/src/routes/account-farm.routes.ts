@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { db } from '../lib/db';
 import { encrypt, decrypt } from '../lib/crypto';
 import { computeReadiness } from '../lib/publish-readiness';
+import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ const BulkSocialAccountBody = z.object({
     platform: z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge']),
     accountName: z.string().min(1).max(200),
     // Publishing method: 'official' (OAuth) or 'private' (unofficial publisher).
-    authMethod: z.enum(['official', 'private']).default('official'),
+    authMethod: z.enum(['official', 'private', 'device']).default('official'),
     // Official-path credentials.
     accessToken: z.string().optional(),
     refreshToken: z.string().optional(),
@@ -67,6 +68,8 @@ const BulkSocialAccountBody = z.object({
     twoFactorSeed: z.string().optional(),
     email: z.string().optional(),
     emailPassword: z.string().optional(),
+    // Device-path: id of the phone as known to Laixi (see GET /devices on device-agent).
+    deviceId: z.string().optional(),
     accountGroupId: z.string().uuid().optional(),
     niche: z.string().optional(),
     language: z.string().max(10).default('en'),
@@ -75,7 +78,7 @@ const BulkSocialAccountBody = z.object({
 });
 
 const SetCredentialsBody = z.object({
-  authMethod: z.enum(['official', 'private']).default('private'),
+  authMethod: z.enum(['official', 'private', 'device']).default('private'),
   username: z.string().optional(),
   password: z.string().optional(),
   sessionId: z.string().optional(),
@@ -85,6 +88,7 @@ const SetCredentialsBody = z.object({
   email: z.string().optional(),
   emailPassword: z.string().optional(),
   accessToken: z.string().optional(),
+  deviceId: z.string().optional(),
 });
 
 type PrivateCreds = {
@@ -449,6 +453,9 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           sessionDataEnc = encrypt(JSON.stringify(session));
           accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
           importNote = note;
+        } else if (acc.authMethod === 'device') {
+          if (!acc.deviceId) throw new Error('Device account needs deviceId (Laixi device id)');
+          accessTokenEnc = encrypt('device'); // placeholder (column is NOT NULL) — the phone's logged-in app IS the session
         } else {
           if (!acc.accessToken) throw new Error('Official account needs accessToken');
           accessTokenEnc = encrypt(acc.accessToken);
@@ -460,6 +467,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
             platform: acc.platform,
             accountName: acc.accountName,
             authMethod: acc.authMethod,
+            deviceId: acc.deviceId,
             accessToken: accessTokenEnc,
             sessionData: sessionDataEnc,
             refreshToken: acc.refreshToken ? encrypt(acc.refreshToken) : undefined,
@@ -518,6 +526,11 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       } catch (err: unknown) {
         return reply.status(400).send({ error: err instanceof Error ? err.message : 'Invalid credentials' });
       }
+    } else if (body.authMethod === 'device') {
+      if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (Laixi device id)' });
+      data.deviceId = body.deviceId;
+      data.accessToken = encrypt('device');
+      data.sessionData = null;
     } else {
       if (!body.accessToken) return reply.status(400).send({ error: 'Official account needs accessToken' });
       data.accessToken = encrypt(body.accessToken);
@@ -593,11 +606,91 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
         warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
         hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
-        enforceWarmup: a.accountGroup?.enforceWarmup ?? false,
+        enforceWarmup: a.accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
       }),
     }));
 
     return reply.send({ accounts, total, page, limit });
+  });
+
+  // ── Publish diagnostics — "why can't I publish" in one shot ─────────────────
+  // Walks the whole chain (publisher service → accounts → sessions → proxies)
+  // and returns a checklist with concrete fixes, so autopublish failures are
+  // self-diagnosable instead of surfacing as cryptic per-post errors.
+  app.get('/diagnostics', async (request, reply) => {
+    const { tenantId } = request.user;
+
+    // 1. Publisher microservice reachability (written to Redis by orchestrator).
+    let publisher: { ok: boolean; reason?: string; url?: string; checkedAt?: string; stale?: boolean };
+    try {
+      const raw = await getRedis().get('kmmzavod:health:publisher');
+      if (!raw) {
+        publisher = { ok: false, reason: 'Нет данных о publisher (оркестратор не запущен или ещё не пинговал)', stale: true };
+      } else {
+        publisher = JSON.parse(raw);
+      }
+    } catch {
+      publisher = { ok: false, reason: 'Не удалось прочитать статус publisher из Redis' };
+    }
+
+    // 2. Accounts breakdown by readiness (the same logic the workers apply).
+    const rows = await db.socialAccount.findMany({
+      where: { tenantId },
+      include: { accountGroup: { select: { enforceWarmup: true } } },
+    });
+    const blockerCounts: Record<string, number> = {};
+    let canPublish = 0;
+    for (const a of rows) {
+      const r = computeReadiness({
+        isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
+        warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
+        hasSession: !!a.sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
+        enforceWarmup: a.accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
+      });
+      if (r.canPublish) canPublish++;
+      for (const b of r.blockers) blockerCounts[b] = (blockerCounts[b] ?? 0) + 1;
+    }
+
+    // 3. Proxy health.
+    const [proxyTotal, proxyActive, accountsNoProxy] = await Promise.all([
+      db.proxy.count({ where: { tenantId } }),
+      db.proxy.count({ where: { tenantId, isActive: true } }),
+      db.socialAccount.count({ where: { tenantId, isActive: true, proxyId: null } }),
+    ]);
+
+    // 4. Build the actionable checklist.
+    const checks: Array<{ id: string; ok: boolean; label: string; fix?: string }> = [
+      {
+        id: 'publisher', ok: publisher.ok,
+        label: publisher.ok ? 'Сервис публикации доступен' : 'Сервис публикации недоступен',
+        fix: publisher.ok ? undefined : (publisher.reason ?? 'Запустите: docker compose up -d publisher'),
+      },
+      {
+        id: 'accounts', ok: rows.length > 0,
+        label: rows.length > 0 ? `Аккаунтов: ${rows.length}` : 'Нет аккаунтов',
+        fix: rows.length > 0 ? undefined : 'Импортируйте аккаунты на вкладке Accounts',
+      },
+      {
+        id: 'ready', ok: canPublish > 0,
+        label: `Готовы публиковать: ${canPublish} из ${rows.length}`,
+        fix: canPublish > 0 ? undefined
+          : 'Ни один аккаунт не готов — см. причины ниже (чаще всего нет sessionid для TikTok)',
+      },
+      {
+        id: 'proxies', ok: proxyTotal === 0 || accountsNoProxy === 0,
+        label: proxyTotal === 0 ? 'Прокси не заданы' : `Аккаунтов без прокси: ${accountsNoProxy}`,
+        fix: accountsNoProxy > 0 ? 'Нажмите «Распределить прокси» на вкладке Proxies' : undefined,
+      },
+    ];
+
+    const canPublishNow = publisher.ok && canPublish > 0;
+    return reply.send({
+      canPublishNow,
+      publisher,
+      checks,
+      accounts: { total: rows.length, ready: canPublish, blockers: blockerCounts },
+      proxies: { total: proxyTotal, active: proxyActive, accountsWithoutProxy: accountsNoProxy },
+    });
   });
 
   // ── Farm Metrics Dashboard ─────────────────────────────────────────────────

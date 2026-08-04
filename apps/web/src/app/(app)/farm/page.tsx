@@ -21,6 +21,7 @@ import {
   type Proxy,
   type FarmSocialAccount,
   type FarmMetrics,
+  type PublishDiagnostics,
 } from "@/lib/api";
 
 const TABS = [
@@ -93,8 +94,71 @@ function FarmContent() {
 
 // ── Overview / Metrics ────────────────────────────────────────────────────────
 
+const BLOCKER_HINTS: Record<string, string> = {
+  "Нет сессии — добавьте sessionid/cookie":
+    "TikTok/Instagram импортируйте форматом с cookies (из sid_guard извлечётся sessionid), либо добавьте sessionid через правку аккаунта.",
+  "Не прогрет (группа требует warmup)":
+    "Отключите «Требовать warmup» у группы, либо дождитесь прогрева (cold→warming).",
+  "Обнаружен shadow-ban": "Аккаунт под shadow-ban — дайте ему отдохнуть или замените.",
+  "Аккаунт на паузе": "Активируйте аккаунт.",
+};
+
+/** One-glance "why can't I publish" panel with concrete fixes. */
+function PublishDiagnosticsCard({ diag, onRefresh }: { diag: PublishDiagnostics; onRefresh: () => void }) {
+  const ok = diag.canPublishNow;
+  return (
+    <Card className={cn("border", ok ? "border-success/40" : "border-warning/50")}>
+      <CardContent className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={cn("w-2.5 h-2.5 rounded-full", ok ? "bg-success" : "bg-warning animate-pulse")} />
+            <h3 className="text-sm font-semibold text-text-primary">
+              {ok ? "Публикация готова к работе" : "Публикация не работает — вот почему"}
+            </h3>
+          </div>
+          <Button variant="ghost" size="xs" onClick={onRefresh}>Обновить</Button>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          {diag.checks.map((c) => (
+            <div key={c.id} className="flex items-start gap-2 text-xs">
+              <span className={cn("mt-0.5 shrink-0", c.ok ? "text-success" : "text-danger")}>{c.ok ? "✓" : "✕"}</span>
+              <span className="min-w-0">
+                <span className="text-text-primary">{c.label}</span>
+                {!c.ok && c.fix && <span className="block text-warning">{c.fix}</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {Object.keys(diag.accounts.blockers).length > 0 && (
+          <div className="border-t border-border pt-2 space-y-1">
+            <p className="text-2xs font-semibold text-text-tertiary uppercase">Почему аккаунты не публикуют</p>
+            {Object.entries(diag.accounts.blockers).map(([blocker, count]) => (
+              <div key={blocker} className="text-xs">
+                <span className="text-danger">{count}×</span>{" "}
+                <span className="text-text-secondary">{blocker}</span>
+                {BLOCKER_HINTS[blocker] && (
+                  <span className="block text-2xs text-text-tertiary ml-4">→ {BLOCKER_HINTS[blocker]}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {diag.publisher.checkedAt && (
+          <p className="text-2xs text-text-tertiary">
+            Publisher {diag.publisher.url ?? ""} · проверен {relativeTime(diag.publisher.checkedAt)}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function OverviewTab() {
   const [metrics, setMetrics] = useState<FarmMetrics | null>(null);
+  const [diag, setDiag] = useState<PublishDiagnostics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,7 +166,12 @@ function OverviewTab() {
     setLoading(true);
     setError(null);
     try {
-      setMetrics(await accountFarmApi.metrics());
+      const [m, d] = await Promise.all([
+        accountFarmApi.metrics(),
+        accountFarmApi.diagnostics().catch(() => null),
+      ]);
+      setMetrics(m);
+      setDiag(d);
     } catch (e: any) {
       setError(e.message ?? "Failed to load metrics");
     } finally {
@@ -120,6 +189,8 @@ function OverviewTab() {
 
   return (
     <div className="space-y-5">
+      {diag && <PublishDiagnosticsCard diag={diag} onRefresh={load} />}
+
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <StatCard label="Total accounts" value={accounts.total} />
         <StatCard label="Active" value={accounts.active} tone="success" />
@@ -480,7 +551,7 @@ function splitFirst(s: string, sep: string): [string, string] {
 
 function getImportFormats(
   platform: string,
-  method: "official" | "private",
+  method: "official" | "private" | "device",
 ): ImportFormat[] {
   if (method === "official") {
     return [{
@@ -492,6 +563,19 @@ function getImportFormats(
         const [accountName, accessToken, refreshToken] = line.split(":");
         if (!accountName || !accessToken) return null;
         return { accountName, accessToken, refreshToken: refreshToken || undefined };
+      },
+    }];
+  }
+  if (method === "device") {
+    return [{
+      id: "name_device_id",
+      label: "accountName:deviceId (id телефона в Laixi, см. GET /devices device-agent'а)",
+      template: "accountName:deviceId",
+      placeholder: "my_account:8f3a1c92",
+      parse: (line) => {
+        const [accountName, deviceId] = splitFirst(line, ":");
+        if (!accountName || !deviceId) return null;
+        return { accountName, deviceId };
       },
     }];
   }
@@ -614,7 +698,7 @@ function AccountsTab() {
   const [importing, setImporting] = useState(false);
   const [raw, setRaw] = useState("");
   const [platform, setPlatform] = useState<"tiktok" | "instagram" | "youtube_shorts" | "postbridge">("tiktok");
-  const [authMethod, setAuthMethod] = useState<"official" | "private">("official");
+  const [authMethod, setAuthMethod] = useState<"official" | "private" | "device">("official");
   const [groupId, setGroupId] = useState("");
   const [formatId, setFormatId] = useState("");
 
@@ -710,6 +794,7 @@ function AccountsTab() {
                     )}
                     <Badge variant="outline" className="text-2xs capitalize">{a.platform}</Badge>
                     {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
+                    {a.authMethod === "device" && <Badge variant="brand" className="text-2xs">device{a.deviceId ? ` · ${a.deviceId}` : ""}</Badge>}
                     {a.readiness && (a.readiness.canPublish
                       ? <Badge variant="success" className="text-2xs">готов к постингу</Badge>
                       : <Badge variant="danger" className="text-2xs">нельзя постить</Badge>)}
@@ -762,6 +847,7 @@ function AccountsTab() {
               >
                 <option value="official">Official API</option>
                 <option value="private">Private (no API)</option>
+                <option value="device">Device (реальный телефон, Laixi)</option>
               </select>
             </div>
             <div>
@@ -777,9 +863,16 @@ function AccountsTab() {
             </div>
           </div>
 
-          {authMethod === "private" && (platform === "youtube_shorts" || platform === "postbridge") && (
+          {(authMethod === "private" || authMethod === "device") && (platform === "youtube_shorts" || platform === "postbridge") && (
             <p className="text-xs text-warning">
-              Приватный метод поддерживается только для TikTok и Instagram. Для {platform} используйте Official API.
+              {authMethod === "private" ? "Приватный" : "Device"} метод поддерживается только для TikTok и Instagram. Для {platform} используйте Official API.
+            </p>
+          )}
+          {authMethod === "device" && (
+            <p className="text-xs text-text-secondary">
+              Публикация идёт через реальный телефон в ферме Laixi (apps/device-agent по AmneziaWG-туннелю) —
+              приложение должно быть уже залогинено на телефоне под этим аккаунтом. См.{" "}
+              <code>docs/PHONE_FARM_INTEGRATION_PLAN.md</code>.
             </p>
           )}
 

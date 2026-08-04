@@ -17,6 +17,7 @@ export interface ReadinessInput {
   hasProxy: boolean;             // proxyUrl set
   expiresAt: Date | null;        // official token expiry
   enforceWarmup: boolean;        // account group opts into the warmup gate
+  hasDeviceId: boolean;           // deviceId present (device path — real phone farm)
 }
 
 export interface Readiness {
@@ -36,11 +37,15 @@ export function computeReadiness(a: ReadinessInput): Readiness {
   if (a.authMethod === 'private') {
     if (!a.hasSession) blockers.push('Нет сессии — добавьте sessionid/cookie');
     if (a.warmupStatus === 'cold' && a.enforceWarmup) blockers.push('Не прогрет (группа требует warmup)');
+  } else if (a.authMethod === 'device') {
+    if (!a.hasDeviceId) blockers.push('Не привязан телефон — укажите deviceId (Laixi)');
   } else {
     if (a.expiresAt && a.expiresAt.getTime() < Date.now()) blockers.push('Токен истёк');
   }
 
-  if (!a.hasProxy) warnings.push('Без прокси (риск бана)');
+  // Device accounts post from the phone's own network (SIM/home wifi) — our
+  // per-account proxy is irrelevant there, so skip the "no proxy" warning.
+  if (!a.hasProxy && a.authMethod !== 'device') warnings.push('Без прокси (риск бана)');
   if (a.authMethod === 'private' && a.warmupStatus === 'cold' && !a.enforceWarmup) {
     warnings.push('Не прогрет (постинг разрешён)');
   }

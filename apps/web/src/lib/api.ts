@@ -452,6 +452,7 @@ export interface FarmSocialAccount {
   platform: string;
   accountName: string;
   authMethod?: string;
+  deviceId?: string | null;
   isActive: boolean;
   healthScore: number;
   warmupStatus: string;
@@ -554,7 +555,7 @@ export const accountFarmApi = {
     accounts: Array<{
       platform: 'tiktok' | 'instagram' | 'youtube_shorts' | 'postbridge';
       accountName: string;
-      authMethod?: 'official' | 'private';
+      authMethod?: 'official' | 'private' | 'device';
       accessToken?: string;
       refreshToken?: string;
       expiresAt?: string;
@@ -568,6 +569,8 @@ export const accountFarmApi = {
       twoFactorSeed?: string;
       email?: string;
       emailPassword?: string;
+      // Device-path: id of the phone as known to Laixi
+      deviceId?: string;
       accountGroupId?: string;
       niche?: string;
       language?: string;
@@ -579,11 +582,12 @@ export const accountFarmApi = {
   ),
 
   setAccountCredentials: (id: string, body: {
-    authMethod: 'official' | 'private';
+    authMethod: 'official' | 'private' | 'device';
     username?: string;
     password?: string;
     sessionId?: string;
     accessToken?: string;
+    deviceId?: string;
   }) => apiFetch<{ updated: boolean; authMethod: string }>(
     `/api/v1/farm/social-accounts/${id}/credentials`,
     { method: 'PUT', body: JSON.stringify(body) }
@@ -597,7 +601,18 @@ export const accountFarmApi = {
 
   // Metrics
   metrics: () => apiFetch<FarmMetrics>('/api/v1/farm/metrics'),
+
+  // Publishing diagnostics — "why can't I publish" chain check
+  diagnostics: () => apiFetch<PublishDiagnostics>('/api/v1/farm/diagnostics'),
 };
+
+export interface PublishDiagnostics {
+  canPublishNow: boolean;
+  publisher: { ok: boolean; reason?: string; url?: string; checkedAt?: string; stale?: boolean };
+  checks: Array<{ id: string; ok: boolean; label: string; fix?: string }>;
+  accounts: { total: number; ready: number; blockers: Record<string, number> };
+  proxies: { total: number; active: number; accountsWithoutProxy: number };
+}
 
 // ── Projects API ──────────────────────────────────────────────────────────────
 

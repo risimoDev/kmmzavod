@@ -274,7 +274,7 @@ export async function publishRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'desc' },
       select: {
         id: true, platform: true, accountName: true, isActive: true, expiresAt: true,
-        proxyUrl: true, createdAt: true, authMethod: true, healthScore: true,
+        proxyUrl: true, createdAt: true, authMethod: true, deviceId: true, healthScore: true,
         warmupStatus: true, shadowBanDetected: true, sessionData: true,
         accountGroup: { select: { enforceWarmup: true } },
         _count: { select: { publishJobs: true } },
@@ -287,7 +287,7 @@ export async function publishRoutes(app: FastifyInstance) {
         isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
         warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
         hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
-        enforceWarmup: accountGroup?.enforceWarmup ?? false,
+        enforceWarmup: accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
       }),
     }));
     return { data };

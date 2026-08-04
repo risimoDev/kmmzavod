@@ -152,6 +152,9 @@ services:
       AI_PROXY_URL: ${AI_PROXY_URL:-}
       PUBLISHER_URL: http://publisher:8200
       EDITOR_URL: http://editor:8300
+      # Home-PC bridge to the Laixi phone farm, reached over AmneziaWG (not a
+      # docker-compose service — see infra/amneziawg/README.md).
+      DEVICE_AGENT_URL: ${DEVICE_AGENT_URL:-http://10.13.13.2:8300}
     dns:
       - 8.8.8.8
       - 1.1.1.1

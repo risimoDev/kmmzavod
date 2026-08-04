@@ -20,6 +20,7 @@ import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
 import { publisherService, describePublisherError } from '../services/publisher';
+import { deviceAgentService, describeDeviceAgentError } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'publish' });
 
@@ -194,6 +195,28 @@ export function createPublishWorker(deps: Deps): Worker {
             }
           } catch (err: unknown) {
             throw new Error(`publisher-${platform}: ${describePublisherError(err)}`);
+          }
+        } else if (
+          accountRaw.authMethod === 'device' && (platform === 'instagram' || platform === 'tiktok')
+        ) {
+          // ── Device path (real phone farm via Laixi + apps/device-agent) ──────
+          if (!accountRaw.deviceId) {
+            throw new Error(`device-${platform}: account has authMethod=device but no deviceId set`);
+          }
+          const presignedUrl = await storage.presignedUrl(storageKey, 3600);
+          const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
+
+          try {
+            const result = await deviceAgentService.publish({
+              deviceId: accountRaw.deviceId,
+              platform,
+              videoUrl: presignedUrl,
+              caption: fullCaption,
+            });
+            if (!result.ok) throw new Error(result.detail ?? 'device-agent reported failure');
+            // No external post id available from real-app UI automation.
+          } catch (err: unknown) {
+            throw new Error(`device-${platform}: ${describeDeviceAgentError(err)}`);
           }
         } else
         switch (platform) {
