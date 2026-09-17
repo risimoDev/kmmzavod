@@ -3,6 +3,7 @@ import { config } from './config';
 import { logger } from './logger';
 import { getRedis } from './lib/redis';
 import { db } from './lib/db';
+import { farmScheduler } from './lib/farm-scheduler';
 import Redis from 'ioredis';
 
 const SERVICE_NAME = 'api';
@@ -47,6 +48,9 @@ async function main() {
   await cleanExpiredSessions();
   const sessionCleanupTimer = setInterval(cleanExpiredSessions, 6 * 60 * 60 * 1000);
 
+  // ── Farm Task Scheduler: 24/7 autonomous script runner ───────────────────
+  farmScheduler.start();
+
   // ── Restart listener via Redis pub/sub ──────────────────────────────────
   const sub = new Redis({
     host: config.REDIS_HOST,
@@ -72,6 +76,7 @@ async function main() {
     shuttingDown = true;
     clearInterval(hbTimer);
     clearInterval(sessionCleanupTimer);
+    farmScheduler.stop();
     try {
       await redis.del(HEARTBEAT_KEY);
       await sub.unsubscribe(RESTART_CHANNEL);

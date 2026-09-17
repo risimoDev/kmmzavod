@@ -10,6 +10,7 @@ import { computeReadiness } from '../lib/publish-readiness';
 import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
 import { deviceAgentClient, describeDeviceAgentError } from '../lib/device-agent';
+import { farmScheduler } from '../lib/farm-scheduler';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -1490,6 +1491,74 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     } catch (err) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
+  });
+
+  // ── Task Scheduler Endpoints (Stage 4: Autonomous Background Tasks) ───────
+
+  app.get('/schedules', async (request, reply) => {
+    const { tenantId } = request.user;
+    const schedules = await farmScheduler.listSchedules(tenantId);
+    return reply.send({ ok: true, schedules });
+  });
+
+  const SaveScheduleBody = z.object({
+    id: z.string().optional(),
+    name: z.string().min(1).max(200),
+    description: z.string().max(1000).optional(),
+    isActive: z.boolean().default(true),
+    triggerType: z.enum(['interval', 'cron', 'once']).default('interval'),
+    intervalMinutes: z.number().int().min(1).optional(),
+    cronExpression: z.string().optional(),
+    runOnceAt: z.string().optional(),
+    jitterMinutes: z.number().int().min(0).max(120).default(10),
+    engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
+    presetId: z.string().optional(),
+    steps: z.array(z.any()).optional(),
+    jsCode: z.string().optional(),
+    variables: z.record(z.string()).optional(),
+    targetMode: z.enum(['all', 'custom']).default('all'),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  app.post('/schedules', async (request, reply) => {
+    const { tenantId } = request.user;
+    const body = SaveScheduleBody.parse(request.body || {});
+    const record = await farmScheduler.saveSchedule(tenantId, body);
+    return reply.send({ ok: true, schedule: record });
+  });
+
+  app.delete('/schedules/:id', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    await farmScheduler.deleteSchedule(tenantId, id);
+    return reply.send({ ok: true, deleted: true, id });
+  });
+
+  app.post('/schedules/:id/toggle', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const { isActive } = z.object({ isActive: z.boolean() }).parse(request.body || {});
+    const updated = await farmScheduler.toggleSchedule(tenantId, id, isActive);
+    if (!updated) return reply.status(404).send({ error: 'ScheduleNotFound' });
+    return reply.send({ ok: true, schedule: updated });
+  });
+
+  app.post('/schedules/:id/run-now', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const schedules = await farmScheduler.listSchedules(tenantId);
+    const schedule = schedules.find((s) => s.id === id);
+    if (!schedule) return reply.status(404).send({ error: 'ScheduleNotFound' });
+
+    const log = await farmScheduler.executeSchedule(schedule);
+    return reply.send({ ok: log.status !== 'failed', log });
+  });
+
+  app.get('/schedules/:id/history', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const history = await farmScheduler.getScheduleHistory(tenantId, id);
+    return reply.send({ ok: true, history });
   });
 }
 

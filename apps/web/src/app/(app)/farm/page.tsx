@@ -30,6 +30,8 @@ import {
   type CustomFarmScript,
   type FlowStep,
   type RunScriptBatchResult,
+  type FarmSchedule,
+  type FarmScheduleRunLog,
 } from "@/lib/api";
 
 const TABS = [
@@ -1188,6 +1190,33 @@ function DevicesTab() {
   const [saveScriptDesc, setSaveScriptDesc] = useState('');
   const [saveScriptSuccessMsg, setSaveScriptSuccessMsg] = useState<string | null>(null);
 
+  // ── Task Scheduler (Stage 4) State ─────────────────────────────────────────
+  const [schedulerModalOpen, setSchedulerModalOpen] = useState(false);
+  const [schedulerTab, setSchedulerTab] = useState<'tasks' | 'new' | 'history'>('tasks');
+  const [schedules, setSchedules] = useState<FarmSchedule[]>([]);
+  const [schedulerLoading, setSchedulerLoading] = useState(false);
+  const [activeHistorySchedule, setActiveHistorySchedule] = useState<FarmSchedule | null>(null);
+  const [historyLogs, setHistoryLogs] = useState<FarmScheduleRunLog[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [runningNowId, setRunningNowId] = useState<string | null>(null);
+  const [schedulerFeedback, setSchedulerFeedback] = useState<string | null>(null);
+
+  // New Schedule form state
+  const [newSchedName, setNewSchedName] = useState('');
+  const [newSchedDesc, setNewSchedDesc] = useState('');
+  const [newSchedActionType, setNewSchedActionType] = useState<'preset' | 'custom'>('preset');
+  const [newSchedPresetId, setNewSchedPresetId] = useState('wb_organic_warmup');
+  const [newSchedCustomId, setNewSchedCustomId] = useState('');
+  const [newSchedVariables, setNewSchedVariables] = useState<Record<string, string>>({ SKU: '1145510159' });
+  const [newSchedTriggerType, setNewSchedTriggerType] = useState<'interval' | 'cron' | 'once'>('interval');
+  const [newSchedIntervalMins, setNewSchedIntervalMins] = useState(120);
+  const [newSchedCron, setNewSchedCron] = useState('0 10,14,19 * * *');
+  const [newSchedRunOnceAt, setNewSchedRunOnceAt] = useState('');
+  const [newSchedJitterMins, setNewSchedJitterMins] = useState(10);
+  const [newSchedTargetMode, setNewSchedTargetMode] = useState<'all' | 'custom'>('all');
+  const [newSchedTargetDeviceIds, setNewSchedTargetDeviceIds] = useState<string[]>([]);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -1939,6 +1968,165 @@ function DevicesTab() {
     }
   };
 
+  // ── Task Scheduler (Stage 4) Handlers ─────────────────────────────────────
+  const handleOpenSchedulerModal = async () => {
+    setSchedulerModalOpen(true);
+    setSchedulerFeedback(null);
+    setSchedulerLoading(true);
+    setNewSchedTargetDeviceIds(devices.filter((d) => d.online).map((d) => d.deviceId));
+
+    try {
+      const [schedRes, presetsRes, customRes] = await Promise.allSettled([
+        accountFarmApi.listSchedules(),
+        accountFarmApi.listScriptPresets(),
+        accountFarmApi.listCustomScripts(),
+      ]);
+
+      if (schedRes.status === 'fulfilled' && schedRes.value.ok) {
+        setSchedules(schedRes.value.schedules);
+      }
+      if (presetsRes.status === 'fulfilled' && presetsRes.value.ok) {
+        setScriptPresets(presetsRes.value.presets);
+      }
+      if (customRes.status === 'fulfilled' && customRes.value.ok) {
+        setCustomScripts(customRes.value.scripts);
+      }
+    } catch (err: any) {
+      console.error('Failed to load scheduler data:', err);
+    } finally {
+      setSchedulerLoading(false);
+    }
+  };
+
+  const handleToggleSchedule = async (id: string, currentState: boolean) => {
+    try {
+      const res = await accountFarmApi.toggleSchedule(id, !currentState);
+      if (res.ok) {
+        setSchedules((prev) =>
+          prev.map((s) => (s.id === id ? res.schedule : s))
+        );
+      }
+    } catch (err: any) {
+      alert(`Ошибка изменения статуса: ${err.message}`);
+    }
+  };
+
+  const handleRunScheduleNow = async (schedule: FarmSchedule) => {
+    setRunningNowId(schedule.id);
+    setSchedulerFeedback(`Выполнение задачи "${schedule.name}" на физических платах...`);
+    try {
+      const res = await accountFarmApi.runScheduleNow(schedule.id);
+      if (res.ok) {
+        setSchedulerFeedback(
+          `Задача выполнена! Успешно: ${res.log.successful} из ${res.log.targetsCount} плат (${(res.log.durationMs / 1000).toFixed(1)}с)`
+        );
+        // Refresh schedules
+        const updated = await accountFarmApi.listSchedules();
+        if (updated.ok) setSchedules(updated.schedules);
+      } else {
+        setSchedulerFeedback(`Сбой выполнения: ${res.log?.error || 'Ошибка исполнения на платах'}`);
+      }
+    } catch (err: any) {
+      setSchedulerFeedback(`Ошибка запуска: ${err.message}`);
+    } finally {
+      setRunningNowId(null);
+    }
+  };
+
+  const handleDeleteSchedule = async (id: string) => {
+    if (!confirm('Удалить эту задачу из планировщика?')) return;
+    try {
+      await accountFarmApi.deleteSchedule(id);
+      setSchedules((prev) => prev.filter((s) => s.id !== id));
+    } catch (err: any) {
+      alert(`Ошибка удаления: ${err.message}`);
+    }
+  };
+
+  const handleViewScheduleHistory = async (schedule: FarmSchedule) => {
+    setActiveHistorySchedule(schedule);
+    setSchedulerTab('history');
+    setHistoryLoading(true);
+    try {
+      const res = await accountFarmApi.getScheduleHistory(schedule.id);
+      if (res.ok) setHistoryLogs(res.history);
+    } catch (err: any) {
+      alert(`Ошибка получения истории: ${err.message}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleCreateSchedule = async () => {
+    if (!newSchedName.trim()) {
+      alert('Укажите название задачи');
+      return;
+    }
+
+    const targets = newSchedTargetMode === 'all'
+      ? devices.filter((d) => d.online).map((d) => d.deviceId)
+      : newSchedTargetDeviceIds;
+
+    if (targets.length === 0) {
+      alert('Выберите хотя бы одну целевую плату');
+      return;
+    }
+
+    setSavingSchedule(true);
+    try {
+      let engine: 'adb_flow' | 'autojs' = 'adb_flow';
+      let steps: any[] | undefined;
+      let jsCode: string | undefined;
+
+      if (newSchedActionType === 'preset') {
+        const p = scriptPresets.find((pr) => pr.id === newSchedPresetId);
+        if (p) {
+          engine = p.engine;
+          steps = p.steps;
+          jsCode = p.jsCode;
+        }
+      } else {
+        const c = customScripts.find((cs) => cs.id === newSchedCustomId);
+        if (c) {
+          engine = c.engine;
+          steps = c.steps;
+          jsCode = c.jsCode;
+        }
+      }
+
+      const res = await accountFarmApi.saveSchedule({
+        name: newSchedName.trim(),
+        description: newSchedDesc.trim() || undefined,
+        isActive: true,
+        triggerType: newSchedTriggerType,
+        intervalMinutes: newSchedTriggerType === 'interval' ? newSchedIntervalMins : undefined,
+        cronExpression: newSchedTriggerType === 'cron' ? newSchedCron : undefined,
+        runOnceAt: newSchedTriggerType === 'once' ? newSchedRunOnceAt : undefined,
+        jitterMinutes: newSchedJitterMins,
+        engine,
+        presetId: newSchedActionType === 'preset' ? newSchedPresetId : undefined,
+        steps,
+        jsCode,
+        variables: newSchedVariables,
+        targetMode: newSchedTargetMode,
+        targetDeviceIds: targets,
+      });
+
+      if (res.ok) {
+        setSchedules((prev) => [res.schedule, ...prev]);
+        setSchedulerTab('tasks');
+        setSchedulerFeedback(`Задача "${res.schedule.name}" успешно поставлена на расписание!`);
+        // Reset form
+        setNewSchedName('');
+        setNewSchedDesc('');
+      }
+    } catch (err: any) {
+      alert(`Ошибка создания задачи: ${err.message}`);
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
   if (loading) return <LoadingSpinner size={32} />;
 
   const onlineCount = devices.filter((d) => d.online).length;
@@ -2063,6 +2251,14 @@ function DevicesTab() {
             onClick={handleOpenScriptModal}
           >
             🤖 Сценарии и Автоматизация
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            className="bg-blue-600 hover:bg-blue-500 text-white font-semibold flex items-center gap-1.5 shadow-sm"
+            onClick={handleOpenSchedulerModal}
+          >
+            ⏱️ Планировщик и Автопилот
           </Button>
           <Button size="sm" variant="ghost" onClick={loadData}>🔄 Обновить</Button>
         </div>
@@ -4395,6 +4591,607 @@ function DevicesTab() {
                 disabled={scriptRunning}
                 onClick={() => setScriptModalOpen(false)}
               >
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Task Scheduler & Autopilot Modal (Stage 4) ───────────────────────── */}
+      {schedulerModalOpen && (
+        <Modal
+          title="⏱️ Планировщик задач и Автопилот (Task Scheduler)"
+          maxWidth="max-w-4xl"
+          onClose={() => setSchedulerModalOpen(false)}
+        >
+          <div className="space-y-4">
+            {/* Top Navigation Tabs */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-3">
+              <div className="flex gap-1.5 p-1 bg-surface-2 rounded-lg border border-border/50">
+                <button
+                  type="button"
+                  onClick={() => setSchedulerTab('tasks')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    schedulerTab === 'tasks'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>📋 Задачи по расписанию</span>
+                  <Badge variant="outline" className="text-[10px] px-1 py-0">{schedules.length}</Badge>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSchedulerTab('new')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    schedulerTab === 'new'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>➕ Создать задачу</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSchedulerTab('history')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    schedulerTab === 'history'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>📜 История запусков</span>
+                  {activeHistorySchedule && (
+                    <span className="text-[10px] bg-brand-500/20 text-brand-300 px-1 rounded truncate max-w-[120px]">
+                      {activeHistorySchedule.name}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs text-text-tertiary">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Автопилот активен 24/7 (сервер Linux)</span>
+              </div>
+            </div>
+
+            {/* Notification feedback */}
+            {schedulerFeedback && (
+              <div className="p-3 bg-brand-500/15 border border-brand-500/40 rounded-xl text-brand-300 text-xs flex items-center justify-between">
+                <span>{schedulerFeedback}</span>
+                <button onClick={() => setSchedulerFeedback(null)} className="text-brand-400 hover:text-white">✕</button>
+              </div>
+            )}
+
+            {/* TAB 1: ACTIVE TASKS LIST */}
+            {schedulerTab === 'tasks' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-text-secondary">
+                    Задачи выполняются сервером автоматически по расписанию через туннель к стойке.
+                  </span>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={async () => {
+                      setSchedulerLoading(true);
+                      const res = await accountFarmApi.listSchedules();
+                      if (res.ok) setSchedules(res.schedules);
+                      setSchedulerLoading(false);
+                    }}
+                  >
+                    🔄 Обновить
+                  </Button>
+                </div>
+
+                {schedulerLoading ? (
+                  <div className="flex flex-col items-center justify-center py-16 gap-2">
+                    <LoadingSpinner size={24} />
+                    <span className="text-xs text-text-secondary">Загрузка расписаний...</span>
+                  </div>
+                ) : schedules.length === 0 ? (
+                  <div className="p-8 text-center text-text-secondary bg-surface-2 rounded-xl border border-border space-y-2">
+                    <p className="text-sm font-semibold text-text-primary">Нет активных задач в расписании</p>
+                    <p className="text-xs text-text-tertiary">
+                      Настройте автоматический прогрев Wildberries, скролл Reels или сброс кэша по таймеру.
+                    </p>
+                    <Button size="sm" variant="primary" onClick={() => setSchedulerTab('new')}>
+                      ➕ Создать первую задачу
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[420px] overflow-y-auto pr-1">
+                    {schedules.map((sched) => (
+                      <div
+                        key={sched.id}
+                        className={cn(
+                          "p-3.5 rounded-xl border space-y-3 transition-all",
+                          sched.isActive
+                            ? "bg-surface-2 border-border/80 hover:border-brand-500/50"
+                            : "bg-surface-2/40 border-border/40 opacity-70"
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="space-y-0.5 min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className={cn("w-2 h-2 rounded-full shrink-0", sched.isActive ? "bg-emerald-400" : "bg-zinc-500")} />
+                              <h4 className="text-xs font-semibold text-text-primary truncate">{sched.name}</h4>
+                            </div>
+                            {sched.description && (
+                              <p className="text-[11px] text-text-secondary line-clamp-1">{sched.description}</p>
+                            )}
+                          </div>
+                          <Badge
+                            variant={sched.isActive ? "success" : "default"}
+                            className="text-[10px] shrink-0"
+                          >
+                            {sched.isActive ? 'Активно' : 'На паузе'}
+                          </Badge>
+                        </div>
+
+                        {/* Timing details */}
+                        <div className="p-2 bg-surface-3/50 rounded-lg space-y-1 text-[11px]">
+                          <div className="flex items-center justify-between text-text-secondary">
+                            <span>Расписание:</span>
+                            <span className="font-mono text-text-primary font-medium">
+                              {sched.triggerType === 'interval' && `Каждые ${sched.intervalMinutes} мин`}
+                              {sched.triggerType === 'cron' && `Cron: ${sched.cronExpression}`}
+                              {sched.triggerType === 'once' && `Разово: ${sched.runOnceAt ? new Date(sched.runOnceAt).toLocaleString('ru-RU') : '—'}`}
+                              {sched.jitterMinutes ? ` (±${sched.jitterMinutes}м джиттер)` : ''}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-text-secondary">
+                            <span>Следующий запуск:</span>
+                            <span className="font-mono text-brand-300 font-semibold">
+                              {sched.nextRunAt && sched.isActive ? new Date(sched.nextRunAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '—'}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-text-tertiary text-[10px]">
+                            <span>Цель:</span>
+                            <span>{sched.targetMode === 'all' ? 'Вся стойка (20 плат)' : `${sched.targetDeviceIds?.length || 0} плат`}</span>
+                          </div>
+                          {sched.lastRunAt && (
+                            <div className="flex items-center justify-between text-text-tertiary text-[10px]">
+                              <span>Посл. запуск:</span>
+                              <span className={cn(
+                                "font-mono font-medium",
+                                sched.lastRunStatus === 'success' ? "text-emerald-400" : sched.lastRunStatus === 'partial' ? "text-amber-300" : "text-rose-400"
+                              )}>
+                                {relativeTime(sched.lastRunAt)} ({sched.lastRunStatus || 'ok'})
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex items-center justify-between pt-1 border-t border-border/50 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              loading={runningNowId === sched.id}
+                              disabled={runningNowId !== null}
+                              onClick={() => handleRunScheduleNow(sched)}
+                              className="h-7 text-[11px] px-2.5 bg-brand-600 hover:bg-brand-500"
+                            >
+                              ▶ Запустить сейчас
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleToggleSchedule(sched.id, sched.isActive)}
+                              className="h-7 text-[11px] px-2.5"
+                            >
+                              {sched.isActive ? '⏸ Пауза' : '▶ Включить'}
+                            </Button>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleViewScheduleHistory(sched)}
+                              className="h-7 text-[11px] px-2 text-text-tertiary hover:text-text-primary"
+                              title="История запусков"
+                            >
+                              📜
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleDeleteSchedule(sched.id)}
+                              className="h-7 text-[11px] px-2 text-rose-400 hover:bg-rose-500/10"
+                              title="Удалить"
+                            >
+                              🗑️
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: CREATE SCHEDULE FORM */}
+            {schedulerTab === 'new' && (
+              <div className="space-y-4 max-h-[460px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-text-secondary">Название задачи *</label>
+                    <Input
+                      value={newSchedName}
+                      onChange={(e) => setNewSchedName(e.target.value)}
+                      placeholder="Например: Авто-прогрев Wildberries каждые 2 часа"
+                      className="text-xs h-8 bg-surface-2"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-text-secondary">Описание (опционально)</label>
+                    <Input
+                      value={newSchedDesc}
+                      onChange={(e) => setNewSchedDesc(e.target.value)}
+                      placeholder="Краткие заметки по задаче..."
+                      className="text-xs h-8 bg-surface-2"
+                    />
+                  </div>
+                </div>
+
+                {/* Scenario Selection */}
+                <div className="p-3 bg-surface-2 rounded-xl border border-border/80 space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/50 pb-2">
+                    <span className="text-xs font-semibold text-text-primary">1. Что запускать (Сценарий)</span>
+                    <div className="flex gap-2 text-xs">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="actionType"
+                          checked={newSchedActionType === 'preset'}
+                          onChange={() => setNewSchedActionType('preset')}
+                          className="text-brand-500"
+                        />
+                        <span>Готовый пресет</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="actionType"
+                          checked={newSchedActionType === 'custom'}
+                          onChange={() => setNewSchedActionType('custom')}
+                          className="text-brand-500"
+                        />
+                        <span>Пользовательский скрипт</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {newSchedActionType === 'preset' ? (
+                    <div className="space-y-2">
+                      <select
+                        value={newSchedPresetId}
+                        onChange={(e) => setNewSchedPresetId(e.target.value)}
+                        className="w-full bg-surface-1 border border-border rounded-lg text-xs p-2 text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+                      >
+                        {scriptPresets.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} ({p.category})
+                          </option>
+                        ))}
+                      </select>
+
+                      {/* Variables if WB */}
+                      {newSchedPresetId === 'wb_organic_warmup' && (
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <div className="space-y-1">
+                            <span className="text-[11px] text-text-secondary">Артикул WB (nmId):</span>
+                            <Input
+                              value={newSchedVariables['SKU'] || ''}
+                              onChange={(e) => setNewSchedVariables((prev) => ({ ...prev, SKU: e.target.value }))}
+                              placeholder="1145510159"
+                              className="text-xs h-7 font-mono bg-surface-1"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[11px] text-text-secondary">Удержание (сек):</span>
+                            <Input
+                              value={newSchedVariables['DWELL_SEC'] || '60'}
+                              onChange={(e) => setNewSchedVariables((prev) => ({ ...prev, DWELL_SEC: e.target.value }))}
+                              placeholder="60"
+                              className="text-xs h-7 font-mono bg-surface-1"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {customScripts.length === 0 ? (
+                        <p className="text-xs text-text-tertiary">Нет сохраненных пользовательских сценариев. Создайте их в Automation Studio.</p>
+                      ) : (
+                        <select
+                          value={newSchedCustomId}
+                          onChange={(e) => setNewSchedCustomId(e.target.value)}
+                          className="w-full bg-surface-1 border border-border rounded-lg text-xs p-2 text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        >
+                          <option value="">-- Выберите скрипт --</option>
+                          {customScripts.map((cs) => (
+                            <option key={cs.id} value={cs.id}>
+                              {cs.name} ({cs.engine})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Trigger / Schedule Configuration */}
+                <div className="p-3 bg-surface-2 rounded-xl border border-border/80 space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/50 pb-2">
+                    <span className="text-xs font-semibold text-text-primary">2. Когда запускать (Расписание)</span>
+                    <div className="flex gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setNewSchedTriggerType('interval')}
+                        className={cn("px-2 py-0.5 rounded border text-[11px]", newSchedTriggerType === 'interval' ? "bg-brand-500 text-white border-brand-500" : "bg-surface-3 border-border text-text-secondary")}
+                      >
+                        Интервал
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewSchedTriggerType('cron')}
+                        className={cn("px-2 py-0.5 rounded border text-[11px]", newSchedTriggerType === 'cron' ? "bg-brand-500 text-white border-brand-500" : "bg-surface-3 border-border text-text-secondary")}
+                      >
+                        Cron
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewSchedTriggerType('once')}
+                        className={cn("px-2 py-0.5 rounded border text-[11px]", newSchedTriggerType === 'once' ? "bg-brand-500 text-white border-brand-500" : "bg-surface-3 border-border text-text-secondary")}
+                      >
+                        Разово
+                      </button>
+                    </div>
+                  </div>
+
+                  {newSchedTriggerType === 'interval' && (
+                    <div className="grid grid-cols-2 gap-3 items-center">
+                      <div className="space-y-1">
+                        <label className="text-[11px] text-text-secondary">Интервал повтора:</label>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            min="1"
+                            value={newSchedIntervalMins}
+                            onChange={(e) => setNewSchedIntervalMins(parseInt(e.target.value, 10) || 60)}
+                            className="text-xs h-8 font-mono bg-surface-1 w-24"
+                          />
+                          <span className="text-xs text-text-secondary">минут ({Math.round(newSchedIntervalMins / 60 * 10) / 10} ч.)</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 pt-4">
+                        {[30, 60, 120, 180, 360, 720].map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setNewSchedIntervalMins(m)}
+                            className="px-2 py-0.5 rounded border border-border text-[10px] bg-surface-1 hover:border-brand-500"
+                          >
+                            {m >= 60 ? `${m / 60} ч.` : `${m} м.`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {newSchedTriggerType === 'cron' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={newSchedCron}
+                          onChange={(e) => setNewSchedCron(e.target.value)}
+                          placeholder="0 9,15,21 * * *"
+                          className="text-xs h-8 font-mono bg-surface-1"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 text-[10px]">
+                        <span className="text-text-tertiary">Быстрый выбор:</span>
+                        <button type="button" onClick={() => setNewSchedCron('0 * * * *')} className="hover:underline text-brand-400">Каждый час</button>
+                        <span>·</span>
+                        <button type="button" onClick={() => setNewSchedCron('0 */2 * * *')} className="hover:underline text-brand-400">Каждые 2 часа</button>
+                        <span>·</span>
+                        <button type="button" onClick={() => setNewSchedCron('0 9,14,20 * * *')} className="hover:underline text-brand-400">В 09:00, 14:00, 20:00</button>
+                        <span>·</span>
+                        <button type="button" onClick={() => setNewSchedCron('0 4 * * *')} className="hover:underline text-brand-400">Ночью (04:00)</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {newSchedTriggerType === 'once' && (
+                    <div className="space-y-1">
+                      <label className="text-[11px] text-text-secondary">Дата и время разового запуска:</label>
+                      <Input
+                        type="datetime-local"
+                        value={newSchedRunOnceAt}
+                        onChange={(e) => setNewSchedRunOnceAt(e.target.value)}
+                        className="text-xs h-8 font-mono bg-surface-1"
+                      />
+                    </div>
+                  )}
+
+                  {/* Anti-detection Jitter */}
+                  <div className="pt-2 border-t border-border/50 flex items-center justify-between text-xs">
+                    <div className="space-y-0.5">
+                      <span className="font-medium text-text-primary">🛡️ Антифрод-джиттер (рандомизация):</span>
+                      <p className="text-[10px] text-text-tertiary">Сдвигает запуск на случайное число минут для естественного поведения</p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-text-secondary font-mono">±</span>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="60"
+                        value={newSchedJitterMins}
+                        onChange={(e) => setNewSchedJitterMins(parseInt(e.target.value, 10) || 0)}
+                        className="text-xs h-7 font-mono bg-surface-1 w-16"
+                      />
+                      <span className="text-text-secondary text-[11px]">мин.</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Target Devices Selection */}
+                <div className="p-3 bg-surface-2 rounded-xl border border-border/80 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-text-primary">3. На каких платах исполнять</span>
+                    <select
+                      value={newSchedTargetMode}
+                      onChange={(e) => setNewSchedTargetMode(e.target.value as any)}
+                      className="bg-surface-1 border border-border rounded text-xs px-2 py-0.5 text-text-primary"
+                    >
+                      <option value="all">Вся стойка (20 плат)</option>
+                      <option value="custom">Выбранные платы ({newSchedTargetDeviceIds.length})</option>
+                    </select>
+                  </div>
+
+                  {newSchedTargetMode === 'custom' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-1.5 max-h-24 overflow-y-auto pt-1">
+                      {devices.map((d) => (
+                        <label key={d.deviceId} className="flex items-center gap-1 text-[10px] font-mono cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={newSchedTargetDeviceIds.includes(d.deviceId)}
+                            onChange={(e) => {
+                              if (e.target.checked) setNewSchedTargetDeviceIds((prev) => [...prev, d.deviceId]);
+                              else setNewSchedTargetDeviceIds((prev) => prev.filter((id) => id !== d.deviceId));
+                            }}
+                            className="rounded border-border text-brand-500"
+                          />
+                          <span className="truncate">{d.deviceId}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end pt-2 border-t border-border">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={savingSchedule}
+                    disabled={savingSchedule}
+                    onClick={handleCreateSchedule}
+                    className="bg-brand-600 hover:bg-brand-500 text-xs px-5"
+                  >
+                    💾 Сохранить и включить автопилот
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: HISTORY LOGS */}
+            {schedulerTab === 'history' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-text-primary">
+                      {activeHistorySchedule ? `История прогонов: "${activeHistorySchedule.name}"` : 'История прогонов задачи'}
+                    </span>
+                    {activeHistorySchedule && (
+                      <Badge variant="outline" className="text-[10px] font-mono">
+                        {activeHistorySchedule.triggerType}
+                      </Badge>
+                    )}
+                  </div>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => {
+                      if (activeHistorySchedule) handleViewScheduleHistory(activeHistorySchedule);
+                    }}
+                  >
+                    🔄 Обновить логи
+                  </Button>
+                </div>
+
+                {historyLoading ? (
+                  <div className="flex flex-col items-center justify-center py-16 gap-2">
+                    <LoadingSpinner size={24} />
+                    <span className="text-xs text-text-secondary">Загрузка журнала прогонов...</span>
+                  </div>
+                ) : historyLogs.length === 0 ? (
+                  <div className="p-8 text-center text-text-secondary bg-surface-2 rounded-xl border border-border">
+                    <p className="text-sm font-medium text-text-primary mb-1">История пуста</p>
+                    <p className="text-xs text-text-tertiary">
+                      Задача ещё не выполнялась. Нажмите «▶ Запустить сейчас» в списке задач для немедленного тестового прогона.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                    {historyLogs.map((log) => (
+                      <div
+                        key={log.id}
+                        className={cn(
+                          "p-3 rounded-xl border text-xs space-y-2",
+                          log.status === 'success' ? "bg-emerald-500/5 border-emerald-500/30" : log.status === 'partial' ? "bg-amber-500/5 border-amber-500/30" : "bg-rose-500/5 border-rose-500/30"
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-mono">
+                            <span className={cn("font-bold text-[11px]", log.status === 'success' ? "text-emerald-400" : log.status === 'partial' ? "text-amber-400" : "text-rose-400")}>
+                              {log.status === 'success' ? '✓ Успешно' : log.status === 'partial' ? '⚠️ Частично' : '❌ Ошибка'}
+                            </span>
+                            <span className="text-text-tertiary">·</span>
+                            <span className="text-text-secondary text-[11px]">
+                              {new Date(log.startedAt).toLocaleString('ru-RU')}
+                            </span>
+                          </div>
+                          <span className="font-mono text-text-tertiary text-[11px]">
+                            {(log.durationMs / 1000).toFixed(1)} сек
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[11px] text-text-secondary">
+                          <span>Обработано плат: <strong className="text-text-primary">{log.successful}</strong> / {log.targetsCount}</span>
+                          {log.failed > 0 && <span className="text-rose-400 font-semibold">{log.failed} плат с ошибкой</span>}
+                        </div>
+
+                        {/* Per-device tags */}
+                        {log.devices && Object.keys(log.devices).length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-1 border-t border-border/40">
+                            {Object.entries(log.devices).map(([serial, dev]) => (
+                              <span
+                                key={serial}
+                                className={cn(
+                                  "px-1.5 py-0.5 rounded text-[10px] font-mono border",
+                                  dev.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                                )}
+                              >
+                                {serial}: {dev.ok ? `✓ ${dev.stepsExecuted}/${dev.totalSteps}` : '✕'}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {log.error && (
+                          <p className="text-[11px] text-rose-400 pt-1">
+                            Ошибка: {log.error}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Bottom Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <Button size="sm" variant="ghost" onClick={() => setSchedulerModalOpen(false)}>
                 Закрыть
               </Button>
             </div>

@@ -786,7 +786,75 @@ export const accountFarmApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  listSchedules: () =>
+    apiFetch<{ ok: boolean; schedules: FarmSchedule[] }>('/api/v1/farm/schedules'),
+
+  saveSchedule: (body: Partial<FarmSchedule>) =>
+    apiFetch<{ ok: boolean; schedule: FarmSchedule }>('/api/v1/farm/schedules', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteSchedule: (id: string) =>
+    apiFetch<{ ok: boolean; deleted: boolean; id: string }>(`/api/v1/farm/schedules/${id}`, {
+      method: 'DELETE',
+    }),
+
+  toggleSchedule: (id: string, isActive: boolean) =>
+    apiFetch<{ ok: boolean; schedule: FarmSchedule }>(`/api/v1/farm/schedules/${id}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ isActive }),
+    }),
+
+  runScheduleNow: (id: string) =>
+    apiFetch<{ ok: boolean; log: FarmScheduleRunLog }>(`/api/v1/farm/schedules/${id}/run-now`, {
+      method: 'POST',
+    }),
+
+  getScheduleHistory: (id: string) =>
+    apiFetch<{ ok: boolean; history: FarmScheduleRunLog[] }>(`/api/v1/farm/schedules/${id}/history`),
 };
+
+export interface FarmSchedule {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  isActive: boolean;
+  triggerType: 'interval' | 'cron' | 'once';
+  intervalMinutes?: number;
+  cronExpression?: string;
+  runOnceAt?: string;
+  jitterMinutes?: number;
+  engine: 'adb_flow' | 'autojs';
+  presetId?: string;
+  steps?: any[];
+  jsCode?: string;
+  variables?: Record<string, string>;
+  targetMode: 'all' | 'custom';
+  targetDeviceIds?: string[];
+  lastRunAt?: string;
+  lastRunStatus?: 'success' | 'failed' | 'partial';
+  nextRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FarmScheduleRunLog {
+  id: string;
+  scheduleId: string;
+  scheduleName: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  status: 'success' | 'failed' | 'partial';
+  targetsCount: number;
+  successful: number;
+  failed: number;
+  devices: Record<string, { ok: boolean; stepsExecuted: number; totalSteps: number; error?: string }>;
+  error?: string;
+}
 
 export interface FlowStep {
   type: 'launch' | 'sleep' | 'tap' | 'swipe' | 'random_scroll' | 'text' | 'key' | 'clear_data' | 'stop_app' | 'open_url' | 'shell';
