@@ -47,13 +47,13 @@ adb devices -l
 echo.
 
 :: 4. Проверка интерфейса AmneziaWG
-echo Проверка туннеля с сервером AWS (10.13.13.2):
-ipconfig | findstr "10.13.13.2" >nul
+echo Проверка туннеля с сервером AWS:
+ipconfig | findstr "10.66.66.2 10.13.13.2" >nul
 if %errorlevel% neq 0 (
-    echo [ВНИМАНИЕ] IP 10.13.13.2 не найден в ipconfig!
+    echo [ВНИМАНИЕ] Туннельный IP (10.66.66.2 / 10.13.13.2) не найден в ipconfig!
     echo Убедитесь, что AmneziaWG клиент подключен к серверу AWS.
 ) else (
-    echo [OK] Интерфейс AmneziaWG активен (10.13.13.2).
+    echo [OK] Интерфейс AmneziaWG активен.
 )
 
 echo.
