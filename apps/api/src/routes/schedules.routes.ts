@@ -75,6 +75,15 @@ export async function scheduleRoutes(app: FastifyInstance) {
     });
     if (!product) return reply.code(404).send({ error: 'Product not found' });
 
+    if (body.socialAccountIds && body.socialAccountIds.length > 0) {
+      const validCount = await db.socialAccount.count({
+        where: { id: { in: body.socialAccountIds }, tenantId },
+      });
+      if (validCount !== body.socialAccountIds.length) {
+        return reply.code(400).send({ error: 'BadRequest', message: 'Некоторые социальные аккаунты не принадлежат вашей организации' });
+      }
+    }
+
     // Compute first next_run_at (naive: assume it's sometime in the next 7 days)
     const now = new Date();
 
@@ -125,6 +134,15 @@ export async function scheduleRoutes(app: FastifyInstance) {
       select: { id: true },
     });
     if (!existing) return reply.code(404).send({ error: 'Schedule not found' });
+
+    if (body.socialAccountIds && body.socialAccountIds.length > 0) {
+      const validCount = await db.socialAccount.count({
+        where: { id: { in: body.socialAccountIds }, tenantId },
+      });
+      if (validCount !== body.socialAccountIds.length) {
+        return reply.code(400).send({ error: 'BadRequest', message: 'Некоторые социальные аккаунты не принадлежат вашей организации' });
+      }
+    }
 
     const schedule = await db.videoSchedule.update({
       where: { id },

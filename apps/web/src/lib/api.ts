@@ -569,7 +569,7 @@ export const accountFarmApi = {
       twoFactorSeed?: string;
       email?: string;
       emailPassword?: string;
-      // Device-path: id of the phone as known to Laixi
+      // Device-path: id of the phone as known to ADB (serial)
       deviceId?: string;
       accountGroupId?: string;
       niche?: string;
@@ -604,7 +604,142 @@ export const accountFarmApi = {
 
   // Publishing diagnostics — "why can't I publish" chain check
   diagnostics: () => apiFetch<PublishDiagnostics>('/api/v1/farm/diagnostics'),
+
+  // Physical phone farm devices (motherboard rack)
+  listDevices: () => apiFetch<{ ok: boolean; total: number; devices: FarmDevice[]; error?: string }>('/api/v1/farm/devices'),
+
+  setDeviceProxy: (deviceId: string, body: {
+    proxyId?: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  }) => apiFetch<{ ok: boolean; check?: DeviceIpCheck }>(`/api/v1/farm/devices/${deviceId}/proxy`, { method: 'POST', body: JSON.stringify(body) }),
+
+  clearDeviceProxy: (deviceId: string) =>
+    apiFetch<{ ok: boolean }>(`/api/v1/farm/devices/${deviceId}/clear-proxy`, { method: 'POST' }),
+
+  checkDeviceIp: (deviceId: string) =>
+    apiFetch<DeviceIpCheck>(`/api/v1/farm/devices/${deviceId}/check-ip`, { method: 'POST' }),
+
+  viewTarget: (deviceId: string, body: ViewTargetParams) =>
+    apiFetch<ViewTargetResponse>(`/api/v1/farm/devices/${deviceId}/view-target`, { method: 'POST', body: JSON.stringify(body) }),
+
+  wbWarmup: (deviceId: string, body: WbWarmupParams) =>
+    apiFetch<WbWarmupResponse>(`/api/v1/farm/devices/${deviceId}/wb-warmup`, { method: 'POST', body: JSON.stringify(body) }),
+
+  rebootDevice: (deviceId: string) =>
+    apiFetch<{ ok: boolean; message?: string }>(`/api/v1/farm/devices/${deviceId}/reboot`, { method: 'POST' }),
+
+  wakeDevice: (deviceId: string) =>
+    apiFetch<{ ok: boolean; message?: string }>(`/api/v1/farm/devices/${deviceId}/wake`, { method: 'POST' }),
+
+  assignDeviceAccount: (deviceId: string, socialAccountId: string) =>
+    apiFetch<{ ok: boolean; deviceId: string; socialAccountId: string }>(`/api/v1/farm/devices/${deviceId}/assign-account`, {
+      method: 'POST',
+      body: JSON.stringify({ socialAccountId }),
+    }),
+
+  screenshotDevice: (deviceId: string) =>
+    apiFetch<{ ok: boolean; data?: any; error?: string }>(`/api/v1/farm/devices/${deviceId}/screenshot`, { method: 'POST' }),
+
+  healDevice: (deviceId: string) =>
+    apiFetch<{ ok: boolean; message?: string; error?: string }>(`/api/v1/farm/devices/${deviceId}/heal`, { method: 'POST' }),
+
+  getDeviceHealth: (deviceId: string) =>
+    apiFetch<BoardHealthInfo>(`/api/v1/farm/devices/${deviceId}/health`),
+
+  optimizeFarm: (deviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; total?: number; results?: Array<{ deviceId: string; ok: boolean; message: string }> }>(
+      '/api/v1/farm/devices/optimize-all',
+      { method: 'POST', body: JSON.stringify({ deviceIds }) }
+    ),
 };
+
+export interface BoardHealthInfo {
+  deviceId: string;
+  online: boolean;
+  batteryLevel?: number;
+  batteryTemp?: number;
+  freeRamMb?: number;
+  error?: string;
+}
+
+export interface FarmDevice {
+  deviceId: string;
+  name: string;
+  model: string;
+  online: boolean;
+  assignedAccount?: {
+    id: string;
+    accountName: string;
+    platform: string;
+    healthScore: number;
+    warmupStatus: string;
+    warmupCount: number;
+  } | null;
+  proxy?: {
+    host: string;
+    port: number;
+    type?: string;
+  } | null;
+}
+
+export interface DeviceIpCheck {
+  ok: boolean;
+  ip?: string;
+  country?: string;
+  city?: string;
+  isp?: string;
+  leakDetected: boolean;
+  hostIp?: string;
+  error?: string;
+}
+
+export interface ViewTargetParams {
+  platform: 'instagram' | 'tiktok';
+  targetUsername: string;
+  watchDurationSeconds?: number;
+  scrollCount?: number;
+  likeProbability?: number;
+  checkIpFirst?: boolean;
+}
+
+export interface ViewTargetResponse {
+  ok: boolean;
+  detail?: string;
+  ipCheck?: DeviceIpCheck;
+  stats?: {
+    platform: string;
+    targetUsername: string;
+    scrollCount: number;
+    baseWatchSeconds: number;
+    likesGiven?: number;
+  };
+}
+
+export interface WbWarmupParams {
+  sku: string | number;
+  dwellDurationSeconds?: number;
+  swipePhotos?: boolean;
+  readReviews?: boolean;
+  addToFavorites?: boolean;
+  checkIpFirst?: boolean;
+}
+
+export interface WbWarmupResponse {
+  ok: boolean;
+  sku: string;
+  detail?: string;
+  ipCheck?: DeviceIpCheck;
+  stats?: {
+    dwellSeconds: number;
+    photosSwiped: number;
+    addedToFavorites: boolean;
+  };
+}
+
 
 export interface PublishDiagnostics {
   canPublishNow: boolean;

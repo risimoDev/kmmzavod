@@ -38,7 +38,7 @@ export function computeReadiness(a: ReadinessInput): Readiness {
     if (!a.hasSession) blockers.push('Нет сессии — добавьте sessionid/cookie');
     if (a.warmupStatus === 'cold' && a.enforceWarmup) blockers.push('Не прогрет (группа требует warmup)');
   } else if (a.authMethod === 'device') {
-    if (!a.hasDeviceId) blockers.push('Не привязан телефон — укажите deviceId (Laixi)');
+    if (!a.hasDeviceId) blockers.push('Не привязан телефон — укажите deviceId (ADB serial)');
   } else {
     if (a.expiresAt && a.expiresAt.getTime() < Date.now()) blockers.push('Токен истёк');
   }

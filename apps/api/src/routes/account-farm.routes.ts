@@ -9,6 +9,7 @@ import { encrypt, decrypt } from '../lib/crypto';
 import { computeReadiness } from '../lib/publish-readiness';
 import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
+import { deviceAgentClient, describeDeviceAgentError } from '../lib/device-agent';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ const BulkSocialAccountBody = z.object({
     twoFactorSeed: z.string().optional(),
     email: z.string().optional(),
     emailPassword: z.string().optional(),
-    // Device-path: id of the phone as known to Laixi (see GET /devices on device-agent).
+    // Device-path: id of the phone as known to ADB (serial, see GET /devices on device-agent).
     deviceId: z.string().optional(),
     accountGroupId: z.string().uuid().optional(),
     niche: z.string().optional(),
@@ -90,6 +91,40 @@ const SetCredentialsBody = z.object({
   accessToken: z.string().optional(),
   deviceId: z.string().optional(),
 });
+
+const SetDeviceProxyBody = z.object({
+  proxyId: z.string().uuid().optional(),
+  host: z.string().optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
+}).refine((data) => data.proxyId || (data.host && data.port), {
+  message: 'Either proxyId or both host and port must be provided',
+});
+
+const ViewTargetBody = z.object({
+  platform: z.enum(['instagram', 'tiktok']),
+  targetUsername: z.string().min(1).max(100),
+  watchDurationSeconds: z.number().int().min(5).max(300).default(25),
+  scrollCount: z.number().int().min(1).max(20).default(3),
+  likeProbability: z.number().min(0).max(1).default(0.3),
+  checkIpFirst: z.boolean().default(true),
+});
+
+const WbWarmupBody = z.object({
+  sku: z.union([z.string().min(1), z.number().int()]),
+  dwellDurationSeconds: z.number().int().min(10).max(300).default(60),
+  swipePhotos: z.boolean().default(true),
+  readReviews: z.boolean().default(true),
+  addToFavorites: z.boolean().default(true),
+  checkIpFirst: z.boolean().default(true),
+});
+
+const AssignDeviceBody = z.object({
+  socialAccountId: z.string().uuid(),
+});
+
 
 type PrivateCreds = {
   username?: string; password?: string; sessionId?: string; cookie?: string;
@@ -454,7 +489,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
           importNote = note;
         } else if (acc.authMethod === 'device') {
-          if (!acc.deviceId) throw new Error('Device account needs deviceId (Laixi device id)');
+          if (!acc.deviceId) throw new Error('Device account needs deviceId (ADB device serial)');
           accessTokenEnc = encrypt('device'); // placeholder (column is NOT NULL) — the phone's logged-in app IS the session
         } else {
           if (!acc.accessToken) throw new Error('Official account needs accessToken');
@@ -527,7 +562,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: err instanceof Error ? err.message : 'Invalid credentials' });
       }
     } else if (body.authMethod === 'device') {
-      if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (Laixi device id)' });
+      if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (ADB device serial)' });
       data.deviceId = body.deviceId;
       data.accessToken = encrypt('device');
       data.sessionData = null;
@@ -683,6 +718,26 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       },
     ];
 
+    const hasDeviceAccounts = rows.some((a) => a.authMethod === 'device');
+    if (hasDeviceAccounts) {
+      let deviceAgentOk = true;
+      let deviceAgentReason: string | undefined;
+      try {
+        const dRes = await deviceAgentClient.listDevices();
+        deviceAgentOk = dRes.ok;
+        if (!dRes.ok) deviceAgentReason = dRes.error;
+      } catch (err) {
+        deviceAgentOk = false;
+        deviceAgentReason = describeDeviceAgentError(err);
+      }
+      checks.push({
+        id: 'device-agent',
+        ok: deviceAgentOk,
+        label: deviceAgentOk ? 'Ферма телефонов (device-agent) подключена' : 'Ферма телефонов (device-agent) недоступна',
+        fix: deviceAgentOk ? undefined : (deviceAgentReason ?? 'Проверьте туннель AmneziaWG и запуск device-agent на хост-ПК'),
+      });
+    }
+
     const canPublishNow = publisher.ok && canPublish > 0;
     return reply.send({
       canPublishNow,
@@ -750,4 +805,288 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       },
     });
   });
+
+  // ── Physical Phone Farm (Motherboard Rack) Endpoints ───────────────────────
+
+  app.get('/devices', async (request, reply) => {
+    const { tenantId } = request.user;
+    let farmResult: { ok: boolean; raw?: unknown; proxies?: Record<string, any>; error?: string };
+    try {
+      farmResult = await deviceAgentClient.listDevices();
+    } catch (err) {
+      return reply.status(502).send({
+        ok: false,
+        error: describeDeviceAgentError(err),
+        devices: [],
+      });
+    }
+
+    const accounts = await db.socialAccount.findMany({
+      where: { tenantId, deviceId: { not: null } },
+      include: {
+        proxy: { select: { id: true, host: true, port: true, type: true, country: true } },
+      },
+    });
+    const accountByDeviceId = new Map(accounts.map((a) => [a.deviceId!, a]));
+
+    let rawList: any[] = [];
+    if (Array.isArray(farmResult.raw)) {
+      rawList = farmResult.raw;
+    } else if (farmResult.raw && typeof farmResult.raw === 'object') {
+      const obj = farmResult.raw as any;
+      rawList = Array.isArray(obj.data) ? obj.data : (Array.isArray(obj.devices) ? obj.devices : []);
+    }
+
+    const proxies = farmResult.proxies || {};
+    const devices = rawList.map((d: any) => {
+      const devId = String(d.deviceid || d.deviceId || d.id || d.serial || '');
+      const assigned = accountByDeviceId.get(devId);
+      return {
+        deviceId: devId,
+        name: d.name || d.device_name || `Плата ${devId.slice(-4)}`,
+        model: d.model || 'Android Board',
+        online: d.status === 1 || d.is_online === true || d.online === true || true,
+        assignedAccount: assigned ? {
+          id: assigned.id,
+          accountName: assigned.accountName,
+          platform: assigned.platform,
+          healthScore: assigned.healthScore,
+          warmupStatus: assigned.warmupStatus,
+          warmupCount: assigned.warmupCount,
+        } : null,
+        proxy: proxies[devId] || (assigned?.proxy ? {
+          host: assigned.proxy.host,
+          port: assigned.proxy.port,
+          type: assigned.proxy.type,
+        } : null),
+      };
+    });
+
+    return reply.send({
+      ok: true,
+      total: devices.length,
+      devices,
+    });
+  });
+
+  app.post('/devices/:deviceId/proxy', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = SetDeviceProxyBody.parse(request.body);
+
+    let proxyConfig: { host: string; port: number; username?: string; password?: string; type?: any };
+    let proxyRecordId: string | null = null;
+
+    if (body.proxyId) {
+      const p = await db.proxy.findFirst({ where: { id: body.proxyId, tenantId } });
+      if (!p) return reply.status(404).send({ error: 'Proxy record not found' });
+      proxyRecordId = p.id;
+      proxyConfig = {
+        host: p.host,
+        port: p.port,
+        username: p.username ?? undefined,
+        password: p.password ? decrypt(p.password) : undefined,
+        type: p.type as any,
+      };
+    } else {
+      proxyConfig = {
+        host: body.host!,
+        port: body.port!,
+        username: body.username,
+        password: body.password,
+        type: body.type,
+      };
+    }
+
+    try {
+      const res = await deviceAgentClient.setProxy(deviceId, proxyConfig);
+      if (proxyRecordId) {
+        await db.socialAccount.updateMany({
+          where: { tenantId, deviceId },
+          data: { proxyId: proxyRecordId, proxyUrl: `${proxyConfig.type || 'http'}://${proxyConfig.host}:${proxyConfig.port}` },
+        });
+      }
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/clear-proxy', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.clearProxy(deviceId);
+      await db.socialAccount.updateMany({
+        where: { tenantId, deviceId },
+        data: { proxyId: null, proxyUrl: null },
+      });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/check-ip', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const check = await deviceAgentClient.checkDeviceIp(deviceId);
+      return reply.send(check);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/view-target', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = ViewTargetBody.parse(request.body);
+
+    try {
+      const result = await deviceAgentClient.viewTarget({
+        deviceId,
+        platform: body.platform,
+        targetUsername: body.targetUsername,
+        watchDurationSeconds: body.watchDurationSeconds,
+        scrollCount: body.scrollCount,
+        likeProbability: body.likeProbability,
+        checkIpFirst: body.checkIpFirst,
+      });
+
+      if (result.ok) {
+        const account = await db.socialAccount.findFirst({
+          where: { tenantId, deviceId },
+        });
+        if (account) {
+          const nextCount = account.warmupCount + 1;
+          const newStatus = nextCount >= 10 ? 'warm' : (account.warmupStatus === 'cold' ? 'warming' : account.warmupStatus);
+          await db.socialAccount.update({
+            where: { id: account.id },
+            data: {
+              warmupCount: nextCount,
+              warmupStatus: newStatus,
+              lastWarmupAt: new Date(),
+              healthScore: Math.min(100, account.healthScore + 2),
+            },
+          });
+        }
+      } else {
+        return reply.status(502).send(result);
+      }
+
+      return reply.send(result);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/wb-warmup', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = WbWarmupBody.parse(request.body);
+
+    try {
+      const result = await deviceAgentClient.wbWarmup({
+        deviceId,
+        sku: body.sku,
+        dwellDurationSeconds: body.dwellDurationSeconds,
+        swipePhotos: body.swipePhotos,
+        readReviews: body.readReviews,
+        addToFavorites: body.addToFavorites,
+        checkIpFirst: body.checkIpFirst,
+      });
+
+      if (!result.ok) {
+        return reply.status(502).send(result);
+      }
+
+      return reply.send(result);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/reboot', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.reboot(deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/wake', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.wake(deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/assign-account', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const { socialAccountId } = AssignDeviceBody.parse(request.body);
+
+    const account = await db.socialAccount.findFirst({
+      where: { id: socialAccountId, tenantId },
+    });
+    if (!account) return reply.status(404).send({ error: 'Social account not found' });
+
+    await db.socialAccount.updateMany({
+      where: { tenantId, deviceId },
+      data: { deviceId: null },
+    });
+
+    await db.socialAccount.update({
+      where: { id: socialAccountId },
+      data: { deviceId, authMethod: 'device' },
+    });
+
+    return reply.send({ ok: true, deviceId, socialAccountId });
+  });
+
+  app.post('/devices/:deviceId/screenshot', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.screenshot(deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/heal', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.heal(deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.get('/devices/:deviceId/health', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const res = await deviceAgentClient.getHealth(deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/optimize-all', async (request, reply) => {
+    const parsed = z.object({ deviceIds: z.array(z.string()).optional() }).optional().safeParse(request.body || {});
+    const deviceIds = parsed.success ? parsed.data?.deviceIds : undefined;
+    try {
+      const res = await deviceAgentClient.optimizeFarm(deviceIds);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
 }
+

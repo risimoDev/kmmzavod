@@ -842,12 +842,12 @@ model SocialAccount {
   // ── Publishing method ──────────────────────────────────────────────
   // 'official' = OAuth APIs (default); 'private' = unofficial publisher
   // microservice (instagrapi / tiktok-uploader); 'device' = real Android
-  // phone in a physical farm (Laixi), routed via apps/device-agent.
+  // phone in a physical farm (ADB), routed via apps/device-agent.
   // sessionData holds the encrypted credentials + live session blob for
   // the private path.
   authMethod         String         @default("official") @map("auth_method")
   sessionData        String?        @map("session_data") @db.Text
-  // Laixi device id — only set when authMethod='device'.
+  // ADB device serial / id — only set when authMethod='device'.
   deviceId           String?        @map("device_id")
   // ── Farm fields ────────────────────────────────────────────────────
   accountGroupId     String?        @map("account_group_id") @db.Uuid

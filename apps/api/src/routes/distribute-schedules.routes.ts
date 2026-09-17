@@ -125,6 +125,28 @@ export async function distributeScheduleRoutes(app: FastifyInstance) {
     });
     if (!existing) return reply.code(404).send({ error: 'Schedule not found' });
 
+    // Validate referenced entities belong to the tenant
+    if (body.uniquifyJobId) {
+      const job = await db.uniquifyJob.findFirst({
+        where: { id: body.uniquifyJobId, tenantId }, select: { id: true },
+      });
+      if (!job) return reply.code(404).send({ error: 'Uniquify job not found' });
+    }
+    if (body.accountGroupId) {
+      const group = await db.accountGroup.findFirst({
+        where: { id: body.accountGroupId, tenantId }, select: { id: true },
+      });
+      if (!group) return reply.code(404).send({ error: 'Account group not found' });
+    }
+    if (body.socialAccountIds && body.socialAccountIds.length > 0) {
+      const count = await db.socialAccount.count({
+        where: { id: { in: body.socialAccountIds }, tenantId },
+      });
+      if (count !== body.socialAccountIds.length) {
+        return reply.code(400).send({ error: 'Some social accounts do not belong to tenant' });
+      }
+    }
+
     const schedule = await db.distributeSchedule.update({
       where: { id },
       data: {

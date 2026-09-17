@@ -39,7 +39,7 @@ export function createDistributeWorker(deps: Deps): Worker {
               socialAccount: {
                 select: {
                   id: true, platform: true, isActive: true,
-                  authMethod: true, warmupStatus: true, sessionData: true,
+                  authMethod: true, deviceId: true, warmupStatus: true, sessionData: true,
                   dailyPostCount: true, lastPostAt: true, healthScore: true,
                   accountGroup: { select: { maxPostsPerDay: true, timezone: true, staggerMinutes: true, enforceWarmup: true } },
                 },
@@ -65,6 +65,16 @@ export function createDistributeWorker(deps: Deps): Worker {
       let itemIndex = 0;
       let skippedCount = 0;
       let newlyScheduledCount = 0;
+
+      // Track the earliest timestamp each account can accept the next post (ensuring >= 3 hours gap)
+      const accountNextAvailableMs = new Map<string, number>();
+      for (const it of distJob.items) {
+        if (!accountNextAvailableMs.has(it.socialAccount.id)) {
+          const lastPostMs = it.socialAccount.lastPostAt ? it.socialAccount.lastPostAt.getTime() : 0;
+          const minGapMs = 3 * 3600 * 1000; // 3 hours
+          accountNextAvailableMs.set(it.socialAccount.id, Math.max(Date.now(), lastPostMs + minGapMs));
+        }
+      }
 
       for (const item of distJob.items) {
         // Skip items already processed in a previous attempt
@@ -96,7 +106,6 @@ export function createDistributeWorker(deps: Deps): Worker {
 
         // Anti-ban guards
         // Private accounts need a stored publisher session to post at all
-        // (e.g. TikTok imported with only login/password and no sessionid/cookie).
         if (item.socialAccount.authMethod === 'private' && !item.socialAccount.sessionData) {
           await db.distributeItem.update({
             where: { id: item.id },
@@ -104,11 +113,19 @@ export function createDistributeWorker(deps: Deps): Worker {
           });
           skippedCount++; itemIndex++; continue;
         }
+        // Physical device accounts need a deviceId assigned
+        if (item.socialAccount.authMethod === 'device' && !item.socialAccount.deviceId) {
+          await db.distributeItem.update({
+            where: { id: item.id },
+            data: { status: 'skipped', error: 'Плата не привязана к аккаунту — укажите номер платы в разделе Стойка плат' },
+          });
+          skippedCount++; itemIndex++; continue;
+        }
         // Warmup gate: only enforced for groups that opt in (default OFF), so
         // freshly imported accounts publish immediately. When enabled, cold
         // accounts wait for the scheduler's warmup promoter (cold→warming→warm).
         if (
-          item.socialAccount.authMethod === 'private' &&
+          (item.socialAccount.authMethod === 'private' || item.socialAccount.authMethod === 'device') &&
           item.socialAccount.warmupStatus === 'cold' &&
           item.socialAccount.accountGroup?.enforceWarmup === true
         ) {
@@ -133,21 +150,19 @@ export function createDistributeWorker(deps: Deps): Worker {
           });
           skippedCount++; itemIndex++; continue;
         }
-        if (item.socialAccount.lastPostAt) {
-          const hoursSinceLast = (Date.now() - item.socialAccount.lastPostAt.getTime()) / 36e5;
-          if (hoursSinceLast < 3) {
-            await db.distributeItem.update({
-              where: { id: item.id },
-              data: { status: 'skipped', error: 'Minimum 3-hour gap between posts not met' },
-            });
-            skippedCount++; itemIndex++; continue;
-          }
-        }
-
-        // Calculate scheduled time with jittered stagger (±15% randomness)
+        // Calculate nominal scheduled time with jittered stagger (±15% randomness)
         const baseDelay = itemIndex * staggerMs;
         const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
-        const scheduledAt = new Date(Date.now() + jitteredDelay);
+        const nominalTimeMs = Date.now() + jitteredDelay;
+
+        // Anti-ban guard: ensure at least 3 hours gap from the account's last post or previously scheduled post
+        const earliestAllowedMs = accountNextAvailableMs.get(item.socialAccount.id) ?? Date.now();
+        const effectiveTimeMs = Math.max(nominalTimeMs, earliestAllowedMs);
+        const effectiveDelayMs = Math.max(0, effectiveTimeMs - Date.now());
+        const scheduledAt = new Date(effectiveTimeMs);
+
+        // Advance next available slot for this account by 3 hours
+        accountNextAvailableMs.set(item.socialAccount.id, effectiveTimeMs + 3 * 3600 * 1000);
 
         // Prefer auto-generated content from uniqueVariant, fallback to template/manual
         const autoCaption = item.uniqueVariant.generatedCaption;
@@ -191,7 +206,7 @@ export function createDistributeWorker(deps: Deps): Worker {
           },
         });
 
-        // Enqueue publish job with delay
+        // Enqueue publish job with effective delay
         const payload: PublishJobPayload = {
           publishJobId: publishJob.id,
           uniqueVariantId: item.uniqueVariant.id,
@@ -204,7 +219,7 @@ export function createDistributeWorker(deps: Deps): Worker {
         await publishQueue.add(
           `publish-distribute:${publishJob.id}`,
           payload,
-          { delay: jitteredDelay, jobId: publishJob.id },
+          { delay: effectiveDelayMs, jobId: publishJob.id },
         );
 
         logger.info(
@@ -215,7 +230,7 @@ export function createDistributeWorker(deps: Deps): Worker {
             variantId: item.uniqueVariant.id,
             accountId: item.socialAccount.id,
             platform: item.socialAccount.platform,
-            delay: `${Math.round(jitteredDelay / 60000)}min`,
+            delay: `${Math.round(effectiveDelayMs / 60000)}min`,
           },
           'Distribute: scheduled publish',
         );

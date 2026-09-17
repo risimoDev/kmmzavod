@@ -2,7 +2,7 @@
   "name": "@kmmzavod/device-agent",
   "version": "1.0.0",
   "private": true,
-  "description": "Bridge between the kmmzavod orchestrator (over AmneziaWG) and a local Laixi Master phone farm.",
+  "description": "Bridge between the kmmzavod orchestrator (over AmneziaWG) and a local native ADB Android phone farm.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc --project tsconfig.json",

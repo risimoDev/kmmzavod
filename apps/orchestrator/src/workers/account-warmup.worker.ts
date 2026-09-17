@@ -1,9 +1,12 @@
 /**
- * Account warmup worker — прогревает приватные аккаунты фермы.
+ * Account warmup worker — прогревает аккаунты фермы (приватные и физические телефоны).
  *
- * Instagram (authMethod=private): через publisher /instagram/warmup — логин по
- * сохранённой сессии, скролл ленты, 2–4 лайка. Обновлённая сессия сохраняется
- * (зашифрованной), чтобы следующий прогрев/пост не требовал повторного логина.
+ * 1. Physical Device Farm (authMethod=device, стойка 20 плат):
+ *    - Instagram & TikTok: через deviceAgentService.viewTarget
+ *    - Выполняет органический просмотр видео в целевой нише (watch time 15–35s, лайки, свайпы)
+ *    - Pre-flight anti-leak защита: проверяет внешний IP платы перед запуском
+ *
+ * 2. Instagram private (authMethod=private): через publisher /instagram/warmup
  *
  * Промоушен статуса:
  *   cold    → warming — после первого успешного прогрева
@@ -18,6 +21,7 @@ import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
 import { publisherService, describePublisherError } from '../services/publisher';
+import { deviceAgentService, describeDeviceAgentError } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'account-warmup' });
 
@@ -39,13 +43,102 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
     async (job) => {
       const { socialAccountId, tenantId } = job.data;
 
-      const account = await db.socialAccount.findUnique({ where: { id: socialAccountId } });
+      const account = await db.socialAccount.findUnique({
+        where: { id: socialAccountId },
+        include: { accountGroup: { select: { niche: true } } },
+      });
       if (!account || account.tenantId !== tenantId) {
         logger.warn({ socialAccountId }, 'Warmup: account not found, skipping');
         return;
       }
-      if (!account.isActive || account.authMethod !== 'private' || account.platform !== 'instagram') {
-        logger.info({ socialAccountId, platform: account.platform }, 'Warmup: not applicable, skipping');
+      if (!account.isActive) {
+        logger.info({ socialAccountId, platform: account.platform }, 'Warmup: account inactive, skipping');
+        return;
+      }
+
+      // ── Physical Phone Farm (authMethod=device, стойка 20 плат) ───────────
+      if (account.authMethod === 'device') {
+        if (!account.deviceId) {
+          logger.warn({ socialAccountId }, 'Warmup: deviceId not assigned to physical account');
+          return;
+        }
+        if (account.platform !== 'instagram' && account.platform !== 'tiktok') {
+          logger.info({ socialAccountId, platform: account.platform }, 'Warmup device: platform not supported');
+          return;
+        }
+
+        // Determine target username from niche or fallback
+        const targetUsername = account.niche || account.accountGroup?.niche || (account.platform === 'tiktok' ? 'tiktok' : 'instagram');
+        logger.info({ socialAccountId, deviceId: account.deviceId, platform: account.platform, targetUsername }, 'Warmup: executing physical board Smart View');
+
+        try {
+          const result = await deviceAgentService.viewTarget({
+            deviceId: account.deviceId,
+            platform: account.platform,
+            targetUsername,
+            watchDurationSeconds: 18 + Math.floor(Math.random() * 18),
+            scrollCount: 2 + Math.floor(Math.random() * 3),
+            likeProbability: 0.35,
+            checkIpFirst: true,
+          });
+
+          if (!result.ok) {
+            throw new Error(result.detail || 'device-agent reported failure during smart view');
+          }
+
+          const now = new Date();
+          const warmupStartedAt = account.warmupStartedAt ?? now;
+          const warmupCount = account.warmupCount + 1;
+
+          // Promotion rules
+          let warmupStatus = account.warmupStatus;
+          if (warmupStatus === 'cold') {
+            warmupStatus = 'warming';
+          } else if (warmupStatus === 'warming') {
+            const daysSinceStart = (now.getTime() - warmupStartedAt.getTime()) / 86_400_000;
+            if (warmupCount >= WARM_MIN_ACTIONS && daysSinceStart >= WARM_MIN_DAYS) {
+              warmupStatus = 'warm';
+            }
+          }
+
+          await db.socialAccount.update({
+            where: { id: socialAccountId },
+            data: {
+              warmupStatus,
+              warmupStartedAt,
+              lastWarmupAt: now,
+              warmupCount,
+              healthScore: Math.min(100, (account.healthScore ?? 90) + 2),
+              lastError: null,
+            },
+          });
+
+          logger.info(
+            { socialAccountId, deviceId: account.deviceId, warmupCount, warmupStatus },
+            'Warmup: physical board session success',
+          );
+          return;
+        } catch (err: unknown) {
+          const errorMsg = describeDeviceAgentError(err);
+          await db.socialAccount.update({
+            where: { id: socialAccountId },
+            data: {
+              lastError: `warmup-device: ${errorMsg}`.slice(0, 1000),
+              healthScore: { decrement: 5 },
+            },
+          });
+          await db.socialAccount.updateMany({
+            where: { id: socialAccountId, healthScore: { lt: 0 } },
+            data: { healthScore: 0 },
+          });
+          logger.error({ socialAccountId, deviceId: account.deviceId, err: errorMsg }, 'Warmup: physical board session failed');
+          throw new Error(`warmup-device: ${errorMsg}`);
+        }
+      }
+
+      // ── Private publisher path (instagrapi) ───────────────────────────────
+      if (account.authMethod !== 'private' || account.platform !== 'instagram') {
+        logger.info({ socialAccountId, platform: account.platform, authMethod: account.authMethod }, 'Warmup: not applicable, skipping');
         return;
       }
 

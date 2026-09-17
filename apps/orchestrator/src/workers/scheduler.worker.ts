@@ -343,6 +343,39 @@ async function runWarmupTick(
     logger.info({ count: igAccounts.length }, 'Scheduler: warmup sessions enqueued');
   }
 
+  // 1b. Physical Phone Farm (authMethod=device): schedule daily smart view warmup
+  const deviceAccounts = await db.socialAccount.findMany({
+    where: {
+      isActive: true,
+      authMethod: 'device',
+      deviceId: { not: null },
+      platform: { in: ['instagram', 'tiktok'] },
+      warmupStatus: { in: ['cold', 'warming'] },
+      healthScore: { gte: 30 },
+      OR: [
+        { lastWarmupAt: null },
+        { lastWarmupAt: { lt: new Date(now.getTime() - WARMUP_INTERVAL_MS) } },
+      ],
+    },
+    select: { id: true, tenantId: true },
+    take: 200,
+  });
+
+  for (const acc of deviceAccounts) {
+    const day = now.toISOString().slice(0, 10);
+    await warmupQueue.add(
+      `warmup:device:${acc.id}`,
+      { socialAccountId: acc.id, tenantId: acc.tenantId },
+      {
+        jobId: `warmup-device-${acc.id}-${day}`,
+        delay: Math.floor(Math.random() * 3 * 3600_000),
+      },
+    );
+  }
+  if (deviceAccounts.length > 0) {
+    logger.info({ count: deviceAccounts.length }, 'Scheduler: device farm warmup sessions enqueued');
+  }
+
   // 2. TikTok private: no publisher warmup action exists (session comes from a
   //    real logged-in account), so promote purely by account age.
   const [tkWarming, tkWarm] = await Promise.all([
@@ -576,7 +609,7 @@ async function runCampaignsTick(
           ],
         },
         select: {
-          id: true, platform: true, authMethod: true, sessionData: true,
+          id: true, platform: true, authMethod: true, deviceId: true, sessionData: true,
           warmupStatus: true, dailyPostCount: true,
           accountGroup: { select: { enforceWarmup: true } },
         },
@@ -584,7 +617,9 @@ async function runCampaignsTick(
 
       const eligible = accounts.filter((a) => {
         if (a.authMethod === 'private' && !a.sessionData) return false;
-        const warmupBlocks = a.authMethod === 'private' && a.warmupStatus === 'cold' &&
+        if (a.authMethod === 'device' && !a.deviceId) return false;
+        const warmupBlocks = (a.authMethod === 'private' || a.authMethod === 'device') &&
+          a.warmupStatus === 'cold' &&
           (c.respectWarmup || a.accountGroup?.enforceWarmup === true);
         return !warmupBlocks;
       });

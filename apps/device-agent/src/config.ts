@@ -1,4 +1,6 @@
 import dotenv from 'dotenv';
+import fs from 'node:fs';
+import path from 'node:path';
 
 dotenv.config();
 
@@ -8,15 +10,22 @@ function env(name: string, fallback?: string): string {
   return v;
 }
 
+function resolveScriptsDir(): string {
+  if (process.env.DEVICE_AGENT_SCRIPTS_DIR) return process.env.DEVICE_AGENT_SCRIPTS_DIR;
+  const localScripts = path.resolve(__dirname, '../scripts');
+  if (fs.existsSync(localScripts)) return localScripts;
+  return String.raw`C:\device-agent\scripts`;
+}
+
 export const config = {
   // Bind to the AmneziaWG interface IP only — never 0.0.0.0. See infra/amneziawg/README.md.
   HOST: env('DEVICE_AGENT_HOST', '10.13.13.2'),
   PORT: Number(env('DEVICE_AGENT_PORT', '8300')),
-  LAIXI_WS_URL: env('LAIXI_WS_URL', 'ws://127.0.0.1:22221/'),
-  // Where the referenced Autox.js scripts live on this PC (paths sent to Laixi's
-  // ExecuteAutoJs action must be local filesystem paths, not URLs).
-  SCRIPTS_DIR: env('DEVICE_AGENT_SCRIPTS_DIR', String.raw`C:\device-agent\scripts`),
-  // Working dir Laixi downloads videos into on-device before posting (per httpdown action).
-  DOWNLOAD_DIR: env('DEVICE_AGENT_DOWNLOAD_DIR', '/sdcard/DCIM/kmmzavod'),
-  LAIXI_TIMEOUT_MS: Number(env('DEVICE_AGENT_LAIXI_TIMEOUT_MS', '120000')),
+  // Path to Google adb executable (defaults to adb in PATH)
+  ADB_PATH: env('ADB_PATH', 'adb'),
+  // Local scripts folder on host PC
+  SCRIPTS_DIR: resolveScriptsDir(),
+  // Target folder on Android device for videos
+  DOWNLOAD_DIR: env('DEVICE_AGENT_DOWNLOAD_DIR', '/sdcard/DCIM/Camera'),
+  ADB_TIMEOUT_MS: Number(env('DEVICE_AGENT_ADB_TIMEOUT_MS', '60000')),
 };

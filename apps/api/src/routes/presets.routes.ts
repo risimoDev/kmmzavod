@@ -131,6 +131,15 @@ export async function presetRoutes(app: FastifyInstance) {
     });
     if (!product) return reply.code(404).send({ error: 'Product not found' });
 
+    if (body.socialAccountIds && body.socialAccountIds.length > 0) {
+      const validCount = await db.socialAccount.count({
+        where: { id: { in: body.socialAccountIds }, tenantId },
+      });
+      if (validCount !== body.socialAccountIds.length) {
+        return reply.code(400).send({ error: 'BadRequest', message: 'Некоторые социальные аккаунты не принадлежат вашей организации' });
+      }
+    }
+
     const preset = await db.videoPreset.create({
       data: {
         tenantId,
@@ -188,6 +197,15 @@ export async function presetRoutes(app: FastifyInstance) {
     // Don't allow editing active preset without pausing first
     if (existing.status === 'active') {
       return reply.code(409).send({ error: 'Pause the preset before editing' });
+    }
+
+    if (body.socialAccountIds && body.socialAccountIds.length > 0) {
+      const validCount = await db.socialAccount.count({
+        where: { id: { in: body.socialAccountIds }, tenantId },
+      });
+      if (validCount !== body.socialAccountIds.length) {
+        return reply.code(400).send({ error: 'BadRequest', message: 'Некоторые социальные аккаунты не принадлежат вашей организации' });
+      }
     }
 
     const preset = await db.videoPreset.update({

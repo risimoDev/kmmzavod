@@ -292,6 +292,16 @@ export async function videoRoutes(app: FastifyInstance) {
       }
     }
 
+    // Проверяем presetId если передан
+    if (body.presetId) {
+      const preset = await db.videoPreset.findFirst({
+        where: { id: body.presetId, tenantId },
+      });
+      if (!preset) {
+        return reply.code(404).send({ error: 'NotFound', message: 'Пресет не найден' });
+      }
+    }
+
     // Проверяем productId и обогащаем prompt данными продукта
     let enrichedPrompt = body.scriptPrompt;
     if (body.productId) {

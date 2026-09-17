@@ -1,20 +1,7 @@
-/**
- * Client for apps/device-agent — the bridge running on the home PC that talks to
- * Laixi Master (real Android phone farm) over AmneziaWG. See
- * docs/PHONE_FARM_INTEGRATION_PLAN.md.
- *
- * Unlike the private publisher (instagrapi/tiktok-uploader), this path has no
- * session state to persist — the phone's own logged-in app IS the session.
- */
 import axios from 'axios';
 import { config } from '../config';
 
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
-
-export interface DevicePublishResult {
-  ok: boolean;
-  detail?: string;
-}
 
 export interface DeviceProxyConfig {
   host: string;
@@ -54,16 +41,38 @@ export interface ViewTargetResult {
     targetUsername: string;
     scrollCount: number;
     baseWatchSeconds: number;
+    likesGiven?: number;
   };
 }
 
-/** Extract a precise, actionable message from an axios/other error. */
+export interface WbWarmupOptions {
+  deviceId: string;
+  sku: string | number;
+  dwellDurationSeconds?: number;
+  swipePhotos?: boolean;
+  readReviews?: boolean;
+  addToFavorites?: boolean;
+  checkIpFirst?: boolean;
+}
+
+export interface WbWarmupResult {
+  ok: boolean;
+  sku: string;
+  detail?: string;
+  ipCheck?: DeviceIpCheckResult;
+  stats?: {
+    dwellSeconds: number;
+    photosSwiped: number;
+    addedToFavorites: boolean;
+  };
+}
+
 export function describeDeviceAgentError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const code = err.code;
     if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
-      return `device-agent unreachable at ${BASE} (${code}). ` +
-        `Is the AmneziaWG tunnel up and device-agent running on the home PC? See infra/amneziawg/README.md`;
+      return `device-agent недоступен по адресу ${BASE} (${code}). ` +
+        `Убедитесь, что AmneziaWG туннель поднят и device-agent запущен на ПК с фермой телефонов.`;
     }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string; error?: unknown } | string | undefined;
@@ -73,33 +82,9 @@ export function describeDeviceAgentError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export async function checkDeviceAgentHealth(): Promise<string | null> {
-  try {
-    await axios.get(`${BASE}/health`, { timeout: 5_000 });
-    return null;
-  } catch (err: unknown) {
-    return describeDeviceAgentError(err);
-  }
-}
-
-export const deviceAgentService = {
-  async publish(opts: {
-    deviceId: string;
-    platform: 'instagram' | 'tiktok';
-    videoUrl: string;
-    caption: string;
-  }): Promise<DevicePublishResult> {
-    const res = await axios.post(`${BASE}/publish`, {
-      deviceId: opts.deviceId,
-      platform: opts.platform,
-      videoUrl: opts.videoUrl,
-      caption: opts.caption,
-    }, { timeout: 300_000 });
-    return { ok: res.data.ok, detail: res.data.detail };
-  },
-
+export const deviceAgentClient = {
   async listDevices(): Promise<{ ok: boolean; raw?: unknown; proxies?: Record<string, DeviceProxyConfig>; error?: string }> {
-    const res = await axios.get(`${BASE}/devices`, { timeout: 10_000 });
+    const res = await axios.get(`${BASE}/devices`, { timeout: 8_000 });
     return res.data;
   },
 
@@ -107,7 +92,7 @@ export const deviceAgentService = {
     const res = await axios.post(`${BASE}/proxy/set`, {
       deviceId,
       ...proxy,
-    }, { timeout: 20_000 });
+    }, { timeout: 25_000 });
     return res.data;
   },
 
@@ -117,12 +102,17 @@ export const deviceAgentService = {
   },
 
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 15_000 });
+    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 20_000 });
     return res.data;
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {
     const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 360_000 });
+    return res.data;
+  },
+
+  async wbWarmup(opts: WbWarmupOptions): Promise<WbWarmupResult> {
+    const res = await axios.post(`${BASE}/wb/warmup`, opts, { timeout: 360_000 });
     return res.data;
   },
 
@@ -156,4 +146,3 @@ export const deviceAgentService = {
     return res.data;
   },
 };
-

@@ -440,6 +440,23 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'BadRequest', message: 'Source video is not ready for uniquification' });
     }
 
+    // Verify additional source video IDs belong to tenant and are ready
+    if (body.config?.additionalSourceVideoIds && body.config.additionalSourceVideoIds.length > 0) {
+      const count = await db.sourceVideo.count({
+        where: {
+          id: { in: body.config.additionalSourceVideoIds },
+          tenantId,
+          status: 'ready',
+        },
+      });
+      if (count !== body.config.additionalSourceVideoIds.length) {
+        return reply.code(400).send({
+          error: 'BadRequest',
+          message: 'Some additional source videos not found or not ready',
+        });
+      }
+    }
+
     // Create the uniquify job
     const uniquifyJob = await db.uniquifyJob.create({
       data: {
@@ -690,8 +707,11 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       where: { id: { in: body.socialAccountIds }, tenantId, isActive: true },
       select: { id: true, platform: true, accountName: true },
     });
-    if (accounts.length === 0) {
-      return reply.code(400).send({ error: 'BadRequest', message: 'No active social accounts found' });
+    if (accounts.length !== body.socialAccountIds.length) {
+      return reply.code(400).send({
+        error: 'BadRequest',
+        message: 'Some social accounts do not belong to tenant or are inactive',
+      });
     }
 
     // Build variant→account assignments

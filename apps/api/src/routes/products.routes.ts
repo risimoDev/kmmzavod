@@ -256,7 +256,7 @@ export async function productRoutes(app: FastifyInstance) {
     if (stripped.startsWith('http')) {
       try {
         const parsed = new URL(stripped);
-        if (!parsed.hostname.endsWith('wildberries.ru')) {
+        if (parsed.hostname !== 'wildberries.ru' && !parsed.hostname.endsWith('.wildberries.ru')) {
           return reply.code(400).send({ error: 'BadRequest', message: 'Поддерживаются только ссылки с wildberries.ru' });
         }
       } catch {
