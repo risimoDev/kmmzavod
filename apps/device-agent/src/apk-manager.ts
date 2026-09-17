@@ -1,0 +1,225 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import axios from 'axios';
+import type { Logger } from 'pino';
+import { AdbClient } from './adb-client';
+
+export interface BatchInstallOptions {
+  apkUrl: string;
+  targetDeviceIds: string[];
+  reinstall?: boolean;
+  grantPermissions?: boolean;
+}
+
+export interface DeviceInstallResult {
+  deviceId: string;
+  ok: boolean;
+  durationMs: number;
+  output: string;
+  error?: string;
+}
+
+export interface BatchInstallResult {
+  ok: boolean;
+  total: number;
+  successful: number;
+  failed: number;
+  apkSizeMb?: number;
+  results: DeviceInstallResult[];
+}
+
+export interface BatchAppActionOptions {
+  action: 'uninstall' | 'clear-data' | 'force-stop' | 'launch';
+  packageName: string;
+  targetDeviceIds: string[];
+}
+
+export interface BatchAppActionResult {
+  ok: boolean;
+  action: string;
+  packageName: string;
+  total: number;
+  successful: number;
+  failed: number;
+  results: Array<{
+    deviceId: string;
+    ok: boolean;
+    output?: string;
+    error?: string;
+  }>;
+}
+
+export class ApkManager {
+  private cacheDir: string;
+
+  constructor(private readonly logger: Logger) {
+    this.cacheDir = path.join(os.tmpdir(), 'kmmzavod-apks');
+    if (!fs.existsSync(this.cacheDir)) {
+      fs.mkdirSync(this.cacheDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Downloads APK from URL with caching on host PC.
+   * If URL was already downloaded and file exists, reuses local cache.
+   */
+  async downloadCachedApk(apkUrl: string): Promise<{ localPath: string; sizeMb: number }> {
+    const hash = crypto.createHash('sha256').update(apkUrl).digest('hex').slice(0, 16);
+    const fileName = `app_${hash}.apk`;
+    const targetPath = path.join(this.cacheDir, fileName);
+
+    // If already downloaded and valid size (> 100 KB)
+    if (fs.existsSync(targetPath)) {
+      const stats = fs.statSync(targetPath);
+      if (stats.size > 100 * 1024) {
+        const sizeMb = Number((stats.size / (1024 * 1024)).toFixed(2));
+        this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: using cached APK');
+        return { localPath: targetPath, sizeMb };
+      }
+    }
+
+    this.logger.info({ apkUrl, targetPath }, 'apk-manager: downloading APK to host PC');
+    const tempPath = `${targetPath}.tmp_${Date.now()}`;
+
+    const response = await axios({
+      method: 'GET',
+      url: apkUrl,
+      responseType: 'stream',
+      timeout: 300_000, // 5 min timeout for slow mirrors
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+
+    const writer = fs.createWriteStream(tempPath);
+    response.data.pipe(writer);
+
+    await new Promise<void>((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    // Atomic move
+    fs.renameSync(tempPath, targetPath);
+    const finalStats = fs.statSync(targetPath);
+    const sizeMb = Number((finalStats.size / (1024 * 1024)).toFixed(2));
+    this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: APK download complete');
+
+    return { localPath: targetPath, sizeMb };
+  }
+
+  /**
+   * Concurrently installs APK on all specified boards.
+   */
+  async batchInstall(adb: AdbClient, opts: BatchInstallOptions): Promise<BatchInstallResult> {
+    const { apkUrl, targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
+    const targets = Array.from(new Set(targetDeviceIds));
+
+    if (targets.length === 0) {
+      return { ok: false, total: 0, successful: 0, failed: 0, results: [] };
+    }
+
+    // 1. Download / cache APK once
+    const { localPath, sizeMb } = await this.downloadCachedApk(apkUrl);
+
+    // 2. Install concurrently across boards
+    this.logger.info({ targetsCount: targets.length, localPath }, 'apk-manager: starting parallel install');
+
+    const settled = await Promise.allSettled(
+      targets.map(async (serial): Promise<DeviceInstallResult> => {
+        const start = Date.now();
+        try {
+          const res = await adb.installApk(serial, localPath, { reinstall, grantPermissions });
+          return {
+            deviceId: serial,
+            ok: res.ok,
+            durationMs: Date.now() - start,
+            output: res.output,
+            error: res.ok ? undefined : res.output,
+          };
+        } catch (err: any) {
+          return {
+            deviceId: serial,
+            ok: false,
+            durationMs: Date.now() - start,
+            output: '',
+            error: err.message || String(err),
+          };
+        }
+      })
+    );
+
+    const results: DeviceInstallResult[] = settled.map((s, idx) => {
+      if (s.status === 'fulfilled') return s.value;
+      return {
+        deviceId: targets[idx],
+        ok: false,
+        durationMs: 0,
+        output: '',
+        error: s.reason?.message || 'Rejected promise',
+      };
+    });
+
+    const successful = results.filter((r) => r.ok).length;
+    const failed = results.length - successful;
+
+    return {
+      ok: successful > 0,
+      total: targets.length,
+      successful,
+      failed,
+      apkSizeMb: sizeMb,
+      results,
+    };
+  }
+
+  /**
+   * Concurrently runs action (uninstall, clear-data, force-stop, launch) across boards.
+   */
+  async batchAppAction(adb: AdbClient, opts: BatchAppActionOptions): Promise<BatchAppActionResult> {
+    const { action, packageName, targetDeviceIds } = opts;
+    const targets = Array.from(new Set(targetDeviceIds));
+
+    this.logger.info({ action, packageName, targetsCount: targets.length }, 'apk-manager: running batch app action');
+
+    const settled = await Promise.allSettled(
+      targets.map(async (serial) => {
+        switch (action) {
+          case 'uninstall':
+            return adb.uninstallApp(serial, packageName);
+          case 'clear-data':
+            return adb.clearAppData(serial, packageName);
+          case 'force-stop':
+            return adb.stopApp(serial, packageName);
+          case 'launch':
+            await adb.openApp(serial, packageName);
+            return { ok: true, output: 'Launched' };
+          default:
+            throw new Error(`Unknown action: ${action}`);
+        }
+      })
+    );
+
+    const results = settled.map((s, idx) => ({
+      deviceId: targets[idx],
+      ok: s.status === 'fulfilled' && (s.value as any)?.ok !== false,
+      output: s.status === 'fulfilled' ? (s.value as any)?.output : undefined,
+      error: s.status === 'rejected' ? s.reason?.message : (s.status === 'fulfilled' && !(s.value as any)?.ok ? (s.value as any)?.output : undefined),
+    }));
+
+    const successful = results.filter((r) => r.ok).length;
+    const failed = results.length - successful;
+
+    return {
+      ok: successful > 0,
+      action,
+      packageName,
+      total: targets.length,
+      successful,
+      failed,
+      results,
+    };
+  }
+}

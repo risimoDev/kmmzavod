@@ -289,8 +289,13 @@ function generateFingerprint() {
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 export async function accountFarmRoutes(app: FastifyInstance) {
-  // All farm routes require JWT authentication (consistent with the rest of the API)
-  app.addHook('preHandler', app.authenticate);
+  // All farm routes require JWT authentication (except APK download for device-agent over VPN)
+  app.addHook('preHandler', async (request, reply) => {
+    if (request.url.includes('/apks/download')) {
+      return;
+    }
+    await app.authenticate(request, reply);
+  });
 
   // ── Account Groups ─────────────────────────────────────────────────────────
 
@@ -1182,6 +1187,100 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const body = DeviceOpenAppBody.parse(request.body || {});
     try {
       const res = await deviceAgentClient.openApp({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  // ── Batch APK Installation & App Management ────────────────────────────────
+
+  app.post('/apks/upload', async (request, reply) => {
+    const { tenantId } = request.user;
+    const data = await request.file();
+    if (!data) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Файл APK не передан' });
+    }
+
+    const cleanFilename = data.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storageKey = `farm-apks/${tenantId}/${Date.now()}_${cleanFilename}`;
+
+    try {
+      await (app.storage as any).uploadStream(storageKey, data.file, undefined, {
+        contentType: 'application/vnd.android.package-archive',
+      });
+
+      const baseUrl = process.env.DEVICE_AGENT_ACCESSIBLE_API_URL || process.env.PUBLIC_API_URL || 'http://10.66.66.1:3000';
+      const apkUrl = `${baseUrl}/api/v1/farm/apks/download?key=${encodeURIComponent(storageKey)}`;
+
+      return reply.send({
+        ok: true,
+        filename: cleanFilename,
+        storageKey,
+        apkUrl,
+      });
+    } catch (err: any) {
+      logger.error({ err, storageKey }, 'failed to upload APK');
+      return reply.status(500).send({ error: 'UploadFailed', message: err.message });
+    }
+  });
+
+  app.get('/apks/download', async (request, reply) => {
+    const { key } = z.object({ key: z.string().min(1) }).parse(request.query);
+
+    if (!key.startsWith('farm-apks/')) {
+      return reply.status(403).send({ error: 'Forbidden', message: 'Invalid APK key' });
+    }
+
+    try {
+      const stream = await (app.storage as any).client.getObject((app.storage as any).bucket, key);
+      reply.header('content-type', 'application/vnd.android.package-archive');
+      reply.header('content-disposition', `attachment; filename="${key.split('/').pop() || 'app.apk'}"`);
+      return reply.send(stream);
+    } catch (err: any) {
+      logger.error({ err, key }, 'failed to download APK');
+      return reply.status(404).send({ error: 'NotFound', message: 'APK file not found' });
+    }
+  });
+
+  const InstallApkBody = z.object({
+    apkUrl: z.string().url(),
+    targetDeviceIds: z.array(z.string()).min(1),
+    reinstall: z.boolean().default(true),
+    grantPermissions: z.boolean().default(true),
+  });
+
+  app.post('/devices/install-apk', async (request, reply) => {
+    const body = InstallApkBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.installApk(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  const BatchAppActionBody = z.object({
+    action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
+    packageName: z.string().min(1),
+    targetDeviceIds: z.array(z.string()).min(1),
+  });
+
+  app.post('/devices/apps/batch-action', async (request, reply) => {
+    const body = BatchAppActionBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.batchAppAction(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.get('/devices/:deviceId/apps', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const { thirdPartyOnly } = z.object({ thirdPartyOnly: z.enum(['true', 'false']).optional() }).parse(request.query);
+    try {
+      const res = await deviceAgentClient.listApps(deviceId, thirdPartyOnly !== 'false');
       return reply.send(res);
     } catch (err) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });

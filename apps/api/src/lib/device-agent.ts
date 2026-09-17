@@ -201,4 +201,59 @@ export const deviceAgentClient = {
     const res = await axios.post(`${BASE}/device/control/open-app`, opts, { timeout: 15_000 });
     return res.data;
   },
+
+  async installApk(opts: {
+    apkUrl: string;
+    targetDeviceIds: string[];
+    reinstall?: boolean;
+    grantPermissions?: boolean;
+  }): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    apkSizeMb?: number;
+    results: Array<{
+      deviceId: string;
+      ok: boolean;
+      durationMs: number;
+      output: string;
+      error?: string;
+    }>;
+  }> {
+    const res = await axios.post(`${BASE}/device/apps/install`, opts, { timeout: 600_000 });
+    return res.data;
+  },
+
+  async batchAppAction(opts: {
+    action: 'uninstall' | 'clear-data' | 'force-stop' | 'launch';
+    packageName: string;
+    targetDeviceIds: string[];
+  }): Promise<{
+    ok: boolean;
+    action: string;
+    packageName: string;
+    total: number;
+    successful: number;
+    failed: number;
+    results: Array<{
+      deviceId: string;
+      ok: boolean;
+      output?: string;
+      error?: string;
+    }>;
+  }> {
+    const res = await axios.post(`${BASE}/device/apps/batch-action`, opts, { timeout: 120_000 });
+    return res.data;
+  },
+
+  async listApps(deviceId: string, thirdPartyOnly = true): Promise<{
+    ok: boolean;
+    deviceId: string;
+    packages: string[];
+    count: number;
+  }> {
+    const res = await axios.post(`${BASE}/device/apps/list`, { deviceId, thirdPartyOnly }, { timeout: 20_000 });
+    return res.data;
+  },
 };

@@ -993,6 +993,64 @@ function ModalActions({ onCancel, onConfirm, loading, disabled, confirmLabel }: 
 
 // ── Physical Phone Farm (Motherboard Rack) Tab ──────────────────────────────
 
+const APK_PRESETS = [
+  {
+    id: 'autox',
+    name: 'AutoX.js v6.6.3',
+    packageName: 'org.autojs.autoxjs.v6',
+    category: 'Автоматизация действий',
+    description: 'Нативный движок JavaScript для автоматизации тапов, скролла, заполнения форм и сценариев прогрева',
+    url: 'https://github.com/kkevsekk1/AutoX/releases/download/v6.6.3/AutoX-v6.6.3-universal.apk',
+    icon: '⚡',
+    recommended: true,
+  },
+  {
+    id: 'wb',
+    name: 'Wildberries Client',
+    packageName: 'com.wildberries.ru',
+    category: 'E-Commerce / Маркетплейс',
+    description: 'Официальный мобильный клиент WB для поведенческого прогрева товаров, свайпа фото и отзывов',
+    url: 'https://s.apkpure.net/dl?id=com.wildberries.ru',
+    icon: '🛍️',
+  },
+  {
+    id: 'instagram',
+    name: 'Instagram Lite / Official',
+    packageName: 'com.instagram.android',
+    category: 'Социальные сети',
+    description: 'Официальное приложение Instagram для органических публикаций Reels и прогрева аккаунтов',
+    url: 'https://s.apkpure.net/dl?id=com.instagram.android',
+    icon: '📸',
+  },
+  {
+    id: 'tiktok',
+    name: 'TikTok Official',
+    packageName: 'com.zhiliaoapp.musically',
+    category: 'Социальные сети',
+    description: 'Официальный клиент TikTok для постинга и нативного удержания аудитории',
+    url: 'https://s.apkpure.net/dl?id=com.zhiliaoapp.musically',
+    icon: '🎵',
+  },
+  {
+    id: 'proxydroid',
+    name: 'ProxyDroid',
+    packageName: 'net.bldv.proxydroid',
+    category: 'Сетевой менеджмент',
+    description: 'Системный SOCKS5/HTTP роутер для изоляции сетевых соединений каждой платы через отдельный IP',
+    url: 'https://github.com/madeye/proxydroid/releases/download/v3.1.0/ProxyDroid-3.1.0.apk',
+    icon: '🛡️',
+  },
+  {
+    id: 'chrome',
+    name: 'Google Chrome',
+    packageName: 'com.android.chrome',
+    category: 'Браузер',
+    description: 'Браузер для тестирования веб-сайтов, проверки IP (2ip / whoer) и авторизаций',
+    url: 'https://s.apkpure.net/dl?id=com.android.chrome',
+    icon: '🌐',
+  },
+];
+
 function DevicesTab() {
   const [devices, setDevices] = useState<FarmDevice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1063,6 +1121,30 @@ function DevicesTab() {
   const [remoteTextInput, setRemoteTextInput] = useState('');
   const [masterSlaveEnabled, setMasterSlaveEnabled] = useState(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; time: number } | null>(null);
+
+  // Batch APK Installer State
+  const [apkModalOpen, setApkModalOpen] = useState(false);
+  const [apkSourceType, setApkSourceType] = useState<'preset' | 'upload' | 'url'>('preset');
+  const [selectedApkPreset, setSelectedApkPreset] = useState<string>('autox');
+  const [customApkUrl, setCustomApkUrl] = useState('');
+  const [uploadedApkFile, setUploadedApkFile] = useState<File | null>(null);
+  const [apkReinstall, setApkReinstall] = useState(true);
+  const [apkGrantPermissions, setApkGrantPermissions] = useState(true);
+  const [apkTargetMode, setApkTargetMode] = useState<'all' | 'custom'>('all');
+  const [apkSelectedTargets, setApkSelectedTargets] = useState<string[]>([]);
+  const [apkInstalling, setApkInstalling] = useState(false);
+  const [apkInstallProgressMsg, setApkInstallProgressMsg] = useState<string | null>(null);
+  const [apkInstallReport, setApkInstallReport] = useState<any | null>(null);
+
+  // App Manager State
+  const [appManagerModalOpen, setAppManagerModalOpen] = useState(false);
+  const [appManagerDevice, setAppManagerDevice] = useState<string>('');
+  const [appManagerPackages, setAppManagerPackages] = useState<string[]>([]);
+  const [appManagerLoading, setAppManagerLoading] = useState(false);
+  const [appManagerActionLoading, setAppManagerActionLoading] = useState(false);
+  const [appManagerSearch, setAppManagerSearch] = useState('');
+  const [appManagerFeedback, setAppManagerFeedback] = useState<string | null>(null);
+  const [appManagerTargetAll, setAppManagerTargetAll] = useState(true);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -1484,6 +1566,139 @@ function DevicesTab() {
     }
   };
 
+  // ── Batch APK Installer Handlers ──────────────────────────────────────────
+  const handleOpenApkModal = () => {
+    setApkModalOpen(true);
+    setApkInstallReport(null);
+    setApkInstallProgressMsg(null);
+    setApkSelectedTargets(devices.filter((d) => d.online).map((d) => d.deviceId));
+  };
+
+  const handleStartBatchInstall = async () => {
+    const targets = apkTargetMode === 'all'
+      ? devices.filter((d) => d.online).map((d) => d.deviceId)
+      : apkSelectedTargets;
+
+    if (targets.length === 0) {
+      alert('Выберите хотя бы одну онлайн-плату для установки');
+      return;
+    }
+
+    setApkInstalling(true);
+    setApkInstallReport(null);
+
+    try {
+      let finalApkUrl = '';
+
+      if (apkSourceType === 'preset') {
+        const preset = APK_PRESETS.find((p) => p.id === selectedApkPreset);
+        if (!preset?.url) {
+          alert('Не выбран пресет приложения');
+          setApkInstalling(false);
+          return;
+        }
+        finalApkUrl = preset.url;
+      } else if (apkSourceType === 'upload') {
+        if (!uploadedApkFile) {
+          alert('Выберите .apk файл для загрузки');
+          setApkInstalling(false);
+          return;
+        }
+        setApkInstallProgressMsg(`Загрузка файла ${uploadedApkFile.name} на сервер...`);
+        const uploadRes = await accountFarmApi.uploadApk(uploadedApkFile);
+        finalApkUrl = uploadRes.apkUrl;
+      } else {
+        if (!customApkUrl.trim().startsWith('http')) {
+          alert('Введите корректную ссылку на APK (начинающуюся с http:// или https://)');
+          setApkInstalling(false);
+          return;
+        }
+        finalApkUrl = customApkUrl.trim();
+      }
+
+      setApkInstallProgressMsg(`Скачивание APK на хост-ПК и параллельная установка по USB на ${targets.length} плат...`);
+      const report = await accountFarmApi.installApk({
+        apkUrl: finalApkUrl,
+        targetDeviceIds: targets,
+        reinstall: apkReinstall,
+        grantPermissions: apkGrantPermissions,
+      });
+
+      setApkInstallReport(report);
+      setApkInstallProgressMsg(null);
+    } catch (err: any) {
+      alert(`Ошибка пакетной установки: ${err.message}`);
+    } finally {
+      setApkInstalling(false);
+      setApkInstallProgressMsg(null);
+    }
+  };
+
+  // ── App Manager Handlers ──────────────────────────────────────────────────
+  const handleOpenAppManager = async (device?: FarmDevice) => {
+    const targetDev = device || devices.find((d) => d.online) || devices[0];
+    if (targetDev) {
+      setAppManagerDevice(targetDev.deviceId);
+      setAppManagerModalOpen(true);
+      setAppManagerFeedback(null);
+      await handleLoadDeviceApps(targetDev.deviceId);
+    } else {
+      setAppManagerModalOpen(true);
+    }
+  };
+
+  const handleLoadDeviceApps = async (deviceId: string) => {
+    if (!deviceId) return;
+    setAppManagerLoading(true);
+    setAppManagerFeedback(null);
+    try {
+      const res = await accountFarmApi.listDeviceApps(deviceId, true);
+      setAppManagerPackages(res.packages || []);
+    } catch (err: any) {
+      setAppManagerFeedback(`Ошибка сканирования пакетов: ${err.message}`);
+    } finally {
+      setAppManagerLoading(false);
+    }
+  };
+
+  const handleRunAppAction = async (action: 'uninstall' | 'clear-data' | 'force-stop' | 'launch', packageName: string) => {
+    const actionLabels = {
+      'uninstall': 'удалить со всех плат',
+      'clear-data': 'очистить данные и сбросить сессии на всех платах',
+      'force-stop': 'принудительно остановить на всех платах',
+      'launch': 'запустить на всех платах',
+    };
+
+    if (action === 'uninstall' && !confirm(`Вы уверены, что хотите ${actionLabels[action]} пакет ${packageName}?`)) {
+      return;
+    }
+
+    const targets = appManagerTargetAll
+      ? devices.filter((d) => d.online).map((d) => d.deviceId)
+      : [appManagerDevice];
+
+    setAppManagerActionLoading(true);
+    setAppManagerFeedback(null);
+    try {
+      const res = await accountFarmApi.batchAppAction({
+        action,
+        packageName,
+        targetDeviceIds: targets,
+      });
+
+      const succ = res.successful ?? res.results?.filter((r: any) => r.ok).length ?? 0;
+      setAppManagerFeedback(`Действие "${action}" успешно выполнено на ${succ} из ${targets.length} плат`);
+
+      if (action === 'uninstall') {
+        setTimeout(() => handleLoadDeviceApps(appManagerDevice), 1000);
+      }
+    } catch (err: any) {
+      setAppManagerFeedback(`Сбой выполнения: ${err.message}`);
+    } finally {
+      setAppManagerActionLoading(false);
+    }
+  };
+
   if (loading) return <LoadingSpinner size={32} />;
 
   const onlineCount = devices.filter((d) => d.online).length;
@@ -1584,6 +1799,22 @@ function DevicesTab() {
             }}
           >
             🛍️ Прогрев карточки WB
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center gap-1.5 shadow-sm"
+            onClick={handleOpenApkModal}
+          >
+            📦 Пакетная установка APK
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10 flex items-center gap-1.5"
+            onClick={() => handleOpenAppManager()}
+          >
+            📱 Менеджер приложений
           </Button>
           <Button size="sm" variant="ghost" onClick={loadData}>🔄 Обновить</Button>
         </div>
@@ -1778,6 +2009,14 @@ function DevicesTab() {
                     onClick={() => handleHealth(device)}
                   >
                     🩺 Инфо
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] py-1 h-auto text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/10"
+                    onClick={() => handleOpenAppManager(device)}
+                  >
+                    📱 Прил.
                   </Button>
                   <Button
                     size="sm"
@@ -2614,6 +2853,484 @@ function DevicesTab() {
                 onClick={() => {
                   setHealthModalOpen(false);
                   setHealthData(null);
+                }}
+              >
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Batch APK Installer Modal ─────────────────────────────── */}
+      {apkModalOpen && (
+        <Modal
+          title="📦 Пакетная установка APK на стойку плат"
+          maxWidth="max-w-3xl"
+          onClose={() => {
+            if (!apkInstalling) {
+              setApkModalOpen(false);
+              setApkInstallProgressMsg(null);
+            }
+          }}
+        >
+          <div className="space-y-5 text-xs">
+            {/* Source tabs: Presets vs File Upload vs Direct URL */}
+            <div className="space-y-2">
+              <label className="text-[11px] font-semibold text-text-secondary uppercase tracking-wide">
+                1. Выберите источник приложения
+              </label>
+              <div className="grid grid-cols-3 gap-2 p-1 bg-surface-2 rounded-xl border border-border">
+                <button
+                  type="button"
+                  onClick={() => setApkSourceType('preset')}
+                  className={cn(
+                    "py-2 px-3 rounded-lg text-xs font-medium transition-all text-center flex items-center justify-center gap-1.5",
+                    apkSourceType === 'preset'
+                      ? "bg-brand-600 text-white shadow"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  ⚡ Проверенные пресеты
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApkSourceType('upload')}
+                  className={cn(
+                    "py-2 px-3 rounded-lg text-xs font-medium transition-all text-center flex items-center justify-center gap-1.5",
+                    apkSourceType === 'upload'
+                      ? "bg-brand-600 text-white shadow"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  📁 Загрузить файл .apk
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApkSourceType('url')}
+                  className={cn(
+                    "py-2 px-3 rounded-lg text-xs font-medium transition-all text-center flex items-center justify-center gap-1.5",
+                    apkSourceType === 'url'
+                      ? "bg-brand-600 text-white shadow"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  🔗 Прямая ссылка (URL)
+                </button>
+              </div>
+            </div>
+
+            {/* TAB CONTENT */}
+            {apkSourceType === 'preset' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[220px] overflow-y-auto p-1 pr-2">
+                {APK_PRESETS.map((preset) => {
+                  const isSelected = selectedApkPreset === preset.id;
+                  return (
+                    <div
+                      key={preset.id}
+                      onClick={() => setSelectedApkPreset(preset.id)}
+                      className={cn(
+                        "p-3 rounded-xl border cursor-pointer transition-all flex items-start gap-3",
+                        isSelected
+                          ? "bg-brand-500/15 border-brand-500 ring-1 ring-brand-500"
+                          : "bg-surface-2 border-border hover:border-border/80 hover:bg-surface-3"
+                      )}
+                    >
+                      <span className="text-2xl">{preset.icon}</span>
+                      <div className="space-y-1 min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-bold text-text-primary text-xs truncate">{preset.name}</span>
+                          {preset.recommended && (
+                            <Badge variant="success" className="text-[9px] px-1 py-0">★ Топ</Badge>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-brand-400 font-mono truncate">{preset.packageName}</p>
+                        <p className="text-[10px] text-text-tertiary line-clamp-2">{preset.description}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {apkSourceType === 'upload' && (
+              <div className="space-y-2">
+                <div
+                  className={cn(
+                    "p-6 rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 text-center cursor-pointer transition-all",
+                    uploadedApkFile
+                      ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+                      : "border-border hover:border-brand-500/50 hover:bg-surface-2/60 text-text-secondary"
+                  )}
+                  onClick={() => document.getElementById('apk-file-input')?.click()}
+                >
+                  <input
+                    id="apk-file-input"
+                    type="file"
+                    accept=".apk,application/vnd.android.package-archive"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files?.[0]) setUploadedApkFile(e.target.files[0]);
+                    }}
+                  />
+                  <span className="text-3xl">📦</span>
+                  {uploadedApkFile ? (
+                    <div>
+                      <p className="font-bold text-sm text-text-primary">{uploadedApkFile.name}</p>
+                      <p className="text-xs text-emerald-400">
+                        {(uploadedApkFile.size / (1024 * 1024)).toFixed(1)} MB • Готов к отправке
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="font-semibold text-text-primary">Нажмите для выбора .apk файла</p>
+                      <p className="text-[11px] text-text-tertiary">Поддерживаются любые Android APK (до 500 МБ)</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {apkSourceType === 'url' && (
+              <div className="space-y-1.5">
+                <label className="text-text-secondary text-xs">Прямая ссылка на скачивание APK</label>
+                <Input
+                  placeholder="https://.../application.apk"
+                  value={customApkUrl}
+                  onChange={(e) => setCustomApkUrl(e.target.value)}
+                  className="font-mono text-xs"
+                />
+                <p className="text-[10px] text-text-tertiary">
+                  Хост-ПК фермы скачает файл по ссылке один раз и мгновенно раздаст на все платы по USB.
+                </p>
+              </div>
+            )}
+
+            {/* Target devices selector */}
+            <div className="space-y-2 pt-2 border-t border-border">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-semibold text-text-secondary uppercase tracking-wide">
+                  2. Целевые платы стойки
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setApkTargetMode('all')}
+                    className={cn(
+                      "px-2.5 py-1 rounded text-[11px] font-medium transition-all",
+                      apkTargetMode === 'all'
+                        ? "bg-brand-500/20 text-brand-400 border border-brand-500/40"
+                        : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                    )}
+                  >
+                    Все онлайн ({devices.filter((d) => d.online).length} шт)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setApkTargetMode('custom')}
+                    className={cn(
+                      "px-2.5 py-1 rounded text-[11px] font-medium transition-all",
+                      apkTargetMode === 'custom'
+                        ? "bg-brand-500/20 text-brand-400 border border-brand-500/40"
+                        : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                    )}
+                  >
+                    Выбрать платы
+                  </button>
+                </div>
+              </div>
+
+              {apkTargetMode === 'custom' && (
+                <div className="grid grid-cols-4 sm:grid-cols-5 gap-1.5 max-h-[110px] overflow-y-auto p-2 bg-surface-2 rounded-xl border border-border">
+                  {devices.map((d, i) => {
+                    const checked = apkSelectedTargets.includes(d.deviceId);
+                    return (
+                      <label
+                        key={d.deviceId}
+                        className={cn(
+                          "flex items-center gap-1.5 p-1.5 rounded cursor-pointer text-[10px] select-none border transition-all",
+                          checked
+                            ? "bg-brand-500/20 border-brand-500/50 text-brand-300 font-semibold"
+                            : "bg-surface-3/50 border-border/40 text-text-tertiary"
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!d.online}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setApkSelectedTargets((prev) => [...prev, d.deviceId]);
+                            } else {
+                              setApkSelectedTargets((prev) => prev.filter((id) => id !== d.deviceId));
+                            }
+                          }}
+                          className="rounded border-border"
+                        />
+                        <span className="truncate">#{i + 1} {d.online ? '' : '(оффлайн)'}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Install flags */}
+            <div className="flex flex-wrap items-center gap-4 p-3 bg-surface-2 rounded-xl border border-border">
+              <label className="flex items-center gap-2 cursor-pointer text-text-secondary text-xs select-none">
+                <input
+                  type="checkbox"
+                  checked={apkGrantPermissions}
+                  onChange={(e) => setApkGrantPermissions(e.target.checked)}
+                  className="rounded border-border text-brand-500"
+                />
+                <span>Автоматически выдать все системные разрешения (<code className="text-brand-400 font-mono">-g</code>)</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer text-text-secondary text-xs select-none">
+                <input
+                  type="checkbox"
+                  checked={apkReinstall}
+                  onChange={(e) => setApkReinstall(e.target.checked)}
+                  className="rounded border-border text-brand-500"
+                />
+                <span>Переустановить поверх существующей версии (<code className="text-brand-400 font-mono">-r</code>)</span>
+              </label>
+            </div>
+
+            {/* Progress status notification */}
+            {apkInstallProgressMsg && (
+              <div className="p-3 bg-brand-500/15 border border-brand-500/40 rounded-xl text-brand-300 flex items-center gap-2.5 animate-pulse">
+                <LoadingSpinner size={16} />
+                <span className="font-medium">{apkInstallProgressMsg}</span>
+              </div>
+            )}
+
+            {/* Install Report Results */}
+            {apkInstallReport && (
+              <div className="space-y-2 p-3 bg-surface-2 rounded-xl border border-border">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-text-primary">Отчет о пакетной установке:</span>
+                  <div className="flex items-center gap-2 font-mono text-[11px]">
+                    <span className="text-emerald-400 font-bold">✓ Успешно: {apkInstallReport.successful}</span>
+                    <span className="text-text-tertiary">|</span>
+                    <span className={apkInstallReport.failed > 0 ? "text-rose-400 font-bold" : "text-text-tertiary"}>
+                      ❌ Ошибок: {apkInstallReport.failed}
+                    </span>
+                    {apkInstallReport.apkSizeMb && (
+                      <>
+                        <span className="text-text-tertiary">|</span>
+                        <span className="text-brand-400">Размер: {apkInstallReport.apkSizeMb} MB</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 max-h-[140px] overflow-y-auto pr-1">
+                  {apkInstallReport.results?.map((res: any) => (
+                    <div
+                      key={res.deviceId}
+                      className={cn(
+                        "p-2 rounded border text-[10px] space-y-0.5",
+                        res.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                      )}
+                    >
+                      <div className="flex items-center justify-between font-mono">
+                        <span className="font-bold truncate">{res.deviceId}</span>
+                        <span>{res.ok ? '✓' : '❌'}</span>
+                      </div>
+                      <p className="text-[9px] text-text-secondary truncate">
+                        {res.ok ? `${(res.durationMs / 1000).toFixed(1)} сек` : (res.error || 'Сбой')}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Actions Buttons */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={apkInstalling}
+                onClick={() => setApkModalOpen(false)}
+              >
+                Закрыть
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                loading={apkInstalling}
+                onClick={handleStartBatchInstall}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-4"
+              >
+                🚀 Запустить параллельную установку
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── App Manager Modal ─────────────────────────────────────── */}
+      {appManagerModalOpen && (
+        <Modal
+          title="📱 Централизованный менеджер приложений стойки"
+          maxWidth="max-w-3xl"
+          onClose={() => {
+            setAppManagerModalOpen(false);
+            setAppManagerFeedback(null);
+          }}
+        >
+          <div className="space-y-4 text-xs">
+            {/* Top Toolbar: device picker, search, refresh, target switch */}
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+              <div className="sm:col-span-4">
+                <label className="text-[10px] text-text-tertiary block mb-1">Считать приложения с платы:</label>
+                <select
+                  value={appManagerDevice}
+                  onChange={(e) => {
+                    setAppManagerDevice(e.target.value);
+                    handleLoadDeviceApps(e.target.value);
+                  }}
+                  className="w-full bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-brand-500"
+                >
+                  {devices.map((d, i) => (
+                    <option key={d.deviceId} value={d.deviceId} disabled={!d.online}>
+                      Плата #{i + 1} ({d.deviceId}) {d.online ? '' : '— оффлайн'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="sm:col-span-5">
+                <label className="text-[10px] text-text-tertiary block mb-1">Поиск по имени пакета:</label>
+                <Input
+                  placeholder="Фильтр: wildberries, instagram, tiktok..."
+                  value={appManagerSearch}
+                  onChange={(e) => setAppManagerSearch(e.target.value)}
+                  className="text-xs h-8"
+                />
+              </div>
+
+              <div className="sm:col-span-3 flex items-end justify-end h-full pt-4">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={appManagerLoading}
+                  onClick={() => handleLoadDeviceApps(appManagerDevice)}
+                  className="w-full h-8 text-xs"
+                >
+                  🔄 Сканировать
+                </Button>
+              </div>
+            </div>
+
+            {/* Target Scope Switcher */}
+            <div className="flex items-center justify-between p-2.5 bg-surface-2 rounded-xl border border-border">
+              <div className="flex items-center gap-2">
+                <span className="text-text-secondary text-xs">Масштаб применения действий:</span>
+                <Badge variant={appManagerTargetAll ? "success" : "default"} className="text-[10px]">
+                  {appManagerTargetAll ? `Вся стойка (${devices.filter(d => d.online).length} плат)` : 'Только выбранная плата'}
+                </Badge>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer text-text-primary text-xs select-none">
+                <input
+                  type="checkbox"
+                  checked={appManagerTargetAll}
+                  onChange={(e) => setAppManagerTargetAll(e.target.checked)}
+                  className="rounded border-border text-brand-500"
+                />
+                <span>Дублировать действие на все 20 плат</span>
+              </label>
+            </div>
+
+            {/* Feedback alert */}
+            {appManagerFeedback && (
+              <div className="p-2.5 bg-brand-500/10 border border-brand-500/30 rounded-lg text-brand-300 text-xs">
+                {appManagerFeedback}
+              </div>
+            )}
+
+            {/* Packages List */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] text-text-tertiary px-1">
+                <span>Обнаружено сторонних пакетов: {appManagerPackages.length}</span>
+                <span>Быстрые действия на платах</span>
+              </div>
+
+              {appManagerLoading ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-2">
+                  <LoadingSpinner size={24} />
+                  <span className="text-xs text-text-secondary">Считывание списка пакетов через ADB...</span>
+                </div>
+              ) : appManagerPackages.length === 0 ? (
+                <div className="p-8 text-center text-text-secondary bg-surface-2 rounded-xl border border-border">
+                  Сторонние приложения не найдены или плата не отвечает
+                </div>
+              ) : (
+                <div className="max-h-[320px] overflow-y-auto space-y-1.5 pr-1">
+                  {appManagerPackages
+                    .filter((pkg) => !appManagerSearch.trim() || pkg.toLowerCase().includes(appManagerSearch.toLowerCase().trim()))
+                    .map((pkg) => (
+                      <div
+                        key={pkg}
+                        className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-surface-2 border border-border hover:border-brand-500/30 transition-all"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="font-mono text-xs font-semibold text-text-primary truncate">{pkg}</p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-[11px] px-2 text-emerald-400 border-emerald-500/40 hover:bg-emerald-500/10"
+                            disabled={appManagerActionLoading}
+                            onClick={() => handleRunAppAction('launch', pkg)}
+                          >
+                            🚀 Запуск
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-[11px] px-2 text-amber-400 border-amber-500/40 hover:bg-amber-500/10"
+                            disabled={appManagerActionLoading}
+                            onClick={() => handleRunAppAction('force-stop', pkg)}
+                          >
+                            ⏹ Стоп
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-[11px] px-2 text-indigo-300 border-indigo-500/40 hover:bg-indigo-500/10"
+                            disabled={appManagerActionLoading}
+                            onClick={() => handleRunAppAction('clear-data', pkg)}
+                          >
+                            🧹 Сброс
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-[11px] px-2 text-rose-400 hover:bg-rose-500/10"
+                            disabled={appManagerActionLoading}
+                            onClick={() => handleRunAppAction('uninstall', pkg)}
+                          >
+                            🗑️
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-border">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setAppManagerModalOpen(false);
+                  setAppManagerFeedback(null);
                 }}
               >
                 Закрыть

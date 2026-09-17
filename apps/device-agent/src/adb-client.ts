@@ -246,4 +246,82 @@ export class AdbClient {
       y: Math.max(0, Math.min(size.height - 1, resolvedY)),
     };
   }
+
+  /** Install APK file on device. Supports reinstall (-r) and granting all runtime permissions (-g). */
+  async installApk(
+    serial: string,
+    apkPath: string,
+    options: { reinstall?: boolean; grantPermissions?: boolean } = {}
+  ): Promise<{ ok: boolean; output: string }> {
+    const { reinstall = true, grantPermissions = true } = options;
+    const args = ['-s', serial, 'install'];
+    if (reinstall) args.push('-r');
+    if (grantPermissions) args.push('-g');
+    args.push(apkPath);
+
+    this.logger.info({ serial, apkPath, options }, 'adb: installing apk');
+    try {
+      const output = await this.exec(args, 180_000); // 3 min timeout for large APKs
+      const isSuccess = output.includes('Success');
+      return { ok: isSuccess, output };
+    } catch (err: any) {
+      this.logger.error({ serial, apkPath, err: err.message }, 'adb: installApk error');
+      return { ok: false, output: err.message };
+    }
+  }
+
+  /** Uninstall application by package name. */
+  async uninstallApp(serial: string, packageName: string, keepData = false): Promise<{ ok: boolean; output: string }> {
+    const args = ['-s', serial, 'uninstall'];
+    if (keepData) args.push('-k');
+    args.push(packageName);
+
+    this.logger.info({ serial, packageName, keepData }, 'adb: uninstalling app');
+    try {
+      const output = await this.exec(args, 60_000);
+      const isSuccess = output.includes('Success');
+      return { ok: isSuccess, output };
+    } catch (err: any) {
+      return { ok: false, output: err.message };
+    }
+  }
+
+  /** Clear application data and cache (pm clear). Instantly resets app state and sessions. */
+  async clearAppData(serial: string, packageName: string): Promise<{ ok: boolean; output: string }> {
+    try {
+      const output = await this.shell(serial, `pm clear ${packageName}`);
+      const isSuccess = output.includes('Success');
+      return { ok: isSuccess, output };
+    } catch (err: any) {
+      return { ok: false, output: err.message };
+    }
+  }
+
+  /** Force stop application (am force-stop). */
+  async stopApp(serial: string, packageName: string): Promise<{ ok: boolean; output: string }> {
+    try {
+      const output = await this.shell(serial, `am force-stop ${packageName}`);
+      return { ok: true, output };
+    } catch (err: any) {
+      return { ok: false, output: err.message };
+    }
+  }
+
+  /** List installed packages. thirdPartyOnly filters system apps. */
+  async listPackages(serial: string, thirdPartyOnly = true): Promise<string[]> {
+    try {
+      const flag = thirdPartyOnly ? '-3' : '';
+      const raw = await this.shell(serial, `pm list packages ${flag}`);
+      return raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith('package:'))
+        .map((line) => line.slice(8).trim())
+        .filter(Boolean)
+        .sort();
+    } catch (err: any) {
+      this.logger.error({ serial, err: err.message }, 'adb: listPackages error');
+      return [];
+    }
+  }
 }

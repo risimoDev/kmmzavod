@@ -8,11 +8,13 @@ import { ProxyManager } from './proxy-manager';
 import { runViewTarget } from './view-target';
 import { runWbWarmup } from './wb-warmup';
 import { AutoHealManager } from './auto-heal';
+import { ApkManager } from './apk-manager';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const adb = new AdbClient(logger, config.ADB_PATH);
 const proxyManager = new ProxyManager(adb, logger);
 const autoHeal = new AutoHealManager(adb, logger);
+const apkManager = new ApkManager(logger);
 
 const app = Fastify({ logger: false });
 
@@ -531,6 +533,77 @@ app.post('/device/control/open-app', async (req, reply) => {
     const successful = results.filter((r) => r.status === 'fulfilled').length;
     return { ok: true, targetsCount: targets.length, successful };
   } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+// ── Batch APK Installation & App Management ────────────────────────────────
+const InstallApkBody = z.object({
+  apkUrl: z.string().url(),
+  targetDeviceIds: z.array(z.string()).min(1),
+  reinstall: z.boolean().default(true),
+  grantPermissions: z.boolean().default(true),
+});
+
+app.post('/device/apps/install', async (req, reply) => {
+  const parsed = InstallApkBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const result = await apkManager.batchInstall(adb, parsed.data);
+    if (!result.ok && result.successful === 0) reply.code(502);
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/apps/install failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const BatchAppActionBody = z.object({
+  action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
+  packageName: z.string().min(1),
+  targetDeviceIds: z.array(z.string()).min(1),
+});
+
+app.post('/device/apps/batch-action', async (req, reply) => {
+  const parsed = BatchAppActionBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const result = await apkManager.batchAppAction(adb, parsed.data);
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/apps/batch-action failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const ListAppsBody = z.object({
+  deviceId: z.string().min(1),
+  thirdPartyOnly: z.boolean().default(true),
+});
+
+app.post('/device/apps/list', async (req, reply) => {
+  const parsed = ListAppsBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const packages = await adb.listPackages(parsed.data.deviceId, parsed.data.thirdPartyOnly);
+    return { ok: true, deviceId: parsed.data.deviceId, packages, count: packages.length };
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/apps/list failed');
     reply.code(502);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

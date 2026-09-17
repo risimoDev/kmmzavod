@@ -692,6 +692,70 @@ export const accountFarmApi = {
       method: 'POST',
       body: JSON.stringify({ packageName, targetDeviceIds }),
     }),
+
+  uploadApk: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return apiFetch<{ ok: boolean; filename: string; storageKey: string; apkUrl: string }>(
+      '/api/v1/farm/apks/upload',
+      { method: 'POST', body: fd }
+    );
+  },
+
+  installApk: (body: {
+    apkUrl: string;
+    targetDeviceIds: string[];
+    reinstall?: boolean;
+    grantPermissions?: boolean;
+  }) =>
+    apiFetch<{
+      ok: boolean;
+      total: number;
+      successful: number;
+      failed: number;
+      apkSizeMb?: number;
+      results: Array<{
+        deviceId: string;
+        ok: boolean;
+        durationMs: number;
+        output: string;
+        error?: string;
+      }>;
+    }>('/api/v1/farm/devices/install-apk', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  batchAppAction: (body: {
+    action: 'uninstall' | 'clear-data' | 'force-stop' | 'launch';
+    packageName: string;
+    targetDeviceIds: string[];
+  }) =>
+    apiFetch<{
+      ok: boolean;
+      action: string;
+      packageName: string;
+      total: number;
+      successful: number;
+      failed: number;
+      results: Array<{
+        deviceId: string;
+        ok: boolean;
+        output?: string;
+        error?: string;
+      }>;
+    }>('/api/v1/farm/devices/apps/batch-action', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  listDeviceApps: (deviceId: string, thirdPartyOnly = true) =>
+    apiFetch<{
+      ok: boolean;
+      deviceId: string;
+      packages: string[];
+      count: number;
+    }>(`/api/v1/farm/devices/${deviceId}/apps?thirdPartyOnly=${thirdPartyOnly}`),
 };
 
 export interface BoardHealthInfo {
