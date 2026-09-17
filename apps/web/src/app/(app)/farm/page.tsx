@@ -1074,7 +1074,7 @@ function DevicesTab() {
                 platform: linked.platform,
                 healthScore: linked.healthScore,
                 warmupStatus: linked.warmupStatus,
-                warmupCount: linked.warmupCount,
+                warmupCount: linked.warmupCount ?? 0,
               } : null,
             };
           });

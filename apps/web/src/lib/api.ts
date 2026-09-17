@@ -456,6 +456,9 @@ export interface FarmSocialAccount {
   isActive: boolean;
   healthScore: number;
   warmupStatus: string;
+  warmupCount?: number;
+  warmupStartedAt?: string | null;
+  lastWarmupAt?: string | null;
   dailyPostCount: number;
   lastPostAt: string | null;
   shadowBanDetected: boolean;
