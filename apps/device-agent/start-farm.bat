@@ -69,6 +69,20 @@ if errorlevel 1 (
     echo [OK] Интерфейс AmneziaWG активен.
 )
 
+:: 4b. Проверка правила Брандмауэра Windows для порта 8300 (AmneziaWG -> device-agent)
+netsh advfirewall firewall show rule name="DeviceAgent 8300" >nul 2>nul
+if errorlevel 1 (
+    echo Настройка Брандмауэра Windows: открытие порта 8300 для запросов с сервера...
+    netsh advfirewall firewall add rule name="DeviceAgent 8300" dir=in action=allow protocol=TCP localport=8300 >nul 2>nul
+    if errorlevel 1 (
+        echo [СОВЕТ] Если сервер не достучится до 8300, запустите этот bat-файл от имени Администратора для авто-настройки брандмауэра.
+    ) else (
+        echo [OK] Порт 8300 открыт в Брандмауэре Windows.
+    )
+) else (
+    echo [OK] Правило Брандмауэра для порта 8300 активно.
+)
+
 echo.
 echo ================================================================
 echo   ЗАПУСК NATIVE DEVICE-AGENT (ADB CONTROLLER)...

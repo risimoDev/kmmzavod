@@ -814,9 +814,11 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     try {
       farmResult = await deviceAgentClient.listDevices();
     } catch (err) {
+      const errMsg = describeDeviceAgentError(err);
       return reply.status(502).send({
         ok: false,
-        error: describeDeviceAgentError(err),
+        message: errMsg,
+        error: errMsg,
         devices: [],
       });
     }
@@ -841,11 +843,12 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const devices = rawList.map((d: any) => {
       const devId = String(d.deviceid || d.deviceId || d.id || d.serial || '');
       const assigned = accountByDeviceId.get(devId);
+      const isOnline = d.state ? d.state === 'device' : (d.status === 1 || d.is_online === true || d.online === true);
       return {
         deviceId: devId,
         name: d.name || d.device_name || `Плата ${devId.slice(-4)}`,
         model: d.model || 'Android Board',
-        online: d.status === 1 || d.is_online === true || d.online === true || true,
+        online: isOnline,
         assignedAccount: assigned ? {
           id: assigned.id,
           accountName: assigned.accountName,

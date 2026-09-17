@@ -72,7 +72,7 @@ export function describeDeviceAgentError(err: unknown): string {
     const code = err.code;
     if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
       return `device-agent недоступен по адресу ${BASE} (${code}). ` +
-        `Убедитесь, что AmneziaWG туннель поднят и device-agent запущен на ПК с фермой телефонов.`;
+        `Убедитесь, что AmneziaWG туннель поднят, в iptables на сервере включен MASQUERADE для awg0, и device-agent запущен на ПК с фермой телефонов.`;
     }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string; error?: unknown } | string | undefined;

@@ -37,7 +37,7 @@ const schema = z.object({
   VIDEO_PROCESSOR_URL: z.string().url().default('http://localhost:8000'),
   NEXT_PUBLIC_API_URL: z.string().url().default('http://localhost:3000'),
   // Real phone-farm bridge (apps/device-agent), reached over AmneziaWG
-  DEVICE_AGENT_URL: z.string().url().default('http://10.13.13.2:8300'),
+  DEVICE_AGENT_URL: z.string().url().default('http://10.66.66.2:8300'),
   // Frontend URL for OAuth redirects (separate from API URL)
   FRONTEND_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
 

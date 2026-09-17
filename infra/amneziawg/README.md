@@ -36,8 +36,19 @@ sudo bash awg-install.sh
 ```ini
 [Peer]
 PublicKey = <публичный ключ домашнего ПК>
-AllowedIPs = 10.13.13.2/32
+AllowedIPs = 10.66.66.2/32
 ```
+
+Для того чтобы Docker-контейнеры (`api`, `orchestrator`) могли беспрепятственно опрашивать домашний ПК через туннель, в конфиге сервера `/etc/amnezia/amneziawg/awg0.conf` в секции `[Interface]` должны присутствовать правила трансляции:
+```ini
+PostUp = iptables -I FORWARD -o awg0 -j ACCEPT
+PostUp = iptables -I FORWARD -i awg0 -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o awg0 -j MASQUERADE
+PostDown = iptables -D FORWARD -o awg0 -j ACCEPT
+PostDown = iptables -D FORWARD -i awg0 -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o awg0 -j MASQUERADE
+```
+*(Или запустите готовый скрипт: `sudo bash infra/amneziawg/setup-server-routing.sh`)*.
 
 Примените:
 ```bash
@@ -52,21 +63,19 @@ sudo ufw allow <ваш WG порт>/udp   # если ufw активен
    https://github.com/amnezia-vpn/amneziawg-windows-client/releases
 2. Сгенерируйте пару ключей в клиенте (или `awg genkey`/`awg pubkey`),
    пришлите публичный ключ на сервер для `[Peer]` выше.
-3. Импортируйте `client.conf.example` (заполнив `PrivateKey`,
-   `Endpoint = <публичный IP сервера>:<порт>`, `PublicKey` сервера, и те же
-   Jc/Jmin/Jmax/S1/S2/H1-H4, что сервер сгенерировал у себя — они должны
-   **совпадать** на обеих сторонах, это не разные ключи, а общий "магический"
-   обфускатор пакетов).
-4. `AllowedIPs = 10.13.13.1/32` — домашний ПК видит через туннель только
+3. Импортируйте конфиг:
+   - `Address = 10.66.66.2/32`
+   - `Endpoint = <публичный IP сервера>:<порт>`
+   - `PublicKey` сервера и те же Jc/Jmin/Jmax/S1/S2/H1-H4.
+4. `AllowedIPs = 10.66.66.1/32` — домашний ПК видит через туннель только
    сервер, никакого полного VPN.
-5. Нажмите Connect. Проверка: `ping 10.13.13.1` с домашнего ПК,
-   `ping 10.13.13.2` с сервера.
+5. Нажмите Connect. Проверка: `ping 10.66.66.1` с домашнего ПК,
+   `ping 10.66.66.2` с сервера.
 
 ## 3. Дальше
 
-- `apps/device-agent` на домашнем ПК слушает `10.13.13.2:8300` (см.
-  `apps/device-agent/README.md`).
-- В `.env` сервера: `DEVICE_AGENT_URL=http://10.13.13.2:8300`.
-- Файрвол домашнего ПК: разрешить входящие на 8300 **только** с интерфейса
-  AmneziaWG (не с LAN/интернета) — большинство файрволов позволяют
-  ограничить правило конкретным адаптером.
+- `apps/device-agent` на домашнем ПК слушает `10.66.66.2:8300` (запускается через `apps/device-agent/start-farm.bat`).
+- Брандмауэр Windows: `start-farm.bat` автоматически открывает входящий порт 8300.
+- В `.env` сервера: `DEVICE_AGENT_URL=http://10.66.66.2:8300`.
+- Проверка доступности с сервера:
+  `curl http://10.66.66.2:8300/devices`
