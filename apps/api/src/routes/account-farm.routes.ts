@@ -1091,5 +1091,101 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
   });
+
+  // ── Remote Control & Master-Slave Interaction ──────────────────────────────
+
+  const DeviceTapBody = z.object({
+    x: z.number().optional(),
+    y: z.number().optional(),
+    xPercent: z.number().min(0).max(1).optional(),
+    yPercent: z.number().min(0).max(1).optional(),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  const DeviceSwipeBody = z.object({
+    x1: z.number().optional(),
+    y1: z.number().optional(),
+    x2: z.number().optional(),
+    y2: z.number().optional(),
+    x1Percent: z.number().min(0).max(1).optional(),
+    y1Percent: z.number().min(0).max(1).optional(),
+    x2Percent: z.number().min(0).max(1).optional(),
+    y2Percent: z.number().min(0).max(1).optional(),
+    durationMs: z.number().int().min(50).max(5000).default(300),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  const DeviceKeyBody = z.object({
+    key: z.union([
+      z.enum(['home', 'back', 'recents', 'power', 'wake', 'volup', 'voldown']),
+      z.number().int(),
+    ]),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  const DeviceTextBody = z.object({
+    text: z.string(),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  const DeviceOpenAppBody = z.object({
+    packageName: z.string().min(1),
+    targetDeviceIds: z.array(z.string()).optional(),
+  });
+
+  app.post('/devices/:deviceId/tap', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceTapBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.tap({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/swipe', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceSwipeBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.swipe({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/key', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceKeyBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.key({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/text', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceTextBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.text({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/open-app', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceOpenAppBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.openApp({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
 }
 

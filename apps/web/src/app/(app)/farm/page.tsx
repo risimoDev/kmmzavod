@@ -958,13 +958,23 @@ function ErrorRetry({ error, onRetry }: { error: string; onRetry: () => void }) 
   );
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({
+  title,
+  onClose,
+  children,
+  maxWidth = "max-w-lg",
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  maxWidth?: string;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-lg rounded-xl border border-border bg-surface-1 shadow-elevation-3 p-5 space-y-4">
-        <div className="flex items-center justify-between">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+      <div className={cn("w-full rounded-xl border border-border bg-surface-1 shadow-elevation-3 p-5 space-y-4 my-auto", maxWidth)}>
+        <div className="flex items-center justify-between border-b border-border/50 pb-3">
           <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
-          <button onClick={onClose} className="text-text-tertiary hover:text-text-primary">✕</button>
+          <button onClick={onClose} className="text-text-tertiary hover:text-text-primary text-base p-1">✕</button>
         </div>
         <div className="space-y-4">{children}</div>
       </div>
@@ -1041,6 +1051,18 @@ function DevicesTab() {
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthData, setHealthData] = useState<BoardHealthInfo | null>(null);
   const [healing, setHealing] = useState(false);
+
+  // Interactive Live Remote Control State (Master-Slave enabled)
+  const [remoteModalOpen, setRemoteModalOpen] = useState(false);
+  const [remoteLive, setRemoteLive] = useState(true);
+  const [remoteFps, setRemoteFps] = useState<number>(1200);
+  const [remoteScreenData, setRemoteScreenData] = useState<string | null>(null);
+  const [remoteScreenLoading, setRemoteScreenLoading] = useState(false);
+  const [remoteActionLoading, setRemoteActionLoading] = useState(false);
+  const [remoteTouchRipple, setRemoteTouchRipple] = useState<{ x: number; y: number } | null>(null);
+  const [remoteTextInput, setRemoteTextInput] = useState('');
+  const [masterSlaveEnabled, setMasterSlaveEnabled] = useState(false);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number; time: number } | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -1329,6 +1351,139 @@ function DevicesTab() {
     }
   };
 
+  const handleOpenRemote = (device: FarmDevice) => {
+    setSelectedDevice(device);
+    setRemoteModalOpen(true);
+    setRemoteScreenData(null);
+    setRemoteTouchRipple(null);
+    setDragStart(null);
+  };
+
+  const refreshRemoteFrame = useCallback(async () => {
+    if (!selectedDevice) return;
+    setRemoteScreenLoading(true);
+    try {
+      const res = await accountFarmApi.screenshotDevice(selectedDevice.deviceId);
+      if (res.ok && res.data) {
+        const raw = (res.data as any).data || res.data;
+        if (typeof raw === 'string') {
+          const s = raw.trim();
+          setRemoteScreenData(s.startsWith('data:image') || s.startsWith('http') ? s : `data:image/png;base64,${s}`);
+        }
+      }
+    } catch {
+      // silent retry on frame capture
+    } finally {
+      setRemoteScreenLoading(false);
+    }
+  }, [selectedDevice]);
+
+  useEffect(() => {
+    if (!remoteModalOpen || !selectedDevice) return;
+    refreshRemoteFrame();
+    if (!remoteLive) return;
+    const interval = setInterval(refreshRemoteFrame, remoteFps);
+    return () => clearInterval(interval);
+  }, [remoteModalOpen, selectedDevice, remoteLive, remoteFps, refreshRemoteFrame]);
+
+  const getTargetDeviceIds = useCallback(() => {
+    if (!masterSlaveEnabled || !selectedDevice) return undefined;
+    return devices
+      .filter((d) => d.online && d.deviceId !== selectedDevice.deviceId)
+      .map((d) => d.deviceId);
+  }, [masterSlaveEnabled, selectedDevice, devices]);
+
+  const handleRemoteMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const yPercent = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    setDragStart({ x: xPercent, y: yPercent, time: Date.now() });
+  };
+
+  const handleRemoteMouseUp = async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragStart || !selectedDevice) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const yPercent = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+
+    const deltaX = Math.abs(xPercent - dragStart.x);
+    const deltaY = Math.abs(yPercent - dragStart.y);
+    const duration = Math.max(100, Math.min(1500, Date.now() - dragStart.time));
+    const targets = getTargetDeviceIds();
+
+    setDragStart(null);
+
+    if (deltaX < 0.03 && deltaY < 0.03) {
+      setRemoteTouchRipple({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      setTimeout(() => setRemoteTouchRipple(null), 400);
+
+      try {
+        await accountFarmApi.tapDevice(selectedDevice.deviceId, {
+          xPercent: dragStart.x,
+          yPercent: dragStart.y,
+          targetDeviceIds: targets,
+        });
+        setTimeout(refreshRemoteFrame, 250);
+      } catch (err: any) {
+        console.error('Remote tap error:', err);
+      }
+    } else {
+      try {
+        await accountFarmApi.swipeDevice(selectedDevice.deviceId, {
+          x1Percent: dragStart.x,
+          y1Percent: dragStart.y,
+          x2Percent: xPercent,
+          y2Percent: yPercent,
+          durationMs: duration,
+          targetDeviceIds: targets,
+        });
+        setTimeout(refreshRemoteFrame, 350);
+      } catch (err: any) {
+        console.error('Remote swipe error:', err);
+      }
+    }
+  };
+
+  const handleRemoteKey = async (key: 'home' | 'back' | 'recents' | 'power' | 'wake' | 'volup' | 'voldown') => {
+    if (!selectedDevice) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.sendDeviceKey(selectedDevice.deviceId, key, getTargetDeviceIds());
+      setTimeout(refreshRemoteFrame, 250);
+    } catch (err: any) {
+      alert(`Ошибка кнопки: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
+  const handleRemoteSendText = async () => {
+    if (!selectedDevice || !remoteTextInput.trim()) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.sendDeviceText(selectedDevice.deviceId, remoteTextInput.trim(), getTargetDeviceIds());
+      setRemoteTextInput('');
+      setTimeout(refreshRemoteFrame, 300);
+    } catch (err: any) {
+      alert(`Ошибка ввода текста: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
+  const handleRemoteOpenApp = async (pkg: string) => {
+    if (!selectedDevice) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.openDeviceApp(selectedDevice.deviceId, pkg, getTargetDeviceIds());
+      setTimeout(refreshRemoteFrame, 800);
+    } catch (err: any) {
+      alert(`Ошибка открытия приложения: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
   if (loading) return <LoadingSpinner size={32} />;
 
   const onlineCount = devices.filter((d) => d.online).length;
@@ -1587,12 +1742,18 @@ function DevicesTab() {
                       setViewModalOpen(true);
                     }}
                   >
-                    👁 Smart View (Просмотр)
-                  </Button>
                   <Button
                     size="sm"
                     variant="primary"
-                    className="col-span-2 text-[11px] py-1.5 h-auto bg-purple-600 hover:bg-purple-500 text-white"
+                    className="col-span-2 text-[11px] py-1.5 h-auto bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center justify-center gap-1.5 shadow-sm"
+                    onClick={() => handleOpenRemote(device)}
+                  >
+                    🎮 Пульт (Live)
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="col-span-2 text-[11px] py-1.5 h-auto bg-purple-600/20 border-purple-500/40 hover:bg-purple-500/30 text-purple-300"
                     onClick={() => {
                       setSelectedDevice(device);
                       setWbModalOpen(true);
@@ -1603,10 +1764,21 @@ function DevicesTab() {
                   <Button
                     size="sm"
                     variant="outline"
+                    className="col-span-2 text-[11px] py-1.5 h-auto bg-brand-600/20 border-brand-500/40 hover:bg-brand-500/30 text-brand-300"
+                    onClick={() => {
+                      setSelectedDevice(device);
+                      setViewModalOpen(true);
+                    }}
+                  >
+                    👁 Smart View
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
                     className="text-[11px] py-1 h-auto"
                     onClick={() => handleScreenshot(device)}
                   >
-                    📸 Экран
+                    📸 Снимок
                   </Button>
                   <Button
                     size="sm"
@@ -2016,6 +2188,293 @@ function DevicesTab() {
             loading={assignSaving}
             disabled={!assignAccountId}
           />
+        </Modal>
+      )}
+
+      {/* Interactive Live Remote Control Modal (Master-Slave enabled) */}
+      {remoteModalOpen && selectedDevice && (
+        <Modal
+          title={`🎮 Пульт управления (Live): ${selectedDevice.name} (${selectedDevice.deviceId})`}
+          maxWidth="max-w-4xl"
+          onClose={() => {
+            setRemoteModalOpen(false);
+            setRemoteScreenData(null);
+            setRemoteTouchRipple(null);
+            setDragStart(null);
+          }}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+            {/* LEFT: Interactive Phone Screen & Navigation Bar */}
+            <div className="md:col-span-5 flex flex-col items-center">
+              {/* Phone Frame */}
+              <div className="relative w-[280px] sm:w-[300px] aspect-[9/18.5] bg-zinc-950 rounded-[32px] border-4 border-zinc-700 shadow-2xl p-2.5 flex flex-col items-center justify-between overflow-hidden select-none">
+                {/* Top Notch / Speaker */}
+                <div className="w-20 h-3.5 bg-zinc-800 rounded-full mb-1 flex items-center justify-center gap-2 z-10">
+                  <span className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+                  <span className="w-8 h-1 rounded-full bg-zinc-700" />
+                </div>
+
+                {/* Screen Viewport with Mouse Event Handling */}
+                <div
+                  className="relative flex-1 w-full bg-zinc-900 rounded-2xl overflow-hidden flex items-center justify-center cursor-crosshair group select-none border border-zinc-800"
+                  onMouseDown={handleRemoteMouseDown}
+                  onMouseUp={handleRemoteMouseUp}
+                >
+                  {remoteScreenLoading && !remoteScreenData ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <LoadingSpinner size={28} />
+                      <span className="text-[11px] text-zinc-400">Подключение видеопотока...</span>
+                    </div>
+                  ) : remoteScreenData ? (
+                    /* eslint-disable-next-line @next/next/no-img-element */
+                    <img
+                      src={remoteScreenData}
+                      alt="Экран платы"
+                      className="w-full h-full object-contain pointer-events-none select-none"
+                      draggable={false}
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 p-4 text-center">
+                      <span className="text-2xl">📱</span>
+                      <span className="text-xs text-zinc-400">Нажмите «Обновить кадр» для запуска</span>
+                    </div>
+                  )}
+
+                  {/* Touch Ripple Effect */}
+                  {remoteTouchRipple && (
+                    <span
+                      className="absolute w-8 h-8 rounded-full border-2 border-emerald-400 bg-emerald-400/40 pointer-events-none animate-ping -translate-x-1/2 -translate-y-1/2"
+                      style={{ left: `${remoteTouchRipple.x}px`, top: `${remoteTouchRipple.y}px` }}
+                    />
+                  )}
+
+                  {/* Live Status Indicator Badge */}
+                  <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur text-[10px] text-zinc-300 pointer-events-none">
+                    <span className={cn("w-1.5 h-1.5 rounded-full", remoteLive ? "bg-emerald-500 animate-pulse" : "bg-zinc-500")} />
+                    <span>{remoteLive ? "LIVE" : "PAUSED"}</span>
+                  </div>
+                </div>
+
+                {/* Bottom Android Navigation Bar */}
+                <div className="w-full pt-2 flex items-center justify-around px-4 gap-2 z-10">
+                  <button
+                    onClick={() => handleRemoteKey('back')}
+                    disabled={remoteActionLoading}
+                    title="Назад (Back)"
+                    className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white transition-all text-xs font-bold"
+                  >
+                    ◀
+                  </button>
+                  <button
+                    onClick={() => handleRemoteKey('home')}
+                    disabled={remoteActionLoading}
+                    title="Домой (Home)"
+                    className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white transition-all text-xs font-bold"
+                  >
+                    ⏺
+                  </button>
+                  <button
+                    onClick={() => handleRemoteKey('recents')}
+                    disabled={remoteActionLoading}
+                    title="Недавние приложения (Recent Apps)"
+                    className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white transition-all text-xs font-bold"
+                  >
+                    ⏹
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-text-tertiary mt-2 text-center">
+                Клик — касание (tap). Зажатие и протяжка — свайп (swipe).
+              </p>
+            </div>
+
+            {/* RIGHT: Control Hub & Master-Slave Panel */}
+            <div className="md:col-span-7 space-y-4">
+              {/* 1. Master-Slave Synchronization Card */}
+              <div className={cn(
+                "p-4 rounded-xl border transition-all space-y-2",
+                masterSlaveEnabled
+                  ? "border-amber-500/60 bg-amber-500/10 shadow-lg shadow-amber-500/5"
+                  : "border-border bg-surface-2"
+              )}>
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={masterSlaveEnabled}
+                      onChange={(e) => setMasterSlaveEnabled(e.target.checked)}
+                      className="w-4 h-4 rounded text-amber-500 focus:ring-amber-400 border-border bg-surface-3 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-text-primary">
+                      ⚡ Master-Slave Control (Зеркалирование)
+                    </span>
+                  </label>
+                  {masterSlaveEnabled && (
+                    <Badge variant="warning" className="text-[10px] animate-pulse">
+                      Синхронизировано: {devices.filter(d => d.online).length} плат
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-[11px] text-text-secondary">
+                  {masterSlaveEnabled
+                    ? "ВНИМАНИЕ: Все ваши клики, свайпы, ввод текста и нажатия кнопок на этой плате параллельно повторяются на ВСЕХ онлайн-платах стойки!"
+                    : "Включите, чтобы параллельно повторять все действия мастера на всех остальных платах фермы с нормализацией координат."}
+                </p>
+              </div>
+
+              {/* 2. Keyboard Text Input Card */}
+              <div className="p-3.5 rounded-xl border border-border bg-surface-2 space-y-2">
+                <label className="text-xs font-semibold text-text-primary flex items-center justify-between">
+                  <span>⌨️ Синхронный ввод текста</span>
+                  <span className="text-[10px] text-text-tertiary">В активное поле ввода</span>
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Введите текст для отправки на устройство..."
+                    value={remoteTextInput}
+                    onChange={(e) => setRemoteTextInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleRemoteSendText();
+                      }
+                    }}
+                    className="text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={handleRemoteSendText}
+                    loading={remoteActionLoading}
+                    disabled={!remoteTextInput.trim()}
+                    className="whitespace-nowrap bg-indigo-600 hover:bg-indigo-500"
+                  >
+                    Отправить
+                  </Button>
+                </div>
+              </div>
+
+              {/* 3. Quick System Actions */}
+              <div className="p-3.5 rounded-xl border border-border bg-surface-2 space-y-2">
+                <label className="text-xs font-semibold text-text-primary">⚡ Системные горячие клавиши</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px]"
+                    onClick={() => handleRemoteKey('wake')}
+                    disabled={remoteActionLoading}
+                  >
+                    💡 Разбудить
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px]"
+                    onClick={() => handleRemoteKey('power')}
+                    disabled={remoteActionLoading}
+                  >
+                    🔒 Питание
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px]"
+                    onClick={() => handleRemoteKey('volup')}
+                    disabled={remoteActionLoading}
+                  >
+                    🔊 Громкость +
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px]"
+                    onClick={() => handleRemoteKey('voldown')}
+                    disabled={remoteActionLoading}
+                  >
+                    🔉 Громкость -
+                  </Button>
+                </div>
+              </div>
+
+              {/* 4. Fast App Launcher */}
+              <div className="p-3.5 rounded-xl border border-border bg-surface-2 space-y-2">
+                <label className="text-xs font-semibold text-text-primary">🚀 Быстрый запуск приложений</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-purple-500/40 text-purple-400 hover:bg-purple-500/10"
+                    onClick={() => handleRemoteOpenApp('com.wildberries.ru')}
+                    disabled={remoteActionLoading}
+                  >
+                    🛍️ Wildberries
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-pink-500/40 text-pink-400 hover:bg-pink-500/10"
+                    onClick={() => handleRemoteOpenApp('com.instagram.android')}
+                    disabled={remoteActionLoading}
+                  >
+                    📸 Instagram
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-cyan-500/40 text-cyan-400 hover:bg-cyan-500/10"
+                    onClick={() => handleRemoteOpenApp('com.zhiliaoapp.musically')}
+                    disabled={remoteActionLoading}
+                  >
+                    🎵 TikTok
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px]"
+                    onClick={() => handleRemoteOpenApp('com.android.settings')}
+                    disabled={remoteActionLoading}
+                  >
+                    ⚙️ Настройки
+                  </Button>
+                </div>
+              </div>
+
+              {/* 5. Stream Controls Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-3/50 rounded-xl border border-border/60">
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={refreshRemoteFrame}
+                    loading={remoteScreenLoading}
+                    className="text-xs"
+                  >
+                    🔄 Обновить кадр
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={remoteLive ? "secondary" : "outline"}
+                    onClick={() => setRemoteLive(!remoteLive)}
+                    className="text-xs"
+                  >
+                    {remoteLive ? "⏸ Пауза потока" : "▶ Включить Live"}
+                  </Button>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setRemoteModalOpen(false);
+                    setRemoteScreenData(null);
+                  }}
+                >
+                  Закрыть пульт
+                </Button>
+              </div>
+            </div>
+          </div>
         </Modal>
       )}
 

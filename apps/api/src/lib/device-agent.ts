@@ -145,4 +145,60 @@ export const deviceAgentClient = {
     const res = await axios.post(`${BASE}/farm/optimize`, { deviceIds }, { timeout: 30_000 });
     return res.data;
   },
+
+  async tap(opts: {
+    deviceId: string;
+    x?: number;
+    y?: number;
+    xPercent?: number;
+    yPercent?: number;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/tap`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async swipe(opts: {
+    deviceId: string;
+    x1?: number;
+    y1?: number;
+    x2?: number;
+    y2?: number;
+    x1Percent?: number;
+    y1Percent?: number;
+    x2Percent?: number;
+    y2Percent?: number;
+    durationMs?: number;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/swipe`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async key(opts: {
+    deviceId: string;
+    key: 'home' | 'back' | 'recents' | 'power' | 'wake' | 'volup' | 'voldown' | number;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/key`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async text(opts: {
+    deviceId: string;
+    text: string;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/text`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async openApp(opts: {
+    deviceId: string;
+    packageName: string;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/open-app`, opts, { timeout: 15_000 });
+    return res.data;
+  },
 };

@@ -185,22 +185,65 @@ export class AdbClient {
     await this.keyevent(serial, 4);
   }
 
+  /** Press App Switcher / Recent Apps button. */
+  async recents(serial: string): Promise<void> {
+    await this.keyevent(serial, 187);
+  }
+
+  /** Press Power / Lock button. */
+  async power(serial: string): Promise<void> {
+    await this.keyevent(serial, 26);
+  }
+
+  /** Volume Up. */
+  async volumeUp(serial: string): Promise<void> {
+    await this.keyevent(serial, 24);
+  }
+
+  /** Volume Down. */
+  async volumeDown(serial: string): Promise<void> {
+    await this.keyevent(serial, 25);
+  }
+
   /** Reboot board. */
   async reboot(serial: string): Promise<void> {
     await this.exec(['-s', serial, 'reboot']);
   }
 
-  /** Get screen dimensions [width, height]. */
+  private screenSizeCache = new Map<string, { width: number; height: number }>();
+
+  /** Get screen dimensions [width, height] with in-memory caching. */
   async getScreenSize(serial: string): Promise<{ width: number; height: number }> {
+    const cached = this.screenSizeCache.get(serial);
+    if (cached) return cached;
+
     try {
       const out = await this.shell(serial, 'wm size');
       const m = out.match(/Physical size:\s*(\d+)x(\d+)/i) || out.match(/(\d+)x(\d+)/);
       if (m) {
-        return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
+        const size = { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
+        this.screenSizeCache.set(serial, size);
+        return size;
       }
     } catch {
       // ignore
     }
-    return { width: 1080, height: 2400 }; // Standard modern Android resolution fallback
+    const fallback = { width: 1080, height: 2220 }; // Standard Samsung S8+ resolution
+    this.screenSizeCache.set(serial, fallback);
+    return fallback;
+  }
+
+  /** Resolve normalized coordinates (0.0 - 1.0) or absolute pixels against device resolution. */
+  async resolveCoordinates(serial: string, xPercent?: number, yPercent?: number, x?: number, y?: number): Promise<{ x: number; y: number }> {
+    if (x !== undefined && y !== undefined && xPercent === undefined && yPercent === undefined) {
+      return { x: Math.round(x), y: Math.round(y) };
+    }
+    const size = await this.getScreenSize(serial);
+    const resolvedX = xPercent !== undefined ? Math.round(xPercent * size.width) : (x ?? Math.round(size.width / 2));
+    const resolvedY = yPercent !== undefined ? Math.round(yPercent * size.height) : (y ?? Math.round(size.height / 2));
+    return {
+      x: Math.max(0, Math.min(size.width - 1, resolvedX)),
+      y: Math.max(0, Math.min(size.height - 1, resolvedY)),
+    };
   }
 }

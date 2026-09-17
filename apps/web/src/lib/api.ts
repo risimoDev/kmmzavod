@@ -658,6 +658,40 @@ export const accountFarmApi = {
       '/api/v1/farm/devices/optimize-all',
       { method: 'POST', body: JSON.stringify({ deviceIds }) }
     ),
+
+  tapDevice: (deviceId: string, body: { x?: number; y?: number; xPercent?: number; yPercent?: number; targetDeviceIds?: string[] }) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/tap`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  swipeDevice: (deviceId: string, body: {
+    x1?: number; y1?: number; x2?: number; y2?: number;
+    x1Percent?: number; y1Percent?: number; x2Percent?: number; y2Percent?: number;
+    durationMs?: number; targetDeviceIds?: string[];
+  }) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/swipe`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  sendDeviceKey: (deviceId: string, key: 'home' | 'back' | 'recents' | 'power' | 'wake' | 'volup' | 'voldown' | number, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/key`, {
+      method: 'POST',
+      body: JSON.stringify({ key, targetDeviceIds }),
+    }),
+
+  sendDeviceText: (deviceId: string, text: string, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/text`, {
+      method: 'POST',
+      body: JSON.stringify({ text, targetDeviceIds }),
+    }),
+
+  openDeviceApp: (deviceId: string, packageName: string, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/open-app`, {
+      method: 'POST',
+      body: JSON.stringify({ packageName, targetDeviceIds }),
+    }),
 };
 
 export interface BoardHealthInfo {

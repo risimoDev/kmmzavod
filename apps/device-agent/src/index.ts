@@ -334,6 +334,208 @@ app.get('/device/:deviceId/health', async (req, reply) => {
   }
 });
 
+// ── Interactive Remote Control Endpoints (Master-Slave enabled) ─────────────
+
+const TapControlBody = z.object({
+  deviceId: z.string().min(1),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  xPercent: z.number().min(0).max(1).optional(),
+  yPercent: z.number().min(0).max(1).optional(),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/tap', async (req, reply) => {
+  const parsed = TapControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, x, y, xPercent, yPercent, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        const coords = await adb.resolveCoordinates(devId, xPercent, yPercent, x, y);
+        await adb.tap(devId, coords.x, coords.y);
+        return { deviceId: devId, x: coords.x, y: coords.y };
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const SwipeControlBody = z.object({
+  deviceId: z.string().min(1),
+  x1: z.number().optional(),
+  y1: z.number().optional(),
+  x2: z.number().optional(),
+  y2: z.number().optional(),
+  x1Percent: z.number().min(0).max(1).optional(),
+  y1Percent: z.number().min(0).max(1).optional(),
+  x2Percent: z.number().min(0).max(1).optional(),
+  y2Percent: z.number().min(0).max(1).optional(),
+  durationMs: z.number().int().min(50).max(5000).default(300),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/swipe', async (req, reply) => {
+  const parsed = SwipeControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, x1, y1, x2, y2, x1Percent, y1Percent, x2Percent, y2Percent, durationMs, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        const start = await adb.resolveCoordinates(devId, x1Percent, y1Percent, x1, y1);
+        const end = await adb.resolveCoordinates(devId, x2Percent, y2Percent, x2, y2);
+        await adb.swipe(devId, start.x, start.y, end.x, end.y, durationMs);
+        return { deviceId: devId };
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const KeyControlBody = z.object({
+  deviceId: z.string().min(1),
+  key: z.union([
+    z.enum(['home', 'back', 'recents', 'power', 'wake', 'volup', 'voldown']),
+    z.number().int(),
+  ]),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/key', async (req, reply) => {
+  const parsed = KeyControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, key, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        if (typeof key === 'number') {
+          await adb.keyevent(devId, key);
+        } else {
+          switch (key) {
+            case 'home':
+              await adb.home(devId);
+              break;
+            case 'back':
+              await adb.back(devId);
+              break;
+            case 'recents':
+              await adb.recents(devId);
+              break;
+            case 'power':
+              await adb.power(devId);
+              break;
+            case 'wake':
+              await adb.wakeUp(devId);
+              break;
+            case 'volup':
+              await adb.volumeUp(devId);
+              break;
+            case 'voldown':
+              await adb.volumeDown(devId);
+              break;
+          }
+        }
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const TextControlBody = z.object({
+  deviceId: z.string().min(1),
+  text: z.string(),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/text', async (req, reply) => {
+  const parsed = TextControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, text, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        await adb.inputText(devId, text);
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const OpenAppControlBody = z.object({
+  deviceId: z.string().min(1),
+  packageName: z.string().min(1),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/open-app', async (req, reply) => {
+  const parsed = OpenAppControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, packageName, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        await adb.openApp(devId, packageName);
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
 app.listen({ host: config.HOST, port: config.PORT }).then(() => {
   logger.info({ host: config.HOST, port: config.PORT }, 'device-agent: listening (Native ADB Controller over AmneziaWG)');
 }).catch((err) => {
