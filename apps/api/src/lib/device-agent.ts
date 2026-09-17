@@ -256,4 +256,39 @@ export const deviceAgentClient = {
     const res = await axios.post(`${BASE}/device/apps/list`, { deviceId, thirdPartyOnly }, { timeout: 20_000 });
     return res.data;
   },
+
+  async runScript(opts: {
+    engine: 'adb_flow' | 'autojs';
+    steps?: any[];
+    jsCode?: string;
+    targetDeviceIds: string[];
+    variables?: Record<string, string>;
+    scriptName?: string;
+  }): Promise<{
+    ok: boolean;
+    engine: 'adb_flow' | 'autojs';
+    targetsCount: number;
+    successful: number;
+    failed: number;
+    devices: Record<string, {
+      serial: string;
+      ok: boolean;
+      stepsExecuted: number;
+      totalSteps: number;
+      totalDurationMs: number;
+      stepLogs: Array<{
+        stepIndex: number;
+        type: string;
+        description: string;
+        status: 'success' | 'failed' | 'skipped';
+        durationMs: number;
+        error?: string;
+      }>;
+      error?: string;
+    }>;
+  }> {
+    const res = await axios.post(`${BASE}/device/scripts/run`, opts, { timeout: 600_000 });
+    return res.data;
+  },
 };
+

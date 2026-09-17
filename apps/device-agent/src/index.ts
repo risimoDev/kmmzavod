@@ -9,12 +9,14 @@ import { runViewTarget } from './view-target';
 import { runWbWarmup } from './wb-warmup';
 import { AutoHealManager } from './auto-heal';
 import { ApkManager } from './apk-manager';
+import { ScriptEngine } from './script-engine';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const adb = new AdbClient(logger, config.ADB_PATH);
 const proxyManager = new ProxyManager(adb, logger);
 const autoHeal = new AutoHealManager(adb, logger);
 const apkManager = new ApkManager(logger);
+const scriptEngine = new ScriptEngine(logger);
 
 const app = Fastify({ logger: false });
 
@@ -604,6 +606,40 @@ app.post('/device/apps/list', async (req, reply) => {
     return { ok: true, deviceId: parsed.data.deviceId, packages, count: packages.length };
   } catch (err) {
     logger.error({ err }, 'device-agent: /device/apps/list failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+// ── Script & Automation Engine (Native ADB Flow & Auto.js) ───────────────────
+const RunScriptBody = z.object({
+  engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
+  steps: z.array(z.any()).optional(),
+  jsCode: z.string().optional(),
+  targetDeviceIds: z.array(z.string()).min(1),
+  variables: z.record(z.string()).optional(),
+  scriptName: z.string().optional(),
+});
+
+app.post('/device/scripts/run', async (req, reply) => {
+  const parsed = RunScriptBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const result = await scriptEngine.runBatchScript(adb, {
+      engine: parsed.data.engine,
+      steps: parsed.data.steps,
+      jsCode: parsed.data.jsCode,
+      targetDeviceIds: parsed.data.targetDeviceIds,
+      variables: parsed.data.variables,
+      scriptName: parsed.data.scriptName,
+    });
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/scripts/run failed');
     reply.code(502);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

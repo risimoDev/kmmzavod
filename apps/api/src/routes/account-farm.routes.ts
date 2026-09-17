@@ -1286,5 +1286,211 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
   });
+
+  // ── Script Presets, Custom Scripts & Batch Runner ──────────────────────────
+
+  const BUILTIN_PRESETS = [
+    {
+      id: 'wb_organic_warmup',
+      name: '🛍️ Wildberries: Прогрев карточки и избранное',
+      category: 'Wildberries',
+      description: 'Поиск товара по артикулу, просмотр фото, чтение отзывов и добавление в избранное',
+      engine: 'adb_flow',
+      variables: [
+        { key: 'SKU', label: 'Артикул WB (nmId)', defaultValue: '1145510159', required: true },
+        { key: 'DWELL_SEC', label: 'Удержание на странице (сек)', defaultValue: '60', required: false },
+      ],
+      steps: [
+        { type: 'launch', packageName: 'com.wildberries.ru' },
+        { type: 'sleep', durationMs: 4000, jitterMs: 1500 },
+        { type: 'open_url', url: 'https://www.wildberries.ru/catalog/{{SKU}}/detail.aspx', packageName: 'com.wildberries.ru' },
+        { type: 'sleep', durationMs: 3500, jitterMs: 1000 },
+        { type: 'swipe', x1Percent: 0.85, y1Percent: 0.38, x2Percent: 0.15, y2Percent: 0.38, durationMs: 280 },
+        { type: 'sleep', durationMs: 1800, jitterMs: 500 },
+        { type: 'swipe', x1Percent: 0.85, y1Percent: 0.38, x2Percent: 0.15, y2Percent: 0.38, durationMs: 280 },
+        { type: 'sleep', durationMs: 1800, jitterMs: 500 },
+        { type: 'random_scroll', count: 3, direction: 'down', minDelayMs: 900, maxDelayMs: 2200 },
+        { type: 'sleep', durationMs: 2500, jitterMs: 800 },
+        { type: 'tap', xPercent: 0.90, yPercent: 0.08 },
+        { type: 'sleep', durationMs: 2000, jitterMs: 500 },
+        { type: 'random_scroll', count: 2, direction: 'up', minDelayMs: 800, maxDelayMs: 1500 },
+        { type: 'sleep', durationMs: 1500 },
+        { type: 'key', key: 'home' },
+      ],
+    },
+    {
+      id: 'instagram_reels_warmup',
+      name: '📸 Instagram: Органический скролл Reels',
+      category: 'Instagram',
+      description: 'Вход в ленту Reels, просмотр видео с органическими паузами и лайками',
+      engine: 'adb_flow',
+      variables: [
+        { key: 'ROUNDS', label: 'Количество роликов', defaultValue: '5', required: false },
+      ],
+      steps: [
+        { type: 'launch', packageName: 'com.instagram.android' },
+        { type: 'sleep', durationMs: 4000, jitterMs: 1500 },
+        { type: 'tap', xPercent: 0.50, yPercent: 0.95 },
+        { type: 'sleep', durationMs: 7000, jitterMs: 3000 },
+        { type: 'random_scroll', count: 1, direction: 'down', minDelayMs: 1200, maxDelayMs: 2000 },
+        { type: 'sleep', durationMs: 8000, jitterMs: 4000 },
+        { type: 'tap', xPercent: 0.92, yPercent: 0.65 },
+        { type: 'sleep', durationMs: 2500 },
+        { type: 'random_scroll', count: 1, direction: 'down', minDelayMs: 1000, maxDelayMs: 2000 },
+        { type: 'sleep', durationMs: 9000, jitterMs: 3000 },
+        { type: 'key', key: 'home' },
+      ],
+    },
+    {
+      id: 'tiktok_foryou_scroller',
+      name: '🎵 TikTok: Скролл ленты For You',
+      category: 'TikTok',
+      description: 'Просмотр рекомендованных видео в TikTok с органическими паузами и свайпами',
+      engine: 'adb_flow',
+      variables: [
+        { key: 'ROUNDS', label: 'Количество роликов', defaultValue: '4', required: false },
+      ],
+      steps: [
+        { type: 'launch', packageName: 'com.zhiliaoapp.musically' },
+        { type: 'sleep', durationMs: 4500, jitterMs: 1500 },
+        { type: 'sleep', durationMs: 6000, jitterMs: 3000 },
+        { type: 'random_scroll', count: 1, direction: 'down', minDelayMs: 1200, maxDelayMs: 2500 },
+        { type: 'sleep', durationMs: 8000, jitterMs: 4000 },
+        { type: 'random_scroll', count: 1, direction: 'down', minDelayMs: 1200, maxDelayMs: 2500 },
+        { type: 'sleep', durationMs: 7000, jitterMs: 3000 },
+        { type: 'key', key: 'home' },
+      ],
+    },
+    {
+      id: 'deep_clean_reset',
+      name: '🧹 Глубокая очистка сессий и сброс',
+      category: 'Система',
+      description: 'Сброс кеша и данных приложений (Wildberries, Instagram, TikTok) и возврат на рабочий стол',
+      engine: 'adb_flow',
+      variables: [],
+      steps: [
+        { type: 'clear_data', packageName: 'com.wildberries.ru' },
+        { type: 'clear_data', packageName: 'com.instagram.android' },
+        { type: 'clear_data', packageName: 'com.zhiliaoapp.musically' },
+        { type: 'sleep', durationMs: 1000 },
+        { type: 'key', key: 'home' },
+      ],
+    },
+    {
+      id: 'autox_diagnostics',
+      name: '⚡ AutoX.js: Тест службы автоматизации',
+      category: 'Auto.js',
+      description: 'Проверка работы движка Auto.js / AutoX.js на физической плате через JavaScript',
+      engine: 'autojs',
+      variables: [],
+      jsCode: `// AutoX.js Diagnostics Script\ntoast("KMM Zavod AutoX.js Test Passed!");\nlog("Device automation engine is alive on: " + device.model);\nsleep(1500);\nhome();`,
+    },
+  ];
+
+  app.get('/scripts/presets', async (_request, reply) => {
+    return reply.send({ ok: true, presets: BUILTIN_PRESETS });
+  });
+
+  app.get('/scripts', async (request, reply) => {
+    const { tenantId } = request.user;
+    const redis = getRedis();
+    const key = `kmmzavod:scripts:${tenantId}`;
+    try {
+      const raw = await redis.get(key);
+      const scripts = raw ? JSON.parse(raw) : [];
+      return reply.send({ ok: true, scripts });
+    } catch {
+      return reply.send({ ok: true, scripts: [] });
+    }
+  });
+
+  const SaveScriptBody = z.object({
+    id: z.string().optional(),
+    name: z.string().min(1).max(200),
+    category: z.string().max(100).default('Пользовательские'),
+    description: z.string().max(1000).optional(),
+    engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
+    steps: z.array(z.any()).optional(),
+    jsCode: z.string().optional(),
+    variables: z.array(z.object({
+      key: z.string(),
+      label: z.string(),
+      defaultValue: z.string().optional(),
+      required: z.boolean().optional(),
+    })).optional(),
+  });
+
+  app.post('/scripts', async (request, reply) => {
+    const { tenantId } = request.user;
+    const body = SaveScriptBody.parse(request.body || {});
+    const redis = getRedis();
+    const key = `kmmzavod:scripts:${tenantId}`;
+
+    let scripts: any[] = [];
+    try {
+      const raw = await redis.get(key);
+      if (raw) scripts = JSON.parse(raw);
+    } catch {
+      scripts = [];
+    }
+
+    const scriptId = body.id || randomUUID();
+    const existingIndex = scripts.findIndex((s) => s.id === scriptId);
+
+    const scriptRecord = {
+      ...body,
+      id: scriptId,
+      updatedAt: new Date().toISOString(),
+      createdAt: existingIndex >= 0 ? scripts[existingIndex].createdAt : new Date().toISOString(),
+    };
+
+    if (existingIndex >= 0) {
+      scripts[existingIndex] = scriptRecord;
+    } else {
+      scripts.unshift(scriptRecord);
+    }
+
+    await redis.set(key, JSON.stringify(scripts));
+    return reply.send({ ok: true, script: scriptRecord });
+  });
+
+  app.delete('/scripts/:id', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const redis = getRedis();
+    const key = `kmmzavod:scripts:${tenantId}`;
+
+    try {
+      const raw = await redis.get(key);
+      if (raw) {
+        let scripts: any[] = JSON.parse(raw);
+        scripts = scripts.filter((s) => s.id !== id);
+        await redis.set(key, JSON.stringify(scripts));
+      }
+      return reply.send({ ok: true, deleted: true, id });
+    } catch (err: any) {
+      return reply.status(500).send({ error: 'DeleteFailed', message: err.message });
+    }
+  });
+
+  const RunScriptDispatchBody = z.object({
+    engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
+    steps: z.array(z.any()).optional(),
+    jsCode: z.string().optional(),
+    targetDeviceIds: z.array(z.string()).min(1),
+    variables: z.record(z.string()).optional(),
+    scriptName: z.string().optional(),
+  });
+
+  app.post('/devices/scripts/run', async (request, reply) => {
+    const body = RunScriptDispatchBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.runScript(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
 }
+
 

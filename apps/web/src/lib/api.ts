@@ -756,7 +756,97 @@ export const accountFarmApi = {
       packages: string[];
       count: number;
     }>(`/api/v1/farm/devices/${deviceId}/apps?thirdPartyOnly=${thirdPartyOnly}`),
+
+  listScriptPresets: () =>
+    apiFetch<{ ok: boolean; presets: FarmScriptPreset[] }>('/api/v1/farm/scripts/presets'),
+
+  listCustomScripts: () =>
+    apiFetch<{ ok: boolean; scripts: CustomFarmScript[] }>('/api/v1/farm/scripts'),
+
+  saveCustomScript: (body: Partial<CustomFarmScript>) =>
+    apiFetch<{ ok: boolean; script: CustomFarmScript }>('/api/v1/farm/scripts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteCustomScript: (id: string) =>
+    apiFetch<{ ok: boolean; deleted: boolean; id: string }>(`/api/v1/farm/scripts/${id}`, {
+      method: 'DELETE',
+    }),
+
+  runFarmScript: (body: {
+    engine: 'adb_flow' | 'autojs';
+    steps?: FlowStep[];
+    jsCode?: string;
+    targetDeviceIds: string[];
+    variables?: Record<string, string>;
+    scriptName?: string;
+  }) =>
+    apiFetch<RunScriptBatchResult>('/api/v1/farm/devices/scripts/run', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
+
+export interface FlowStep {
+  type: 'launch' | 'sleep' | 'tap' | 'swipe' | 'random_scroll' | 'text' | 'key' | 'clear_data' | 'stop_app' | 'open_url' | 'shell';
+  [key: string]: any;
+}
+
+export interface ScriptVariable {
+  key: string;
+  label: string;
+  defaultValue?: string;
+  required?: boolean;
+}
+
+export interface FarmScriptPreset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  engine: 'adb_flow' | 'autojs';
+  variables: ScriptVariable[];
+  steps?: FlowStep[];
+  jsCode?: string;
+}
+
+export interface CustomFarmScript {
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+  engine: 'adb_flow' | 'autojs';
+  steps?: FlowStep[];
+  jsCode?: string;
+  variables?: ScriptVariable[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RunScriptBatchResult {
+  ok: boolean;
+  engine: 'adb_flow' | 'autojs';
+  targetsCount: number;
+  successful: number;
+  failed: number;
+  devices: Record<string, {
+    serial: string;
+    ok: boolean;
+    stepsExecuted: number;
+    totalSteps: number;
+    totalDurationMs: number;
+    stepLogs: Array<{
+      stepIndex: number;
+      type: string;
+      description: string;
+      status: 'success' | 'failed' | 'skipped';
+      durationMs: number;
+      error?: string;
+    }>;
+    error?: string;
+  }>;
+}
 
 export interface BoardHealthInfo {
   deviceId: string;

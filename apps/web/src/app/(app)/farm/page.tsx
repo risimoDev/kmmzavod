@@ -26,6 +26,10 @@ import {
   type DeviceIpCheck,
   type BoardHealthInfo,
   type WbWarmupResponse,
+  type FarmScriptPreset,
+  type CustomFarmScript,
+  type FlowStep,
+  type RunScriptBatchResult,
 } from "@/lib/api";
 
 const TABS = [
@@ -1146,6 +1150,44 @@ function DevicesTab() {
   const [appManagerFeedback, setAppManagerFeedback] = useState<string | null>(null);
   const [appManagerTargetAll, setAppManagerTargetAll] = useState(true);
 
+  // ── Automation Studio (Stage 3) State ──────────────────────────────────────
+  const [scriptModalOpen, setScriptModalOpen] = useState(false);
+  const [scriptActiveTab, setScriptActiveTab] = useState<'presets' | 'flow' | 'autojs' | 'saved'>('presets');
+  const [scriptPresets, setScriptPresets] = useState<FarmScriptPreset[]>([]);
+  const [customScripts, setCustomScripts] = useState<CustomFarmScript[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<FarmScriptPreset | null>(null);
+  const [presetVars, setPresetVars] = useState<Record<string, string>>({});
+
+  // Target boards for script execution
+  const [scriptTargetMode, setScriptTargetMode] = useState<'all' | 'custom'>('all');
+  const [scriptSelectedTargets, setScriptSelectedTargets] = useState<string[]>([]);
+
+  // Flow builder state
+  const [flowSteps, setFlowSteps] = useState<FlowStep[]>([
+    { type: 'launch', packageName: 'com.wildberries.ru' },
+    { type: 'sleep', durationMs: 3000, jitterMs: 1000 },
+    { type: 'random_scroll', count: 3, direction: 'down' },
+    { type: 'key', key: 'home' },
+  ]);
+
+  // Auto.js code editor state
+  const [autoJsCode, setAutoJsCode] = useState<string>(
+    `// Скрипт автоматизации AutoX.js для физической платы\nconsole.log("Запуск скрипта на плате: " + device.model);\ntoast("Запуск скрипта KMM Zavod");\n\n// Органический скролл ленты\nfor (let i = 0; i < 3; i++) {\n    scrollDown();\n    sleep(2000 + random(500, 1500));\n}\n\nhome();\ntoast("Сценарий успешно завершен!");`
+  );
+  const [autoJsScriptName, setAutoJsScriptName] = useState<string>('macro.js');
+
+  // Execution & Live Logs
+  const [scriptRunning, setScriptRunning] = useState(false);
+  const [scriptProgressMsg, setScriptProgressMsg] = useState<string | null>(null);
+  const [scriptBatchResult, setScriptBatchResult] = useState<RunScriptBatchResult | null>(null);
+  const [expandedLogBoard, setExpandedLogBoard] = useState<string | null>(null);
+
+  // Custom script saving form
+  const [saveScriptName, setSaveScriptName] = useState('');
+  const [saveScriptCategory, setSaveScriptCategory] = useState('Пользовательские');
+  const [saveScriptDesc, setSaveScriptDesc] = useState('');
+  const [saveScriptSuccessMsg, setSaveScriptSuccessMsg] = useState<string | null>(null);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -1699,6 +1741,204 @@ function DevicesTab() {
     }
   };
 
+  // ── Automation Studio Handlers ────────────────────────────────────────────
+  const handleOpenScriptModal = async () => {
+    setScriptModalOpen(true);
+    setScriptBatchResult(null);
+    setScriptProgressMsg(null);
+    setSaveScriptSuccessMsg(null);
+    setScriptSelectedTargets(devices.filter((d) => d.online).map((d) => d.deviceId));
+
+    try {
+      const [presetsRes, customRes] = await Promise.allSettled([
+        accountFarmApi.listScriptPresets(),
+        accountFarmApi.listCustomScripts(),
+      ]);
+
+      if (presetsRes.status === 'fulfilled' && presetsRes.value.ok) {
+        setScriptPresets(presetsRes.value.presets);
+        if (!selectedPreset && presetsRes.value.presets.length > 0) {
+          const first = presetsRes.value.presets[0];
+          setSelectedPreset(first);
+          const initialVars: Record<string, string> = {};
+          first.variables.forEach((v) => {
+            initialVars[v.key] = v.defaultValue || '';
+          });
+          setPresetVars(initialVars);
+        }
+      }
+
+      if (customRes.status === 'fulfilled' && customRes.value.ok) {
+        setCustomScripts(customRes.value.scripts);
+      }
+    } catch (err: any) {
+      console.error('Failed to load scripts data:', err);
+    }
+  };
+
+  const handleSelectPreset = (preset: FarmScriptPreset) => {
+    setSelectedPreset(preset);
+    const initialVars: Record<string, string> = {};
+    preset.variables.forEach((v) => {
+      initialVars[v.key] = v.defaultValue || '';
+    });
+    setPresetVars(initialVars);
+  };
+
+  const getScriptTargets = (): string[] => {
+    if (scriptTargetMode === 'all') {
+      return devices.filter((d) => d.online).map((d) => d.deviceId);
+    }
+    return scriptSelectedTargets;
+  };
+
+  const handleRunPreset = async () => {
+    if (!selectedPreset) return;
+    const targets = getScriptTargets();
+    if (targets.length === 0) {
+      alert('Выберите хотя бы одну онлайн-плату для запуска');
+      return;
+    }
+
+    setScriptRunning(true);
+    setScriptBatchResult(null);
+    setScriptProgressMsg(`Запуск пресета "${selectedPreset.name}" на ${targets.length} платах...`);
+
+    try {
+      const res = await accountFarmApi.runFarmScript({
+        engine: selectedPreset.engine,
+        steps: selectedPreset.steps,
+        jsCode: selectedPreset.jsCode,
+        targetDeviceIds: targets,
+        variables: presetVars,
+        scriptName: `${selectedPreset.id}.js`,
+      });
+
+      setScriptBatchResult(res);
+      setScriptProgressMsg(
+        `Завершено! Успешно: ${res.successful} из ${res.targetsCount} плат.`
+      );
+    } catch (err: any) {
+      setScriptProgressMsg(`Ошибка выполнения пресета: ${err.message}`);
+    } finally {
+      setScriptRunning(false);
+    }
+  };
+
+  const handleRunFlow = async () => {
+    const targets = getScriptTargets();
+    if (targets.length === 0) {
+      alert('Выберите хотя бы одну онлайн-плату для запуска');
+      return;
+    }
+    if (flowSteps.length === 0) {
+      alert('Добавьте хотя бы один шаг в конструктор');
+      return;
+    }
+
+    setScriptRunning(true);
+    setScriptBatchResult(null);
+    setScriptProgressMsg(`Выполнение цепочки из ${flowSteps.length} шагов на ${targets.length} платах...`);
+
+    try {
+      const res = await accountFarmApi.runFarmScript({
+        engine: 'adb_flow',
+        steps: flowSteps,
+        targetDeviceIds: targets,
+      });
+
+      setScriptBatchResult(res);
+      setScriptProgressMsg(
+        `Цепочка завершена! Успешно: ${res.successful} из ${res.targetsCount} плат.`
+      );
+    } catch (err: any) {
+      setScriptProgressMsg(`Ошибка выполнения цепочки: ${err.message}`);
+    } finally {
+      setScriptRunning(false);
+    }
+  };
+
+  const handleRunAutoJs = async () => {
+    const targets = getScriptTargets();
+    if (targets.length === 0) {
+      alert('Выберите хотя бы одну онлайн-плату для запуска');
+      return;
+    }
+    if (!autoJsCode.trim()) {
+      alert('Введите JavaScript код для выполнения');
+      return;
+    }
+
+    setScriptRunning(true);
+    setScriptBatchResult(null);
+    setScriptProgressMsg(`Отправка и запуск AutoX.js скрипта на ${targets.length} платах...`);
+
+    try {
+      const res = await accountFarmApi.runFarmScript({
+        engine: 'autojs',
+        jsCode: autoJsCode,
+        scriptName: autoJsScriptName || 'macro.js',
+        targetDeviceIds: targets,
+      });
+
+      setScriptBatchResult(res);
+      setScriptProgressMsg(
+        `AutoX.js скрипт запущен! Успешно: ${res.successful} из ${res.targetsCount} плат.`
+      );
+    } catch (err: any) {
+      setScriptProgressMsg(`Ошибка запуска AutoX.js: ${err.message}`);
+    } finally {
+      setScriptRunning(false);
+    }
+  };
+
+  const handleSaveFlowAsCustom = async () => {
+    if (!saveScriptName.trim()) {
+      alert('Введите название для сохранения сценария');
+      return;
+    }
+    try {
+      const res = await accountFarmApi.saveCustomScript({
+        name: saveScriptName.trim(),
+        category: saveScriptCategory || 'Пользовательские',
+        description: saveScriptDesc,
+        engine: scriptActiveTab === 'autojs' ? 'autojs' : 'adb_flow',
+        steps: scriptActiveTab === 'autojs' ? undefined : flowSteps,
+        jsCode: scriptActiveTab === 'autojs' ? autoJsCode : undefined,
+      });
+
+      setSaveScriptSuccessMsg(`Сценарий "${res.script.name}" успешно сохранен!`);
+      setSaveScriptName('');
+      setSaveScriptDesc('');
+      const updated = await accountFarmApi.listCustomScripts();
+      if (updated.ok) setCustomScripts(updated.scripts);
+    } catch (err: any) {
+      alert(`Ошибка сохранения: ${err.message}`);
+    }
+  };
+
+  const handleDeleteCustomScript = async (id: string) => {
+    if (!confirm('Удалить этот пользовательский сценарий?')) return;
+    try {
+      await accountFarmApi.deleteCustomScript(id);
+      setCustomScripts((prev) => prev.filter((s) => s.id !== id));
+    } catch (err: any) {
+      alert(`Ошибка удаления: ${err.message}`);
+    }
+  };
+
+  const handleLoadCustomScript = (script: CustomFarmScript) => {
+    if (script.engine === 'autojs') {
+      setAutoJsCode(script.jsCode || '');
+      setScriptActiveTab('autojs');
+    } else {
+      if (script.steps && script.steps.length > 0) {
+        setFlowSteps(script.steps);
+      }
+      setScriptActiveTab('flow');
+    }
+  };
+
   if (loading) return <LoadingSpinner size={32} />;
 
   const onlineCount = devices.filter((d) => d.online).length;
@@ -1815,6 +2055,14 @@ function DevicesTab() {
             onClick={() => handleOpenAppManager()}
           >
             📱 Менеджер приложений
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            className="bg-amber-600 hover:bg-amber-500 text-white font-semibold flex items-center gap-1.5 shadow-sm"
+            onClick={handleOpenScriptModal}
+          >
+            🤖 Сценарии и Автоматизация
           </Button>
           <Button size="sm" variant="ghost" onClick={loadData}>🔄 Обновить</Button>
         </div>
@@ -3332,6 +3580,820 @@ function DevicesTab() {
                   setAppManagerModalOpen(false);
                   setAppManagerFeedback(null);
                 }}
+              >
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Automation Studio Modal (Stage 3) ─────────────────────────────────── */}
+      {scriptModalOpen && (
+        <Modal
+          title="🤖 Студия автоматизации и сценариев (Automation Studio)"
+          maxWidth="max-w-4xl"
+          onClose={() => {
+            if (scriptRunning) return;
+            setScriptModalOpen(false);
+          }}
+        >
+          <div className="space-y-4">
+            {/* Top Engine & Mode Selector Tabs */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-3">
+              <div className="flex gap-1.5 p-1 bg-surface-2 rounded-lg border border-border/50">
+                <button
+                  type="button"
+                  onClick={() => setScriptActiveTab('presets')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    scriptActiveTab === 'presets'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>⚡ Готовые сценарии</span>
+                  <Badge variant="outline" className="text-[10px] px-1 py-0">{scriptPresets.length}</Badge>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScriptActiveTab('flow')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    scriptActiveTab === 'flow'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>🧩 Конструктор шагов (Flow)</span>
+                  <Badge variant="outline" className="text-[10px] px-1 py-0">{flowSteps.length}</Badge>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScriptActiveTab('autojs')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    scriptActiveTab === 'autojs'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>💻 Редактор Auto.js (JS)</span>
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1 rounded font-mono">JS</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScriptActiveTab('saved')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5",
+                    scriptActiveTab === 'saved'
+                      ? "bg-brand-500 text-white shadow-sm"
+                      : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                  )}
+                >
+                  <span>📁 Мои сценарии</span>
+                  <Badge variant="outline" className="text-[10px] px-1 py-0">{customScripts.length}</Badge>
+                </button>
+              </div>
+
+              {/* Target Devices Selection */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-text-tertiary">Цель:</span>
+                <select
+                  value={scriptTargetMode}
+                  onChange={(e) => setScriptTargetMode(e.target.value as any)}
+                  className="bg-surface-2 border border-border rounded-lg text-xs px-2.5 py-1 text-text-primary font-medium focus:outline-none focus:ring-1 focus:ring-brand-500"
+                >
+                  <option value="all">Вся стойка (20 плат)</option>
+                  <option value="custom">Выбранные платы ({scriptSelectedTargets.length})</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Custom Boards Selector (if custom target mode selected) */}
+            {scriptTargetMode === 'custom' && (
+              <div className="p-3 bg-surface-2/60 rounded-xl border border-border/80 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-secondary font-medium">Выберите целевые платы для запуска:</span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      className="text-[11px] text-brand-400 hover:underline"
+                      onClick={() => setScriptSelectedTargets(devices.filter((d) => d.online).map((d) => d.deviceId))}
+                    >
+                      Выбрать все онлайн
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[11px] text-text-tertiary hover:underline"
+                      onClick={() => setScriptSelectedTargets([])}
+                    >
+                      Снять выбор
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-2 max-h-28 overflow-y-auto pr-1">
+                  {devices.map((d) => (
+                    <label
+                      key={d.deviceId}
+                      className={cn(
+                        "flex items-center gap-1.5 p-1.5 rounded border text-[11px] cursor-pointer font-mono select-none transition-colors",
+                        scriptSelectedTargets.includes(d.deviceId)
+                          ? "bg-brand-500/15 border-brand-500/50 text-text-primary"
+                          : "bg-surface-3/50 border-border text-text-tertiary hover:border-border-hover"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={scriptSelectedTargets.includes(d.deviceId)}
+                        disabled={!d.online}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setScriptSelectedTargets((prev) => [...prev, d.deviceId]);
+                          } else {
+                            setScriptSelectedTargets((prev) => prev.filter((id) => id !== d.deviceId));
+                          }
+                        }}
+                        className="rounded border-border text-brand-500"
+                      />
+                      <span className="truncate">{d.deviceId}</span>
+                      {!d.online && <span className="text-[9px] text-rose-400">offline</span>}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 1: PRESETS */}
+            {scriptActiveTab === 'presets' && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {scriptPresets.map((preset) => {
+                    const isSelected = selectedPreset?.id === preset.id;
+                    return (
+                      <div
+                        key={preset.id}
+                        onClick={() => handleSelectPreset(preset)}
+                        className={cn(
+                          "p-3.5 rounded-xl border transition-all cursor-pointer space-y-2",
+                          isSelected
+                            ? "bg-brand-500/10 border-brand-500 shadow-sm ring-1 ring-brand-500/30"
+                            : "bg-surface-2 border-border/70 hover:border-border-hover hover:bg-surface-2/80"
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <h4 className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+                            {preset.name}
+                          </h4>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "text-[10px] uppercase font-mono px-1.5 py-0.5",
+                              preset.engine === 'autojs' ? "border-amber-500/40 text-amber-300" : "border-emerald-500/40 text-emerald-300"
+                            )}
+                          >
+                            {preset.engine === 'autojs' ? 'AutoX.js' : 'Native ADB Flow'}
+                          </Badge>
+                        </div>
+                        <p className="text-[11px] text-text-secondary leading-relaxed">
+                          {preset.description}
+                        </p>
+                        <div className="flex items-center justify-between pt-1 text-[10px] text-text-tertiary">
+                          <span>Категория: {preset.category}</span>
+                          <span>{preset.steps ? `${preset.steps.length} шагов` : 'JS скрипт'}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Selected Preset Variables & Execution Form */}
+                {selectedPreset && (
+                  <div className="p-4 bg-surface-2 rounded-xl border border-brand-500/30 space-y-3">
+                    <div className="flex items-center justify-between border-b border-border/50 pb-2">
+                      <h4 className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+                        <span>Настройки запуска:</span>
+                        <span className="text-brand-400">{selectedPreset.name}</span>
+                      </h4>
+                      <Badge variant="outline" className="text-[10px]">
+                        Движок: {selectedPreset.engine}
+                      </Badge>
+                    </div>
+
+                    {selectedPreset.variables && selectedPreset.variables.length > 0 ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {selectedPreset.variables.map((v) => (
+                          <div key={v.key} className="space-y-1">
+                            <label className="text-[11px] font-medium text-text-secondary">
+                              {v.label} {v.required && <span className="text-rose-400">*</span>}
+                            </label>
+                            <Input
+                              value={presetVars[v.key] ?? v.defaultValue ?? ''}
+                              onChange={(e) => setPresetVars((prev) => ({ ...prev, [v.key]: e.target.value }))}
+                              placeholder={v.defaultValue || `Значение {{${v.key}}}`}
+                              className="text-xs h-8 font-mono bg-surface-1"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-text-tertiary">Сценарий готов к выполнению без дополнительных параметров.</p>
+                    )}
+
+                    <div className="flex items-center justify-between pt-2">
+                      <span className="text-[11px] text-text-secondary">
+                        Будет запущено на <span className="text-brand-400 font-semibold">{getScriptTargets().length}</span> платах
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        loading={scriptRunning}
+                        disabled={scriptRunning || getScriptTargets().length === 0}
+                        onClick={handleRunPreset}
+                        className="bg-brand-600 hover:bg-brand-500 font-semibold text-xs px-4"
+                      >
+                        ▶ Запустить сценарий
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: FLOW BUILDER */}
+            {scriptActiveTab === 'flow' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-semibold text-text-primary">Конструктор цепочки действий (Native ADB Flow)</h4>
+                    <p className="text-[11px] text-text-tertiary">Выполняется на физическом уровне Android без необходимости прав рута или фоновых сервисов</p>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs border-dashed"
+                      onClick={() => setFlowSteps((prev) => [...prev, { type: 'sleep', durationMs: 2000, jitterMs: 500 }])}
+                    >
+                      + Пауза
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs border-dashed"
+                      onClick={() => setFlowSteps((prev) => [...prev, { type: 'random_scroll', count: 2, direction: 'down' }])}
+                    >
+                      + Скролл
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs border-dashed"
+                      onClick={() => setFlowSteps((prev) => [...prev, { type: 'tap', xPercent: 0.5, yPercent: 0.5 }])}
+                    >
+                      + Клик (Tap)
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs border-dashed"
+                      onClick={() => setFlowSteps((prev) => [...prev, { type: 'key', key: 'home' }])}
+                    >
+                      + Кнопка (Key)
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Steps List */}
+                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                  {flowSteps.map((step, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 p-2.5 bg-surface-2 rounded-xl border border-border/80 text-xs hover:border-border-hover transition-colors"
+                    >
+                      <span className="w-5 h-5 rounded-full bg-surface-3 flex items-center justify-center font-mono font-bold text-[10px] text-text-tertiary shrink-0">
+                        {idx + 1}
+                      </span>
+                      <span className="font-semibold text-brand-400 uppercase text-[10px] w-24 shrink-0 font-mono">
+                        {step.type}
+                      </span>
+
+                      {/* Step specific editor inline */}
+                      <div className="flex-1 flex flex-wrap items-center gap-2 min-w-0">
+                        {step.type === 'launch' && (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <span className="text-text-tertiary text-[11px]">Пакет:</span>
+                            <Input
+                              value={step.packageName || ''}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).packageName = e.target.value;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 py-1"
+                              placeholder="com.wildberries.ru"
+                            />
+                          </div>
+                        )}
+
+                        {step.type === 'sleep' && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-text-tertiary text-[11px]">Время (мс):</span>
+                            <Input
+                              type="number"
+                              value={step.durationMs || 1000}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).durationMs = parseInt(e.target.value, 10) || 0;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 w-24 py-1"
+                            />
+                            <span className="text-text-tertiary text-[11px]">Джиттер ±:</span>
+                            <Input
+                              type="number"
+                              value={step.jitterMs || 0}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).jitterMs = parseInt(e.target.value, 10) || 0;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 w-20 py-1"
+                            />
+                          </div>
+                        )}
+
+                        {step.type === 'tap' && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-text-tertiary text-[11px]">X%:</span>
+                            <Input
+                              type="number"
+                              step="0.01"
+                              value={step.xPercent ?? 0.5}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).xPercent = parseFloat(e.target.value);
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 w-16 py-1"
+                            />
+                            <span className="text-text-tertiary text-[11px]">Y%:</span>
+                            <Input
+                              type="number"
+                              step="0.01"
+                              value={step.yPercent ?? 0.5}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).yPercent = parseFloat(e.target.value);
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 w-16 py-1"
+                            />
+                          </div>
+                        )}
+
+                        {step.type === 'random_scroll' && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-text-tertiary text-[11px]">Повторов:</span>
+                            <Input
+                              type="number"
+                              value={step.count || 3}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).count = parseInt(e.target.value, 10) || 1;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 w-16 py-1"
+                            />
+                            <span className="text-text-tertiary text-[11px]">Направление:</span>
+                            <select
+                              value={step.direction || 'down'}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).direction = e.target.value as any;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 border border-border rounded px-1 text-text-primary"
+                            >
+                              <option value="down">Вниз (down)</option>
+                              <option value="up">Вверх (up)</option>
+                            </select>
+                          </div>
+                        )}
+
+                        {step.type === 'key' && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-text-tertiary text-[11px]">Кнопка:</span>
+                            <select
+                              value={String(step.key)}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).key = e.target.value;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 border border-border rounded px-2 text-text-primary"
+                            >
+                              <option value="home">HOME (Домой)</option>
+                              <option value="back">BACK (Назад)</option>
+                              <option value="recents">RECENTS (Приложения)</option>
+                              <option value="power">POWER (Питание)</option>
+                              <option value="enter">ENTER</option>
+                            </select>
+                          </div>
+                        )}
+
+                        {step.type === 'text' && (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <span className="text-text-tertiary text-[11px]">Текст:</span>
+                            <Input
+                              value={step.text || ''}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).text = e.target.value;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs bg-surface-1 py-1"
+                              placeholder="Текст для ввода..."
+                            />
+                          </div>
+                        )}
+
+                        {step.type === 'clear_data' && (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <span className="text-text-tertiary text-[11px]">Сброс данных пакета:</span>
+                            <Input
+                              value={step.packageName || ''}
+                              onChange={(e) => {
+                                const next = [...flowSteps];
+                                (next[idx] as any).packageName = e.target.value;
+                                setFlowSteps(next);
+                              }}
+                              className="h-7 text-xs font-mono bg-surface-1 py-1"
+                              placeholder="com.wildberries.ru"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          onClick={() => {
+                            if (idx === 0) return;
+                            const next = [...flowSteps];
+                            const temp = next[idx - 1];
+                            next[idx - 1] = next[idx];
+                            next[idx] = temp;
+                            setFlowSteps(next);
+                          }}
+                          className="p-1 text-text-tertiary hover:text-text-primary disabled:opacity-30"
+                          title="Выше"
+                        >
+                          ▲
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === flowSteps.length - 1}
+                          onClick={() => {
+                            if (idx === flowSteps.length - 1) return;
+                            const next = [...flowSteps];
+                            const temp = next[idx + 1];
+                            next[idx + 1] = next[idx];
+                            next[idx] = temp;
+                            setFlowSteps(next);
+                          }}
+                          className="p-1 text-text-tertiary hover:text-text-primary disabled:opacity-30"
+                          title="Ниже"
+                        >
+                          ▼
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFlowSteps((prev) => prev.filter((_, i) => i !== idx))}
+                          className="p-1 text-rose-400 hover:text-rose-300"
+                          title="Удалить шаг"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Flow Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const name = prompt('Введите имя сценария для сохранения:', 'Мой сценарий');
+                        if (!name) return;
+                        setSaveScriptName(name);
+                        handleSaveFlowAsCustom();
+                      }}
+                      className="text-xs"
+                    >
+                      💾 Сохранить в библиотеку
+                    </Button>
+                    {saveScriptSuccessMsg && (
+                      <span className="text-xs text-emerald-400">{saveScriptSuccessMsg}</span>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={scriptRunning}
+                    disabled={scriptRunning || flowSteps.length === 0 || getScriptTargets().length === 0}
+                    onClick={handleRunFlow}
+                    className="bg-brand-600 hover:bg-brand-500 font-semibold text-xs px-4"
+                  >
+                    ▶ Запустить конструктор на {getScriptTargets().length} платах
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: AUTO.JS JAVASCRIPT EDITOR */}
+            {scriptActiveTab === 'autojs' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+                      <span>JavaScript редактор скриптов AutoX.js</span>
+                      <span className="text-[10px] bg-emerald-500/15 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                        Auto.js v6 API
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-text-tertiary">
+                      Полноценная автоматизация с доступом к экрану, координатам, UI селекторам (`id()`, `text()`, `desc()`)
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-text-tertiary font-mono">Файл:</span>
+                    <Input
+                      value={autoJsScriptName}
+                      onChange={(e) => setAutoJsScriptName(e.target.value)}
+                      className="h-7 text-xs font-mono bg-surface-1 w-36 py-1"
+                      placeholder="script.js"
+                    />
+                  </div>
+                </div>
+
+                {/* Snippets Toolbar */}
+                <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-surface-2 rounded-lg border border-border/70 text-[11px]">
+                  <span className="text-text-tertiary px-1">Сниппеты:</span>
+                  <button
+                    type="button"
+                    onClick={() => setAutoJsCode((prev) => prev + `\n// Поиск и клик по тексту\nclick("Войти");\n`)}
+                    className="px-2 py-0.5 bg-surface-3 hover:bg-surface-3/80 rounded border border-border text-text-secondary hover:text-text-primary"
+                  >
+                    + Клик по тексту
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAutoJsCode((prev) => prev + `\n// Поиск элемента по id и клик\nid("button_like").findOne().click();\n`)}
+                    className="px-2 py-0.5 bg-surface-3 hover:bg-surface-3/80 rounded border border-border text-text-secondary hover:text-text-primary"
+                  >
+                    + Клик по ID
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAutoJsCode((prev) => prev + `\n// Органический скролл вниз\nscrollDown();\nsleep(1800);\n`)}
+                    className="px-2 py-0.5 bg-surface-3 hover:bg-surface-3/80 rounded border border-border text-text-secondary hover:text-text-primary"
+                  >
+                    + Скролл вниз
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAutoJsCode((prev) => prev + `\n// Случайная пауза от 2 до 5 сек\nsleep(random(2000, 5000));\n`)}
+                    className="px-2 py-0.5 bg-surface-3 hover:bg-surface-3/80 rounded border border-border text-text-secondary hover:text-text-primary"
+                  >
+                    + Рандомная пауза
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAutoJsCode((prev) => prev + `\n// Ввод текста\nsetText("Мой поисковый запрос");\n`)}
+                    className="px-2 py-0.5 bg-surface-3 hover:bg-surface-3/80 rounded border border-border text-text-secondary hover:text-text-primary"
+                  >
+                    + Ввод текста
+                  </button>
+                </div>
+
+                {/* Code Editor Textarea */}
+                <div className="relative rounded-xl border border-border overflow-hidden bg-zinc-950 font-mono text-xs">
+                  <Textarea
+                    value={autoJsCode}
+                    onChange={(e) => setAutoJsCode(e.target.value)}
+                    rows={12}
+                    className="w-full bg-transparent border-0 text-zinc-100 font-mono text-xs p-4 focus:ring-0 resize-y leading-relaxed"
+                    placeholder="// Введите код AutoX.js JavaScript..."
+                  />
+                </div>
+
+                {/* AutoJs Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const name = prompt('Введите имя сценария для сохранения:', autoJsScriptName.replace(/\.js$/, ''));
+                        if (!name) return;
+                        setSaveScriptName(name);
+                        handleSaveFlowAsCustom();
+                      }}
+                      className="text-xs"
+                    >
+                      💾 Сохранить JS скрипт
+                    </Button>
+                    {saveScriptSuccessMsg && (
+                      <span className="text-xs text-emerald-400">{saveScriptSuccessMsg}</span>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={scriptRunning}
+                    disabled={scriptRunning || !autoJsCode.trim() || getScriptTargets().length === 0}
+                    onClick={handleRunAutoJs}
+                    className="bg-amber-600 hover:bg-amber-500 font-semibold text-xs px-4 text-white"
+                  >
+                    ▶ Запустить AutoX.js на {getScriptTargets().length} платах
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: SAVED SCRIPTS */}
+            {scriptActiveTab === 'saved' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-text-primary">Сохраненные сценарии автоматизации</h4>
+                  <span className="text-xs text-text-tertiary">Всего: {customScripts.length}</span>
+                </div>
+
+                {customScripts.length === 0 ? (
+                  <div className="p-8 text-center text-text-secondary bg-surface-2 rounded-xl border border-border">
+                    <p className="text-sm font-medium text-text-primary mb-1">Библиотека пуста</p>
+                    <p className="text-xs text-text-tertiary">
+                      Создайте и сохраните сценарий во вкладке «Конструктор шагов» или «Редактор Auto.js».
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[350px] overflow-y-auto pr-1">
+                    {customScripts.map((script) => (
+                      <div
+                        key={script.id}
+                        className="p-3.5 bg-surface-2 rounded-xl border border-border/80 space-y-2.5 hover:border-border-hover transition-all"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <h5 className="text-xs font-semibold text-text-primary">{script.name}</h5>
+                            <span className="text-[10px] text-text-tertiary">
+                              {script.category} · {relativeTime(script.updatedAt || script.createdAt)}
+                            </span>
+                          </div>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "text-[10px] font-mono",
+                              script.engine === 'autojs' ? "text-amber-300 border-amber-500/40" : "text-brand-300 border-brand-500/40"
+                            )}
+                          >
+                            {script.engine === 'autojs' ? 'AutoX.js' : 'ADB Flow'}
+                          </Badge>
+                        </div>
+
+                        {script.description && (
+                          <p className="text-[11px] text-text-secondary line-clamp-2">
+                            {script.description}
+                          </p>
+                        )}
+
+                        <div className="flex items-center justify-between pt-1 border-t border-border/50">
+                          <span className="text-[10px] text-text-tertiary font-mono">
+                            {script.steps ? `${script.steps.length} шагов` : `${(script.jsCode || '').length} байт JS`}
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-[11px] px-2.5"
+                              onClick={() => handleLoadCustomScript(script)}
+                            >
+                              ✏️ Открыть в редакторе
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 text-[11px] px-2 text-rose-400 hover:bg-rose-500/10"
+                              onClick={() => handleDeleteCustomScript(script.id)}
+                            >
+                              🗑️
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Live Progress Bar Notification */}
+            {scriptProgressMsg && (
+              <div className="p-3 bg-brand-500/15 border border-brand-500/40 rounded-xl text-brand-300 flex items-center gap-2.5 animate-pulse">
+                <LoadingSpinner size={16} />
+                <span className="text-xs font-medium">{scriptProgressMsg}</span>
+              </div>
+            )}
+
+            {/* Script Execution Report & Step Logs per Device */}
+            {scriptBatchResult && (
+              <div className="p-4 bg-surface-2 rounded-xl border border-border/80 space-y-3">
+                <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm">📊</span>
+                    <h5 className="text-xs font-semibold text-text-primary">Отчет о выполнении сценария</h5>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant={scriptBatchResult.ok ? "success" : "danger"} className="text-[10px]">
+                      Успешно: {scriptBatchResult.successful} / {scriptBatchResult.targetsCount}
+                    </Badge>
+                  </div>
+                </div>
+
+                {/* Per-device expandable cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+                  {Object.values(scriptBatchResult.devices).map((dev) => {
+                    const isExpanded = expandedLogBoard === dev.serial;
+                    return (
+                      <div
+                        key={dev.serial}
+                        className={cn(
+                          "p-2.5 rounded-lg border text-xs space-y-1.5 transition-all cursor-pointer",
+                          dev.ok ? "bg-emerald-500/5 border-emerald-500/30" : "bg-rose-500/5 border-rose-500/30"
+                        )}
+                        onClick={() => setExpandedLogBoard(isExpanded ? null : dev.serial)}
+                      >
+                        <div className="flex items-center justify-between font-mono text-[11px]">
+                          <span className="font-bold text-text-primary">{dev.serial}</span>
+                          <span className={cn("font-semibold", dev.ok ? "text-emerald-400" : "text-rose-400")}>
+                            {dev.ok ? `✓ Выполнено (${(dev.totalDurationMs / 1000).toFixed(1)}с)` : '❌ Сбой'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-text-secondary">
+                          <span>Шагов: {dev.stepsExecuted} / {dev.totalSteps}</span>
+                          <span className="text-brand-400 hover:underline">
+                            {isExpanded ? 'Скрыть логи ▲' : 'Логи шагов ▼'}
+                          </span>
+                        </div>
+
+                        {/* Detailed step logs drawer */}
+                        {isExpanded && (
+                          <div className="pt-2 border-t border-border/50 space-y-1 font-mono text-[10px] max-h-36 overflow-y-auto">
+                            {dev.stepLogs.length === 0 ? (
+                              <p className="text-text-tertiary">Логи отсутствуют</p>
+                            ) : (
+                              dev.stepLogs.map((log) => (
+                                <div
+                                  key={log.stepIndex}
+                                  className={cn(
+                                    "flex items-center justify-between p-1 rounded",
+                                    log.status === 'success' ? "text-emerald-300 bg-emerald-500/10" : "text-rose-300 bg-rose-500/10"
+                                  )}
+                                >
+                                  <span className="truncate">
+                                    {log.status === 'success' ? '✓' : '✕'} #{log.stepIndex} {log.description}
+                                  </span>
+                                  <span className="shrink-0 ml-1 opacity-70">{log.durationMs}ms</span>
+                                </div>
+                              ))
+                            )}
+                            {dev.error && (
+                              <p className="text-rose-400 font-sans text-[11px] pt-1">
+                                Ошибка: {dev.error}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Bottom Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={scriptRunning}
+                onClick={() => setScriptModalOpen(false)}
               >
                 Закрыть
               </Button>
