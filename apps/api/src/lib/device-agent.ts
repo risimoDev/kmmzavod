@@ -9,6 +9,7 @@ export interface DeviceProxyConfig {
   username?: string;
   password?: string;
   type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  rotateUrl?: string;
 }
 
 export interface DeviceIpCheckResult {
@@ -104,6 +105,81 @@ export const deviceAgentClient = {
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
     const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 20_000 });
     return res.data;
+  },
+
+  async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
+    ok: boolean;
+    deviceId: string;
+    rotateUrl: string;
+    statusCode?: number;
+    rotateResponse?: string;
+    check: DeviceIpCheckResult;
+    error?: string;
+  }> {
+    const res = await axios.post(`${BASE}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 35_000 });
+    return res.data;
+  },
+
+  async restartNetworkInterface(opts: {
+    deviceId: string;
+    mode?: 'ethernet' | 'wifi' | 'all';
+    targetDeviceIds?: string[];
+  }): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    results: Array<{
+      deviceId: string;
+      mode: string;
+      ok: boolean;
+      log: string;
+    }>;
+  }> {
+    const res = await axios.post(`${BASE}/network/restart-interface`, opts, { timeout: 30_000 });
+    return res.data;
+  },
+
+  async batchSetProxy(assignments: Array<{
+    deviceId: string;
+    host: string;
+    port: number;
+    username?: string;
+    password?: string;
+    type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+    rotateUrl?: string;
+  }>): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    results: Array<{
+      deviceId: string;
+      ok: boolean;
+      check?: DeviceIpCheckResult;
+      error?: string;
+    }>;
+  }> {
+    const res = await axios.post(`${BASE}/proxy/batch-set`, { assignments }, { timeout: 60_000 });
+    return res.data;
+  },
+
+  async batchCheckDeviceIp(deviceIds: string[]): Promise<Array<{ deviceId: string } & DeviceIpCheckResult>> {
+    const results = await Promise.allSettled(
+      deviceIds.map(async (id) => {
+        const check = await this.checkDeviceIp(id);
+        return { deviceId: id, ...check };
+      })
+    );
+    return results.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      return {
+        deviceId: deviceIds[i],
+        ok: false,
+        leakDetected: false,
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+      };
+    });
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {

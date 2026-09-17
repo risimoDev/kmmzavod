@@ -1217,6 +1217,22 @@ function DevicesTab() {
   const [newSchedTargetDeviceIds, setNewSchedTargetDeviceIds] = useState<string[]>([]);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
+  // ── Network Management & Proxy Hub (Stage 5) State ─────────────────────────
+  const [networkModalOpen, setNetworkModalOpen] = useState(false);
+  const [networkTab, setNetworkTab] = useState<'anti_leak' | 'restart_net' | 'batch_proxy'>('anti_leak');
+  const [rotatingDeviceIds, setRotatingDeviceIds] = useState<Record<string, boolean>>({});
+  const [restartingNet, setRestartingNet] = useState(false);
+  const [restartNetMode, setRestartNetMode] = useState<'ethernet' | 'wifi' | 'all'>('ethernet');
+  const [restartTargetDeviceIds, setRestartTargetDeviceIds] = useState<string[]>([]);
+  const [restartLogs, setRestartLogs] = useState<Array<{ deviceId: string; mode: string; ok: boolean; log: string }>>([]);
+  const [batchProxyText, setBatchProxyText] = useState('');
+  const [batchProxyType, setBatchProxyType] = useState<'http' | 'socks5' | 'mobile' | 'residential'>('http');
+  const [batchProxyTargets, setBatchProxyTargets] = useState<string[]>([]);
+  const [batchProxyApplying, setBatchProxyApplying] = useState(false);
+  const [batchCheckingIps, setBatchCheckingIps] = useState(false);
+  const [networkFeedbackMsg, setNetworkFeedbackMsg] = useState<string | null>(null);
+  const [editingRotateUrl, setEditingRotateUrl] = useState<Record<string, string>>({});
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -2127,6 +2143,217 @@ function DevicesTab() {
     }
   };
 
+  // ── Network Management & Proxy Hub Handlers ────────────────────────────────
+  const handleOpenNetworkModal = () => {
+    setNetworkModalOpen(true);
+    setNetworkFeedbackMsg(null);
+    if (restartTargetDeviceIds.length === 0) {
+      setRestartTargetDeviceIds(devices.map((d) => d.deviceId));
+    }
+    if (batchProxyTargets.length === 0) {
+      setBatchProxyTargets(devices.map((d) => d.deviceId));
+    }
+    const initialRotateUrls: Record<string, string> = {};
+    devices.forEach((d) => {
+      if (d.proxy?.rotateUrl) {
+        initialRotateUrls[d.deviceId] = d.proxy.rotateUrl;
+      }
+    });
+    setEditingRotateUrl(initialRotateUrls);
+  };
+
+  const handleRotateIp = async (deviceId: string, overrideUrl?: string) => {
+    setRotatingDeviceIds((prev) => ({ ...prev, [deviceId]: true }));
+    setNetworkFeedbackMsg(null);
+    try {
+      const targetUrl = overrideUrl || editingRotateUrl[deviceId];
+      const res = await accountFarmApi.rotateDeviceProxyIp(deviceId, { rotateUrl: targetUrl });
+      if (res.ok) {
+        setIpResults((prev) => ({ ...prev, [deviceId]: res.check }));
+        setNetworkFeedbackMsg(`Плата ${deviceId}: IP успешно сменен! Новый IP: ${res.check.ip || 'OK'}`);
+      } else {
+        alert(`Ошибка ротации IP на плате ${deviceId}: ${res.error || 'Неизвестная ошибка'}`);
+      }
+    } catch (err: any) {
+      alert(`Ошибка ротации IP: ${err.message}`);
+    } finally {
+      setRotatingDeviceIds((prev) => ({ ...prev, [deviceId]: false }));
+    }
+  };
+
+  const handleBatchRotateIp = async () => {
+    const targets = devices.filter((d) => d.online && (d.proxy?.rotateUrl || editingRotateUrl[d.deviceId]));
+    if (targets.length === 0) {
+      alert('Нет плат с настроенной ссылкой (Webhook) ротации');
+      return;
+    }
+    setNetworkFeedbackMsg(`Запущена одновременная ротация IP на ${targets.length} платах...`);
+    await Promise.allSettled(targets.map((d) => handleRotateIp(d.deviceId, editingRotateUrl[d.deviceId])));
+  };
+
+  const handleBatchCheckIps = async () => {
+    const ids = devices.map((d) => d.deviceId);
+    if (ids.length === 0) return;
+    setBatchCheckingIps(true);
+    setNetworkFeedbackMsg('Проверка IP и Anti-Leak на всех 20 платах...');
+    try {
+      const res = await accountFarmApi.batchCheckDeviceIps(ids);
+      if (res.ok && Array.isArray(res.results)) {
+        const nextResults: Record<string, DeviceIpCheck> = {};
+        res.results.forEach((item) => {
+          nextResults[item.deviceId] = item;
+        });
+        setIpResults((prev) => ({ ...prev, ...nextResults }));
+        const leaks = res.results.filter((r) => r.leakDetected).length;
+        setNetworkFeedbackMsg(
+          leaks > 0
+            ? `⚠️ Проверка завершена! Обнаружено ${leaks} плат с утечкой прямого IP!`
+            : `✓ Все ${res.results.length} плат проверены. Утечек прямого IP не обнаружено.`
+        );
+      }
+    } catch (err: any) {
+      alert(`Ошибка проверки IP: ${err.message}`);
+    } finally {
+      setBatchCheckingIps(false);
+    }
+  };
+
+  const handleRestartNetwork = async () => {
+    if (restartTargetDeviceIds.length === 0) {
+      alert('Выберите хотя бы одну плату для перезапуска');
+      return;
+    }
+    setRestartingNet(true);
+    setNetworkFeedbackMsg(`Перезапуск сетевых интерфейсов (${restartNetMode}) на ${restartTargetDeviceIds.length} платах...`);
+    try {
+      const res = await accountFarmApi.restartDeviceNetwork({
+        mode: restartNetMode,
+        targetDeviceIds: restartTargetDeviceIds,
+      });
+      if (res.ok) {
+        setRestartLogs(res.results);
+        setNetworkFeedbackMsg(`Сетевой стек успешно перезапущен на ${res.successful} платах, сброшен DNS и маршруты!`);
+      } else {
+        alert(`Ошибка перезапуска сети: ${res.failed} плат не ответили`);
+      }
+    } catch (err: any) {
+      alert(`Ошибка перезапуска сети: ${err.message}`);
+    } finally {
+      setRestartingNet(false);
+    }
+  };
+
+  const parseBatchProxyLines = (text: string) => {
+    const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('#'));
+    const parsed: Array<{ host: string; port: number; username?: string; password?: string; rotateUrl?: string }> = [];
+
+    for (const line of lines) {
+      let mainPart = line;
+      let rotUrl: string | undefined;
+      if (line.includes('|')) {
+        const parts = line.split('|');
+        mainPart = parts[0].trim();
+        rotUrl = parts[1].trim();
+      }
+
+      if (mainPart.startsWith('http://') || mainPart.startsWith('https://') || mainPart.startsWith('socks5://')) {
+        try {
+          const u = new URL(mainPart);
+          parsed.push({
+            host: u.hostname,
+            port: Number(u.port) || 8080,
+            username: u.username || undefined,
+            password: u.password || undefined,
+            rotateUrl: rotUrl,
+          });
+          continue;
+        } catch {
+          // fallback to tokens
+        }
+      }
+
+      const tokens = mainPart.split(':');
+      if (tokens.length >= 2) {
+        const host = tokens[0].trim();
+        const port = Number(tokens[1].trim());
+        const username = tokens[2]?.trim() || undefined;
+        const password = tokens[3]?.trim() || undefined;
+        const potentialUrl = tokens.slice(4).join(':').trim() || rotUrl;
+
+        if (host && !isNaN(port)) {
+          parsed.push({
+            host,
+            port,
+            username,
+            password,
+            rotateUrl: potentialUrl && potentialUrl.startsWith('http') ? potentialUrl : undefined,
+          });
+        }
+      }
+    }
+    return parsed;
+  };
+
+  const handleApplyBatchProxies = async () => {
+    const parsed = parseBatchProxyLines(batchProxyText);
+    if (parsed.length === 0) {
+      alert('Не удалось распознать ни одного прокси в введенном тексте');
+      return;
+    }
+    if (batchProxyTargets.length === 0) {
+      alert('Выберите целевые платы для распределения');
+      return;
+    }
+
+    const assignments = batchProxyTargets.slice(0, parsed.length).map((devId, idx) => ({
+      deviceId: devId,
+      host: parsed[idx].host,
+      port: parsed[idx].port,
+      username: parsed[idx].username,
+      password: parsed[idx].password,
+      type: batchProxyType,
+      rotateUrl: parsed[idx].rotateUrl,
+    }));
+
+    if (assignments.length === 0) {
+      alert('Нет совпадений между списком прокси и выбранными платами');
+      return;
+    }
+
+    setBatchProxyApplying(true);
+    setNetworkFeedbackMsg(`Назначение прокси 1-к-1 на ${assignments.length} плат...`);
+    try {
+      const res = await accountFarmApi.batchSetDeviceProxies(assignments);
+      if (res.ok) {
+        setNetworkFeedbackMsg(`Прокси успешно применены к ${res.successful} платам! Запускается перепроверка IP...`);
+        setDevices((prev) =>
+          prev.map((d) => {
+            const match = assignments.find((a) => a.deviceId === d.deviceId);
+            if (match) {
+              return {
+                ...d,
+                proxy: {
+                  host: match.host,
+                  port: match.port,
+                  type: match.type,
+                  rotateUrl: match.rotateUrl,
+                },
+              };
+            }
+            return d;
+          })
+        );
+        await handleBatchCheckIps();
+      } else {
+        alert(`Ошибка пакетного применения: ${res.failed} плат завершились с ошибкой`);
+      }
+    } catch (err: any) {
+      alert(`Ошибка применения прокси: ${err.message}`);
+    } finally {
+      setBatchProxyApplying(false);
+    }
+  };
+
   if (loading) return <LoadingSpinner size={32} />;
 
   const onlineCount = devices.filter((d) => d.online).length;
@@ -2259,6 +2486,14 @@ function DevicesTab() {
             onClick={handleOpenSchedulerModal}
           >
             ⏱️ Планировщик и Автопилот
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            className="bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5 shadow-sm"
+            onClick={handleOpenNetworkModal}
+          >
+            🌐 Сеть и Прокси (Network Hub)
           </Button>
           <Button size="sm" variant="ghost" onClick={loadData}>🔄 Обновить</Button>
         </div>
@@ -5192,6 +5427,551 @@ function DevicesTab() {
             {/* Bottom Actions */}
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
               <Button size="sm" variant="ghost" onClick={() => setSchedulerModalOpen(false)}>
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Stage 5: Network Hub & Proxy Management Modal ── */}
+      {networkModalOpen && (
+        <Modal
+          title="🌐 Сетевой менеджмент & Proxy Hub (Ферма без SIM-карт)"
+          maxWidth="max-w-5xl"
+          onClose={() => setNetworkModalOpen(false)}
+        >
+          <div className="space-y-4 text-xs">
+            {/* Context Notice */}
+            <div className="p-3 bg-cyan-950/30 border border-cyan-500/30 rounded-lg text-cyan-200 flex items-start gap-2.5">
+              <span className="text-base">🔌</span>
+              <div>
+                <strong className="block font-semibold">Архитектура фермы: 20 плат без SIM-карт, подключенных по Ethernet</strong>
+                <p className="text-[11px] text-cyan-300/80 pt-0.5">
+                  Так как в платах нет физических SIM-карт и мобильных модемов, переключение режима «В самолете» (Airplane Mode) недоступно. Ротация IP производится через Webhook провайдера прокси, а сброс зависших соединений — аппаратным перезапуском интерфейса eth0 и очисткой DNS-кэша.
+                </p>
+              </div>
+            </div>
+
+            {/* Feedback alert */}
+            {networkFeedbackMsg && (
+              <div className="p-3 rounded-lg bg-surface-2 border border-brand-500/40 text-brand-300 flex items-center justify-between">
+                <span>{networkFeedbackMsg}</span>
+                <button
+                  onClick={() => setNetworkFeedbackMsg(null)}
+                  className="text-text-tertiary hover:text-text-primary px-1 font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Tabs Header */}
+            <div className="flex border-b border-border gap-2">
+              <button
+                type="button"
+                onClick={() => setNetworkTab('anti_leak')}
+                className={cn(
+                  "px-3 py-2 font-medium border-b-2 transition-colors",
+                  networkTab === 'anti_leak'
+                    ? "border-cyan-500 text-cyan-400 font-semibold"
+                    : "border-transparent text-text-secondary hover:text-text-primary"
+                )}
+              >
+                🌐 Ротация IP и Anti-Leak (20 плат)
+              </button>
+              <button
+                type="button"
+                onClick={() => setNetworkTab('restart_net')}
+                className={cn(
+                  "px-3 py-2 font-medium border-b-2 transition-colors",
+                  networkTab === 'restart_net'
+                    ? "border-cyan-500 text-cyan-400 font-semibold"
+                    : "border-transparent text-text-secondary hover:text-text-primary"
+                )}
+              >
+                ⚡ Перезапуск сетевых интерфейсов (Ethernet)
+              </button>
+              <button
+                type="button"
+                onClick={() => setNetworkTab('batch_proxy')}
+                className={cn(
+                  "px-3 py-2 font-medium border-b-2 transition-colors",
+                  networkTab === 'batch_proxy'
+                    ? "border-cyan-500 text-cyan-400 font-semibold"
+                    : "border-transparent text-text-secondary hover:text-text-primary"
+                )}
+              >
+                📦 Пакетное распределение пула прокси (1-к-1)
+              </button>
+            </div>
+
+            {/* TAB 1: Anti-Leak & IP Rotation */}
+            {networkTab === 'anti_leak' && (
+              <div className="space-y-4">
+                {/* Stats Summary */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="p-3 bg-surface-2 rounded-lg border border-border">
+                    <span className="text-[11px] text-text-tertiary">Всего устройств</span>
+                    <p className="text-xl font-bold text-text-primary">{devices.length}</p>
+                  </div>
+                  <div className="p-3 bg-surface-2 rounded-lg border border-border">
+                    <span className="text-[11px] text-text-tertiary">С прокси</span>
+                    <p className="text-xl font-bold text-brand-400">
+                      {devices.filter((d) => d.proxy).length}
+                    </p>
+                  </div>
+                  <div className="p-3 bg-surface-2 rounded-lg border border-border">
+                    <span className="text-[11px] text-text-tertiary">Защищены (Anti-Leak Safe)</span>
+                    <p className="text-xl font-bold text-emerald-400">
+                      {devices.filter((d) => {
+                        const c = ipResults[d.deviceId];
+                        return c && c.ok && !c.leakDetected && Boolean(d.proxy);
+                      }).length}
+                    </p>
+                  </div>
+                  <div className="p-3 bg-surface-2 rounded-lg border border-border">
+                    <span className="text-[11px] text-text-tertiary">🚨 Утечки прямого IP</span>
+                    <p className="text-xl font-bold text-rose-400">
+                      {devices.filter((d) => {
+                        const c = ipResults[d.deviceId];
+                        return c && c.leakDetected;
+                      }).length}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Batch Actions Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-2/40 rounded-lg border border-border/60">
+                  <div className="text-text-secondary text-xs">
+                    Одновременные сетевые операции по всей стойке:
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      loading={batchCheckingIps}
+                      onClick={handleBatchCheckIps}
+                      className="border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10"
+                    >
+                      🔍 Проверить IP на всех 20 платах
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
+                      onClick={handleBatchRotateIp}
+                    >
+                      🔄 Сменить IP на всех платах (Webhook)
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Device Anti-Leak Table */}
+                <div className="border border-border rounded-lg overflow-hidden max-h-[420px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-surface-2 text-text-secondary text-[11px] border-b border-border sticky top-0 z-10">
+                      <tr>
+                        <th className="p-2.5">Плата</th>
+                        <th className="p-2.5">Прокси</th>
+                        <th className="p-2.5">Внешний IP / Гео</th>
+                        <th className="p-2.5">Anti-Leak Статус</th>
+                        <th className="p-2.5">Ссылка ротации (Webhook)</th>
+                        <th className="p-2.5 text-right">Действия</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/40 font-mono text-[11px]">
+                      {devices.map((device, idx) => {
+                        const check = ipResults[device.deviceId];
+                        const isRotating = rotatingDeviceIds[device.deviceId];
+                        const rotUrl = editingRotateUrl[device.deviceId] ?? device.proxy?.rotateUrl ?? '';
+
+                        return (
+                          <tr key={device.deviceId} className="hover:bg-surface-2/30 transition-colors">
+                            <td className="p-2.5 font-sans font-medium text-text-primary whitespace-nowrap">
+                              <span className="text-text-tertiary mr-1.5 font-mono">#{idx + 1}</span>
+                              {device.name}
+                              <span className="block text-[10px] text-text-tertiary font-mono">{device.deviceId}</span>
+                            </td>
+                            <td className="p-2.5">
+                              {device.proxy ? (
+                                <div>
+                                  <span className="text-text-primary font-semibold">
+                                    {device.proxy.host}:{device.proxy.port}
+                                  </span>
+                                  <Badge variant="outline" className="ml-1 text-[9px] px-1 py-0">
+                                    {device.proxy.type || 'http'}
+                                  </Badge>
+                                </div>
+                              ) : (
+                                <span className="text-text-tertiary font-sans">Прямой интернет</span>
+                              )}
+                            </td>
+                            <td className="p-2.5">
+                              {check ? (
+                                check.ok ? (
+                                  <div>
+                                    <span className="text-text-primary font-bold">{check.ip}</span>
+                                    {(check.country || check.city) && (
+                                      <span className="block text-[10px] text-text-secondary font-sans">
+                                        📍 {check.country} {check.city ? `(${check.city})` : ''}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-rose-400 font-sans">{check.error || 'Ошибка связи'}</span>
+                                )
+                              ) : (
+                                <span className="text-text-tertiary font-sans italic">Не проверен</span>
+                              )}
+                            </td>
+                            <td className="p-2.5 font-sans">
+                              {check?.leakDetected ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-semibold animate-pulse">
+                                  🚨 УТЕЧКА (IP хоста!)
+                                </span>
+                              ) : check?.ok && device.proxy ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 text-[10px]">
+                                  🛡️ Защищен
+                                </span>
+                              ) : check?.ok ? (
+                                <span className="text-text-tertiary text-[10px]">Прямой доступ</span>
+                              ) : (
+                                <span className="text-text-tertiary text-[10px]">—</span>
+                              )}
+                            </td>
+                            <td className="p-2.5 font-sans max-w-[220px]">
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  placeholder="https://...rotate_url"
+                                  value={rotUrl}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setEditingRotateUrl((prev) => ({ ...prev, [device.deviceId]: val }));
+                                  }}
+                                  className="text-[10px] py-1 h-7 font-mono truncate"
+                                />
+                              </div>
+                            </td>
+                            <td className="p-2.5 text-right font-sans whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  loading={isRotating}
+                                  disabled={!rotUrl}
+                                  onClick={() => handleRotateIp(device.deviceId, rotUrl)}
+                                  className="text-[11px] py-1 h-7 bg-indigo-600 hover:bg-indigo-500"
+                                >
+                                  🔄 Сменить IP
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handleCheckIp(device.deviceId)}
+                                  className="text-[11px] py-1 h-7"
+                                >
+                                  🔍
+                                </Button>
+                                {device.proxy && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleClearProxy(device.deviceId)}
+                                    className="text-rose-400 hover:text-rose-300 text-[11px] py-1 h-7 px-1.5"
+                                    title="Сбросить прокси"
+                                  >
+                                    ✕
+                                  </Button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: Network Interfaces Restart (eth0 / wlan0) */}
+            {networkTab === 'restart_net' && (
+              <div className="space-y-4">
+                <div className="p-4 bg-surface-2 rounded-xl border border-border space-y-3">
+                  <h4 className="font-semibold text-text-primary text-sm">
+                    Параметры аппаратного перезапуска сети (Ethernet single-switch)
+                  </h4>
+                  <p className="text-text-secondary text-xs">
+                    Выполняет команды <code className="text-cyan-300 bg-surface-1 px-1 py-0.5 rounded font-mono">ndc resolver flushdefaultif</code>, <code className="text-cyan-300 bg-surface-1 px-1 py-0.5 rounded font-mono">ip route flush cache</code> и переинициализирует адаптер интерфейса (<code className="text-cyan-300 bg-surface-1 px-1 py-0.5 rounded font-mono">eth0 down/up</code>).
+                  </p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                    <label
+                      onClick={() => setRestartNetMode('ethernet')}
+                      className={cn(
+                        "p-3 rounded-lg border cursor-pointer transition-all flex items-start gap-2.5",
+                        restartNetMode === 'ethernet'
+                          ? "border-cyan-500 bg-cyan-500/10 text-cyan-200"
+                          : "border-border bg-surface-1 text-text-secondary hover:border-border/80"
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="restartNetMode"
+                        checked={restartNetMode === 'ethernet'}
+                        onChange={() => setRestartNetMode('ethernet')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block font-semibold text-text-primary">eth0 (Ethernet)</strong>
+                        <span className="text-[11px] text-text-tertiary">
+                          Рекомендуется для 20-платной стойки без SIM-карт
+                        </span>
+                      </div>
+                    </label>
+
+                    <label
+                      onClick={() => setRestartNetMode('wifi')}
+                      className={cn(
+                        "p-3 rounded-lg border cursor-pointer transition-all flex items-start gap-2.5",
+                        restartNetMode === 'wifi'
+                          ? "border-cyan-500 bg-cyan-500/10 text-cyan-200"
+                          : "border-border bg-surface-1 text-text-secondary hover:border-border/80"
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="restartNetMode"
+                        checked={restartNetMode === 'wifi'}
+                        onChange={() => setRestartNetMode('wifi')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block font-semibold text-text-primary">wlan0 (Wi-Fi)</strong>
+                        <span className="text-[11px] text-text-tertiary">
+                          svc wifi disable & enable
+                        </span>
+                      </div>
+                    </label>
+
+                    <label
+                      onClick={() => setRestartNetMode('all')}
+                      className={cn(
+                        "p-3 rounded-lg border cursor-pointer transition-all flex items-start gap-2.5",
+                        restartNetMode === 'all'
+                          ? "border-cyan-500 bg-cyan-500/10 text-cyan-200"
+                          : "border-border bg-surface-1 text-text-secondary hover:border-border/80"
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="restartNetMode"
+                        checked={restartNetMode === 'all'}
+                        onChange={() => setRestartNetMode('all')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block font-semibold text-text-primary">Все интерфейсы</strong>
+                        <span className="text-[11px] text-text-tertiary">
+                          Полный сброс eth0 + wlan0 + DNS
+                        </span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Target Device Selector */}
+                <div className="p-4 bg-surface-2 rounded-xl border border-border space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-text-primary">
+                      Целевые платы для перезапуска ({restartTargetDeviceIds.length} / {devices.length}):
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setRestartTargetDeviceIds(devices.map((d) => d.deviceId))}
+                        className="text-[11px] text-cyan-400 hover:underline"
+                      >
+                        Выбрать все 20 плат
+                      </button>
+                      <span className="text-text-tertiary">|</span>
+                      <button
+                        type="button"
+                        onClick={() => setRestartTargetDeviceIds([])}
+                        className="text-[11px] text-text-secondary hover:underline"
+                      >
+                        Снять выделение
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-10 gap-1.5">
+                    {devices.map((d, i) => {
+                      const isChecked = restartTargetDeviceIds.includes(d.deviceId);
+                      return (
+                        <button
+                          key={d.deviceId}
+                          type="button"
+                          onClick={() => {
+                            setRestartTargetDeviceIds((prev) =>
+                              prev.includes(d.deviceId)
+                                ? prev.filter((id) => id !== d.deviceId)
+                                : [...prev, d.deviceId]
+                            );
+                          }}
+                          className={cn(
+                            "px-2 py-1 rounded text-center border font-mono text-[11px] transition-all",
+                            isChecked
+                              ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-200 font-semibold"
+                              : "bg-surface-1 border-border/60 text-text-tertiary hover:border-border"
+                          )}
+                        >
+                          #{i + 1}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Execute Button */}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={restartingNet}
+                    onClick={handleRestartNetwork}
+                    className="bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5"
+                  >
+                    ⚡ Перезапустить интерфейс ({restartNetMode}) на {restartTargetDeviceIds.length} платах
+                  </Button>
+                </div>
+
+                {/* Restart Logs */}
+                {restartLogs.length > 0 && (
+                  <div className="space-y-2 border border-border rounded-lg p-3 bg-surface-2/40 max-h-52 overflow-y-auto">
+                    <span className="font-semibold text-text-primary text-[11px]">Журнал сброса интерфейсов:</span>
+                    <div className="space-y-1 font-mono text-[11px]">
+                      {restartLogs.map((log) => (
+                        <div
+                          key={log.deviceId}
+                          className={cn(
+                            "flex items-center justify-between p-1.5 rounded border",
+                            log.ok ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300" : "bg-rose-500/10 border-rose-500/20 text-rose-300"
+                          )}
+                        >
+                          <span>{log.deviceId} ({log.mode}):</span>
+                          <span>{log.log}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 3: Batch Proxy Pool Distribution (1-to-1) */}
+            {networkTab === 'batch_proxy' && (
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="font-semibold text-text-primary text-xs">
+                      Вставьте список прокси (один на строку):
+                    </label>
+                    <span className="text-[11px] text-text-tertiary">
+                      Распознано: <strong className="text-cyan-300">{parseBatchProxyLines(batchProxyText).length}</strong> шт.
+                    </span>
+                  </div>
+                  <Textarea
+                    rows={6}
+                    placeholder={`185.123.45.67:8080:user:pass:https://mobileproxy.space/reload.html?proxy_key=xxx\n185.123.45.68:8080:user:pass|https://mobileproxy.space/reload.html?proxy_key=yyy\nhttp://admin:secret@185.123.45.69:8080\n185.123.45.70:8080`}
+                    value={batchProxyText}
+                    onChange={(e) => setBatchProxyText(e.target.value)}
+                    className="font-mono text-[11px]"
+                  />
+                  <div className="flex flex-wrap gap-2 text-[10px] text-text-tertiary">
+                    <span>Поддерживаемые форматы:</span>
+                    <code className="bg-surface-2 px-1 rounded text-cyan-400">host:port:user:pass:rotateUrl</code>
+                    <code className="bg-surface-2 px-1 rounded text-cyan-400">host:port:user:pass|rotateUrl</code>
+                    <code className="bg-surface-2 px-1 rounded text-cyan-400">http://user:pass@host:port</code>
+                    <code className="bg-surface-2 px-1 rounded text-cyan-400">host:port</code>
+                  </div>
+                </div>
+
+                {/* Proxy Protocol / Type */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div>
+                    <label className="text-[11px] text-text-secondary block mb-1">Тип прокси:</label>
+                    <select
+                      value={batchProxyType}
+                      onChange={(e) => setBatchProxyType(e.target.value as any)}
+                      className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
+                    >
+                      <option value="http">HTTP / HTTPS</option>
+                      <option value="socks5">SOCKS5</option>
+                      <option value="mobile">Мобильный 4G / LTE</option>
+                      <option value="residential">Резидентский</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Preview Table */}
+                {parseBatchProxyLines(batchProxyText).length > 0 && (
+                  <div className="space-y-1.5">
+                    <span className="font-semibold text-text-primary text-[11px]">
+                      Предпросмотр распределения 1-к-1:
+                    </span>
+                    <div className="border border-border rounded-lg overflow-hidden max-h-48 overflow-y-auto">
+                      <table className="w-full text-left border-collapse font-mono text-[11px]">
+                        <thead className="bg-surface-2 text-text-secondary text-[10px] border-b border-border sticky top-0">
+                          <tr>
+                            <th className="p-2">№</th>
+                            <th className="p-2">Целевая плата</th>
+                            <th className="p-2">Host:Port</th>
+                            <th className="p-2">Авторизация</th>
+                            <th className="p-2">Webhook ротации</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border/40">
+                          {parseBatchProxyLines(batchProxyText).map((item, idx) => {
+                            const targetId = batchProxyTargets[idx] || `— (Плат меньше, чем прокси)`;
+                            return (
+                              <tr key={idx} className="hover:bg-surface-2/30">
+                                <td className="p-2 text-text-tertiary">#{idx + 1}</td>
+                                <td className="p-2 font-sans font-semibold text-text-primary">{targetId}</td>
+                                <td className="p-2 text-cyan-300 font-bold">{item.host}:{item.port}</td>
+                                <td className="p-2 text-text-secondary">{item.username ? `${item.username}:***` : 'Без логина'}</td>
+                                <td className="p-2 text-[10px] truncate max-w-[180px] text-text-tertiary">
+                                  {item.rotateUrl || '—'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="flex justify-end gap-2 pt-2 border-t border-border">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={batchProxyApplying}
+                    disabled={parseBatchProxyLines(batchProxyText).length === 0}
+                    onClick={handleApplyBatchProxies}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
+                  >
+                    🚀 Применить прокси 1-к-1 ({Math.min(parseBatchProxyLines(batchProxyText).length, batchProxyTargets.length)} плат)
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Bottom Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <Button size="sm" variant="ghost" onClick={() => setNetworkModalOpen(false)}>
                 Закрыть
               </Button>
             </div>

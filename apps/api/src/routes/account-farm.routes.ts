@@ -100,8 +100,36 @@ const SetDeviceProxyBody = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
+  rotateUrl: z.string().url().optional(),
 }).refine((data) => data.proxyId || (data.host && data.port), {
   message: 'Either proxyId or both host and port must be provided',
+});
+
+const RotateDeviceIpBody = z.object({
+  rotateUrl: z.string().url().optional(),
+  cooldownMs: z.number().int().min(0).max(30000).optional(),
+});
+
+const RestartNetworkBody = z.object({
+  deviceId: z.string().min(1).optional(),
+  mode: z.enum(['ethernet', 'wifi', 'all']).default('ethernet'),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+const BatchSetDeviceProxyBody = z.object({
+  assignments: z.array(z.object({
+    deviceId: z.string().min(1),
+    host: z.string().min(1),
+    port: z.number().int().min(1).max(65535),
+    username: z.string().optional(),
+    password: z.string().optional(),
+    type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
+    rotateUrl: z.string().url().optional(),
+  })).min(1),
+});
+
+const BatchCheckIpBody = z.object({
+  deviceIds: z.array(z.string()).min(1),
 });
 
 const ViewTargetBody = z.object({
@@ -883,7 +911,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = SetDeviceProxyBody.parse(request.body);
 
-    let proxyConfig: { host: string; port: number; username?: string; password?: string; type?: any };
+    let proxyConfig: { host: string; port: number; username?: string; password?: string; type?: any; rotateUrl?: string };
     let proxyRecordId: string | null = null;
 
     if (body.proxyId) {
@@ -896,6 +924,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         username: p.username ?? undefined,
         password: p.password ? decrypt(p.password) : undefined,
         type: p.type as any,
+        rotateUrl: body.rotateUrl,
       };
     } else {
       proxyConfig = {
@@ -904,6 +933,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         username: body.username,
         password: body.password,
         type: body.type,
+        rotateUrl: body.rotateUrl,
       };
     }
 
@@ -941,6 +971,51 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     try {
       const check = await deviceAgentClient.checkDeviceIp(deviceId);
       return reply.send(check);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/rotate-ip', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = RotateDeviceIpBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.rotateProxyIp(deviceId, body.rotateUrl, body.cooldownMs);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/network/restart', async (request, reply) => {
+    const body = RestartNetworkBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.restartNetworkInterface({
+        deviceId: body.deviceId || 'all',
+        mode: body.mode,
+        targetDeviceIds: body.targetDeviceIds,
+      });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/batch-set', async (request, reply) => {
+    const body = BatchSetDeviceProxyBody.parse(request.body);
+    try {
+      const res = await deviceAgentClient.batchSetProxy(body.assignments);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/batch-check-ip', async (request, reply) => {
+    const body = BatchCheckIpBody.parse(request.body);
+    try {
+      const results = await deviceAgentClient.batchCheckDeviceIp(body.deviceIds);
+      return reply.send({ ok: true, count: results.length, results });
     } catch (err) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }

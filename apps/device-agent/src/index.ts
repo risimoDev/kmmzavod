@@ -52,6 +52,7 @@ const SetProxyBody = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
+  rotateUrl: z.string().url().optional(),
 });
 
 app.post('/proxy/set', async (req, reply) => {
@@ -106,6 +107,113 @@ app.post('/proxy/check', async (req, reply) => {
     const check = await proxyManager.checkDeviceIp(parsed.data.deviceId);
     return check;
   } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const RotateIpBody = z.object({
+  deviceId: z.string().min(1),
+  rotateUrl: z.string().url().optional(),
+  cooldownMs: z.number().int().min(0).max(30000).optional(),
+});
+
+app.post('/proxy/rotate-ip', async (req, reply) => {
+  const parsed = RotateIpBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const res = await proxyManager.rotateProxyIp(parsed.data.deviceId, parsed.data.rotateUrl, parsed.data.cooldownMs);
+    return res;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /proxy/rotate-ip failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const RestartInterfaceBody = z.object({
+  deviceId: z.string().min(1),
+  mode: z.enum(['ethernet', 'wifi', 'all']).default('ethernet'),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/network/restart-interface', async (req, reply) => {
+  const parsed = RestartInterfaceBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, mode, targetDeviceIds } = parsed.data;
+  const targets = (targetDeviceIds && targetDeviceIds.length > 0) ? targetDeviceIds : [deviceId];
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map((id) => proxyManager.restartNetworkInterface(id, mode))
+    );
+    const formatted = results.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      return {
+        ok: false,
+        deviceId: targets[i],
+        mode,
+        log: r.reason instanceof Error ? r.reason.message : String(r.reason),
+      };
+    });
+    const successful = formatted.filter((f) => f.ok).length;
+    return {
+      ok: successful > 0 || targets.length === 0,
+      total: targets.length,
+      successful,
+      failed: targets.length - successful,
+      results: formatted,
+    };
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /network/restart-interface failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const BatchSetProxyBody = z.object({
+  assignments: z.array(z.object({
+    deviceId: z.string().min(1),
+    host: z.string().min(1),
+    port: z.number().int().min(1).max(65535),
+    username: z.string().optional(),
+    password: z.string().optional(),
+    type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
+    rotateUrl: z.string().url().optional(),
+  })).min(1),
+});
+
+app.post('/proxy/batch-set', async (req, reply) => {
+  const parsed = BatchSetProxyBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  try {
+    const assignments = parsed.data.assignments.map((a) => ({
+      deviceId: a.deviceId,
+      proxy: {
+        host: a.host,
+        port: a.port,
+        username: a.username,
+        password: a.password,
+        type: a.type,
+        rotateUrl: a.rotateUrl,
+      },
+    }));
+    const res = await proxyManager.batchSetProxy(assignments);
+    return res;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /proxy/batch-set failed');
     reply.code(502);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

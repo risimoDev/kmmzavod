@@ -11,6 +11,7 @@ export interface DeviceProxyConfig {
   username?: string;
   password?: string;
   type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  rotateUrl?: string;
 }
 
 export interface DeviceIpCheckResult {
@@ -197,6 +198,159 @@ export class ProxyManager {
         hostIp: this.hostPublicIp ?? undefined,
       };
     }
+  }
+
+  /** Trigger IP rotation webhook for mobile/residential proxy and verify new exit IP. */
+  async rotateProxyIp(
+    deviceId: string,
+    rotateUrlOverride?: string,
+    cooldownMs = 4000
+  ): Promise<{
+    ok: boolean;
+    deviceId: string;
+    rotateUrl: string;
+    statusCode?: number;
+    rotateResponse?: string;
+    check: DeviceIpCheckResult;
+    error?: string;
+  }> {
+    const cfg = this.proxyMap.get(deviceId);
+    const url = rotateUrlOverride || cfg?.rotateUrl;
+    if (!url) {
+      throw new Error(`Для устройства ${deviceId} не указан URL ротации (Webhook смены IP)`);
+    }
+
+    this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');
+
+    let statusCode: number | undefined;
+    let rotateResponse = '';
+
+    try {
+      const res = await axios.get(url, {
+        timeout: 15_000,
+        headers: { 'User-Agent': 'KMMZavod-ProxyManager/1.0' },
+      });
+      statusCode = res.status;
+      rotateResponse = typeof res.data === 'string' ? res.data.slice(0, 500) : JSON.stringify(res.data).slice(0, 500);
+    } catch (err) {
+      this.logger.error({ deviceId, err }, 'proxy-manager: failed to call rotateUrl');
+      throw new Error(`Ошибка вызова ротации по ссылке: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Cooldown to give mobile carrier / modem time to re-establish connection
+    if (cooldownMs > 0) {
+      await new Promise((r) => setTimeout(r, cooldownMs));
+    }
+
+    // Re-check exit IP
+    const check = await this.checkDeviceIp(deviceId);
+    return {
+      ok: check.ok,
+      deviceId,
+      rotateUrl: url,
+      statusCode,
+      rotateResponse,
+      check,
+    };
+  }
+
+  /**
+   * Restart network interface (Ethernet eth0 or Wi-Fi wlan0) and flush DNS/route cache.
+   * Tailored for single-cable Ethernet motherboard phone farms without SIM cards.
+   */
+  async restartNetworkInterface(
+    deviceId: string,
+    mode: 'ethernet' | 'wifi' | 'all' = 'ethernet'
+  ): Promise<{
+    ok: boolean;
+    deviceId: string;
+    mode: string;
+    log: string;
+  }> {
+    this.logger.info({ deviceId, mode }, 'proxy-manager: restarting network interface and flushing caches');
+
+    const commands: string[] = [];
+
+    // 1. Flush DNS resolver and route caches
+    commands.push('ndc resolver flushdefaultif 2>/dev/null || true');
+    commands.push('ip route flush cache 2>/dev/null || true');
+
+    // 2. Ethernet bounce (single cable farm architecture)
+    if (mode === 'ethernet' || mode === 'all') {
+      commands.push('ip link set eth0 down 2>/dev/null || ifconfig eth0 down 2>/dev/null || true');
+      commands.push('sleep 1');
+      commands.push('ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true');
+    }
+
+    // 3. Wi-Fi bounce
+    if (mode === 'wifi' || mode === 'all') {
+      commands.push('svc wifi disable 2>/dev/null || true');
+      commands.push('sleep 1');
+      commands.push('svc wifi enable 2>/dev/null || true');
+    }
+
+    const script = commands.join(' && ');
+    let output = '';
+    try {
+      output = await this.adb.shell(deviceId, script);
+    } catch (err) {
+      this.logger.error({ deviceId, err }, 'proxy-manager: network restart command failed');
+      throw new Error(`Ошибка перезапуска сети: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Allow 2s for interface re-negotiation / DHCP renewal
+    await new Promise((r) => setTimeout(r, 2000));
+
+    return {
+      ok: true,
+      deviceId,
+      mode,
+      log: output || 'Сетевые интерфейсы перезапущены, DNS и маршруты сброшены',
+    };
+  }
+
+  /** Batch set proxy across multiple devices in parallel */
+  async batchSetProxy(
+    assignments: Array<{ deviceId: string; proxy: DeviceProxyConfig }>
+  ): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    results: Array<{
+      deviceId: string;
+      ok: boolean;
+      check?: DeviceIpCheckResult;
+      error?: string;
+    }>;
+  }> {
+    const results = await Promise.allSettled(
+      assignments.map(async ({ deviceId, proxy }) => {
+        const check = await this.setProxy(deviceId, proxy);
+        return { deviceId, ok: true, check };
+      })
+    );
+
+    const formatted = results.map((r, i) => {
+      const devId = assignments[i].deviceId;
+      if (r.status === 'fulfilled') {
+        return r.value;
+      }
+      return {
+        deviceId: devId,
+        ok: false,
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+      };
+    });
+
+    const successful = formatted.filter((f) => f.ok).length;
+    return {
+      ok: successful > 0 || assignments.length === 0,
+      total: assignments.length,
+      successful,
+      failed: assignments.length - successful,
+      results: formatted,
+    };
   }
 
   getProxy(deviceId: string): DeviceProxyConfig | undefined {

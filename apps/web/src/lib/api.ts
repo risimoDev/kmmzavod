@@ -618,6 +618,7 @@ export const accountFarmApi = {
     username?: string;
     password?: string;
     type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+    rotateUrl?: string;
   }) => apiFetch<{ ok: boolean; check?: DeviceIpCheck }>(`/api/v1/farm/devices/${deviceId}/proxy`, { method: 'POST', body: JSON.stringify(body) }),
 
   clearDeviceProxy: (deviceId: string) =>
@@ -625,6 +626,64 @@ export const accountFarmApi = {
 
   checkDeviceIp: (deviceId: string) =>
     apiFetch<DeviceIpCheck>(`/api/v1/farm/devices/${deviceId}/check-ip`, { method: 'POST' }),
+
+  rotateDeviceProxyIp: (deviceId: string, body?: { rotateUrl?: string; cooldownMs?: number }) =>
+    apiFetch<{
+      ok: boolean;
+      deviceId: string;
+      rotateUrl: string;
+      statusCode?: number;
+      rotateResponse?: string;
+      check: DeviceIpCheck;
+      error?: string;
+    }>(`/api/v1/farm/devices/${deviceId}/rotate-ip`, { method: 'POST', body: JSON.stringify(body || {}) }),
+
+  restartDeviceNetwork: (body: {
+    deviceId?: string;
+    mode?: 'ethernet' | 'wifi' | 'all';
+    targetDeviceIds?: string[];
+  }) =>
+    apiFetch<{
+      ok: boolean;
+      total: number;
+      successful: number;
+      failed: number;
+      results: Array<{
+        deviceId: string;
+        mode: string;
+        ok: boolean;
+        log: string;
+      }>;
+    }>('/api/v1/farm/devices/network/restart', { method: 'POST', body: JSON.stringify(body) }),
+
+  batchSetDeviceProxies: (assignments: Array<{
+    deviceId: string;
+    host: string;
+    port: number;
+    username?: string;
+    password?: string;
+    type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+    rotateUrl?: string;
+  }>) =>
+    apiFetch<{
+      ok: boolean;
+      total: number;
+      successful: number;
+      failed: number;
+      results: Array<{
+        deviceId: string;
+        ok: boolean;
+        check?: DeviceIpCheck;
+        error?: string;
+      }>;
+    }>('/api/v1/farm/devices/proxy/batch-set', { method: 'POST', body: JSON.stringify({ assignments }) }),
+
+  batchCheckDeviceIps: (deviceIds: string[]) =>
+    apiFetch<{
+      ok: boolean;
+      count: number;
+      results: Array<{ deviceId: string } & DeviceIpCheck>;
+    }>('/api/v1/farm/devices/proxy/batch-check-ip', { method: 'POST', body: JSON.stringify({ deviceIds }) }),
 
   viewTarget: (deviceId: string, body: ViewTargetParams) =>
     apiFetch<ViewTargetResponse>(`/api/v1/farm/devices/${deviceId}/view-target`, { method: 'POST', body: JSON.stringify(body) }),
@@ -942,6 +1001,7 @@ export interface FarmDevice {
     host: string;
     port: number;
     type?: string;
+    rotateUrl?: string;
   } | null;
 }
 
