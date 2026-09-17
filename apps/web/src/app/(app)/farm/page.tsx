@@ -1736,15 +1736,6 @@ function DevicesTab() {
                   <Button
                     size="sm"
                     variant="primary"
-                    className="col-span-2 text-[11px] py-1.5 h-auto bg-brand-600 hover:bg-brand-500"
-                    onClick={() => {
-                      setSelectedDevice(device);
-                      setViewModalOpen(true);
-                    }}
-                  >
-                  <Button
-                    size="sm"
-                    variant="primary"
                     className="col-span-2 text-[11px] py-1.5 h-auto bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center justify-center gap-1.5 shadow-sm"
                     onClick={() => handleOpenRemote(device)}
                   >
