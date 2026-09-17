@@ -935,8 +935,8 @@ function AccountsTab() {
 }
 
 function HealthBadge({ score }: { score: number }) {
-  const tone = score >= 70 ? "success" : score >= 40 ? "warning" : "danger";
-  return <Badge variant={tone as any}>{score}/100</Badge>;
+  const tone: "success" | "warning" | "danger" = score >= 70 ? "success" : score >= 40 ? "warning" : "danger";
+  return <Badge variant={tone}>{score}/100</Badge>;
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -1465,7 +1465,7 @@ function DevicesTab() {
                       {device.name || `Плата #${idx + 1}`}
                     </span>
                   </div>
-                  <Badge variant={device.online ? "success" : "neutral"} className="text-[10px] px-1.5 py-0.5">
+                  <Badge variant={device.online ? "success" : "default"} className="text-[10px] px-1.5 py-0.5">
                     {device.online ? "Онлайн" : "Оффлайн"}
                   </Badge>
                 </div>
