@@ -62,8 +62,8 @@ echo.
 :: 4. Проверка интерфейса AmneziaWG
 echo Проверка туннеля с сервером AWS:
 ipconfig | findstr "10.66.66.2 10.13.13.2" >nul
-if %errorlevel% neq 0 (
-    echo [ВНИМАНИЕ] Туннельный IP (10.66.66.2 / 10.13.13.2) не найден в ipconfig!
+if errorlevel 1 (
+    echo [ВНИМАНИЕ] Туннельный IP 10.66.66.2 или 10.13.13.2 не найден в ipconfig!
     echo Убедитесь, что AmneziaWG клиент подключен к серверу AWS.
 ) else (
     echo [OK] Интерфейс AmneziaWG активен.
@@ -78,44 +78,38 @@ echo.
 :: 5. Определение пакетного менеджера (pnpm или npm)
 set "RUN_CMD="
 where pnpm >nul 2>nul
-if %errorlevel% equ 0 (
-    set "RUN_CMD=pnpm"
-) else (
+if not errorlevel 1 set "RUN_CMD=pnpm"
+if not defined RUN_CMD (
     where npm >nul 2>nul
-    if %errorlevel% equ 0 (
-        set "RUN_CMD=npm"
-    ) else (
-        echo [ОШИБКА] Ни pnpm, ни npm не найдены в системе!
-        pause
-        exit /b 1
-    )
+    if not errorlevel 1 set "RUN_CMD=npm"
+)
+if not defined RUN_CMD (
+    echo [ОШИБКА] Ни pnpm, ни npm не найдены в системе!
+    pause
+    exit /b 1
 )
 
 :: 6. Установка зависимостей, если еще не установлены
 if not exist "node_modules" (
     echo Папка node_modules не найдена. Установка зависимостей через %RUN_CMD%...
-    if "%RUN_CMD%"=="pnpm" (
-        call pnpm install
-    ) else (
-        call npm install
-    )
-    if %errorlevel% neq 0 (
+    call %RUN_CMD% install
+    if errorlevel 1 (
         echo [ОШИБКА] Не удалось установить зависимости!
         pause
-        exit /b %errorlevel%
+        exit /b 1
     )
 )
 
-:: 7. Запуск приложения (обязательно с call, чтобы окно не закрывалось)
+:: 7. Запуск приложения
 if "%RUN_CMD%"=="pnpm" (
     call pnpm dev
 ) else (
     call npm run dev
 )
 
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo.
-    echo [ОШИБКА] Device-agent завершился с кодом ошибки %errorlevel%.
+    echo [ОШИБКА] Device-agent завершился с ошибкой.
 )
 
 echo.
