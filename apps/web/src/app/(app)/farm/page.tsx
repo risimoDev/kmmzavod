@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { TopBar } from "@/components/layout/AppShell";
 import {
@@ -1528,8 +1528,12 @@ function DevicesTab() {
     setDragStart(null);
   };
 
+  const inFlightFrameRef = useRef(false);
+  const remoteImgRef = useRef<HTMLImageElement>(null);
+
   const refreshRemoteFrame = useCallback(async () => {
-    if (!selectedDevice) return;
+    if (!selectedDevice || inFlightFrameRef.current) return;
+    inFlightFrameRef.current = true;
     setRemoteScreenLoading(true);
     try {
       const res = await accountFarmApi.screenshotDevice(selectedDevice.deviceId);
@@ -1543,6 +1547,7 @@ function DevicesTab() {
     } catch {
       // silent retry on frame capture
     } finally {
+      inFlightFrameRef.current = false;
       setRemoteScreenLoading(false);
     }
   }, [selectedDevice]);
@@ -1562,18 +1567,66 @@ function DevicesTab() {
       .map((d) => d.deviceId);
   }, [masterSlaveEnabled, selectedDevice, devices]);
 
-  const handleRemoteMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  /** Exact touch coordinate calculation factoring in letterbox/pillarbox bars of object-contain. */
+  const getNormalizedCoordinates = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const xPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const yPercent = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const img = remoteImgRef.current;
+    if (!img || !img.naturalWidth || !img.naturalHeight) {
+      return {
+        xPercent: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+        yPercent: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+        rippleX: e.clientX - rect.left,
+        rippleY: e.clientY - rect.top,
+      };
+    }
+
+    const imgAspect = img.naturalWidth / img.naturalHeight;
+    const containerAspect = rect.width / rect.height;
+
+    let renderedWidth = rect.width;
+    let renderedHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (imgAspect > containerAspect) {
+      // Image is wider than container (e.g. landscape mode or wider aspect ratio)
+      renderedWidth = rect.width;
+      renderedHeight = rect.width / imgAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderedHeight) / 2;
+    } else {
+      // Image is taller than container (standard vertical phone screen)
+      renderedHeight = rect.height;
+      renderedWidth = rect.height * imgAspect;
+      offsetX = (rect.width - renderedWidth) / 2;
+      offsetY = 0;
+    }
+
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+
+    const xOnImg = clientX - offsetX;
+    const yOnImg = clientY - offsetY;
+
+    const xPercent = Math.max(0, Math.min(1, xOnImg / renderedWidth));
+    const yPercent = Math.max(0, Math.min(1, yOnImg / renderedHeight));
+
+    return {
+      xPercent,
+      yPercent,
+      rippleX: clientX,
+      rippleY: clientY,
+    };
+  };
+
+  const handleRemoteMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const { xPercent, yPercent } = getNormalizedCoordinates(e);
     setDragStart({ x: xPercent, y: yPercent, time: Date.now() });
   };
 
   const handleRemoteMouseUp = async (e: React.MouseEvent<HTMLDivElement>) => {
     if (!dragStart || !selectedDevice) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const xPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const yPercent = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const { xPercent, yPercent, rippleX, rippleY } = getNormalizedCoordinates(e);
 
     const deltaX = Math.abs(xPercent - dragStart.x);
     const deltaY = Math.abs(yPercent - dragStart.y);
@@ -1583,7 +1636,7 @@ function DevicesTab() {
     setDragStart(null);
 
     if (deltaX < 0.03 && deltaY < 0.03) {
-      setRemoteTouchRipple({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      setRemoteTouchRipple({ x: rippleX, y: rippleY });
       setTimeout(() => setRemoteTouchRipple(null), 400);
 
       try {
@@ -1592,7 +1645,7 @@ function DevicesTab() {
           yPercent: dragStart.y,
           targetDeviceIds: targets,
         });
-        setTimeout(refreshRemoteFrame, 250);
+        setTimeout(refreshRemoteFrame, 200);
       } catch (err: any) {
         console.error('Remote tap error:', err);
       }
@@ -1606,7 +1659,7 @@ function DevicesTab() {
           durationMs: duration,
           targetDeviceIds: targets,
         });
-        setTimeout(refreshRemoteFrame, 350);
+        setTimeout(refreshRemoteFrame, 300);
       } catch (err: any) {
         console.error('Remote swipe error:', err);
       }
@@ -1621,6 +1674,45 @@ function DevicesTab() {
       setTimeout(refreshRemoteFrame, 250);
     } catch (err: any) {
       alert(`Ошибка кнопки: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
+  const handleRemoteSetOrientation = async (orientation: 0 | 1) => {
+    if (!selectedDevice) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.setDeviceOrientation(selectedDevice.deviceId, orientation, getTargetDeviceIds());
+      setTimeout(refreshRemoteFrame, 350);
+    } catch (err: any) {
+      alert(`Ошибка установки ориентации: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
+  const handleRemoteAcceptDialog = async () => {
+    if (!selectedDevice) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.acceptDeviceDialog(selectedDevice.deviceId, getTargetDeviceIds());
+      setTimeout(refreshRemoteFrame, 350);
+    } catch (err: any) {
+      alert(`Ошибка подтверждения диалога: ${err.message}`);
+    } finally {
+      setRemoteActionLoading(false);
+    }
+  };
+
+  const handleRemoteGrantPermissions = async () => {
+    if (!selectedDevice) return;
+    setRemoteActionLoading(true);
+    try {
+      await accountFarmApi.grantDevicePermissions(selectedDevice.deviceId, undefined, getTargetDeviceIds());
+      setTimeout(refreshRemoteFrame, 350);
+    } catch (err: any) {
+      alert(`Ошибка авто-выдачи разрешений: ${err.message}`);
     } finally {
       setRemoteActionLoading(false);
     }
@@ -3137,6 +3229,7 @@ function DevicesTab() {
                   ) : remoteScreenData ? (
                     /* eslint-disable-next-line @next/next/no-img-element */
                     <img
+                      ref={remoteImgRef}
                       src={remoteScreenData}
                       alt="Экран платы"
                       className="w-full h-full object-contain pointer-events-none select-none"
@@ -3165,7 +3258,7 @@ function DevicesTab() {
                 </div>
 
                 {/* Bottom Android Navigation Bar */}
-                <div className="w-full pt-2 flex items-center justify-around px-4 gap-2 z-10">
+                <div className="w-full pt-2 flex items-center justify-around px-2 gap-1.5 z-10">
                   <button
                     onClick={() => handleRemoteKey('back')}
                     disabled={remoteActionLoading}
@@ -3189,6 +3282,22 @@ function DevicesTab() {
                     className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white transition-all text-xs font-bold"
                   >
                     ⏹
+                  </button>
+                  <button
+                    onClick={handleRemoteAcceptDialog}
+                    disabled={remoteActionLoading}
+                    title="Подтвердить диалог / Enter (OK)"
+                    className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-emerald-800 hover:bg-emerald-700 active:scale-95 text-emerald-100 hover:text-white transition-all text-[11px] font-bold"
+                  >
+                    ↵ OK
+                  </button>
+                  <button
+                    onClick={() => handleRemoteSetOrientation(0)}
+                    disabled={remoteActionLoading}
+                    title="Вернуть в вертикальный портрет (0°)"
+                    className="flex-1 py-1.5 flex items-center justify-center rounded-lg bg-blue-800 hover:bg-blue-700 active:scale-95 text-blue-100 hover:text-white transition-all text-[11px] font-bold"
+                  >
+                    📱 0°
                   </button>
                 </div>
               </div>
@@ -3350,7 +3459,62 @@ function DevicesTab() {
                 </div>
               </div>
 
-              {/* 5. Stream Controls Toolbar */}
+              {/* 5. Orientation & Permission Overrides (Fix for landscape & dialog bugs) */}
+              <div className="p-3.5 rounded-xl border border-border bg-surface-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-text-primary">
+                    🛡️ Экран и Права доступа (Решение проблем с диалогами)
+                  </label>
+                  <span className="text-[10px] text-emerald-400 font-medium">Bypass Tapjacking</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-blue-500/40 text-blue-400 hover:bg-blue-500/10"
+                    onClick={() => handleRemoteSetOrientation(0)}
+                    disabled={remoteActionLoading}
+                    title="Принудительно вернуть экран платы в вертикальный режим 0°"
+                  >
+                    📱 Портрет (0°)
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-blue-500/40 text-blue-400 hover:bg-blue-500/10"
+                    onClick={() => handleRemoteSetOrientation(1)}
+                    disabled={remoteActionLoading}
+                    title="Повернуть экран в горизонтальный режим 90°"
+                  >
+                    🔄 Альбом (90°)
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+                    onClick={handleRemoteAcceptDialog}
+                    disabled={remoteActionLoading}
+                    title="Нажать кнопку Разрешить на системном диалоге через аппаратный D-Pad"
+                  >
+                    ✅ Принять права
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[11px] border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+                    onClick={handleRemoteGrantPermissions}
+                    disabled={remoteActionLoading}
+                    title="Выдать активному приложению все права напрямую через ADB pm grant"
+                  >
+                    🛡️ Auto-Grant
+                  </Button>
+                </div>
+                <p className="text-[10px] text-text-tertiary">
+                  Если приложение перевернуло экран — нажмите «📱 Портрет». Если всплыло системное окно «Подтвердить права» и кнопки не нажимаются мышь — нажмите «✅ Принять права» или «🛡️ Auto-Grant».
+                </p>
+              </div>
+
+              {/* 6. Stream Controls Toolbar */}
               <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-3/50 rounded-xl border border-border/60">
                 <div className="flex items-center gap-2">
                   <Button

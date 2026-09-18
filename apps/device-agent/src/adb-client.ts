@@ -137,9 +137,32 @@ export class AdbClient {
     });
   }
 
-  /** Launch application by package name. */
+  /** Launch application by package name with 3-tier fallback. */
   async openApp(serial: string, packageName: string): Promise<void> {
-    await this.shell(serial, `monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`);
+    // 1. First try monkey runner
+    try {
+      const res = await this.shell(serial, `monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`);
+      if (!res.includes('No activities found') && !res.includes('monkey aborted') && !res.includes('** Error')) {
+        return;
+      }
+    } catch {
+      // fallback
+    }
+
+    // 2. Try resolving main launchable activity via cmd package resolve-activity
+    try {
+      const actRaw = await this.shell(serial, `cmd package resolve-activity --brief ${packageName}`);
+      const match = actRaw.match(/([a-zA-Z0-9_.]+\/[a-zA-Z0-9_.]+)/);
+      if (match && !match[1].includes('ResolverActivity')) {
+        await this.shell(serial, `am start -n ${match[1]}`);
+        return;
+      }
+    } catch {
+      // fallback
+    }
+
+    // 3. Standard am start intent action MAIN category LAUNCHER
+    await this.shell(serial, `am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${packageName}`);
   }
 
   /** Open deep link or URL via Android Intent. */
@@ -210,6 +233,104 @@ export class AdbClient {
     await this.exec(['-s', serial, 'reboot']);
   }
 
+  /** Get current device screen orientation (0 = 0°, 1 = 90°, 2 = 180°, 3 = 270°). */
+  async getOrientation(serial: string): Promise<number> {
+    try {
+      const out = await this.shell(serial, 'dumpsys window');
+      const m = out.match(/mCurrentRotation=(\d)/i) || out.match(/orientation=(\d)/i);
+      if (m) {
+        return parseInt(m[1], 10);
+      }
+    } catch {
+      // fallback
+    }
+    return 0;
+  }
+
+  /** Force device orientation: 0 = Portrait (0°), 1 = Landscape (90°). */
+  async setOrientation(serial: string, orientation: 0 | 1): Promise<void> {
+    // Disable accelerometer auto-rotation to prevent hardware sensors from snapping back
+    await this.shell(serial, 'settings put system accelerometer_rotation 0');
+    await this.shell(serial, `settings put system user_rotation ${orientation}`);
+  }
+
+  /** Determine currently focused / foreground package name. */
+  async getForegroundApp(serial: string): Promise<string | undefined> {
+    try {
+      const out = await this.shell(serial, 'dumpsys window');
+      const m = out.match(/mCurrentFocus=Window\{[^\}]*\s+([a-zA-Z0-9_.]+)\//) ||
+                out.match(/mFocusedApp=AppWindowToken\{[^\}]*\s+([a-zA-Z0-9_.]+)\//);
+      if (m && m[1] && m[1] !== 'com.android.systemui') {
+        return m[1];
+      }
+    } catch {}
+    try {
+      const out = await this.shell(serial, 'dumpsys activity activities');
+      const m = out.match(/topResumedActivity=ActivityRecord\{[^\}]*\s+([a-zA-Z0-9_.]+)\//) ||
+                out.match(/ResumedActivity: ActivityRecord\{[^\}]*\s+([a-zA-Z0-9_.]+)\//);
+      if (m && m[1]) return m[1];
+    } catch {}
+    return undefined;
+  }
+
+  /**
+   * Auto-grant all common Android runtime permissions via ADB.
+   * If packageName is omitted, targets the currently focused foreground app.
+   */
+  async grantAllPermissions(serial: string, packageName?: string): Promise<{ ok: boolean; targetPackage?: string; grantedCount: number }> {
+    const pkg = packageName || (await this.getForegroundApp(serial));
+    if (!pkg) {
+      return { ok: false, grantedCount: 0 };
+    }
+
+    const permissions = [
+      'android.permission.CAMERA',
+      'android.permission.RECORD_AUDIO',
+      'android.permission.READ_EXTERNAL_STORAGE',
+      'android.permission.WRITE_EXTERNAL_STORAGE',
+      'android.permission.READ_MEDIA_IMAGES',
+      'android.permission.READ_MEDIA_VIDEO',
+      'android.permission.READ_MEDIA_AUDIO',
+      'android.permission.ACCESS_FINE_LOCATION',
+      'android.permission.ACCESS_COARSE_LOCATION',
+      'android.permission.POST_NOTIFICATIONS',
+    ];
+
+    let grantedCount = 0;
+    for (const perm of permissions) {
+      try {
+        await this.shell(serial, `pm grant ${pkg} ${perm}`);
+        grantedCount++;
+      } catch {
+        // Not all apps declare all permissions, ignore failed grants
+      }
+    }
+
+    try {
+      await this.shell(serial, `appops set ${pkg} SYSTEM_ALERT_WINDOW allow`);
+    } catch {}
+
+    this.logger.info({ serial, pkg, grantedCount }, 'adb: auto-granted runtime permissions');
+    return { ok: true, targetPackage: pkg, grantedCount };
+  }
+
+  /**
+   * Confirms system runtime permission dialogs ("Подтвердить права"):
+   * Sends DPAD hardware keys (Down + Right + Enter) to trigger "Allow",
+   * and also grants all permissions via ADB pm grant.
+   */
+  async acceptPermissionDialog(serial: string): Promise<void> {
+    // 1. Send D-Pad navigation to focus and trigger the "Allow" button on system dialog
+    try {
+      await this.keyevent(serial, 20); // KEYCODE_DPAD_DOWN
+      await this.keyevent(serial, 22); // KEYCODE_DPAD_RIGHT
+      await this.keyevent(serial, 66); // KEYCODE_ENTER
+    } catch {}
+
+    // 2. Also run pm grant for all permissions on the active app
+    await this.grantAllPermissions(serial);
+  }
+
   private screenSizeCache = new Map<string, { width: number; height: number }>();
 
   /** Get screen dimensions [width, height] with in-memory caching. */
@@ -233,17 +354,34 @@ export class AdbClient {
     return fallback;
   }
 
-  /** Resolve normalized coordinates (0.0 - 1.0) or absolute pixels against device resolution. */
+  /** Resolve normalized coordinates (0.0 - 1.0) or absolute pixels against device resolution & rotation. */
   async resolveCoordinates(serial: string, xPercent?: number, yPercent?: number, x?: number, y?: number): Promise<{ x: number; y: number }> {
     if (x !== undefined && y !== undefined && xPercent === undefined && yPercent === undefined) {
       return { x: Math.round(x), y: Math.round(y) };
     }
     const size = await this.getScreenSize(serial);
-    const resolvedX = xPercent !== undefined ? Math.round(xPercent * size.width) : (x ?? Math.round(size.width / 2));
-    const resolvedY = yPercent !== undefined ? Math.round(yPercent * size.height) : (y ?? Math.round(size.height / 2));
+    const orientation = await this.getOrientation(serial);
+
+    // If rotated 90° or 270° (landscape), swap width and height in display coordinate space
+    let displayWidth = size.width;
+    let displayHeight = size.height;
+    if (orientation === 1 || orientation === 3) {
+      if (size.width < size.height) {
+        displayWidth = size.height;
+        displayHeight = size.width;
+      }
+    } else {
+      if (size.width > size.height) {
+        displayWidth = size.height;
+        displayHeight = size.width;
+      }
+    }
+
+    const resolvedX = xPercent !== undefined ? Math.round(xPercent * displayWidth) : (x ?? Math.round(displayWidth / 2));
+    const resolvedY = yPercent !== undefined ? Math.round(yPercent * displayHeight) : (y ?? Math.round(displayHeight / 2));
     return {
-      x: Math.max(0, Math.min(size.width - 1, resolvedX)),
-      y: Math.max(0, Math.min(size.height - 1, resolvedY)),
+      x: Math.max(0, Math.min(displayWidth - 1, resolvedX)),
+      y: Math.max(0, Math.min(displayHeight - 1, resolvedY)),
     };
   }
 

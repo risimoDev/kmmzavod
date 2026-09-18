@@ -96,6 +96,8 @@ services:
       INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
       YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
+      # Home-PC bridge to the native ADB phone farm, reached over AmneziaWG
+      DEVICE_AGENT_URL: ${DEVICE_AGENT_URL:-http://10.66.66.2:8300}
     dns:
       - 8.8.8.8
       - 1.1.1.1

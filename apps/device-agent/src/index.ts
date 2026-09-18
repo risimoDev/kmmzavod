@@ -648,6 +648,98 @@ app.post('/device/control/open-app', async (req, reply) => {
   }
 });
 
+const OrientationControlBody = z.object({
+  deviceId: z.string().min(1),
+  orientation: z.union([z.literal(0), z.literal(1)]),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/orientation', async (req, reply) => {
+  const parsed = OrientationControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, orientation, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        await adb.setOrientation(devId, orientation);
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful, orientation };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const AcceptDialogControlBody = z.object({
+  deviceId: z.string().min(1),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/accept-dialog', async (req, reply) => {
+  const parsed = AcceptDialogControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        await adb.acceptPermissionDialog(devId);
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+const GrantPermissionsControlBody = z.object({
+  deviceId: z.string().min(1),
+  packageName: z.string().optional(),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+app.post('/device/control/grant-permissions', async (req, reply) => {
+  const parsed = GrantPermissionsControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  const { deviceId, packageName, targetDeviceIds } = parsed.data;
+  const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
+
+  try {
+    const results = await Promise.allSettled(
+      targets.map(async (devId) => {
+        return await adb.grantAllPermissions(devId, packageName);
+      })
+    );
+
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    return { ok: true, targetsCount: targets.length, successful };
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
 // ── Batch APK Installation & App Management ────────────────────────────────
 const InstallApkBody = z.object({
   apkUrl: z.string().url(),

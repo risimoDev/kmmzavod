@@ -752,6 +752,33 @@ export const accountFarmApi = {
       body: JSON.stringify({ packageName, targetDeviceIds }),
     }),
 
+  setDeviceOrientation: (deviceId: string, orientation: 0 | 1, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number; orientation?: number }>(
+      `/api/v1/farm/devices/${deviceId}/orientation`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ orientation, targetDeviceIds }),
+      }
+    ),
+
+  acceptDeviceDialog: (deviceId: string, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(
+      `/api/v1/farm/devices/${deviceId}/accept-dialog`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ targetDeviceIds }),
+      }
+    ),
+
+  grantDevicePermissions: (deviceId: string, packageName?: string, targetDeviceIds?: string[]) =>
+    apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(
+      `/api/v1/farm/devices/${deviceId}/grant-permissions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ packageName, targetDeviceIds }),
+      }
+    ),
+
   uploadApk: (file: File) => {
     const fd = new FormData();
     fd.append('file', file);

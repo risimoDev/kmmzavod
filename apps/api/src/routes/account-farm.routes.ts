@@ -132,6 +132,43 @@ const BatchCheckIpBody = z.object({
   deviceIds: z.array(z.string()).min(1),
 });
 
+const InstallApkBody = z.object({
+  apkUrl: z.string().url(),
+  targetDeviceIds: z.array(z.string()).min(1),
+  reinstall: z.boolean().default(true),
+  grantPermissions: z.boolean().default(true),
+});
+
+const BatchAppActionBody = z.object({
+  action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
+  packageName: z.string().min(1),
+  targetDeviceIds: z.array(z.string()).min(1),
+});
+
+const RunScriptDispatchBody = z.object({
+  engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
+  steps: z.array(z.any()).optional(),
+  jsCode: z.string().optional(),
+  targetDeviceIds: z.array(z.string()).min(1),
+  variables: z.record(z.string()).optional(),
+  scriptName: z.string().optional(),
+});
+
+const DeviceOrientationBody = z.object({
+  orientation: z.union([z.literal(0), z.literal(1)]),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+const DeviceAcceptDialogBody = z.object({
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+const DeviceGrantPermissionsBody = z.object({
+  packageName: z.string().optional(),
+  targetDeviceIds: z.array(z.string()).optional(),
+});
+
+
 const ViewTargetBody = z.object({
   platform: z.enum(['instagram', 'tiktok']),
   targetUsername: z.string().min(1).max(100),
@@ -906,6 +943,97 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     });
   });
 
+  // ── Global & Batch Farm Operations (Static routes MUST precede /devices/:deviceId) ──
+
+  app.post('/devices/optimize-all', async (request, reply) => {
+    const parsed = z.object({ deviceIds: z.array(z.string()).optional() }).optional().safeParse(request.body || {});
+    const deviceIds = parsed.success ? parsed.data?.deviceIds : undefined;
+    try {
+      const res = await deviceAgentClient.optimizeFarm(deviceIds);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  const restartNetworkHandler = async (request: any, reply: any) => {
+    const body = RestartNetworkBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.restartNetworkInterface({
+        deviceId: body.deviceId || 'all',
+        mode: body.mode,
+        targetDeviceIds: body.targetDeviceIds,
+      });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/network/restart', restartNetworkHandler);
+  app.post('/network/restart', restartNetworkHandler);
+
+  const batchSetProxyHandler = async (request: any, reply: any) => {
+    const body = BatchSetDeviceProxyBody.parse(request.body);
+    try {
+      const res = await deviceAgentClient.batchSetProxy(body.assignments);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/proxy/batch-set', batchSetProxyHandler);
+  app.post('/proxies/batch-set', batchSetProxyHandler);
+
+  const batchCheckIpHandler = async (request: any, reply: any) => {
+    const body = BatchCheckIpBody.parse(request.body);
+    try {
+      const results = await deviceAgentClient.batchCheckDeviceIp(body.deviceIds);
+      return reply.send({ ok: true, count: results.length, results });
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/proxy/batch-check-ip', batchCheckIpHandler);
+  app.post('/proxies/batch-check-ip', batchCheckIpHandler);
+
+  const installApkHandler = async (request: any, reply: any) => {
+    const body = InstallApkBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.installApk(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/install-apk', installApkHandler);
+  app.post('/apks/install', installApkHandler);
+
+  const batchAppActionHandler = async (request: any, reply: any) => {
+    const body = BatchAppActionBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.batchAppAction(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/apps/batch-action', batchAppActionHandler);
+  app.post('/apps/batch-action', batchAppActionHandler);
+
+  const runScriptHandler = async (request: any, reply: any) => {
+    const body = RunScriptDispatchBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.runScript(body);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  };
+  app.post('/devices/scripts/run', runScriptHandler);
+  app.post('/scripts/run', runScriptHandler);
+
+  // ── Individual Device Endpoints (:deviceId) ────────────────────────────────
+
   app.post('/devices/:deviceId/proxy', async (request, reply) => {
     const { tenantId } = request.user;
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
@@ -982,40 +1110,6 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     try {
       const res = await deviceAgentClient.rotateProxyIp(deviceId, body.rotateUrl, body.cooldownMs);
       return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
-    }
-  });
-
-  app.post('/devices/network/restart', async (request, reply) => {
-    const body = RestartNetworkBody.parse(request.body || {});
-    try {
-      const res = await deviceAgentClient.restartNetworkInterface({
-        deviceId: body.deviceId || 'all',
-        mode: body.mode,
-        targetDeviceIds: body.targetDeviceIds,
-      });
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
-    }
-  });
-
-  app.post('/devices/proxy/batch-set', async (request, reply) => {
-    const body = BatchSetDeviceProxyBody.parse(request.body);
-    try {
-      const res = await deviceAgentClient.batchSetProxy(body.assignments);
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
-    }
-  });
-
-  app.post('/devices/proxy/batch-check-ip', async (request, reply) => {
-    const body = BatchCheckIpBody.parse(request.body);
-    try {
-      const results = await deviceAgentClient.batchCheckDeviceIp(body.deviceIds);
-      return reply.send({ ok: true, count: results.length, results });
     } catch (err) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
@@ -1162,17 +1256,6 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/devices/optimize-all', async (request, reply) => {
-    const parsed = z.object({ deviceIds: z.array(z.string()).optional() }).optional().safeParse(request.body || {});
-    const deviceIds = parsed.success ? parsed.data?.deviceIds : undefined;
-    try {
-      const res = await deviceAgentClient.optimizeFarm(deviceIds);
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
-    }
-  });
-
   // ── Remote Control & Master-Slave Interaction ──────────────────────────────
 
   const DeviceTapBody = z.object({
@@ -1269,6 +1352,39 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post('/devices/:deviceId/orientation', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceOrientationBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.setOrientation({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/accept-dialog', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceAcceptDialogBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.acceptDialog({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/:deviceId/grant-permissions', async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = DeviceGrantPermissionsBody.parse(request.body || {});
+    try {
+      const res = await deviceAgentClient.grantPermissions({ deviceId, ...body });
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
   // ── Batch APK Installation & App Management ────────────────────────────────
 
   app.post('/apks/upload', async (request, reply) => {
@@ -1316,39 +1432,6 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     } catch (err: any) {
       logger.error({ err, key }, 'failed to download APK');
       return reply.status(404).send({ error: 'NotFound', message: 'APK file not found' });
-    }
-  });
-
-  const InstallApkBody = z.object({
-    apkUrl: z.string().url(),
-    targetDeviceIds: z.array(z.string()).min(1),
-    reinstall: z.boolean().default(true),
-    grantPermissions: z.boolean().default(true),
-  });
-
-  app.post('/devices/install-apk', async (request, reply) => {
-    const body = InstallApkBody.parse(request.body || {});
-    try {
-      const res = await deviceAgentClient.installApk(body);
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
-    }
-  });
-
-  const BatchAppActionBody = z.object({
-    action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
-    packageName: z.string().min(1),
-    targetDeviceIds: z.array(z.string()).min(1),
-  });
-
-  app.post('/devices/apps/batch-action', async (request, reply) => {
-    const body = BatchAppActionBody.parse(request.body || {});
-    try {
-      const res = await deviceAgentClient.batchAppAction(body);
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1546,25 +1629,6 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       return reply.send({ ok: true, deleted: true, id });
     } catch (err: any) {
       return reply.status(500).send({ error: 'DeleteFailed', message: err.message });
-    }
-  });
-
-  const RunScriptDispatchBody = z.object({
-    engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
-    steps: z.array(z.any()).optional(),
-    jsCode: z.string().optional(),
-    targetDeviceIds: z.array(z.string()).min(1),
-    variables: z.record(z.string()).optional(),
-    scriptName: z.string().optional(),
-  });
-
-  app.post('/devices/scripts/run', async (request, reply) => {
-    const body = RunScriptDispatchBody.parse(request.body || {});
-    try {
-      const res = await deviceAgentClient.runScript(body);
-      return reply.send(res);
-    } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
     }
   });
 

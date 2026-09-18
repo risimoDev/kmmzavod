@@ -278,6 +278,32 @@ export const deviceAgentClient = {
     return res.data;
   },
 
+  async setOrientation(opts: {
+    deviceId: string;
+    orientation: 0 | 1;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; orientation?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/orientation`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async acceptDialog(opts: {
+    deviceId: string;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/accept-dialog`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async grantPermissions(opts: {
+    deviceId: string;
+    packageName?: string;
+    targetDeviceIds?: string[];
+  }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/control/grant-permissions`, opts, { timeout: 15_000 });
+    return res.data;
+  },
+
   async installApk(opts: {
     apkUrl: string;
     targetDeviceIds: string[];
