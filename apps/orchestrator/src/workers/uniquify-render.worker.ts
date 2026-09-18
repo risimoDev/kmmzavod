@@ -59,14 +59,12 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         logger.info({ uniquifyJobId, variantId }, 'Uniquify-render: job cancelled, aborting');
         return;
       }
-      if (!uniquifyJob.voiceoverKey) {
-        throw new Error('Uniquify-render: job has no voiceover (analyze step did not complete)');
-      }
 
       await db.uniqueVariant.update({ where: { id: variantId }, data: { status: 'rendering' } });
 
       try {
         const subtitles = (uniquifyJob.transcript ?? []) as unknown as SubtitleLine[];
+        const mode = job.data.mode ?? 'preserve_context';
 
         const renderResp = await axios.post<{
           output_key: string;
@@ -81,8 +79,9 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           variant_id: variantId,
           uniquify_job_id: uniquifyJobId,
           tenant_id: tenantId,
+          mode,
           source_storage_keys: sourceStorageKeys,
-          voiceover_storage_key: uniquifyJob.voiceoverKey,
+          voiceover_storage_key: uniquifyJob.voiceoverKey ?? null,
           output_key: outputKey,
           seed,
           width,

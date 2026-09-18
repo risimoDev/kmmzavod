@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { useTheme } from "@/components/providers/ThemeProvider";
 import { getStoredUser, authApi } from "@/lib/api";
+import { NotificationBell } from "./NotificationBell";
 
 // ── Mobile menu context ─────────────────────────────────────────────────────────
 
@@ -319,6 +320,7 @@ export function TopBar({ title, subtitle, actions, children }: TopBarProps) {
         {subtitle && <p className="text-xs text-text-secondary truncate">{subtitle}</p>}
       </div>
       <div className="flex-1" />
+      <NotificationBell />
       {actions}
       {children}
     </header>

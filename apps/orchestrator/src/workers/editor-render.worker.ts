@@ -80,29 +80,29 @@ export function createEditorRenderWorker(deps: Deps): Worker {
           bgmUrl,
         });
 
+        const workspaceProjectId = typeof config.workspaceProjectId === 'string' ? config.workspaceProjectId : null;
+
         // Persist outputs onto the included clip rows (aligned by index).
         for (let i = 0; i < result.clips.length; i++) {
           const out = result.clips[i];
           const row = clipRows[i];
           if (!row) continue;
 
-          let outputSourceVideoId: string | null = null;
-          if (project.mode === 'uniquify_source') {
-            const sv = await db.sourceVideo.create({
-              data: {
-                tenantId,
-                title: out.title || project.name,
-                status: 'ready',
-                storageKey: out.output_key,
-                mimeType: 'video/mp4',
-                fileSizeBytes: BigInt(out.file_size_bytes ?? 0),
-                durationSec: out.duration_sec,
-                width: out.width,
-                height: out.height,
-              },
-            });
-            outputSourceVideoId = sv.id;
-          }
+          // Create a ready SourceVideo for each master clip linked to the workspace project
+          const sv = await db.sourceVideo.create({
+            data: {
+              tenantId,
+              projectId: workspaceProjectId,
+              title: out.title || `${project.name} (Мастер #${i + 1})`,
+              status: 'ready',
+              storageKey: out.output_key,
+              mimeType: 'video/mp4',
+              fileSizeBytes: BigInt(out.file_size_bytes ?? 0),
+              durationSec: out.duration_sec,
+              width: out.width,
+              height: out.height,
+            },
+          });
 
           await db.editClip.update({
             where: { id: row.id },
@@ -111,19 +111,39 @@ export function createEditorRenderWorker(deps: Deps): Worker {
               thumbnailKey: out.thumbnail_key ?? null,
               durationSec: out.duration_sec,
               phash: out.phash ?? null,
-              outputSourceVideoId,
+              outputSourceVideoId: sv.id,
             },
           });
         }
 
         await db.editProject.update({ where: { id: projectId }, data: { status: 'completed' } });
         logger.info({ projectId, rendered: result.clips.length }, 'Editor-render: complete');
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'system',
+            title: 'Монтаж успешно завершён!',
+            body: `Проект "${project.name}": отрендерено ${result.clips.length} мастер-роликов, сохранённых в проекте.`,
+            actionUrl: workspaceProjectId ? `/projects?selected=${workspaceProjectId}` : `/editor/${projectId}`,
+          },
+        }).catch(() => {});
       } catch (err: unknown) {
         const errorMsg = err && typeof err === 'object' && 'isAxiosError' in err
           ? describeEditorError(err)
           : err instanceof Error ? err.message : String(err);
         logger.error({ projectId, err: errorMsg }, 'Editor-render: failed');
         await db.editProject.update({ where: { id: projectId }, data: { status: 'failed', error: errorMsg } });
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'job_failed',
+            title: 'Ошибка монтажа видео',
+            body: `Проект "${project.name}": ${errorMsg}`,
+            actionUrl: `/editor/${projectId}`,
+          },
+        }).catch(() => {});
         throw err;
       }
     },

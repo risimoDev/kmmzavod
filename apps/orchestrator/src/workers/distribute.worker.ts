@@ -164,23 +164,32 @@ export function createDistributeWorker(deps: Deps): Worker {
         // Advance next available slot for this account by 3 hours
         accountNextAvailableMs.set(item.socialAccount.id, effectiveTimeMs + 3 * 3600 * 1000);
 
-        // Prefer auto-generated content from uniqueVariant, fallback to template/manual
+        // Precedence: explicit manual assignment caption -> AI auto-generated caption -> template fallback
         const autoCaption = item.uniqueVariant.generatedCaption;
         const autoHashtags = item.uniqueVariant.generatedHashtags;
 
-        const caption = autoCaption
-          ? `${autoCaption}\n\n${autoHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
-          : buildCaption(
-              distJob.captionTemplate,
-              item.caption,
-              item.hashtags.length > 0 ? item.hashtags : distJob.hashtags,
-              itemIndex,
-              item.socialAccount.platform,
-            );
+        const hashtags = item.hashtags && item.hashtags.length > 0
+          ? item.hashtags
+          : (autoHashtags && autoHashtags.length > 0 ? autoHashtags : distJob.hashtags);
 
-        const hashtags = autoHashtags && autoHashtags.length > 0
-          ? autoHashtags
-          : item.hashtags.length > 0 ? item.hashtags : distJob.hashtags;
+        const hashtagStr = hashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ');
+
+        let caption: string;
+        if (item.caption && item.caption.trim()) {
+          caption = hashtagStr && !item.caption.includes('#')
+            ? `${item.caption.trim()}\n\n${hashtagStr}`
+            : item.caption.trim();
+        } else if (autoCaption) {
+          caption = `${autoCaption}\n\n${autoHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`;
+        } else {
+          caption = buildCaption(
+            distJob.captionTemplate,
+            item.caption,
+            hashtags,
+            itemIndex,
+            item.socialAccount.platform,
+          );
+        }
 
         // Create PublishJob
         const publishJob = await db.publishJob.create({

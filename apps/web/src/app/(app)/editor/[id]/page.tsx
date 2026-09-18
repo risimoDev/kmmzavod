@@ -605,11 +605,14 @@ export default function EditorProjectDetailPage() {
                 <h3 className="font-semibold text-text-primary">
                   Готовые клипы <span className="text-text-tertiary">({outputs.length})</span>
                 </h3>
-                {project.mode === "uniquify_source" && (
-                  <Button size="sm" variant="primary" onClick={() => router.push("/uniquify")}>
-                    → В уникализацию
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => router.push("/projects")}>
+                    📁 К проектам
                   </Button>
-                )}
+                  <Button size="sm" variant="primary" onClick={() => router.push("/uniquify")}>
+                    ⚡ В уникализацию
+                  </Button>
+                </div>
               </div>
               {outputs.length === 0 ? (
                 <EmptyState title="Нет выходов" description="Клипы ещё обрабатываются или рендер не дал результатов." />
@@ -623,19 +626,31 @@ export default function EditorProjectDetailPage() {
                       ) : (
                         <div className="w-full bg-surface-3" style={{ aspectRatio: aspectCss }} />
                       )}
-                      <div className="p-2.5 flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-text-primary truncate">{o.title}</p>
-                          <p className="text-2xs text-text-tertiary">
-                            {o.durationSec ? fmtTime(Number(o.durationSec)) : ""}
-                            {o.sourceVideoId ? " · в источниках уникализации" : ""}
-                          </p>
+                      <div className="p-2.5 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-text-primary truncate">{o.title}</p>
+                            <p className="text-2xs text-text-tertiary">
+                              {o.durationSec ? fmtTime(Number(o.durationSec)) : ""}
+                              {o.sourceVideoId ? " · сохранён в проекте" : ""}
+                            </p>
+                          </div>
+                          {o.url && (
+                            <a href={o.url} download
+                              className="shrink-0 text-xs text-brand-400 hover:underline font-medium">
+                              Скачать
+                            </a>
+                          )}
                         </div>
-                        {o.url && (
-                          <a href={o.url} download
-                            className="shrink-0 text-xs text-brand-400 hover:underline font-medium">
-                            Скачать
-                          </a>
+                        {o.sourceVideoId && (
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            className="w-full text-2xs"
+                            onClick={() => router.push(`/uniquify?sourceVideoId=${o.sourceVideoId}`)}
+                          >
+                            ⚡ Уникализировать этот ролик
+                          </Button>
                         )}
                       </div>
                     </div>

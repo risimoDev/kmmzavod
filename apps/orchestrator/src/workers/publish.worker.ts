@@ -19,10 +19,28 @@ import { PostBridgeClient } from '../clients/social/postbridge.client';
 import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
+import { getRedisConnection } from '../lib/redis';
+import type Redis from 'ioredis';
 import { publisherService, describePublisherError } from '../services/publisher';
 import { deviceAgentService, describeDeviceAgentError } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'publish' });
+
+async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec = 120, timeoutMs = 60_000): Promise<boolean> {
+  const key = `lock:device:${deviceId}`;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await redis.set(key, '1', 'EX', ttlSec, 'NX');
+    if (res === 'OK') return true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
+async function releaseDeviceLock(redis: Redis, deviceId: string): Promise<void> {
+  const key = `lock:device:${deviceId}`;
+  await redis.del(key).catch(() => {});
+}
 
 interface Deps {
   db: PrismaClient;
@@ -206,6 +224,12 @@ export function createPublishWorker(deps: Deps): Worker {
           const presignedUrl = await storage.presignedUrl(storageKey, 3600);
           const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
+          const redis = getRedisConnection();
+          const locked = await acquireDeviceLock(redis, accountRaw.deviceId, 120, 60_000);
+          if (!locked) {
+            throw new Error(`Устройство ${accountRaw.deviceId} занято публикацией другого ролика. Задача вернётся в очередь.`);
+          }
+
           try {
             const result = await deviceAgentService.publish({
               deviceId: accountRaw.deviceId,
@@ -217,6 +241,8 @@ export function createPublishWorker(deps: Deps): Worker {
             // No external post id available from real-app UI automation.
           } catch (err: unknown) {
             throw new Error(`device-${platform}: ${describeDeviceAgentError(err)}`);
+          } finally {
+            await releaseDeviceLock(redis, accountRaw.deviceId);
           }
         } else
         switch (platform) {
@@ -412,6 +438,16 @@ export function createPublishWorker(deps: Deps): Worker {
 
         logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
 
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'system',
+            title: `Видео опубликовано (${platform.toUpperCase()})`,
+            body: `Аккаунт: ${accountRaw.accountName}${accountRaw.deviceId ? ` · Телефон ${accountRaw.deviceId}` : ''}`,
+            actionUrl: `/uniquify`,
+          },
+        }).catch(() => {});
+
         // Schedule shadow-ban check ~45 min after publish
         if (shadowBanCheckQueue) {
           await shadowBanCheckQueue.add(
@@ -474,6 +510,18 @@ export function createPublishWorker(deps: Deps): Worker {
               data: { status: 'completed', completedAt: now },
             });
           }
+        }
+
+        if ((job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 3)) {
+          await db.notification.create({
+            data: {
+              tenantId,
+              type: 'job_failed',
+              title: `Ошибка публикации (${platform.toUpperCase()})`,
+              body: `Аккаунт: ${accountRaw?.accountName || socialAccountId}. Ошибка: ${errorMsg}`,
+              actionUrl: `/uniquify`,
+            },
+          }).catch(() => {});
         }
 
         throw err; // Let BullMQ handle retries

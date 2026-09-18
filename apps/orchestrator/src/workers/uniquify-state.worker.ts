@@ -42,7 +42,12 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
 
         const uniquifyJob = await tx.uniquifyJob.findUniqueOrThrow({
           where: { id: uniquifyJobId },
-          select: { variantCount: true, status: true },
+          select: {
+            tenantId: true,
+            variantCount: true,
+            status: true,
+            sourceVideo: { select: { title: true, projectId: true } },
+          },
         });
 
         const totalDone = completedCount + failedCount;
@@ -62,10 +67,25 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
         await tx.uniquifyJob.update({ where: { id: uniquifyJobId }, data });
 
         if (finished) {
+          const allFailed = completedCount === 0;
           logger.info(
             { uniquifyJobId, completed: completedCount, failed: failedCount, finalStatus: data.status },
             'Uniquify-state: job finished',
           );
+
+          await tx.notification.create({
+            data: {
+              tenantId: uniquifyJob.tenantId,
+              type: allFailed ? 'job_failed' : 'system',
+              title: allFailed ? 'Ошибка уникализации видео' : 'Уникализация успешно завершена!',
+              body: allFailed
+                ? `Задача "${uniquifyJob.sourceVideo?.title || 'Без названия'}": все ${failedCount} вариантов не удалось сгенерировать.`
+                : `Задача "${uniquifyJob.sourceVideo?.title || 'Без названия'}": готово ${completedCount} уникальных роликов (ошибок: ${failedCount}).`,
+              actionUrl: uniquifyJob.sourceVideo?.projectId
+                ? `/projects?selected=${uniquifyJob.sourceVideo.projectId}`
+                : `/uniquify/jobs/${uniquifyJobId}`,
+            },
+          }).catch(() => {});
         }
       });
     },

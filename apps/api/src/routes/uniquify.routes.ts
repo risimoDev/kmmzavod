@@ -33,6 +33,8 @@ const CreateUniquifyJobBody = z.object({
   variantCount: z.number().int().min(1).max(100).default(10),
   targetPlatforms: z.array(z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge'])).default([]),
   config: z.object({
+    // Mode: 'preserve_context' keeps narrative/cuts intact and perturbs visual/audio tensors; 'remix_montage' chops & remixes.
+    mode: z.enum(['preserve_context', 'remix_montage']).default('preserve_context'),
     // Extra source clips to recombine alongside the primary one (pool mode).
     additionalSourceVideoIds: z.array(z.string().uuid()).max(20).optional(),
     // Background-music library — one different track is picked per variant so the

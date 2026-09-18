@@ -108,12 +108,32 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
         ]);
 
         logger.info({ projectId, clips: result.clips.length }, 'Editor-analyze: complete (ready for review)');
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'system',
+            title: 'Раскадровка готова к проверке',
+            body: `Проект "${project.name}": сформировано ${result.clips.length} клипов с субтитрами. Перейдите для настройки и запуска рендера.`,
+            actionUrl: `/editor/${projectId}`,
+          },
+        }).catch(() => {});
       } catch (err: unknown) {
         const errorMsg = err && typeof err === 'object' && 'isAxiosError' in err
           ? describeEditorError(err)
           : err instanceof Error ? err.message : String(err);
         logger.error({ projectId, err: errorMsg }, 'Editor-analyze: failed');
         await db.editProject.update({ where: { id: projectId }, data: { status: 'failed', error: errorMsg } });
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'job_failed',
+            title: 'Ошибка анализа видео в редакторе',
+            body: `Проект "${project.name}": ${errorMsg}`,
+            actionUrl: `/editor/${projectId}`,
+          },
+        }).catch(() => {});
         throw err;
       }
     },

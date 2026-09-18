@@ -200,67 +200,94 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         const { width, height } = dimsForAspect(config.aspectRatio as string | undefined);
         const fps = typeof config.fps === 'number' ? config.fps : 30;
 
-        // ── 3. ONE GPT call: script (from theme) + per-variant captions ───────
+        const mode = (config.mode as 'preserve_context' | 'remix_montage') ?? 'preserve_context';
+        const isPreserveContext = mode === 'preserve_context';
+
         let script = '';
         let captions: Array<{ caption: string; hashtags: string[] }> = [];
-        try {
-          ({ script, captions } = await gptunnelService.generateScript({
-            title: sourceVideo.title ?? 'video',
-            description: sourceVideo.description ?? '',
-            productInfo: (config.productInfo as string) ?? undefined,
-            language,
-            variantCount,
-            targetSeconds,
-          }));
-        } catch (e) {
-          throw new Error(`gpt-script: ${describeAxios(e)}`);
-        }
-
-        // ── 4. ONE TTS call: the shared voiceover ────────────────────────────
-        let tts: { storageKey: string; cost: number };
-        try {
-          tts = await gptunnelService.ttsCreate({
-            text: script,
-            voiceId,
-            tenantId,
-            uniquifyJobId,
-          });
-        } catch (e) {
-          throw new Error(`tts (voiceId=${voiceId}): ${describeAxios(e)}`);
-        }
-        const voiceoverKey = tts.storageKey;
-
-        // ── 5. ONE Whisper run: subtitle lines timed to the voiceover ────────
-        // Whisper gives the best (word-level) sync; if it yields nothing we fall
-        // back to evenly distributing the known script across the voiceover
-        // length, so subtitles are always present.
+        let voiceoverKey: string | null = null;
         let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
-        if (enableSubtitles) {
-          let voiceDuration = 0;
+        let ttsCost = 0;
+
+        if (isPreserveContext) {
+          // ── Preserve-Context mode: original voiceover and audio stay 100% intact!
+          // We generate unique social captions/hashtags per variant, but do NOT replace voice!
           try {
-            const tr = await axios.post<{
-              subtitles: Array<{ start_sec: number; end_sec: number; text: string }>;
-              duration_sec?: number;
-            }>(`${videoProcessorUrl}/transcribe`, {
-              storage_key: voiceoverKey,
+            ({ captions } = await gptunnelService.generateScript({
+              title: sourceVideo.title ?? 'video',
+              description: sourceVideo.description ?? '',
+              productInfo: (config.productInfo as string) ?? undefined,
               language,
-            }, { timeout: 300_000 });
-            subtitles = tr.data.subtitles ?? [];
-            voiceDuration = tr.data.duration_sec ?? 0;
-          } catch (err: unknown) {
-            logger.warn(
-              { uniquifyJobId, err: describeAxios(err) },
-              'Uniquify-analyze: voiceover transcription failed, will use script-based subtitles',
-            );
+              variantCount,
+              targetSeconds,
+            }));
+          } catch (e) {
+            logger.warn({ err: describeAxios(e) }, 'GPT caption generation fallback');
+            captions = Array.from({ length: variantCount }, (_, i) => ({
+              caption: `${sourceVideo.title ?? 'Видео'} (Вариант ${i + 1})`,
+              hashtags: ['#viral', '#reels', '#shorts', '#trending'],
+            }));
           }
 
-          if (subtitles.length === 0 && script.trim()) {
-            if (voiceDuration <= 0) voiceDuration = estimateSpeechDuration(script);
-            subtitles = buildSubtitlesFromScript(script, voiceDuration);
-            logger.info(
-              { uniquifyJobId, lines: subtitles.length, voiceDuration },
-              'Uniquify-analyze: using script-based fallback subtitles',
-            );
+          if (enableSubtitles && sourceVideo.transcript) {
+            subtitles = (sourceVideo.transcript as any) ?? [];
+          }
+        } else {
+          // ── Remix-Montage mode: full script + shared TTS voiceover
+          try {
+            ({ script, captions } = await gptunnelService.generateScript({
+              title: sourceVideo.title ?? 'video',
+              description: sourceVideo.description ?? '',
+              productInfo: (config.productInfo as string) ?? undefined,
+              language,
+              variantCount,
+              targetSeconds,
+            }));
+          } catch (e) {
+            throw new Error(`gpt-script: ${describeAxios(e)}`);
+          }
+
+          let tts: { storageKey: string; cost: number };
+          try {
+            tts = await gptunnelService.ttsCreate({
+              text: script,
+              voiceId,
+              tenantId,
+              uniquifyJobId,
+            });
+          } catch (e) {
+            throw new Error(`tts (voiceId=${voiceId}): ${describeAxios(e)}`);
+          }
+          voiceoverKey = tts.storageKey;
+          ttsCost = tts.cost ?? 0;
+
+          if (enableSubtitles) {
+            let voiceDuration = 0;
+            try {
+              const tr = await axios.post<{
+                subtitles: Array<{ start_sec: number; end_sec: number; text: string }>;
+                duration_sec?: number;
+              }>(`${videoProcessorUrl}/transcribe`, {
+                storage_key: voiceoverKey,
+                language,
+              }, { timeout: 300_000 });
+              subtitles = tr.data.subtitles ?? [];
+              voiceDuration = tr.data.duration_sec ?? 0;
+            } catch (err: unknown) {
+              logger.warn(
+                { uniquifyJobId, err: describeAxios(err) },
+                'Uniquify-analyze: voiceover transcription failed, will use script-based subtitles',
+              );
+            }
+
+            if (subtitles.length === 0 && script.trim()) {
+              if (voiceDuration <= 0) voiceDuration = estimateSpeechDuration(script);
+              subtitles = buildSubtitlesFromScript(script, voiceDuration);
+              logger.info(
+                { uniquifyJobId, lines: subtitles.length, voiceDuration },
+                'Uniquify-analyze: using script-based fallback subtitles',
+              );
+            }
           }
         }
 
@@ -269,12 +296,12 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           where: { id: uniquifyJobId },
           data: {
             status: 'generating',
-            script,
-            voiceoverKey,
-            voiceId,
+            script: script || null,
+            voiceoverKey: voiceoverKey ?? null,
+            voiceId: isPreserveContext ? null : voiceId,
             language,
             transcript: subtitles as unknown as any,
-            creditsUsed: { increment: Math.round(tts.cost ?? 0) },
+            creditsUsed: { increment: Math.round(ttsCost) },
           },
         });
 
@@ -294,10 +321,10 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               tenantId,
               variantIndex: i,
               status: 'pending',
-              transforms: { seed, subtitleStyle, bgmKey, width, height, fps } as any,
+              transforms: { seed, subtitleStyle, bgmKey, width, height, fps, mode } as any,
               subtitleStyle,
-              ttsVoiceId: voiceId,
-              ttsStorageKey: voiceoverKey,
+              ttsVoiceId: isPreserveContext ? null : voiceId,
+              ttsStorageKey: voiceoverKey ?? null,
               bgmTrackKey: bgmKey ?? null,
               generatedCaption: content?.caption ?? null,
               generatedHashtags: content?.hashtags ?? [],
@@ -310,12 +337,13 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               uniquifyJobId,
               variantId: variant.id,
               tenantId,
+              mode,
               sourceStorageKeys,
               outputKey: `tenants/${tenantId}/uniquify/${uniquifyJobId}/${variant.id}.mp4`,
               seed,
               subtitleStyle,
               bgmStorageKey: bgmKey,
-              bgmVolume,
+              bgmVolume: isPreserveContext ? 0.08 : bgmVolume,
               voiceoverVolume: 1.0,
               width,
               height,
@@ -330,9 +358,19 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         await uniquifyRenderQueue.addBulk(renderJobs);
 
         logger.info(
-          { uniquifyJobId, variantCount, subtitleLines: subtitles.length, bgmTracks: bgmKeys.length },
+          { uniquifyJobId, variantCount, mode, subtitleLines: subtitles.length, bgmTracks: bgmKeys.length },
           'Uniquify-analyze: complete, montage render jobs enqueued',
         );
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'system',
+            title: 'Уникализация запущена',
+            body: `Генерация ${variantCount} вариантов видео "${sourceVideo.title}" в режиме ${isPreserveContext ? '«Сохранение сюжета»' : '«Динамический ремикс»'}.`,
+            actionUrl: `/uniquify/jobs/${uniquifyJobId}`,
+          },
+        }).catch(() => {});
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error({ sourceVideoId, uniquifyJobId, err: errorMsg }, 'Uniquify-analyze: failed');
@@ -340,6 +378,16 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'failed', error: errorMsg } }),
           db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'failed', error: errorMsg } }),
         ]);
+
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'job_failed',
+            title: 'Сбой уникализации видео',
+            body: `Ошибка при подготовке вариантов: ${errorMsg}`,
+            actionUrl: `/uniquify/jobs/${uniquifyJobId}`,
+          },
+        }).catch(() => {});
         throw err;
       }
     },

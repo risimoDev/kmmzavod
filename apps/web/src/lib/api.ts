@@ -1135,12 +1135,38 @@ export interface PublishDiagnostics {
   proxies: { total: number; active: number; accountsWithoutProxy: number };
 }
 
-// ── Projects API ──────────────────────────────────────────────────────────────
+export interface ProjectHubDetail {
+  project: Project & { _count: { videos: number; assets: number; sourceVideos: number } };
+  rawVideos: Array<SourceVideo & { url: string | null }>;
+  masterClips: Array<EditClip & { url: string | null; thumbnailUrl: string | null; project: { id: string; name: string; mode: string; aspect: string } }>;
+  uniqueVariants: Array<UniqueVariant & { url: string | null; thumbnailUrl: string | null; uniquifyJob: { id: string; status: string; variantCount: number; sourceVideoId: string } }>;
+  distributeJobs: Array<DistributeJob & { items: Array<DistributeItem & { socialAccount: { id: string; accountName: string; platform: string; deviceId?: string | null } }> }>;
+}
 
 export const projectsApi = {
   list: () => apiFetch<Project[]>('/api/v1/projects'),
 
   get: (id: string) => apiFetch<ProjectDetail>(`/api/v1/projects/${id}`),
+
+  hub: (id: string) => apiFetch<ProjectHubDetail>(`/api/v1/projects/${id}/hub`),
+
+  uploadSourceVideo: async (projectId: string, file: File): Promise<SourceVideo & { url: string | null }> => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE}/api/v1/projects/${projectId}/source-videos/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAccessToken()}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error((b as any).message ?? `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
+  deleteSourceVideo: (projectId: string, videoId: string) =>
+    apiFetch<void>(`/api/v1/projects/${projectId}/source-videos/${videoId}`, { method: 'DELETE' }),
 
   create: (body: { name: string; description?: string }) =>
     apiFetch<Project>('/api/v1/projects', { method: 'POST', body: JSON.stringify(body) }),
@@ -1310,6 +1336,8 @@ export interface UniqueVariant {
   width: number | null;
   height: number | null;
   subtitleStyle: string | null;
+  generatedCaption?: string | null;
+  generatedHashtags?: string[];
   error: string | null;
   createdAt: string;
 }
@@ -1523,12 +1551,16 @@ export const uniquifyApi = {
     return apiFetch<{ items: SourceVideo[]; pagination: Pagination }>(`/api/v1/uniquify/source-videos?${q}`);
   },
 
+  getSourceVideo: (id: string) =>
+    apiFetch<SourceVideo & { downloadUrl: string | null }>(`/api/v1/uniquify/source-videos/${id}`),
+
   createJob: (body: {
     sourceVideoId: string;
     variantCount: number;
     projectId?: string;
     targetPlatforms?: string[];
     config?: {
+      mode?: 'preserve_context' | 'remix_montage';
       additionalSourceVideoIds?: string[];
       bgmTrackKeys?: string[];
       bgmVolume?: number;
@@ -1796,6 +1828,12 @@ export const editorApi = {
     return res.json() as Promise<EditSource>;
   },
 
+  importSourcesFromWorkspaceVideo: (id: string, sourceVideoIds: string[]) =>
+    apiFetch<{ sources: EditSource[] }>(`/api/v1/editor/projects/${id}/sources/from-workspace-video`, {
+      method: 'POST',
+      body: JSON.stringify({ sourceVideoIds }),
+    }),
+
   analyze: (id: string) =>
     apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/analyze`, { method: 'POST' }),
 
@@ -1817,3 +1855,45 @@ export const editorApi = {
   remove: (id: string) =>
     apiFetch<void>(`/api/v1/editor/projects/${id}`, { method: 'DELETE' }),
 };
+
+export interface AppNotification {
+  id: string;
+  tenantId: string;
+  userId?: string | null;
+  type: 'system' | 'job_failed' | 'billing' | 'credits_low' | 'plan_expiring';
+  title: string;
+  body: string;
+  isRead: boolean;
+  actionUrl?: string | null;
+  createdAt: string;
+  readAt?: string | null;
+}
+
+export interface NotificationListResponse {
+  items: AppNotification[];
+  total: number;
+  unreadCount: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+export const notificationsApi = {
+  list: (params?: { unreadOnly?: boolean; page?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.unreadOnly) q.set('unreadOnly', 'true');
+    if (params?.page) q.set('page', String(params.page));
+    if (params?.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return apiFetch<NotificationListResponse>(`/api/v1/notifications${qs ? `?${qs}` : ''}`);
+  },
+
+  unreadCount: () => apiFetch<{ unreadCount: number }>('/api/v1/notifications/unread-count'),
+
+  markRead: (id: string) =>
+    apiFetch<AppNotification>(`/api/v1/notifications/${id}/read`, { method: 'PATCH' }),
+
+  markAllRead: () =>
+    apiFetch<{ success: boolean }>('/api/v1/notifications/read-all', { method: 'POST' }),
+};
+

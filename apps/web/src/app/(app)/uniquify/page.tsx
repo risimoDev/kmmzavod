@@ -119,6 +119,20 @@ function UniquifyContent() {
     load();
   }, [load, router]);
 
+  // Auto-open modal if navigated from Projects / Editor with ?sourceVideoId=xxx
+  const sourceVideoIdParam = searchParams.get("sourceVideoId");
+  useEffect(() => {
+    if (!sourceVideoIdParam) return;
+    const match = sources.find((s) => s.id === sourceVideoIdParam);
+    if (match) {
+      setCreateFor(match);
+    } else {
+      uniquifyApi.getSourceVideo(sourceVideoIdParam).then((v) => {
+        if (v) setCreateFor(v);
+      }).catch(() => {});
+    }
+  }, [sourceVideoIdParam, sources]);
+
   // Live updates: silently re-poll while there is active work (no page reload).
   const SOURCE_BUSY = ["uploading", "analyzing"];
   const JOB_BUSY = ["pending", "analyzing", "generating"];
@@ -409,6 +423,7 @@ function CreateJobModal({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const [mode, setMode] = useState<"preserve_context" | "remix_montage">("preserve_context");
   const [variantCount, setVariantCount] = useState(10);
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9" | "4:5">("9:16");
   const [language, setLanguage] = useState("ru");
@@ -457,14 +472,15 @@ function CreateJobModal({
         sourceVideoId: source.id,
         variantCount,
         config: {
+          mode,
           aspectRatio,
           language,
-          voiceId: voiceId.trim() || undefined,
+          voiceId: mode === 'preserve_context' ? undefined : (voiceId.trim() || undefined),
           targetSeconds,
           productInfo: productInfo.trim() || undefined,
-          enableSubtitles,
+          enableSubtitles: mode === 'preserve_context' ? false : enableSubtitles,
           enableBgm,
-          beatSync,
+          beatSync: mode === 'preserve_context' ? false : beatSync,
           bgmTrackKeys: enableBgm ? selectedTracks : [],
         },
       });
@@ -489,14 +505,65 @@ function CreateJobModal({
           <p className="text-xs text-text-tertiary mt-0.5 truncate">{source.title}</p>
         </div>
 
-        <Field label="Что за товар (для точной озвучки)">
-          <Textarea
-            value={productInfo}
-            onChange={(e) => setProductInfo(e.target.value)}
-            placeholder="Опишите товар: что это, для кого, ключевые преимущества, цена/акция — нейросеть напишет сценарий точнее"
-            rows={3}
-          />
-        </Field>
+        {/* Mode selector */}
+        <div className="space-y-2">
+          <label className="text-xs font-medium text-text-secondary">Режим уникализации</label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div
+              onClick={() => setMode("preserve_context")}
+              className={cn(
+                "cursor-pointer rounded-lg p-3 ring-1 transition-all",
+                mode === "preserve_context"
+                  ? "bg-emerald-500/10 ring-emerald-500/50 text-text-primary"
+                  : "bg-surface-2 ring-border text-text-secondary hover:bg-surface-3"
+              )}
+            >
+              <div className="flex items-center gap-2 font-medium text-xs text-emerald-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                Сохранение контекста (Рекомендуется)
+              </div>
+              <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
+                Идеально для готовых роликов из монтажа. Видео и голос автора сохраняются целиком без нарезки, а алгоритмы соцсетей обходятся за счет безопасных микро-модификаций (шум, частоты, зум, цвет).
+              </p>
+            </div>
+
+            <div
+              onClick={() => setMode("remix_montage")}
+              className={cn(
+                "cursor-pointer rounded-lg p-3 ring-1 transition-all",
+                mode === "remix_montage"
+                  ? "bg-purple-500/10 ring-purple-500/50 text-text-primary"
+                  : "bg-surface-2 ring-border text-text-secondary hover:bg-surface-3"
+              )}
+            >
+              <div className="flex items-center gap-2 font-medium text-xs text-purple-400">
+                <span className="w-2 h-2 rounded-full bg-purple-400" />
+                Динамический ремикс
+              </div>
+              <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
+                Нарезает исходник на сцены, перемешивает кадры и синтезирует полностью новую AI-озвучку и сценарий с нуля.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {mode === "preserve_context" ? (
+          <div className="p-3 rounded-lg bg-surface-2 ring-1 ring-border text-[11px] text-text-secondary space-y-1">
+            <p className="font-medium text-emerald-400">Целостность сюжета гарантирована</p>
+            <p className="text-text-tertiary">
+              Оригинальная речь, интонации и монтажные склейки останутся 100% нетронутыми. Нейросеть сгенерирует уникальные заголовки и хэштеги для публикации каждого варианта.
+            </p>
+          </div>
+        ) : (
+          <Field label="Что за товар (для написания сценария и озвучки)">
+            <Textarea
+              value={productInfo}
+              onChange={(e) => setProductInfo(e.target.value)}
+              placeholder="Опишите товар: что это, для кого, ключевые преимущества, цена/акция — нейросеть напишет сценарий точнее"
+              rows={3}
+            />
+          </Field>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Кол-во вариантов">
@@ -508,15 +575,17 @@ function CreateJobModal({
               onChange={(e) => setVariantCount(Math.max(1, Math.min(100, +e.target.value || 1)))}
             />
           </Field>
-          <Field label="Длительность, сек">
-            <Input
-              type="number"
-              min={8}
-              max={120}
-              value={targetSeconds}
-              onChange={(e) => setTargetSeconds(Math.max(8, Math.min(120, +e.target.value || 30)))}
-            />
-          </Field>
+          {mode === "remix_montage" && (
+            <Field label="Длительность, сек">
+              <Input
+                type="number"
+                min={8}
+                max={120}
+                value={targetSeconds}
+                onChange={(e) => setTargetSeconds(Math.max(8, Math.min(120, +e.target.value || 30)))}
+              />
+            </Field>
+          )}
           <Field label="Формат">
             <select
               value={aspectRatio}
@@ -535,25 +604,31 @@ function CreateJobModal({
           </Field>
         </div>
 
-        <Field label="Голос озвучки">
-          <select
-            value={voiceId}
-            onChange={(e) => setVoiceId(e.target.value)}
-            className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary"
-          >
-            <option value="">По умолчанию (ALEX)</option>
-            {voices.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {mode === "remix_montage" && (
+          <Field label="Голос озвучки">
+            <select
+              value={voiceId}
+              onChange={(e) => setVoiceId(e.target.value)}
+              className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary"
+            >
+              <option value="">По умолчанию (ALEX)</option>
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
 
         <div className="space-y-2">
-          <Checkbox checked={enableSubtitles} onChange={setEnableSubtitles} label="Субтитры (по озвучке)" />
-          <Checkbox checked={beatSync} onChange={setBeatSync} label="Нарезка под ритм музыки" />
-          <Checkbox checked={enableBgm} onChange={setEnableBgm} label="Фоновая музыка (разная на вариант)" />
+          {mode === "remix_montage" && (
+            <>
+              <Checkbox checked={enableSubtitles} onChange={setEnableSubtitles} label="Субтитры (по озвучке)" />
+              <Checkbox checked={beatSync} onChange={setBeatSync} label="Нарезка под ритм музыки" />
+            </>
+          )}
+          <Checkbox checked={enableBgm} onChange={setEnableBgm} label="Фоновая музыка (ротация разных треков)" />
         </div>
 
         {enableBgm && (

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.services.storage import StorageClient
 from app.services.uniquify import analyze_video
-from app.services.montage import render_montage
+from app.services.montage import render_montage, render_preserve_context
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +91,9 @@ class RenderRequest(BaseModel):
     variant_id: str
     uniquify_job_id: str
     tenant_id: str
+    mode: str = "preserve_context"  # "preserve_context" | "remix_montage"
     source_storage_keys: list[str] = Field(min_length=1)
-    voiceover_storage_key: str
+    voiceover_storage_key: str | None = None
     output_key: str
     seed: int
     width: int = 1080
@@ -190,10 +191,6 @@ def create_router() -> APIRouter:
                 await storage.download(key, p)
                 source_paths.append(p)
 
-            # Download the shared voiceover.
-            voiceover_path = os.path.join(work_dir, "voiceover.mp3")
-            await storage.download(req.voiceover_storage_key, voiceover_path)
-
             # Download this variant's background music (if any).
             bgm_path: str | None = None
             if req.bgm_storage_key:
@@ -202,24 +199,45 @@ def create_router() -> APIRouter:
 
             output_path = os.path.join(work_dir, "output.mp4")
 
-            async with sem:
-                result = await render_montage(
-                    source_paths=source_paths,
-                    voiceover_path=voiceover_path,
-                    output_path=output_path,
-                    work_dir=work_dir,
-                    seed=req.seed,
-                    width=req.width,
-                    height=req.height,
-                    fps=req.fps,
-                    subtitles=[s.model_dump() for s in req.subtitles],
-                    subtitle_style=req.subtitle_style,
-                    bgm_path=bgm_path,
-                    bgm_volume=req.bgm_volume,
-                    voiceover_volume=req.voiceover_volume,
-                    beat_sync=req.beat_sync,
-                    scene_breaks_by_source=req.scene_breaks,
-                )
+            # If preserve_context mode (default) or no voiceover provided, run narrative-preserving engine
+            if req.mode == "preserve_context" or not req.voiceover_storage_key:
+                async with sem:
+                    result = await render_preserve_context(
+                        source_path=source_paths[0],
+                        output_path=output_path,
+                        work_dir=work_dir,
+                        seed=req.seed,
+                        width=req.width,
+                        height=req.height,
+                        fps=req.fps,
+                        subtitles=[s.model_dump() for s in req.subtitles],
+                        subtitle_style=req.subtitle_style,
+                        bgm_path=bgm_path,
+                        bgm_volume=req.bgm_volume,
+                    )
+            else:
+                # Download the shared voiceover for remix montage
+                voiceover_path = os.path.join(work_dir, "voiceover.mp3")
+                await storage.download(req.voiceover_storage_key, voiceover_path)
+
+                async with sem:
+                    result = await render_montage(
+                        source_paths=source_paths,
+                        voiceover_path=voiceover_path,
+                        output_path=output_path,
+                        work_dir=work_dir,
+                        seed=req.seed,
+                        width=req.width,
+                        height=req.height,
+                        fps=req.fps,
+                        subtitles=[s.model_dump() for s in req.subtitles],
+                        subtitle_style=req.subtitle_style,
+                        bgm_path=bgm_path,
+                        bgm_volume=req.bgm_volume,
+                        voiceover_volume=req.voiceover_volume,
+                        beat_sync=req.beat_sync,
+                        scene_breaks_by_source=req.scene_breaks,
+                    )
 
             # Upload output + thumbnail.
             await storage.upload(req.output_key, result.output_path, "video/mp4")

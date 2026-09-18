@@ -31,6 +31,7 @@ const createProjectSchema = z.object({
   useVision: z.boolean().default(false),
   targetClipCount: z.number().int().min(1).max(30).default(5),
   targetClipSeconds: z.number().min(3).max(180).default(30),
+  workspaceProjectId: z.string().uuid().optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -115,7 +116,7 @@ export async function editorRoutes(app: FastifyInstance) {
         useVision: body.useVision,
         targetClipCount: body.targetClipCount,
         targetClipSeconds: body.targetClipSeconds,
-        config: (body.config ?? {}) as object,
+        config: ({ ...(body.config ?? {}), workspaceProjectId: body.workspaceProjectId }) as object,
         status: 'draft',
       },
     });
@@ -196,6 +197,49 @@ export async function editorRoutes(app: FastifyInstance) {
       await db.editSource.delete({ where: { id: source.id } }).catch(() => {});
       return reply.code(500).send({ error: 'UploadFailed' });
     }
+  });
+
+  // ── Import sources from workspace project videos ───────────────────────────
+  app.post('/projects/:id/sources/from-workspace-video', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id: projectId } = req.params as { id: string };
+    const body = z.object({
+      sourceVideoIds: z.array(z.string().uuid()).min(1),
+    }).parse(req.body);
+
+    const project = await db.editProject.findFirst({ where: { id: projectId, tenantId } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+
+    const sourceVideos = await db.sourceVideo.findMany({
+      where: { id: { in: body.sourceVideoIds }, tenantId },
+    });
+    if (sourceVideos.length === 0) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Видео не найдены' });
+    }
+
+    const currentCount = await db.editSource.count({ where: { projectId } });
+    const createdSources = await Promise.all(
+      sourceVideos.map((sv, idx) =>
+        db.editSource.create({
+          data: {
+            projectId,
+            storageKey: sv.storageKey,
+            order: currentCount + idx,
+            durationSec: sv.durationSec,
+            width: sv.width,
+            height: sv.height,
+            fps: sv.fps,
+            analysis: (sv.sceneBreaks || sv.transcript) ? ({
+              scene_breaks: sv.sceneBreaks,
+              transcript: sv.transcript,
+              audio_profile: sv.audioProfile,
+            } as any) : undefined,
+          },
+        }),
+      ),
+    );
+
+    return reply.code(201).send({ sources: createdSources });
   });
 
   // ── Trigger analysis ────────────────────────────────────────────────────────

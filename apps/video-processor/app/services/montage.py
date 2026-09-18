@@ -590,3 +590,150 @@ def _compute_phash(image_path: str) -> str | None:
         )
     except Exception:
         return None
+
+
+async def render_preserve_context(
+    source_path: str,
+    output_path: str,
+    work_dir: str,
+    seed: int,
+    width: int = 1080,
+    height: int = 1920,
+    fps: int = 30,
+    subtitles: list[dict[str, Any]] | None = None,
+    subtitle_style: str = "none",
+    bgm_path: str | None = None,
+    bgm_volume: float = 0.08,
+    crf: int = 22,
+    threads: int = 2,
+) -> MontageResult:
+    """
+    Context-preserving video uniquification.
+    Maintains 100% of the narrative flow, scene sequencing, cuts, and original
+    speech/audio. Applies multi-vector, undetectable perturbations to pass
+    social media duplicate detection:
+      - Safe-area micro zoom (101.5% - 103.5%)
+      - Subtle gamma/contrast/saturation color grading (+/- 2%)
+      - High-frequency imperceptible luma noise (breaks pHash/SSIM fingerprint)
+      - Pitch-preserved audio micro-tempo drift (0.985x - 1.015x)
+      - Vocal presence EQ boost
+      - Optional subtle ambient/lo-fi music bed ducked under speech
+      - Metadata and camera EXIF scrub + unique container atoms
+    """
+    rng = random.Random(seed)
+    zoom = round(1.0 + rng.uniform(0.015, 0.035), 4)
+    gamma = round(rng.uniform(0.98, 1.02), 3)
+    contrast = round(rng.uniform(0.98, 1.02), 3)
+    saturation = round(rng.uniform(0.97, 1.03), 3)
+    tempo = round(rng.uniform(0.985, 1.015), 4)
+
+    # 1. Video filter chain
+    vf_parts = [
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
+        f"scale=iw*{zoom}:ih*{zoom}",
+        f"crop={width}:{height}",
+        f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}",
+        "noise=alls=2:allf=t",
+        f"fps={fps}",
+    ]
+
+    # Optional subtitles
+    if subtitles and subtitle_style and subtitle_style != "none":
+        ass_path = os.path.join(work_dir, "subs.ass")
+        entries = [
+            SubtitleEntry(
+                start_sec=float(s.get("start_sec", s.get("start", 0))),
+                end_sec=float(s.get("end_sec", s.get("end", 0))),
+                text=str(s.get("text", "")).strip(),
+            )
+            for s in subtitles
+            if str(s.get("text", "")).strip() and float(s.get("end_sec", s.get("end", 0))) > 0
+        ]
+        if entries:
+            try:
+                style_enum = SubtitleStyle(subtitle_style)
+            except ValueError:
+                style_enum = SubtitleStyle.TIKTOK
+            await asyncio.to_thread(generate_ass_file, entries, ass_path, width, height, style_enum)
+            escaped_ass = fx.escape_filter_path(ass_path)
+            vf_parts.append(f"subtitles='{escaped_ass}'")
+
+    video_filter = ",".join(vf_parts)
+
+    # 2. Audio filter chain
+    has_audio = fx.probe(source_path).has_audio
+    cmd = [
+        fx.ffmpeg(), "-threads", str(threads), "-y",
+        "-i", source_path,
+    ]
+
+    if bgm_path and os.path.exists(bgm_path):
+        cmd += ["-stream_loop", "-1", "-i", bgm_path]
+        if has_audio:
+            filter_complex = (
+                f"[0:v]{video_filter}[vout];"
+                f"[0:a]atempo={tempo},equalizer=f=2500:width_type=o:width=1:g=1.5,"
+                f"equalizer=f=200:width_type=o:width=1:g=1.0[voice];"
+                f"[1:a]volume={bgm_volume}[bgm];"
+                f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            )
+        else:
+            filter_complex = (
+                f"[0:v]{video_filter}[vout];"
+                f"[1:a]volume={bgm_volume}[aout]"
+            )
+        cmd += [
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "[aout]",
+        ]
+    else:
+        if has_audio:
+            filter_complex = (
+                f"[0:v]{video_filter}[vout];"
+                f"[0:a]atempo={tempo},equalizer=f=2500:width_type=o:width=1:g=1.5[aout]"
+            )
+            cmd += [
+                "-filter_complex", filter_complex,
+                "-map", "[vout]", "-map", "[aout]",
+            ]
+        else:
+            cmd += [
+                "-vf", video_filter,
+                "-map", "0:v:0",
+            ]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-map_metadata", "-1",
+        "-metadata", f"comment=variant_{seed}",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    await asyncio.to_thread(fx.run, cmd, 600)
+
+    # Thumbnail + perceptual hash
+    thumb_path = output_path.rsplit(".", 1)[0] + "_thumb.jpg"
+    try:
+        await asyncio.to_thread(fx.extract_thumbnail, output_path, thumb_path, 0.2)
+    except Exception:
+        thumb_path = None
+    phash = _compute_phash(thumb_path) if thumb_path else None
+
+    stat = os.stat(output_path)
+    out_probe = fx.probe(output_path)
+
+    return MontageResult(
+        output_path=output_path,
+        thumbnail_path=thumb_path,
+        duration_sec=round(out_probe.duration, 2),
+        file_size_bytes=stat.st_size,
+        width=width,
+        height=height,
+        phash=phash,
+        segment_count=1,
+    )
+

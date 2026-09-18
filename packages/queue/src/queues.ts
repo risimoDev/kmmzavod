@@ -302,6 +302,7 @@ export interface UniquifyRenderJobPayload {
   uniquifyJobId: string;
   variantId: string;
   tenantId: string;
+  mode?: 'preserve_context' | 'remix_montage';
   /** One or more source clips (pool mode reorders across several). */
   sourceStorageKeys: string[];
   outputKey: string;

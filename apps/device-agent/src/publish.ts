@@ -72,30 +72,41 @@ export async function publishToDevice(
     await adb.wakeUp(deviceId);
     await adb.shell(deviceId, 'wm dismiss-keyguard');
 
-    // 5. Trigger publication via Android Share Intent
-    logger.info({ deviceId, platform, onDevicePath }, 'device-agent: launching social app share intent');
+    // 5. Verify target package is installed
+    const primaryPkg = platform === 'instagram' ? 'com.instagram.android' : 'com.zhiliaoapp.musically';
+    const altPkg = platform === 'tiktok' ? 'com.ss.android.ugc.trill' : '';
+    const pkgCheck = await adb.shell(deviceId, `pm list packages`).catch(() => '');
+    const hasPrimary = pkgCheck.includes(primaryPkg);
+    const hasAlt = altPkg ? pkgCheck.includes(altPkg) : false;
 
-    if (platform === 'instagram') {
-      // Direct intent into Instagram Reels/Story post
+    if (!hasPrimary && !hasAlt) {
+      throw new Error(`Приложение ${platform} (${primaryPkg}) не установлено на телефоне ${deviceId}`);
+    }
+    const resolvedPkg = hasPrimary ? primaryPkg : altPkg;
+
+    // 6. Set Android clipboard with caption & hashtags
+    if (caption && caption.trim()) {
       try {
-        await adb.shell(
-          deviceId,
-          `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM "file://${onDevicePath}" -p com.instagram.android`,
-        );
-      } catch {
-        // Fallback: open Instagram app
-        await adb.openApp(deviceId, 'com.instagram.android');
+        const b64 = Buffer.from(caption.trim(), 'utf-8').toString('base64');
+        await adb.shell(deviceId, `cmd clipboard set text "$(echo '${b64}' | base64 -d)"`).catch(async () => {
+          await adb.shell(deviceId, `am broadcast -a clipper.set -e text "${caption.replace(/["$`\\]/g, ' ')}"`).catch(() => {});
+        });
+      } catch (e) {
+        logger.warn({ deviceId, err: e }, 'device-agent: could not set clipboard');
       }
-    } else {
-      // Direct intent into TikTok
-      try {
-        await adb.shell(
-          deviceId,
-          `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM "file://${onDevicePath}" -p com.zhiliaoapp.musically`,
-        );
-      } catch {
-        await adb.openApp(deviceId, 'com.zhiliaoapp.musically');
-      }
+    }
+
+    // 7. Trigger publication via Android Share Intent
+    logger.info({ deviceId, platform, resolvedPkg, onDevicePath }, 'device-agent: launching social app share intent');
+
+    try {
+      await adb.shell(
+        deviceId,
+        `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM "file://${onDevicePath}" -p ${resolvedPkg}`,
+      );
+    } catch {
+      // Fallback: open app directly
+      await adb.openApp(deviceId, resolvedPkg);
     }
 
     // Give the app 3 seconds to receive intent
@@ -107,6 +118,7 @@ export async function publishToDevice(
     };
   } catch (err: any) {
     logger.error({ deviceId, platform, err: err.message }, 'device-agent: publish failed');
+    await adb.shell(deviceId, `screencap -p /sdcard/DCIM/error_pub_${Date.now()}.png`).catch(() => {});
     return {
       ok: false,
       detail: `Ошибка публикации через ADB: ${err.message}`,
