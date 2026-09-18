@@ -109,21 +109,20 @@ export async function projectRoutes(app: FastifyInstance) {
     );
 
     // 2. Master clips from Smart Editor (editClips with outputKey, linked to project)
-    const editorClips = await db.editClip.findMany({
+    const allEditorClips = await db.editClip.findMany({
       where: {
         outputKey: { not: null },
-        project: {
-          tenantId,
-          OR: [
-            { config: { path: ['workspaceProjectId'], equals: id } },
-            { name: { contains: project.name } },
-          ],
-        },
+        project: { tenantId },
       },
       orderBy: { createdAt: 'desc' },
       include: {
-        project: { select: { id: true, name: true, mode: true, aspect: true } },
+        project: { select: { id: true, name: true, mode: true, aspect: true, config: true } },
       },
+    });
+
+    const editorClips = allEditorClips.filter((c) => {
+      const cfg = (c.project.config ?? {}) as Record<string, unknown>;
+      return cfg.workspaceProjectId === id || (c.project.name && project.name && c.project.name.toLowerCase().includes(project.name.toLowerCase()));
     });
 
     const enrichedMasterClips = await Promise.all(

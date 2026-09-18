@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { Suspense, useEffect, useState, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { TopBar } from "@/components/layout/AppShell";
 import {
@@ -31,6 +31,23 @@ const COLORS = ["#7C3AED", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#EC4899"
 type HubTab = "raw" | "master" | "uniquified" | "distributions";
 
 export default function ProjectsPage() {
+  return (
+    <Suspense
+      fallback={
+        <>
+          <TopBar title="Проекты" />
+          <main className="flex-1 flex items-center justify-center">
+            <LoadingSpinner size={32} />
+          </main>
+        </>
+      }
+    >
+      <ProjectsContent />
+    </Suspense>
+  );
+}
+
+function ProjectsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);

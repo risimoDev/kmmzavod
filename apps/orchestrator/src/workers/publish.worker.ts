@@ -76,6 +76,8 @@ export function createPublishWorker(deps: Deps): Worker {
       const { publishJobId, videoId, tenantId, platform, socialAccountId } = job.data;
       logger.info({ publishJobId, platform, videoId, attempt: job.attemptsMade + 1 }, 'Publish: старт');
 
+      let accountName = socialAccountId;
+
       // Mark as uploading
       await db.publishJob.update({
         where: { id: publishJobId },
@@ -87,6 +89,7 @@ export function createPublishWorker(deps: Deps): Worker {
         const accountRaw = await db.socialAccount.findUniqueOrThrow({
           where: { id: socialAccountId },
         });
+        accountName = accountRaw.accountName;
         const account = {
           ...accountRaw,
           accessToken: decrypt(accountRaw.accessToken),
@@ -518,7 +521,7 @@ export function createPublishWorker(deps: Deps): Worker {
               tenantId,
               type: 'job_failed',
               title: `Ошибка публикации (${platform.toUpperCase()})`,
-              body: `Аккаунт: ${accountRaw?.accountName || socialAccountId}. Ошибка: ${errorMsg}`,
+              body: `Аккаунт: ${accountName}. Ошибка: ${errorMsg}`,
               actionUrl: `/uniquify`,
             },
           }).catch(() => {});
