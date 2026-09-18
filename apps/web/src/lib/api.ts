@@ -1772,6 +1772,7 @@ export interface EdlSubtitleLine {
 
 export interface EditClip {
   id: string;
+  projectId?: string;
   title: string;
   order: number;
   included: boolean;
@@ -1781,6 +1782,7 @@ export interface EditClip {
   thumbnailUrl?: string | null;
   outputKey?: string | null;
   outputUrl?: string | null;
+  outputSourceVideoId?: string | null;
   durationSec?: number | null;
   edl?: {
     segments?: { src_idx: number; start: number; end: number; score: number }[];
