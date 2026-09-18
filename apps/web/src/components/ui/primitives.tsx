@@ -80,10 +80,11 @@ Button.displayName = "Button";
 
 // ── Badge ─────────────────────────────────────────────────────────────────────
 
-type BadgeVariant = "default" | "success" | "warning" | "danger" | "info" | "outline" | "brand";
+export type BadgeVariant = "default" | "success" | "warning" | "danger" | "info" | "outline" | "brand" | "neutral";
 
 const badgeVariants: Record<BadgeVariant, string> = {
   default:  "bg-surface-2 text-text-secondary",
+  neutral:  "bg-surface-2 text-text-secondary",
   success:  "bg-success/10 text-success",
   warning:  "bg-warning/10 text-warning",
   danger:   "bg-danger/10 text-danger",

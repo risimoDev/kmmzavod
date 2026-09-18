@@ -490,7 +490,7 @@ function JobDetailContent({ jobId }: { jobId: string }) {
                             {/* Schedule Delay */}
                             <div className="col-span-2">
                               {row.enabled ? (
-                                <Badge variant="neutral" className="text-2xs">
+                                <Badge variant="default" className="text-2xs">
                                   {delayMin === 0 ? "Сразу" : `+${delayMin} мин`}
                                 </Badge>
                               ) : (

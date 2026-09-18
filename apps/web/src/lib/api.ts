@@ -1367,7 +1367,7 @@ export interface DistributeItem {
   hashtags: string[];
   error: string | null;
   uniqueVariant: { id: string; variantIndex: number; outputKey: string | null; thumbnailKey: string | null };
-  socialAccount: { id: string; platform: string; accountName: string };
+  socialAccount: { id: string; platform: string; accountName: string; deviceId?: string | null };
   publishJob: { id: string; status: string; publishedAt: string | null; externalPostId: string | null; error: string | null } | null;
 }
 
