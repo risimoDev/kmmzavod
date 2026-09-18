@@ -62,8 +62,33 @@ export class ApkManager {
   }
 
   /**
-   * Downloads APK from URL with caching on host PC.
-   * If URL was already downloaded and file exists, reuses local cache.
+   * Validates that the file at localPath begins with ZIP magic bytes PK\x03\x04.
+   * If invalid (e.g. HTML challenge page), deletes the file and throws an error.
+   */
+  private validateApkFile(filePath: string): void {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Файл не найден: ${filePath}`);
+    }
+    const fd = fs.openSync(filePath, 'r');
+    const header = Buffer.alloc(4);
+    fs.readSync(fd, header, 0, 4, 0);
+    fs.closeSync(fd);
+
+    if (header[0] !== 0x50 || header[1] !== 0x4b || header[2] !== 0x03 || header[3] !== 0x04) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {}
+      const preview = header.toString('utf-8').replace(/[^\x20-\x7E]/g, '.');
+      throw new Error(
+        `Загруженный файл не является APK-архивом (сигнатура: '${preview}'). ` +
+        `Возможно, ссылка защищена Cloudflare или возвращает HTML-страницу. ` +
+        `Рекомендуется скачать APK вручную через браузер на ПК и загрузить файлом.`
+      );
+    }
+  }
+
+  /**
+   * Downloads APK from URL with caching on host PC and ZIP header verification.
    */
   async downloadCachedApk(apkUrl: string): Promise<{ localPath: string; sizeMb: number }> {
     const hash = crypto.createHash('sha256').update(apkUrl).digest('hex').slice(0, 16);
@@ -74,9 +99,14 @@ export class ApkManager {
     if (fs.existsSync(targetPath)) {
       const stats = fs.statSync(targetPath);
       if (stats.size > 100 * 1024) {
-        const sizeMb = Number((stats.size / (1024 * 1024)).toFixed(2));
-        this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: using cached APK');
-        return { localPath: targetPath, sizeMb };
+        try {
+          this.validateApkFile(targetPath);
+          const sizeMb = Number((stats.size / (1024 * 1024)).toFixed(2));
+          this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: using validated cached APK');
+          return { localPath: targetPath, sizeMb };
+        } catch {
+          // If cached file was corrupted or HTML, download fresh
+        }
       }
     }
 
@@ -89,7 +119,7 @@ export class ApkManager {
       responseType: 'stream',
       timeout: 300_000, // 5 min timeout for slow mirrors
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
       },
     });
 
@@ -101,31 +131,58 @@ export class ApkManager {
       writer.on('error', reject);
     });
 
+    // Validate magic bytes before promoting temp file
+    try {
+      this.validateApkFile(tempPath);
+    } catch (err) {
+      try { fs.unlinkSync(tempPath); } catch {}
+      throw err;
+    }
+
     // Atomic move
     fs.renameSync(tempPath, targetPath);
     const finalStats = fs.statSync(targetPath);
     const sizeMb = Number((finalStats.size / (1024 * 1024)).toFixed(2));
-    this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: APK download complete');
+    this.logger.info({ apkUrl, targetPath, sizeMb }, 'apk-manager: APK download and verification complete');
 
     return { localPath: targetPath, sizeMb };
   }
 
   /**
-   * Concurrently installs APK on all specified boards.
+   * Saves uploaded APK buffer to cache directory with signature verification.
    */
-  async batchInstall(adb: AdbClient, opts: BatchInstallOptions): Promise<BatchInstallResult> {
-    const { apkUrl, targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
-    const targets = Array.from(new Set(targetDeviceIds));
+  async saveLocalApkBuffer(buffer: Buffer, originalFilename?: string): Promise<{ localPath: string; sizeMb: number }> {
+    if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b || buffer[2] !== 0x03 || buffer[3] !== 0x04) {
+      throw new Error('Загруженный файл не является валидным APK-архивом (отсутствует сигнатура PK ZIP)');
+    }
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 16);
+    const cleanName = (originalFilename || 'app').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fileName = `upload_${hash}_${cleanName}`;
+    const targetPath = path.join(this.cacheDir, fileName.endsWith('.apk') ? fileName : `${fileName}.apk`);
 
+    fs.writeFileSync(targetPath, buffer);
+    const sizeMb = Number((buffer.length / (1024 * 1024)).toFixed(2));
+    this.logger.info({ targetPath, sizeMb }, 'apk-manager: saved uploaded APK buffer to local cache');
+    return { localPath: targetPath, sizeMb };
+  }
+
+  /**
+   * Concurrently installs a local APK file on all specified boards.
+   */
+  async batchInstallLocal(
+    adb: AdbClient,
+    localPath: string,
+    sizeMb: number,
+    targetDeviceIds: string[],
+    reinstall = true,
+    grantPermissions = true
+  ): Promise<BatchInstallResult> {
+    const targets = Array.from(new Set(targetDeviceIds));
     if (targets.length === 0) {
       return { ok: false, total: 0, successful: 0, failed: 0, results: [] };
     }
 
-    // 1. Download / cache APK once
-    const { localPath, sizeMb } = await this.downloadCachedApk(apkUrl);
-
-    // 2. Install concurrently across boards
-    this.logger.info({ targetsCount: targets.length, localPath }, 'apk-manager: starting parallel install');
+    this.logger.info({ targetsCount: targets.length, localPath, sizeMb }, 'apk-manager: starting parallel install');
 
     const settled = await Promise.allSettled(
       targets.map(async (serial): Promise<DeviceInstallResult> => {
@@ -173,6 +230,39 @@ export class ApkManager {
       apkSizeMb: sizeMb,
       results,
     };
+  }
+
+  /**
+   * Concurrently installs APK from URL on all specified boards.
+   */
+  async batchInstall(adb: AdbClient, opts: BatchInstallOptions): Promise<BatchInstallResult> {
+    const { apkUrl, targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
+    const targets = Array.from(new Set(targetDeviceIds));
+
+    if (targets.length === 0) {
+      return { ok: false, total: 0, successful: 0, failed: 0, results: [] };
+    }
+
+    // 1. Download / cache APK once with verification
+    const { localPath, sizeMb } = await this.downloadCachedApk(apkUrl);
+
+    // 2. Install concurrently across boards
+    return this.batchInstallLocal(adb, localPath, sizeMb, targets, reinstall, grantPermissions);
+  }
+
+  /**
+   * Concurrently installs APK from uploaded Buffer on all specified boards.
+   */
+  async batchInstallFromBuffer(
+    adb: AdbClient,
+    buffer: Buffer,
+    targetDeviceIds: string[],
+    originalFilename?: string,
+    reinstall = true,
+    grantPermissions = true
+  ): Promise<BatchInstallResult> {
+    const { localPath, sizeMb } = await this.saveLocalApkBuffer(buffer, originalFilename);
+    return this.batchInstallLocal(adb, localPath, sizeMb, targetDeviceIds, reinstall, grantPermissions);
   }
 
   /**

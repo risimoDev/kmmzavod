@@ -1002,11 +1002,74 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       const res = await deviceAgentClient.installApk(body);
       return reply.send(res);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(200).send({
+        ok: false,
+        total: body.targetDeviceIds?.length || 0,
+        successful: 0,
+        failed: body.targetDeviceIds?.length || 0,
+        error: describeDeviceAgentError(err),
+        results: (body.targetDeviceIds || []).map((id: string) => ({
+          deviceId: id,
+          ok: false,
+          durationMs: 0,
+          output: '',
+          error: describeDeviceAgentError(err),
+        })),
+      });
     }
   };
   app.post('/devices/install-apk', installApkHandler);
   app.post('/apks/install', installApkHandler);
+
+  const installApkFileHandler = async (request: any, reply: any) => {
+    try {
+      const data = await request.file();
+      if (!data) {
+        return reply.status(400).send({ ok: false, error: 'Файл APK не передан' });
+      }
+
+      const fileBuffer = await data.toBuffer();
+      const fields = data.fields as Record<string, any>;
+
+      let targetDeviceIds: string[] = [];
+      if (fields?.targetDeviceIds?.value) {
+        try {
+          const parsed = JSON.parse(fields.targetDeviceIds.value);
+          targetDeviceIds = Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+          targetDeviceIds = String(fields.targetDeviceIds.value).split(',').map((s: string) => s.trim()).filter(Boolean);
+        }
+      }
+
+      const reinstall = fields?.reinstall?.value !== 'false';
+      const grantPermissions = fields?.grantPermissions?.value !== 'false';
+
+      if (targetDeviceIds.length === 0) {
+        return reply.status(400).send({ ok: false, error: 'Не выбраны целевые устройства' });
+      }
+
+      const res = await deviceAgentClient.uploadAndInstallApk({
+        fileBuffer,
+        filename: data.filename || 'app.apk',
+        targetDeviceIds,
+        reinstall,
+        grantPermissions,
+      });
+
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(200).send({
+        ok: false,
+        total: 0,
+        successful: 0,
+        failed: 0,
+        error: describeDeviceAgentError(err),
+        results: [],
+      });
+    }
+  };
+  app.post('/devices/install-apk-file', installApkFileHandler);
+  app.post('/apks/upload-and-install', installApkFileHandler);
 
   const batchAppActionHandler = async (request: any, reply: any) => {
     const body = BatchAppActionBody.parse(request.body || {});
@@ -1261,6 +1324,8 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   const DeviceTapBody = z.object({
     x: z.number().optional(),
     y: z.number().optional(),
+    targetX: z.number().optional(),
+    targetY: z.number().optional(),
     xPercent: z.number().min(0).max(1).optional(),
     yPercent: z.number().min(0).max(1).optional(),
     targetDeviceIds: z.array(z.string()).optional(),

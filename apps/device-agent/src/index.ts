@@ -18,7 +18,18 @@ const autoHeal = new AutoHealManager(adb, logger);
 const apkManager = new ApkManager(logger);
 const scriptEngine = new ScriptEngine(logger);
 
-const app = Fastify({ logger: false });
+const app = Fastify({
+  logger: false,
+  bodyLimit: 300 * 1024 * 1024, // 300 MB limit for APK transfers
+});
+
+app.addContentTypeParser(
+  ['application/octet-stream', 'application/vnd.android.package-archive'],
+  { parseAs: 'buffer', bodyLimit: 300 * 1024 * 1024 },
+  (_req, body, done) => {
+    done(null, body);
+  }
+);
 
 app.get('/health', async () => ({
   ok: true,
@@ -412,8 +423,8 @@ app.post('/device/screenshot', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   try {
-    const base64 = await adb.takeScreenshot(parsed.data.deviceId);
-    return { ok: true, data: { data: base64 } };
+    const screenshot = await adb.takeScreenshotFast(parsed.data.deviceId);
+    return { ok: true, data: screenshot };
   } catch (err) {
     reply.code(502);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -452,6 +463,8 @@ const TapControlBody = z.object({
   deviceId: z.string().min(1),
   x: z.number().optional(),
   y: z.number().optional(),
+  targetX: z.number().optional(),
+  targetY: z.number().optional(),
   xPercent: z.number().min(0).max(1).optional(),
   yPercent: z.number().min(0).max(1).optional(),
   targetDeviceIds: z.array(z.string()).optional(),
@@ -464,13 +477,13 @@ app.post('/device/control/tap', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
 
-  const { deviceId, x, y, xPercent, yPercent, targetDeviceIds } = parsed.data;
+  const { deviceId, x, y, targetX, targetY, xPercent, yPercent, targetDeviceIds } = parsed.data;
   const targets = Array.from(new Set([deviceId, ...(targetDeviceIds || [])]));
 
   try {
     const results = await Promise.allSettled(
       targets.map(async (devId) => {
-        const coords = await adb.resolveCoordinates(devId, xPercent, yPercent, x, y);
+        const coords = await adb.resolveCoordinates(devId, xPercent, yPercent, x, y, targetX, targetY);
         await adb.tap(devId, coords.x, coords.y);
         return { deviceId: devId, x: coords.x, y: coords.y };
       })
@@ -757,12 +770,89 @@ app.post('/device/apps/install', async (req, reply) => {
 
   try {
     const result = await apkManager.batchInstall(adb, parsed.data);
-    if (!result.ok && result.successful === 0) reply.code(502);
     return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: /device/apps/install failed');
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      total: parsed.data.targetDeviceIds.length,
+      successful: 0,
+      failed: parsed.data.targetDeviceIds.length,
+      error: err instanceof Error ? err.message : String(err),
+      results: parsed.data.targetDeviceIds.map((id) => ({
+        deviceId: id,
+        ok: false,
+        durationMs: 0,
+        output: '',
+        error: err instanceof Error ? err.message : String(err),
+      })),
+    };
+  }
+});
+
+const UploadAndInstallJsonBody = z.object({
+  apkBase64: z.string().min(10),
+  filename: z.string().optional(),
+  targetDeviceIds: z.array(z.string()).min(1),
+  reinstall: z.boolean().default(true),
+  grantPermissions: z.boolean().default(true),
+});
+
+app.post('/device/apps/upload-and-install', async (req, reply) => {
+  try {
+    let apkBuffer: Buffer;
+    let targetDeviceIds: string[] = [];
+    let reinstall = true;
+    let grantPermissions = true;
+    let filename = 'app.apk';
+
+    if (Buffer.isBuffer(req.body)) {
+      // Binary stream payload
+      apkBuffer = req.body;
+      const query = (req.query || {}) as Record<string, string>;
+      const rawTargets = query.targetDeviceIds || (req.headers['x-target-device-ids'] as string);
+      targetDeviceIds = rawTargets ? rawTargets.split(',').map((s) => s.trim()).filter(Boolean) : [];
+      reinstall = query.reinstall !== 'false';
+      grantPermissions = query.grantPermissions !== 'false';
+      filename = query.filename || (req.headers['x-filename'] as string) || 'app.apk';
+    } else {
+      // JSON base64 payload
+      const parsed = UploadAndInstallJsonBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { ok: false, error: parsed.error.flatten() };
+      }
+      apkBuffer = Buffer.from(parsed.data.apkBase64, 'base64');
+      targetDeviceIds = parsed.data.targetDeviceIds;
+      reinstall = parsed.data.reinstall;
+      grantPermissions = parsed.data.grantPermissions;
+      filename = parsed.data.filename || 'app.apk';
+    }
+
+    if (targetDeviceIds.length === 0) {
+      reply.code(400);
+      return { ok: false, error: 'No targetDeviceIds specified' };
+    }
+
+    const result = await apkManager.batchInstallFromBuffer(
+      adb,
+      apkBuffer,
+      targetDeviceIds,
+      filename,
+      reinstall,
+      grantPermissions
+    );
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/apps/upload-and-install failed');
+    return {
+      ok: false,
+      total: 0,
+      successful: 0,
+      failed: 0,
+      error: err instanceof Error ? err.message : String(err),
+      results: [],
+    };
   }
 });
 

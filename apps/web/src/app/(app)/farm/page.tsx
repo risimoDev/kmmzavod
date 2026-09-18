@@ -1119,7 +1119,7 @@ function DevicesTab() {
   // Interactive Live Remote Control State (Master-Slave enabled)
   const [remoteModalOpen, setRemoteModalOpen] = useState(false);
   const [remoteLive, setRemoteLive] = useState(true);
-  const [remoteFps, setRemoteFps] = useState<number>(1200);
+  const [remoteFps, setRemoteFps] = useState<number>(250);
   const [remoteScreenData, setRemoteScreenData] = useState<string | null>(null);
   const [remoteScreenLoading, setRemoteScreenLoading] = useState(false);
   const [remoteActionLoading, setRemoteActionLoading] = useState(false);
@@ -1530,6 +1530,7 @@ function DevicesTab() {
 
   const inFlightFrameRef = useRef(false);
   const remoteImgRef = useRef<HTMLImageElement>(null);
+  const deviceResolutionRef = useRef<{ width: number; height: number }>({ width: 1080, height: 2220 });
 
   const refreshRemoteFrame = useCallback(async () => {
     if (!selectedDevice || inFlightFrameRef.current) return;
@@ -1541,7 +1542,10 @@ function DevicesTab() {
         const raw = (res.data as any).data || res.data;
         if (typeof raw === 'string') {
           const s = raw.trim();
-          setRemoteScreenData(s.startsWith('data:image') || s.startsWith('http') ? s : `data:image/png;base64,${s}`);
+          setRemoteScreenData(s.startsWith('data:image') || s.startsWith('http') ? s : `data:image/jpeg;base64,${s}`);
+        }
+        if (res.data.width && res.data.height) {
+          deviceResolutionRef.current = { width: res.data.width, height: res.data.height };
         }
       }
     } catch {
@@ -1639,13 +1643,20 @@ function DevicesTab() {
       setRemoteTouchRipple({ x: rippleX, y: rippleY });
       setTimeout(() => setRemoteTouchRipple(null), 400);
 
+      const targetWidth = deviceResolutionRef.current?.width || 1080;
+      const targetHeight = deviceResolutionRef.current?.height || 2220;
+      const targetX = Math.round(dragStart.x * targetWidth);
+      const targetY = Math.round(dragStart.y * targetHeight);
+
       try {
         await accountFarmApi.tapDevice(selectedDevice.deviceId, {
+          targetX,
+          targetY,
           xPercent: dragStart.x,
           yPercent: dragStart.y,
           targetDeviceIds: targets,
         });
-        setTimeout(refreshRemoteFrame, 200);
+        setTimeout(refreshRemoteFrame, 150);
       } catch (err: any) {
         console.error('Remote tap error:', err);
       }
@@ -1767,41 +1778,48 @@ function DevicesTab() {
     setApkInstallReport(null);
 
     try {
-      let finalApkUrl = '';
+      let report: any = null;
 
-      if (apkSourceType === 'preset') {
-        const preset = APK_PRESETS.find((p) => p.id === selectedApkPreset);
-        if (!preset?.url) {
-          alert('Не выбран пресет приложения');
-          setApkInstalling(false);
-          return;
-        }
-        finalApkUrl = preset.url;
-      } else if (apkSourceType === 'upload') {
+      if (apkSourceType === 'upload') {
         if (!uploadedApkFile) {
           alert('Выберите .apk файл для загрузки');
           setApkInstalling(false);
           return;
         }
-        setApkInstallProgressMsg(`Загрузка файла ${uploadedApkFile.name} на сервер...`);
-        const uploadRes = await accountFarmApi.uploadApk(uploadedApkFile);
-        finalApkUrl = uploadRes.apkUrl;
+        setApkInstallProgressMsg(`Прямая передача ${uploadedApkFile.name} на ферму и параллельная установка по USB на ${targets.length} плат...`);
+        report = await accountFarmApi.uploadAndInstallApk({
+          file: uploadedApkFile,
+          targetDeviceIds: targets,
+          reinstall: apkReinstall,
+          grantPermissions: apkGrantPermissions,
+        });
       } else {
-        if (!customApkUrl.trim().startsWith('http')) {
-          alert('Введите корректную ссылку на APK (начинающуюся с http:// или https://)');
-          setApkInstalling(false);
-          return;
+        let finalApkUrl = '';
+        if (apkSourceType === 'preset') {
+          const preset = APK_PRESETS.find((p) => p.id === selectedApkPreset);
+          if (!preset?.url) {
+            alert('Не выбран пресет приложения');
+            setApkInstalling(false);
+            return;
+          }
+          finalApkUrl = preset.url;
+        } else {
+          if (!customApkUrl.trim().startsWith('http')) {
+            alert('Введите корректную ссылку на APK (начинающуюся с http:// или https://)');
+            setApkInstalling(false);
+            return;
+          }
+          finalApkUrl = customApkUrl.trim();
         }
-        finalApkUrl = customApkUrl.trim();
-      }
 
-      setApkInstallProgressMsg(`Скачивание APK на хост-ПК и параллельная установка по USB на ${targets.length} плат...`);
-      const report = await accountFarmApi.installApk({
-        apkUrl: finalApkUrl,
-        targetDeviceIds: targets,
-        reinstall: apkReinstall,
-        grantPermissions: apkGrantPermissions,
-      });
+        setApkInstallProgressMsg(`Скачивание APK на хост-ПК фермы и параллельная установка по USB на ${targets.length} плат...`);
+        report = await accountFarmApi.installApk({
+          apkUrl: finalApkUrl,
+          targetDeviceIds: targets,
+          reinstall: apkReinstall,
+          grantPermissions: apkGrantPermissions,
+        });
+      }
 
       setApkInstallReport(report);
       setApkInstallProgressMsg(null);

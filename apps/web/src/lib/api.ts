@@ -718,7 +718,7 @@ export const accountFarmApi = {
       { method: 'POST', body: JSON.stringify({ deviceIds }) }
     ),
 
-  tapDevice: (deviceId: string, body: { x?: number; y?: number; xPercent?: number; yPercent?: number; targetDeviceIds?: string[] }) =>
+  tapDevice: (deviceId: string, body: { x?: number; y?: number; targetX?: number; targetY?: number; xPercent?: number; yPercent?: number; targetDeviceIds?: string[] }) =>
     apiFetch<{ ok: boolean; targetsCount?: number; successful?: number }>(`/api/v1/farm/devices/${deviceId}/tap`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -786,6 +786,37 @@ export const accountFarmApi = {
       '/api/v1/farm/apks/upload',
       { method: 'POST', body: fd }
     );
+  },
+
+  uploadAndInstallApk: (opts: {
+    file: File;
+    targetDeviceIds: string[];
+    reinstall?: boolean;
+    grantPermissions?: boolean;
+  }) => {
+    const fd = new FormData();
+    fd.append('file', opts.file);
+    fd.append('targetDeviceIds', JSON.stringify(opts.targetDeviceIds));
+    if (opts.reinstall !== undefined) fd.append('reinstall', String(opts.reinstall));
+    if (opts.grantPermissions !== undefined) fd.append('grantPermissions', String(opts.grantPermissions));
+    return apiFetch<{
+      ok: boolean;
+      total: number;
+      successful: number;
+      failed: number;
+      apkSizeMb?: number;
+      error?: string;
+      results: Array<{
+        deviceId: string;
+        ok: boolean;
+        durationMs: number;
+        output: string;
+        error?: string;
+      }>;
+    }>('/api/v1/farm/devices/install-apk-file', {
+      method: 'POST',
+      body: fd,
+    });
   },
 
   installApk: (body: {

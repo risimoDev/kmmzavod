@@ -226,6 +226,8 @@ export const deviceAgentClient = {
     deviceId: string;
     x?: number;
     y?: number;
+    targetX?: number;
+    targetY?: number;
     xPercent?: number;
     yPercent?: number;
     targetDeviceIds?: string[];
@@ -324,6 +326,48 @@ export const deviceAgentClient = {
     }>;
   }> {
     const res = await axios.post(`${BASE}/device/apps/install`, opts, { timeout: 600_000 });
+    return res.data;
+  },
+
+  async uploadAndInstallApk(opts: {
+    fileBuffer: Buffer;
+    filename?: string;
+    targetDeviceIds: string[];
+    reinstall?: boolean;
+    grantPermissions?: boolean;
+  }): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    apkSizeMb?: number;
+    results: Array<{
+      deviceId: string;
+      ok: boolean;
+      durationMs: number;
+      output: string;
+      error?: string;
+    }>;
+  }> {
+    const { fileBuffer, filename = 'app.apk', targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
+    const res = await axios.post(
+      `${BASE}/device/apps/upload-and-install`,
+      fileBuffer,
+      {
+        params: {
+          targetDeviceIds: targetDeviceIds.join(','),
+          filename,
+          reinstall: String(reinstall),
+          grantPermissions: String(grantPermissions),
+        },
+        headers: {
+          'Content-Type': 'application/octet-stream',
+        },
+        maxBodyLength: 300 * 1024 * 1024,
+        maxContentLength: 300 * 1024 * 1024,
+        timeout: 600_000,
+      }
+    );
     return res.data;
   },
 
