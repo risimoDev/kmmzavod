@@ -330,7 +330,7 @@ export const deviceAgentClient = {
   },
 
   async uploadAndInstallApk(opts: {
-    fileBuffer: Buffer;
+    fileData: Buffer | NodeJS.ReadableStream;
     filename?: string;
     targetDeviceIds: string[];
     reinstall?: boolean;
@@ -349,10 +349,10 @@ export const deviceAgentClient = {
       error?: string;
     }>;
   }> {
-    const { fileBuffer, filename = 'app.apk', targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
+    const { fileData, filename = 'app.apk', targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
     const res = await axios.post(
       `${BASE}/device/apps/upload-and-install`,
-      fileBuffer,
+      fileData,
       {
         params: {
           targetDeviceIds: targetDeviceIds.join(','),
@@ -363,9 +363,9 @@ export const deviceAgentClient = {
         headers: {
           'Content-Type': 'application/octet-stream',
         },
-        maxBodyLength: 300 * 1024 * 1024,
-        maxContentLength: 300 * 1024 * 1024,
-        timeout: 600_000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 900_000,
       }
     );
     return res.data;

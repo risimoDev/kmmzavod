@@ -35,6 +35,7 @@ import { campaignRoutes } from './routes/campaigns.routes';
 
 export async function buildApp() {
   const app = Fastify({
+    bodyLimit: 1024 * 1024 * 1024, // 1 GB for large APK uploads
     logger: {
       level: config.NODE_ENV === 'production' ? 'info' : 'debug',
       ...(config.NODE_ENV !== 'production' && {
@@ -70,7 +71,7 @@ export async function buildApp() {
   });
 
   await app.register(fastifyMultipart, {
-    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB
+    limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
   });
 
   await app.register(rateLimitPlugin);

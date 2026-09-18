@@ -266,6 +266,48 @@ export class ApkManager {
   }
 
   /**
+   * Streams uploaded APK from Readable stream to disk and installs on all specified boards.
+   * Zero RAM allocation even for huge APKs (300MB - 2GB).
+   */
+  async streamAndInstallApk(
+    adb: AdbClient,
+    stream: NodeJS.ReadableStream,
+    targetDeviceIds: string[],
+    originalFilename?: string,
+    reinstall = true,
+    grantPermissions = true
+  ): Promise<BatchInstallResult> {
+    const cleanName = (originalFilename || 'app').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fileName = `stream_${Date.now()}_${cleanName}.apk`;
+    const tempPath = path.join(this.cacheDir, `${fileName}.tmp`);
+    const targetPath = path.join(this.cacheDir, fileName);
+
+    const writer = fs.createWriteStream(tempPath);
+    stream.pipe(writer);
+
+    await new Promise<void>((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      (stream as any).on?.('error', reject);
+    });
+
+    // Validate ZIP magic bytes
+    try {
+      this.validateApkFile(tempPath);
+    } catch (err) {
+      try { fs.unlinkSync(tempPath); } catch {}
+      throw err;
+    }
+
+    fs.renameSync(tempPath, targetPath);
+    const stats = fs.statSync(targetPath);
+    const sizeMb = Number((stats.size / (1024 * 1024)).toFixed(2));
+    this.logger.info({ targetPath, sizeMb }, 'apk-manager: streamed APK to disk successfully');
+
+    return this.batchInstallLocal(adb, targetPath, sizeMb, targetDeviceIds, reinstall, grantPermissions);
+  }
+
+  /**
    * Concurrently runs action (uninstall, clear-data, force-stop, launch) across boards.
    */
   async batchAppAction(adb: AdbClient, opts: BatchAppActionOptions): Promise<BatchAppActionResult> {

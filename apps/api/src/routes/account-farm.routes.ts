@@ -1023,16 +1023,20 @@ export async function accountFarmRoutes(app: FastifyInstance) {
 
   const installApkFileHandler = async (request: any, reply: any) => {
     try {
-      const data = await request.file();
+      const data = await request.file({
+        limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
+      });
       if (!data) {
         return reply.status(400).send({ ok: false, error: 'Файл APK не передан' });
       }
 
-      const fileBuffer = await data.toBuffer();
-      const fields = data.fields as Record<string, any>;
+      const query = (request.query || {}) as Record<string, string>;
+      const fields = (data.fields || {}) as Record<string, any>;
 
       let targetDeviceIds: string[] = [];
-      if (fields?.targetDeviceIds?.value) {
+      if (query.targetDeviceIds) {
+        targetDeviceIds = query.targetDeviceIds.split(',').map((s: string) => s.trim()).filter(Boolean);
+      } else if (fields?.targetDeviceIds?.value) {
         try {
           const parsed = JSON.parse(fields.targetDeviceIds.value);
           targetDeviceIds = Array.isArray(parsed) ? parsed : [parsed];
@@ -1041,15 +1045,16 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         }
       }
 
-      const reinstall = fields?.reinstall?.value !== 'false';
-      const grantPermissions = fields?.grantPermissions?.value !== 'false';
+      const reinstall = query.reinstall !== undefined ? query.reinstall !== 'false' : fields?.reinstall?.value !== 'false';
+      const grantPermissions = query.grantPermissions !== undefined ? query.grantPermissions !== 'false' : fields?.grantPermissions?.value !== 'false';
 
       if (targetDeviceIds.length === 0) {
         return reply.status(400).send({ ok: false, error: 'Не выбраны целевые устройства' });
       }
 
+      // Stream file directly to device-agent with zero RAM allocation
       const res = await deviceAgentClient.uploadAndInstallApk({
-        fileBuffer,
+        fileData: data.file,
         filename: data.filename || 'app.apk',
         targetDeviceIds,
         reinstall,

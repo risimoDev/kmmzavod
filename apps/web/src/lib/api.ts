@@ -56,11 +56,12 @@ export function getStoredTenant(): AuthTenant | null {
 // ── Fetch wrapper with auto-refresh ──────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${getAccessToken()}`,
     ...(init.headers as Record<string, string> ?? {}),
   };
-  if (init.body) headers['Content-Type'] = 'application/json';
+  if (init.body && !isFormData) headers['Content-Type'] = 'application/json';
 
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -75,7 +76,7 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
         Authorization: `Bearer ${getAccessToken()}`,
         ...(init.headers as Record<string, string> ?? {}),
       };
-      if (init.body) retryHeaders['Content-Type'] = 'application/json';
+      if (init.body && !isFormData) retryHeaders['Content-Type'] = 'application/json';
 
       const retry = await fetch(`${BASE}${path}`, {
         ...init,
@@ -795,10 +796,18 @@ export const accountFarmApi = {
     grantPermissions?: boolean;
   }) => {
     const fd = new FormData();
-    fd.append('file', opts.file);
+    // Append text fields FIRST so server streaming parser has target metadata immediately
     fd.append('targetDeviceIds', JSON.stringify(opts.targetDeviceIds));
     if (opts.reinstall !== undefined) fd.append('reinstall', String(opts.reinstall));
     if (opts.grantPermissions !== undefined) fd.append('grantPermissions', String(opts.grantPermissions));
+    fd.append('file', opts.file);
+
+    const q = new URLSearchParams({
+      targetDeviceIds: opts.targetDeviceIds.join(','),
+      reinstall: String(opts.reinstall ?? true),
+      grantPermissions: String(opts.grantPermissions ?? true),
+    });
+
     return apiFetch<{
       ok: boolean;
       total: number;
@@ -813,7 +822,7 @@ export const accountFarmApi = {
         output: string;
         error?: string;
       }>;
-    }>('/api/v1/farm/devices/install-apk-file', {
+    }>(`/api/v1/farm/devices/install-apk-file?${q.toString()}`, {
       method: 'POST',
       body: fd,
     });

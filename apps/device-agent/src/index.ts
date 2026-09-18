@@ -20,14 +20,13 @@ const scriptEngine = new ScriptEngine(logger);
 
 const app = Fastify({
   logger: false,
-  bodyLimit: 300 * 1024 * 1024, // 300 MB limit for APK transfers
+  bodyLimit: 1024 * 1024 * 1024, // 1 GB limit for large APK transfers
 });
 
 app.addContentTypeParser(
   ['application/octet-stream', 'application/vnd.android.package-archive'],
-  { parseAs: 'buffer', bodyLimit: 300 * 1024 * 1024 },
-  (_req, body, done) => {
-    done(null, body);
+  function (_req, payload, done) {
+    done(null, payload); // Pass raw stream directly without buffering in RAM
   }
 );
 
@@ -800,21 +799,51 @@ const UploadAndInstallJsonBody = z.object({
 
 app.post('/device/apps/upload-and-install', async (req, reply) => {
   try {
-    let apkBuffer: Buffer;
     let targetDeviceIds: string[] = [];
     let reinstall = true;
     let grantPermissions = true;
     let filename = 'app.apk';
 
-    if (Buffer.isBuffer(req.body)) {
-      // Binary stream payload
-      apkBuffer = req.body;
-      const query = (req.query || {}) as Record<string, string>;
-      const rawTargets = query.targetDeviceIds || (req.headers['x-target-device-ids'] as string);
-      targetDeviceIds = rawTargets ? rawTargets.split(',').map((s) => s.trim()).filter(Boolean) : [];
-      reinstall = query.reinstall !== 'false';
-      grantPermissions = query.grantPermissions !== 'false';
-      filename = query.filename || (req.headers['x-filename'] as string) || 'app.apk';
+    const query = (req.query || {}) as Record<string, string>;
+    const rawTargets = query.targetDeviceIds || (req.headers['x-target-device-ids'] as string);
+    if (rawTargets) {
+      targetDeviceIds = rawTargets.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (query.reinstall !== undefined) reinstall = query.reinstall !== 'false';
+    if (query.grantPermissions !== undefined) grantPermissions = query.grantPermissions !== 'false';
+    if (query.filename || req.headers['x-filename']) {
+      filename = query.filename || (req.headers['x-filename'] as string);
+    }
+
+    const isStream = req.body && typeof (req.body as any).pipe === 'function';
+    const isBuffer = Buffer.isBuffer(req.body);
+
+    if (isStream) {
+      if (targetDeviceIds.length === 0) {
+        reply.code(400);
+        return { ok: false, error: 'No targetDeviceIds specified' };
+      }
+      return await apkManager.streamAndInstallApk(
+        adb,
+        req.body as NodeJS.ReadableStream,
+        targetDeviceIds,
+        filename,
+        reinstall,
+        grantPermissions
+      );
+    } else if (isBuffer) {
+      if (targetDeviceIds.length === 0) {
+        reply.code(400);
+        return { ok: false, error: 'No targetDeviceIds specified' };
+      }
+      return await apkManager.batchInstallFromBuffer(
+        adb,
+        req.body as Buffer,
+        targetDeviceIds,
+        filename,
+        reinstall,
+        grantPermissions
+      );
     } else {
       // JSON base64 payload
       const parsed = UploadAndInstallJsonBody.safeParse(req.body);
@@ -822,27 +851,16 @@ app.post('/device/apps/upload-and-install', async (req, reply) => {
         reply.code(400);
         return { ok: false, error: parsed.error.flatten() };
       }
-      apkBuffer = Buffer.from(parsed.data.apkBase64, 'base64');
-      targetDeviceIds = parsed.data.targetDeviceIds;
-      reinstall = parsed.data.reinstall;
-      grantPermissions = parsed.data.grantPermissions;
-      filename = parsed.data.filename || 'app.apk';
+      const apkBuffer = Buffer.from(parsed.data.apkBase64, 'base64');
+      return await apkManager.batchInstallFromBuffer(
+        adb,
+        apkBuffer,
+        parsed.data.targetDeviceIds,
+        parsed.data.filename || filename,
+        parsed.data.reinstall,
+        parsed.data.grantPermissions
+      );
     }
-
-    if (targetDeviceIds.length === 0) {
-      reply.code(400);
-      return { ok: false, error: 'No targetDeviceIds specified' };
-    }
-
-    const result = await apkManager.batchInstallFromBuffer(
-      adb,
-      apkBuffer,
-      targetDeviceIds,
-      filename,
-      reinstall,
-      grantPermissions
-    );
-    return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: /device/apps/upload-and-install failed');
     return {
