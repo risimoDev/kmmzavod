@@ -222,6 +222,7 @@ function EditorProjectsContent() {
         useVision,
         targetClipCount,
         targetClipSeconds,
+        workspaceProjectId: selectedWorkspaceProjectId || undefined,
         ...(selectedWorkspaceProjectId ? { config: { workspaceProjectId: selectedWorkspaceProjectId } } : {}),
       });
 

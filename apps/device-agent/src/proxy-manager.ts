@@ -217,7 +217,18 @@ export class ProxyManager {
     const cfg = this.proxyMap.get(deviceId);
     const url = rotateUrlOverride || cfg?.rotateUrl;
     if (!url) {
-      throw new Error(`Для устройства ${deviceId} не указан URL ротации (Webhook смены IP)`);
+      // Для Shared-прокси с ротацией по таймеру провайдера URL-вебхук отсутствует.
+      // Не падаем с ошибкой, а проверяем текущий выходной IP и статус.
+      this.logger.info({ deviceId }, 'proxy-manager: no rotateUrl configured (Shared/timer rotation) - checking current IP');
+      const check = await this.checkDeviceIp(deviceId);
+      return {
+        ok: check.ok,
+        deviceId,
+        rotateUrl: 'timer-rotation',
+        statusCode: 200,
+        rotateResponse: 'Авторотация по таймеру провайдера (Shared-режим)',
+        check,
+      };
     }
 
     this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');

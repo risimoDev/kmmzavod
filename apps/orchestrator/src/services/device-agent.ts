@@ -85,7 +85,7 @@ export async function checkDeviceAgentHealth(): Promise<string | null> {
 export const deviceAgentService = {
   async publish(opts: {
     deviceId: string;
-    platform: 'instagram' | 'tiktok';
+    platform: 'instagram' | 'tiktok' | 'youtube_shorts';
     videoUrl: string;
     caption: string;
   }): Promise<DevicePublishResult> {

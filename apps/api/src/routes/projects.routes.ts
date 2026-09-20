@@ -92,22 +92,6 @@ export async function projectRoutes(app: FastifyInstance) {
     });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
 
-    // 1. Raw source videos uploaded to this project
-    const rawVideos = await db.sourceVideo.findMany({
-      where: { projectId: id, tenantId, isArchived: false },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        _count: { select: { uniquifyJobs: true } },
-      },
-    });
-
-    const enrichedRawVideos = await Promise.all(
-      rawVideos.map(async (v) => ({
-        ...v,
-        url: v.storageKey ? await app.storage.presignedUrl(v.storageKey, 3600).catch(() => null) : null,
-      })),
-    );
-
     // 2. Master clips from Smart Editor (editClips with outputKey, linked to project)
     const allEditorClips = await db.editClip.findMany({
       where: {
@@ -125,6 +109,28 @@ export async function projectRoutes(app: FastifyInstance) {
       return cfg.workspaceProjectId === id || (c.project.name && project.name && c.project.name.toLowerCase().includes(project.name.toLowerCase()));
     });
 
+    const masterClipSourceIds = new Set(
+      editorClips.map((c) => c.outputSourceVideoId).filter((vid): vid is string => Boolean(vid)),
+    );
+
+    // 1. Raw source videos uploaded to this project (excluding master clips to avoid duplication between tabs)
+    const rawVideos = await db.sourceVideo.findMany({
+      where: { projectId: id, tenantId, isArchived: false },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        _count: { select: { uniquifyJobs: true } },
+      },
+    });
+
+    const trulyRawVideos = rawVideos.filter((v) => !masterClipSourceIds.has(v.id));
+
+    const enrichedRawVideos = await Promise.all(
+      trulyRawVideos.map(async (v) => ({
+        ...v,
+        url: v.storageKey ? await app.storage.presignedUrl(v.storageKey, 3600).catch(() => null) : null,
+      })),
+    );
+
     const enrichedMasterClips = await Promise.all(
       editorClips.map(async (c) => ({
         ...c,
@@ -133,8 +139,11 @@ export async function projectRoutes(app: FastifyInstance) {
       })),
     );
 
-    // 3. Unique variants generated for this project's source videos
-    const projectSourceIds = rawVideos.map((v) => v.id);
+    // 3. Unique variants generated for this project's source videos & master clips
+    const projectSourceIds = Array.from(new Set([
+      ...rawVideos.map((v) => v.id),
+      ...Array.from(masterClipSourceIds),
+    ]));
     const uniqueVariants = projectSourceIds.length > 0
       ? await db.uniqueVariant.findMany({
           where: {

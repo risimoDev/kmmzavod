@@ -293,7 +293,7 @@ app.post('/wb/warmup', async (req, reply) => {
 
 const PublishBody = z.object({
   deviceId: z.string().min(1),
-  platform: z.enum(['instagram', 'tiktok']),
+  platform: z.enum(['instagram', 'tiktok', 'youtube_shorts']),
   videoUrl: z.string().url(),
   caption: z.string().default(''),
 });

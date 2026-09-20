@@ -1748,6 +1748,8 @@ export interface EditProject {
   targetClipCount: number;
   targetClipSeconds: number;
   error?: string | null;
+  workspaceProjectId?: string | null;
+  config?: Record<string, unknown> | null;
   createdAt: string;
   _count?: { sources: number; clips: number };
 }

@@ -560,7 +560,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
           importNote = note;
         } else if (acc.authMethod === 'device') {
-          if (!acc.deviceId) throw new Error('Device account needs deviceId (ADB device serial)');
+          // Device accounts can be linked to physical ADB boards during import or later via the UI
           accessTokenEnc = encrypt('device'); // placeholder (column is NOT NULL) — the phone's logged-in app IS the session
         } else {
           if (!acc.accessToken) throw new Error('Official account needs accessToken');

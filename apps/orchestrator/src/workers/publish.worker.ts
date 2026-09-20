@@ -218,7 +218,7 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new Error(`publisher-${platform}: ${describePublisherError(err)}`);
           }
         } else if (
-          accountRaw.authMethod === 'device' && (platform === 'instagram' || platform === 'tiktok')
+          accountRaw.authMethod === 'device' && (platform === 'instagram' || platform === 'tiktok' || platform === 'youtube_shorts')
         ) {
           // ── Device path (real phone farm via Laixi + apps/device-agent) ──────
           if (!accountRaw.deviceId) {

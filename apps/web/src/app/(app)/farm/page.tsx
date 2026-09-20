@@ -1226,7 +1226,8 @@ function DevicesTab() {
   const [restartTargetDeviceIds, setRestartTargetDeviceIds] = useState<string[]>([]);
   const [restartLogs, setRestartLogs] = useState<Array<{ deviceId: string; mode: string; ok: boolean; log: string }>>([]);
   const [batchProxyText, setBatchProxyText] = useState('');
-  const [batchProxyType, setBatchProxyType] = useState<'http' | 'socks5' | 'mobile' | 'residential'>('http');
+  const [batchProxyType, setBatchProxyType] = useState<'http' | 'socks5' | 'mobile' | 'residential'>('socks5');
+  const [batchProxyDistributionMode, setBatchProxyDistributionMode] = useState<'shared_cycle' | 'one_to_one'>('shared_cycle');
   const [batchProxyTargets, setBatchProxyTargets] = useState<string[]>([]);
   const [batchProxyApplying, setBatchProxyApplying] = useState(false);
   const [batchCheckingIps, setBatchCheckingIps] = useState(false);
@@ -2415,15 +2416,29 @@ function DevicesTab() {
       return;
     }
 
-    const assignments = batchProxyTargets.slice(0, parsed.length).map((devId, idx) => ({
-      deviceId: devId,
-      host: parsed[idx].host,
-      port: parsed[idx].port,
-      username: parsed[idx].username,
-      password: parsed[idx].password,
-      type: batchProxyType,
-      rotateUrl: parsed[idx].rotateUrl,
-    }));
+    const assignments =
+      batchProxyDistributionMode === 'shared_cycle'
+        ? batchProxyTargets.map((devId, idx) => {
+            const p = parsed[idx % parsed.length];
+            return {
+              deviceId: devId,
+              host: p.host,
+              port: p.port,
+              username: p.username,
+              password: p.password,
+              type: batchProxyType,
+              rotateUrl: p.rotateUrl,
+            };
+          })
+        : batchProxyTargets.slice(0, parsed.length).map((devId, idx) => ({
+            deviceId: devId,
+            host: parsed[idx].host,
+            port: parsed[idx].port,
+            username: parsed[idx].username,
+            password: parsed[idx].password,
+            type: batchProxyType,
+            rotateUrl: parsed[idx].rotateUrl,
+          }));
 
     if (assignments.length === 0) {
       alert('Нет совпадений между списком прокси и выбранными платами');
@@ -2431,7 +2446,11 @@ function DevicesTab() {
     }
 
     setBatchProxyApplying(true);
-    setNetworkFeedbackMsg(`Назначение прокси 1-к-1 на ${assignments.length} плат...`);
+    setNetworkFeedbackMsg(
+      batchProxyDistributionMode === 'shared_cycle'
+        ? `Назначение ${parsed.length} Shared-прокси циклически на ${assignments.length} плат...`
+        : `Назначение прокси 1-к-1 на ${assignments.length} плат...`
+    );
     try {
       const res = await accountFarmApi.batchSetDeviceProxies(assignments);
       if (res.ok) {
@@ -6080,28 +6099,72 @@ function DevicesTab() {
                   </div>
                 </div>
 
-                {/* Proxy Protocol / Type */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {/* Distribution Mode & Proxy Protocol */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[11px] text-text-secondary block mb-1">Тип прокси:</label>
+                    <label className="text-[11px] text-text-secondary block mb-1 font-semibold">Режим распределения:</label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setBatchProxyDistributionMode('shared_cycle')}
+                        className={cn(
+                          "flex-1 text-xs py-2 px-2.5 rounded-lg border text-left transition-all",
+                          batchProxyDistributionMode === 'shared_cycle'
+                            ? "border-brand-500 bg-brand-500/15 text-brand-300 ring-1 ring-brand-500/30"
+                            : "border-border bg-surface-2 text-text-secondary hover:text-text-primary"
+                        )}
+                      >
+                        <span className="block font-semibold">🔄 Shared-пул (Циклически)</span>
+                        <span className="text-[10px] text-text-tertiary">1 или несколько прокси на ВСЕ {batchProxyTargets.length} плат</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBatchProxyDistributionMode('one_to_one')}
+                        className={cn(
+                          "flex-1 text-xs py-2 px-2.5 rounded-lg border text-left transition-all",
+                          batchProxyDistributionMode === 'one_to_one'
+                            ? "border-brand-500 bg-brand-500/15 text-brand-300 ring-1 ring-brand-500/30"
+                            : "border-border bg-surface-2 text-text-secondary hover:text-text-primary"
+                        )}
+                      >
+                        <span className="block font-semibold">🎯 Строго 1-к-1</span>
+                        <span className="text-[10px] text-text-tertiary">Каждой плате отдельный прокси</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-text-secondary block mb-1 font-semibold">Протокол подключения:</label>
                     <select
                       value={batchProxyType}
                       onChange={(e) => setBatchProxyType(e.target.value as any)}
-                      className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
+                      className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-text-primary text-xs"
                     >
+                      <option value="socks5">SOCKS5 (рекомендуется для ProxyDroid/Android)</option>
                       <option value="http">HTTP / HTTPS</option>
-                      <option value="socks5">SOCKS5</option>
                       <option value="mobile">Мобильный 4G / LTE</option>
                       <option value="residential">Резидентский</option>
                     </select>
                   </div>
                 </div>
 
+                {batchProxyDistributionMode === 'shared_cycle' && (
+                  <div className="p-3 rounded-lg bg-cyan-950/40 border border-cyan-500/30 text-[11px] text-cyan-200 flex items-start gap-2.5">
+                    <span className="text-base leading-none">💡</span>
+                    <div>
+                      <strong>Shared-режим готов:</strong> Введённый прокси будет циклически привязан ко всем выбранным платам ({batchProxyTargets.length} шт).
+                      При запуске публикаций в матрице используйте интервал (stagger) <strong>7–15 минут</strong>, чтобы сотовый оператор успевал ротировать IP по таймеру перед стартом следующей платы.
+                    </div>
+                  </div>
+                )}
+
                 {/* Preview Table */}
                 {parseBatchProxyLines(batchProxyText).length > 0 && (
                   <div className="space-y-1.5">
                     <span className="font-semibold text-text-primary text-[11px]">
-                      Предпросмотр распределения 1-к-1:
+                      {batchProxyDistributionMode === 'shared_cycle'
+                        ? `Предпросмотр распределения Shared-пула (${batchProxyTargets.length} плат):`
+                        : 'Предпросмотр распределения 1-к-1:'}
                     </span>
                     <div className="border border-border rounded-lg overflow-hidden max-h-48 overflow-y-auto">
                       <table className="w-full text-left border-collapse font-mono text-[11px]">
@@ -6111,24 +6174,31 @@ function DevicesTab() {
                             <th className="p-2">Целевая плата</th>
                             <th className="p-2">Host:Port</th>
                             <th className="p-2">Авторизация</th>
-                            <th className="p-2">Webhook ротации</th>
+                            <th className="p-2">Ротация / Режим</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-border/40">
-                          {parseBatchProxyLines(batchProxyText).map((item, idx) => {
-                            const targetId = batchProxyTargets[idx] || `— (Плат меньше, чем прокси)`;
-                            return (
-                              <tr key={idx} className="hover:bg-surface-2/30">
-                                <td className="p-2 text-text-tertiary">#{idx + 1}</td>
-                                <td className="p-2 font-sans font-semibold text-text-primary">{targetId}</td>
-                                <td className="p-2 text-cyan-300 font-bold">{item.host}:{item.port}</td>
-                                <td className="p-2 text-text-secondary">{item.username ? `${item.username}:***` : 'Без логина'}</td>
-                                <td className="p-2 text-[10px] truncate max-w-[180px] text-text-tertiary">
-                                  {item.rotateUrl || '—'}
-                                </td>
-                              </tr>
-                            );
-                          })}
+                          {(batchProxyDistributionMode === 'shared_cycle'
+                            ? batchProxyTargets.map((targetId, idx) => {
+                                const parsed = parseBatchProxyLines(batchProxyText);
+                                const item = parsed[idx % parsed.length];
+                                return { targetId, item, idx };
+                              })
+                            : parseBatchProxyLines(batchProxyText).map((item, idx) => {
+                                const targetId = batchProxyTargets[idx] || `— (Плат меньше, чем прокси)`;
+                                return { targetId, item, idx };
+                              })
+                          ).map(({ targetId, item, idx }) => (
+                            <tr key={idx} className="hover:bg-surface-2/30">
+                              <td className="p-2 text-text-tertiary">#{idx + 1}</td>
+                              <td className="p-2 font-sans font-semibold text-text-primary">{targetId}</td>
+                              <td className="p-2 text-cyan-300 font-bold">{item.host}:{item.port}</td>
+                              <td className="p-2 text-text-secondary">{item.username ? `${item.username}:***` : 'Без логина'}</td>
+                              <td className="p-2 text-[10px] truncate max-w-[180px] text-text-tertiary">
+                                {item.rotateUrl || 'Авторотация по таймеру (Shared)'}
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
@@ -6145,7 +6215,9 @@ function DevicesTab() {
                     onClick={handleApplyBatchProxies}
                     className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
                   >
-                    🚀 Применить прокси 1-к-1 ({Math.min(parseBatchProxyLines(batchProxyText).length, batchProxyTargets.length)} плат)
+                    {batchProxyDistributionMode === 'shared_cycle'
+                      ? `🚀 Применить Shared-прокси ко всем ${batchProxyTargets.length} платам`
+                      : `🚀 Применить прокси 1-к-1 (${Math.min(parseBatchProxyLines(batchProxyText).length, batchProxyTargets.length)} плат)`}
                   </Button>
                 </div>
               </div>

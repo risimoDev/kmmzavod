@@ -698,9 +698,14 @@ async def render_preserve_context(
                 "-map", "[vout]", "-map", "[aout]",
             ]
         else:
+            filter_complex = (
+                f"[0:v]{video_filter}[vout];"
+                f"anullsrc=channel_layout=stereo:sample_rate=44100[aout]"
+            )
             cmd += [
-                "-vf", video_filter,
-                "-map", "0:v:0",
+                "-filter_complex", filter_complex,
+                "-map", "[vout]", "-map", "[aout]",
+                "-shortest",
             ]
 
     cmd += [

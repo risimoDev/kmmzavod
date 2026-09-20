@@ -17,7 +17,7 @@ import { AdbClient } from './adb-client';
 
 export interface PublishRequest {
   deviceId: string;
-  platform: 'instagram' | 'tiktok';
+  platform: 'instagram' | 'tiktok' | 'youtube_shorts';
   videoUrl: string;
   caption: string;
 }
@@ -73,8 +73,16 @@ export async function publishToDevice(
     await adb.shell(deviceId, 'wm dismiss-keyguard');
 
     // 5. Verify target package is installed
-    const primaryPkg = platform === 'instagram' ? 'com.instagram.android' : 'com.zhiliaoapp.musically';
-    const altPkg = platform === 'tiktok' ? 'com.ss.android.ugc.trill' : '';
+    let primaryPkg: string;
+    let altPkg = '';
+    if (platform === 'instagram') {
+      primaryPkg = 'com.instagram.android';
+    } else if (platform === 'tiktok') {
+      primaryPkg = 'com.zhiliaoapp.musically';
+      altPkg = 'com.ss.android.ugc.trill';
+    } else {
+      primaryPkg = 'com.google.android.youtube';
+    }
     const pkgCheck = await adb.shell(deviceId, `pm list packages`).catch(() => '');
     const hasPrimary = pkgCheck.includes(primaryPkg);
     const hasAlt = altPkg ? pkgCheck.includes(altPkg) : false;

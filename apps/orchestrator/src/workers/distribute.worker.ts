@@ -168,24 +168,28 @@ export function createDistributeWorker(deps: Deps): Worker {
         const autoCaption = item.uniqueVariant.generatedCaption;
         const autoHashtags = item.uniqueVariant.generatedHashtags;
 
-        const hashtags = item.hashtags && item.hashtags.length > 0
+        const resolvedHashtags: string[] = Array.isArray(item.hashtags) && item.hashtags.length > 0
           ? item.hashtags
-          : (autoHashtags && autoHashtags.length > 0 ? autoHashtags : distJob.hashtags);
+          : (Array.isArray(autoHashtags) && autoHashtags.length > 0
+              ? autoHashtags
+              : (Array.isArray(distJob.hashtags) ? distJob.hashtags : []));
 
-        const hashtagStr = hashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ');
+        const hashtagStr = resolvedHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ');
 
         let caption: string;
         if (item.caption && item.caption.trim()) {
           caption = hashtagStr && !item.caption.includes('#')
             ? `${item.caption.trim()}\n\n${hashtagStr}`
             : item.caption.trim();
-        } else if (autoCaption) {
-          caption = `${autoCaption}\n\n${autoHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`;
+        } else if (autoCaption && autoCaption.trim()) {
+          caption = hashtagStr
+            ? `${autoCaption.trim()}\n\n${hashtagStr}`
+            : autoCaption.trim();
         } else {
           caption = buildCaption(
             distJob.captionTemplate,
             item.caption,
-            hashtags,
+            resolvedHashtags,
             itemIndex,
             item.socialAccount.platform,
           );
@@ -199,7 +203,7 @@ export function createDistributeWorker(deps: Deps): Worker {
             uniqueVariantId: item.uniqueVariant.id,
             platform: item.socialAccount.platform as any,
             caption,
-            hashtags,
+            hashtags: resolvedHashtags,
             scheduledAt,
             status: 'scheduled',
           },

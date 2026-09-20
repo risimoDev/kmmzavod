@@ -101,25 +101,26 @@ export async function editorRoutes(app: FastifyInstance) {
     const { tenantId, userId } = req.user;
     const body = createProjectSchema.parse(req.body);
 
-    const project = await db.editProject.create({
-      data: {
-        tenantId,
-        createdBy: userId,
-        name: body.name,
-        mode: body.mode,
-        geometry: body.geometry,
-        aspect: body.aspect,
-        fps: body.fps,
-        smartCrop: body.smartCrop,
-        audioMode: body.audioMode,
-        subtitleStyle: body.subtitleStyle,
-        useVision: body.useVision,
-        targetClipCount: body.targetClipCount,
-        targetClipSeconds: body.targetClipSeconds,
-        config: ({ ...(body.config ?? {}), workspaceProjectId: body.workspaceProjectId }) as object,
-        status: 'draft',
-      },
-    });
+        const wsProjectId = body.workspaceProjectId || ((body.config as any)?.workspaceProjectId as string | undefined);
+        const project = await db.editProject.create({
+          data: {
+            tenantId,
+            createdBy: userId,
+            name: body.name,
+            mode: body.mode,
+            geometry: body.geometry,
+            aspect: body.aspect,
+            fps: body.fps,
+            smartCrop: body.smartCrop,
+            audioMode: body.audioMode,
+            subtitleStyle: body.subtitleStyle,
+            useVision: body.useVision,
+            targetClipCount: body.targetClipCount,
+            targetClipSeconds: body.targetClipSeconds,
+            config: ({ ...(body.config ?? {}), ...(wsProjectId ? { workspaceProjectId: wsProjectId } : {}) }) as object,
+            status: 'draft',
+          },
+        });
     return reply.code(201).send(project);
   });
 

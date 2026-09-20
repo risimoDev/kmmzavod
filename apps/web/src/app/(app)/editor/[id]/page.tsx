@@ -647,7 +647,11 @@ export default function EditorProjectDetailPage() {
                             size="xs"
                             variant="secondary"
                             className="w-full text-2xs"
-                            onClick={() => router.push(`/uniquify?sourceVideoId=${o.sourceVideoId}`)}
+                            onClick={() => {
+                              const wsId = (project.config as any)?.workspaceProjectId;
+                              const pQuery = wsId ? `&projectId=${wsId}` : "";
+                              router.push(`/uniquify?sourceVideoId=${o.sourceVideoId}${pQuery}`);
+                            }}
                           >
                             ⚡ Уникализировать этот ролик
                           </Button>
