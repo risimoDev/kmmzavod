@@ -141,8 +141,15 @@ export class ProxyManager {
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
     await this.refreshHostIp();
 
-    // Run curl or wget on the device to get its outward IP
-    const cmd = 'curl -s --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 https://api.ipify.org';
+    // Run curl or wget on the device to get its outward IP (testing through proxy if configured)
+    const cfg = this.proxyMap.get(deviceId);
+    let proxyOpt = '';
+    if (cfg && cfg.host && cfg.port) {
+      const auth = cfg.username && cfg.password ? `${cfg.username}:${cfg.password}@` : '';
+      const proto = cfg.type === 'socks5' ? 'socks5://' : 'http://';
+      proxyOpt = `-x ${proto}${auth}${cfg.host}:${cfg.port} `;
+    }
+    const cmd = `curl -s ${proxyOpt}--max-time 10 https://api.ipify.org || curl -s --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 https://api.ipify.org`;
 
     try {
       const text = await this.adb.shell(deviceId, cmd);

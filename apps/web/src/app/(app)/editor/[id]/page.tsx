@@ -22,7 +22,20 @@ import {
   type EditClip,
   type EditOutput,
   type EdlSubtitleLine,
+  type FishAudioVoice,
 } from "@/lib/api";
+
+const SUBTITLE_STYLES = [
+  { id: "tiktok", name: "TikTok", cls: "text-warning font-black", badge: "Хит" },
+  { id: "mrbeast", name: "MrBeast", cls: "text-cyan-400 font-black", badge: "Вирус" },
+  { id: "neon_glow", name: "Neon Glow", cls: "text-fuchsia-400 font-bold", badge: "Стиль" },
+  { id: "fire_hype", name: "Fire Hype", cls: "text-orange-400 font-black", badge: "Драйв" },
+  { id: "single_word", name: "1-Word", cls: "text-amber-300 font-black", badge: "100% CTR" },
+  { id: "cinematic", name: "Cinema", cls: "text-text-primary font-medium" },
+  { id: "minimal", name: "Minimal", cls: "text-text-secondary font-light" },
+  { id: "default", name: "Классика", cls: "text-brand-400 font-bold" },
+  { id: "none", name: "Выкл", cls: "text-text-tertiary line-through" },
+];
 
 const POLL_MS = 4000;
 
@@ -223,6 +236,82 @@ export default function EditorProjectDetailPage() {
   const [editingClipId, setEditingClipId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // AI Studio (OpenRouter + Fish Audio)
+  const [showAiStudio, setShowAiStudio] = useState(false);
+  const [aiTopic, setAiTopic] = useState("");
+  const [aiStyle, setAiStyle] = useState("hype");
+  const [aiSeconds, setAiSeconds] = useState(30);
+  const [aiScript, setAiScript] = useState("");
+  const [aiHook, setAiHook] = useState("");
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [voices, setVoices] = useState<FishAudioVoice[]>([]);
+  const [selectedVoiceId, setSelectedVoiceId] = useState("e04b4c73046f491c89366fbca39d48dd");
+  const [voiceSpeed, setVoiceSpeed] = useState(1.0);
+  const [synthesizing, setSynthesizing] = useState(false);
+  const [voiceoverAudioUrl, setVoiceoverAudioUrl] = useState<string | null>(null);
+  const [showSafeZones, setShowSafeZones] = useState(false);
+
+  useEffect(() => {
+    editorApi.getVoices().then((res) => {
+      if (res.voices?.length) {
+        setVoices(res.voices);
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (project?.config) {
+      const cfg = project.config as Record<string, any>;
+      if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
+      if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
+      if (cfg.voiceId) setSelectedVoiceId(cfg.voiceId);
+      if (cfg.voiceSpeed) setVoiceSpeed(cfg.voiceSpeed);
+    }
+  }, [project]);
+
+  async function handleGenerateScript() {
+    if (!aiTopic.trim()) return;
+    setAiGenerating(true);
+    try {
+      const res = await editorApi.generateScript(id, {
+        topic: aiTopic,
+        style: aiStyle,
+        targetSeconds: aiSeconds,
+        useSourceTranscript: true,
+      });
+      setAiScript(res.script);
+      setAiHook(res.hook);
+    } catch (e: any) {
+      alert(e.message || "Ошибка генерации сценария");
+    } finally {
+      setAiGenerating(false);
+    }
+  }
+
+  async function handleGenerateVoice() {
+    if (!aiScript.trim()) return;
+    setSynthesizing(true);
+    try {
+      const res = await editorApi.generateVoice(id, {
+        text: aiScript,
+        voiceId: selectedVoiceId,
+        speed: voiceSpeed,
+      });
+      setVoiceoverAudioUrl(res.audioUrl);
+      await load();
+    } catch (e: any) {
+      alert(e.message || "Ошибка генерации голоса");
+    } finally {
+      setSynthesizing(false);
+    }
+  }
+
+  async function changeSubtitleStyle(style: string) {
+    if (!project) return;
+    setProject({ ...project, subtitleStyle: style });
+    await editorApi.patchProject(id, { subtitleStyle: style }).catch(() => {});
+  }
+
   const load = useCallback(async () => {
     try {
       const p = await editorApi.getProject(id);
@@ -361,6 +450,240 @@ export default function EditorProjectDetailPage() {
             {project.smartCrop && <Badge variant="outline">smart-crop</Badge>}
           </div>
         </div>
+
+        {/* Панель инструментов: AI Студия, Пресеты субтитров, Безопасные зоны */}
+        <div className="flex items-center justify-between flex-wrap gap-2.5 rounded-xl border border-border bg-surface-1 p-3">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-2xs font-semibold uppercase text-text-tertiary mr-1">Стиль субтитров:</span>
+            {SUBTITLE_STYLES.map((st) => (
+              <button
+                key={st.id}
+                type="button"
+                onClick={() => changeSubtitleStyle(st.id)}
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-1",
+                  project.subtitleStyle === st.id
+                    ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-semibold shadow-brand-glow-sm"
+                    : "bg-surface-2 text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                )}
+              >
+                <span className={st.cls}>Aa</span>
+                <span>{st.name}</span>
+                {st.badge && (
+                  <span className="text-3xs px-1 rounded bg-brand-500/20 text-brand-300 font-bold">
+                    {st.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {project.aspect === "9:16" && (
+              <button
+                type="button"
+                onClick={() => setShowSafeZones(!showSafeZones)}
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1",
+                  showSafeZones
+                    ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40 font-semibold"
+                    : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                )}
+              >
+                <span>📱 Safe Zones</span>
+                <span className="text-2xs opacity-75">{showSafeZones ? "Вкл" : "Выкл"}</span>
+              </button>
+            )}
+
+            <Button
+              size="sm"
+              variant={showAiStudio ? "secondary" : "primary"}
+              onClick={() => setShowAiStudio(!showAiStudio)}
+              className="gap-1.5"
+            >
+              <span>✨ AI Студия: Сценарий & Озвучка</span>
+            </Button>
+          </div>
+        </div>
+
+        {/* AI Студия: OpenRouter Free Cascade + Fish Audio s2.1-pro-free */}
+        {showAiStudio && (
+          <Card className="border-brand-500/40 bg-gradient-to-br from-surface-1 via-surface-2/70 to-surface-1 shadow-elevation-2 animate-fade-in">
+            <CardContent className="p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-border/60 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">🎙️</span>
+                  <div>
+                    <h3 className="font-semibold text-text-primary text-base">
+                      AI Студия: Генерация сценария и озвучки
+                    </h3>
+                    <p className="text-xs text-text-secondary">
+                      Сценарий через OpenRouter (каскад бесплатных моделей) → Озвучка через Fish Audio (s2.1-pro-free) → точные субтитры по голосу
+                    </p>
+                  </div>
+                </div>
+                <Button size="xs" variant="ghost" onClick={() => setShowAiStudio(false)}>
+                  ✕ Закрыть
+                </Button>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                {/* 1. Тема и стиль сценария */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase text-text-tertiary">
+                      1. Сценарий (OpenRouter)
+                    </span>
+                    <span className="text-3xs font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
+                      Free Cascade
+                    </span>
+                  </div>
+
+                  <input
+                    value={aiTopic}
+                    onChange={(e) => setAiTopic(e.target.value)}
+                    placeholder="Тема ролика (например: 3 секрета продаж)..."
+                    className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  />
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      { id: "hype", label: "🔥 Хайп / Драйв" },
+                      { id: "educational", label: "💡 Экспертный" },
+                      { id: "story", label: "📖 Сторителлинг" },
+                      { id: "sales", label: "💰 Продажи / Оффер" },
+                    ].map((st) => (
+                      <button
+                        key={st.id}
+                        type="button"
+                        onClick={() => setAiStyle(st.id)}
+                        className={cn(
+                          "px-2 py-1.5 rounded text-2xs text-left transition-all",
+                          aiStyle === st.id
+                            ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-medium"
+                            : "bg-surface-3 text-text-secondary hover:text-text-primary"
+                        )}
+                      >
+                        {st.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-secondary">Длительность:</span>
+                    <span className="font-mono text-brand-400 font-semibold">{aiSeconds} сек</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={15}
+                    max={60}
+                    step={5}
+                    value={aiSeconds}
+                    onChange={(e) => setAiSeconds(Number(e.target.value))}
+                    className="w-full accent-brand-500"
+                  />
+
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="w-full"
+                    loading={aiGenerating}
+                    disabled={!aiTopic.trim()}
+                    onClick={handleGenerateScript}
+                  >
+                    ⚡ Сгенерировать сценарий
+                  </Button>
+                </div>
+
+                {/* 2. Текст сценария (редактируемый) */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase text-text-tertiary">
+                      2. Текст для диктора
+                    </span>
+                    <span className="text-2xs text-text-secondary font-mono">
+                      {aiScript.trim().split(/\s+/).filter(Boolean).length} слов · ~{Math.round(aiScript.trim().split(/\s+/).filter(Boolean).length / 2.4)}с
+                    </span>
+                  </div>
+
+                  {aiHook && (
+                    <div className="rounded-md bg-brand-500/10 border border-brand-500/30 p-2 text-2xs text-brand-300">
+                      <span className="font-bold">Хук (0-3с): </span>{aiHook}
+                    </div>
+                  )}
+
+                  <textarea
+                    rows={6}
+                    value={aiScript}
+                    onChange={(e) => setAiScript(e.target.value)}
+                    placeholder="Здесь появится готовый текст для озвучки, либо напишите свой текст..."
+                    className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-primary font-sans leading-relaxed resize-none focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  />
+
+                  <p className="text-3xs text-text-tertiary">
+                    Текст будет озвучен диктором дословно. Числа рекомендуется писать словами.
+                  </p>
+                </div>
+
+                {/* 3. Голос Fish Audio & Синтез */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase text-text-tertiary">
+                      3. Диктор (Fish Audio)
+                    </span>
+                    <span className="text-3xs font-mono px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400">
+                      s2.1-pro-free
+                    </span>
+                  </div>
+
+                  <select
+                    value={selectedVoiceId}
+                    onChange={(e) => setSelectedVoiceId(e.target.value)}
+                    className="w-full bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  >
+                    {voices.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name} ({v.gender === "female" ? "жен." : "муж."})
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-secondary">Скорость речи:</span>
+                    <span className="font-mono text-brand-400 font-semibold">{voiceSpeed.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.8}
+                    max={1.3}
+                    step={0.05}
+                    value={voiceSpeed}
+                    onChange={(e) => setVoiceSpeed(Number(e.target.value))}
+                    className="w-full accent-brand-500"
+                  />
+
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    className="w-full"
+                    loading={synthesizing}
+                    disabled={!aiScript.trim()}
+                    onClick={handleGenerateVoice}
+                  >
+                    🎙️ Озвучить через Fish Audio
+                  </Button>
+
+                  {voiceoverAudioUrl && (
+                    <div className="space-y-1 pt-1">
+                      <p className="text-3xs text-emerald-400 font-medium">✓ Озвучка готова и привязана:</p>
+                      <audio controls src={voiceoverAudioUrl} className="w-full h-8 rounded" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {project.status === "failed" && project.error && (
           <Card className="border-danger/40">
@@ -513,6 +836,21 @@ export default function EditorProjectDetailPage() {
                         ) : (
                           <div className="absolute inset-0 flex items-center justify-center text-xs text-text-tertiary">
                             нет превью
+                          </div>
+                        )}
+                        {/* Safe Zones Overlay */}
+                        {showSafeZones && project.aspect === "9:16" && (
+                          <div className="absolute inset-0 pointer-events-none z-10 select-none">
+                            <div className="absolute top-0 inset-x-0 h-[12%] bg-red-500/15 border-b border-red-500/40 flex items-center justify-center">
+                              <span className="text-3xs text-red-200 font-mono">Интерфейс (верх)</span>
+                            </div>
+                            <div className="absolute top-[12%] bottom-[20%] right-0 w-[16%] bg-amber-500/15 border-l border-amber-500/40 flex items-center justify-center">
+                              <span className="text-3xs text-amber-200 font-mono -rotate-90">Кнопки</span>
+                            </div>
+                            <div className="absolute bottom-0 inset-x-0 h-[20%] bg-red-500/15 border-t border-red-500/40 flex items-center justify-center">
+                              <span className="text-3xs text-red-200 font-mono">Описание / музыка</span>
+                            </div>
+                            <div className="absolute top-[12%] left-0 right-[16%] bottom-[20%] border border-dashed border-emerald-400/60" />
                           </div>
                         )}
                         {/* Вкл/выкл */}

@@ -47,8 +47,12 @@ const ASPECTS: { value: EditAspect; w: number; h: number; hint: string }[] = [
   { value: "16:9", w: 36, h: 21, hint: "YouTube" },
 ];
 
-const SUBTITLE_STYLES: { value: string; label: string; cls: string }[] = [
-  { value: "tiktok", label: "TikTok", cls: "font-black text-warning" },
+const SUBTITLE_STYLES: { value: string; label: string; cls: string; badge?: string }[] = [
+  { value: "tiktok", label: "TikTok Classic", cls: "font-black text-warning", badge: "Хит" },
+  { value: "mrbeast", label: "MrBeast Bouncy", cls: "font-black text-cyan-400", badge: "Вирус" },
+  { value: "neon_glow", label: "Neon Glow", cls: "font-bold text-fuchsia-400", badge: "Стиль" },
+  { value: "fire_hype", label: "Fire Hype", cls: "font-black text-orange-400", badge: "Драйв" },
+  { value: "single_word", label: "1-Word Flash", cls: "font-black text-amber-300", badge: "100% CTR" },
   { value: "cinematic", label: "Cinema", cls: "font-medium text-text-primary" },
   { value: "minimal", label: "Minimal", cls: "font-light text-text-secondary" },
   { value: "default", label: "Классика", cls: "font-bold text-brand-400" },
@@ -60,10 +64,14 @@ type PresetPatch = Partial<Pick<EditProject,
   "targetClipCount" | "targetClipSeconds">> & { name: string };
 
 const PRESETS: { label: string; icon: string; hint: string; patch: PresetPatch }[] = [
+  { label: "MrBeast Shorts", icon: "💥", hint: "Крупные bouncy-субтитры, ультра-динамика, 20с",
+    patch: { name: "MrBeast Ролик", mode: "smart_montage", geometry: "highlights", aspect: "9:16", subtitleStyle: "mrbeast", audioMode: "keep", targetClipCount: 3, targetClipSeconds: 20 } },
+  { label: "1-Word Flash", icon: "⚡", hint: "По 1 слову на экране, удержание 100%, 15с",
+    patch: { name: "Flash Шортс", mode: "smart_montage", geometry: "mix", aspect: "9:16", subtitleStyle: "single_word", audioMode: "keep", targetClipSeconds: 15 } },
   { label: "Хайлайты из подкаста", icon: "🎙️", hint: "5 лучших моментов × 30с, karaoke-субтитры",
     patch: { name: "Хайлайты", mode: "smart_montage", geometry: "highlights", aspect: "9:16", subtitleStyle: "tiktok", audioMode: "keep", targetClipCount: 5, targetClipSeconds: 30 } },
-  { label: "Динамичный микс", icon: "⚡", hint: "Один ролик из лучших битов, beat-sync",
-    patch: { name: "Микс", mode: "smart_montage", geometry: "mix", aspect: "9:16", subtitleStyle: "tiktok", audioMode: "keep", targetClipSeconds: 25 } },
+  { label: "Кинематографичный ролик", icon: "🎬", hint: "Элегантный стиль, нижняя треть кадра, 40с",
+    patch: { name: "Кинематографичный", mode: "smart_montage", geometry: "highlights", aspect: "9:16", subtitleStyle: "cinematic", audioMode: "keep", targetClipCount: 2, targetClipSeconds: 40 } },
   { label: "Сырьё для уникализации", icon: "🏭", hint: "Нарезка без субтитров → в конвейер фермы",
     patch: { name: "Уникализация", mode: "uniquify_source", geometry: "mix", aspect: "9:16", subtitleStyle: "none", audioMode: "keep", targetClipSeconds: 30 } },
 ];

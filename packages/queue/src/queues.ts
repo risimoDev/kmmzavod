@@ -308,7 +308,16 @@ export interface UniquifyRenderJobPayload {
   outputKey: string;
   /** Determines the montage variation — different per variant. */
   seed: number;
-  subtitleStyle: 'tiktok' | 'cinematic' | 'minimal' | 'default' | 'none';
+  subtitleStyle:
+    | 'tiktok'
+    | 'mrbeast'
+    | 'neon_glow'
+    | 'fire_hype'
+    | 'single_word'
+    | 'cinematic'
+    | 'minimal'
+    | 'default'
+    | 'none';
   /** Per-variant background music (different track → different audio fingerprint). */
   bgmStorageKey?: string;
   bgmVolume: number;

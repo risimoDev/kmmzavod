@@ -1807,6 +1807,32 @@ export interface EditOutput {
   thumbnailUrl: string | null;
 }
 
+export interface FishAudioVoice {
+  id: string;
+  name: string;
+  gender: 'male' | 'female';
+  category: string;
+  description: string;
+  previewText: string;
+}
+
+export interface SubtitlePreset {
+  id: string;
+  name: string;
+  badge?: string;
+  description: string;
+  highlightColor: string;
+  preview: string;
+}
+
+export interface GeneratedScriptResult {
+  hook: string;
+  script: string;
+  title: string;
+  captions: Array<{ caption: string; hashtags: string[] }>;
+  modelUsed: string;
+}
+
 export const editorApi = {
   listProjects: () => apiFetch<{ projects: EditProject[] }>('/api/v1/editor/projects'),
 
@@ -1814,6 +1840,36 @@ export const editorApi = {
 
   createProject: (body: Partial<EditProject> & { name: string }) =>
     apiFetch<EditProject>('/api/v1/editor/projects', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+
+  patchProject: (id: string, body: Partial<EditProject>) =>
+    apiFetch<EditProject>(`/api/v1/editor/projects/${id}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    }),
+
+  getVoices: () => apiFetch<{ voices: FishAudioVoice[] }>('/api/v1/editor/voices'),
+
+  getPresets: () => apiFetch<{ subtitleStyles: SubtitlePreset[] }>('/api/v1/editor/presets'),
+
+  generateScript: (id: string, body: {
+    topic: string;
+    style?: string;
+    targetSeconds?: number;
+    productInfo?: string;
+    useSourceTranscript?: boolean;
+  }) =>
+    apiFetch<GeneratedScriptResult>(`/api/v1/editor/projects/${id}/generate-script`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+
+  generateVoice: (id: string, body: {
+    text: string;
+    voiceId?: string;
+    speed?: number;
+    volume?: number;
+  }) =>
+    apiFetch<{ storageKey: string; audioUrl: string; status: string }>(`/api/v1/editor/projects/${id}/generate-voice`, {
       method: 'POST', body: JSON.stringify(body),
     }),
 

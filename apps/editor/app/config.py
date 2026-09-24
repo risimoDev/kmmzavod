@@ -44,11 +44,15 @@ class Settings(BaseSettings):
     # Sampling fps for motion / scene analysis (keep CPU low on long videos).
     analysis_sample_fps: float = 2.0
 
-    # ── GPTunnel (LLM moment selection + gpt-4o vision) ───────────────
+    # ── GPTunnel / OpenRouter / Fish Audio ────────────
     gptunnel_api_key: str = ""
     gptunnel_base_url: str = "https://gptunnel.ru/v1"
     gptunnel_text_model: str = "gpt-4o-mini"
     gptunnel_vision_model: str = "gpt-4o"
+    fish_audio_api_key: str = ""
+    fish_audio_base_url: str = "https://api.fish.audio/v1"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # ── Limits ────────────────────────────────────────────────────────
     max_source_videos: int = 12

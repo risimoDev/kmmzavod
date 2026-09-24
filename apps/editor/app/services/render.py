@@ -377,11 +377,15 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
               "-threads", str(threads), pre_final], "keep_bgm")
 
     # 4. Subtitles: burn whenever a style is chosen (user's explicit choice),
-    #    independent of mode. EDL subtitles (proposed at analyze, possibly edited
-    #    by the user) win; otherwise transcribe the FINAL audio.
+    #    independent of mode. When audio is replaced with voiceover, transcribing
+    #    pre_final guarantees 100% word-level synchronization with the speaker.
     ass_path: str | None = None
     if subtitle_style and subtitle_style != "none":
-        lines = _lines_from_clip(clip) or _transcribe_for_subs(pre_final)
+        if audio_mode == AudioMode.REPLACE and voiceover_path:
+            lines = _transcribe_for_subs(pre_final) or _lines_from_clip(clip)
+        else:
+            lines = _lines_from_clip(clip) or _transcribe_for_subs(pre_final)
+
         if lines:
             ass_path = os.path.join(work_dir, "subs.ass")
             generate_ass(lines, ass_path, out_w, out_h, subtitle_style)

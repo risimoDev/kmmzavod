@@ -37,7 +37,16 @@ interface Deps {
 // GET /v1/tts/voices; can be overridden per job via config.voiceId.
 const DEFAULT_TTS_VOICE_ID = '65f4092eddc5862248a18111';
 
-const SUBTITLE_STYLES = ['tiktok', 'cinematic', 'minimal', 'default'] as const;
+const SUBTITLE_STYLES = [
+  'tiktok',
+  'mrbeast',
+  'neon_glow',
+  'fire_hype',
+  'single_word',
+  'cinematic',
+  'minimal',
+  'default',
+] as const;
 
 /** Rough speech duration (sec) from a script — ~2.6 words/sec for Russian TTS. */
 function estimateSpeechDuration(script: string): number {

@@ -57,6 +57,10 @@ const schema = z.object({
   RUNWAY_API_KEY: z.string().optional(),
   GPTUNNEL_API_KEY: z.string().optional(),
   GPTUNNEL_BASE_URL: z.string().url().default('https://gptunnel.ru/v1'),
+  FISH_AUDIO_API_KEY: z.string().optional(),
+  FISH_AUDIO_BASE_URL: z.string().url().default('https://api.fish.audio/v1'),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: z.string().url().default('https://openrouter.ai/api/v1'),
 });
 
 const parsed = schema.safeParse(process.env);

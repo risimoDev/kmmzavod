@@ -18,6 +18,20 @@ import { editorAnalyzeQueue, editorRenderQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import type { EditorAnalyzeJobPayload, EditorRenderJobPayload } from '@kmmzavod/queue';
+import { FishAudioService, FISH_AUDIO_VOICES } from '../services/fish-audio';
+import { OpenRouterService } from '../services/openrouter';
+
+const SUBTITLE_STYLES = [
+  'none',
+  'default',
+  'tiktok',
+  'mrbeast',
+  'neon_glow',
+  'fire_hype',
+  'single_word',
+  'cinematic',
+  'minimal',
+] as const;
 
 const createProjectSchema = z.object({
   name: z.string().min(1).max(200),
@@ -27,11 +41,20 @@ const createProjectSchema = z.object({
   fps: z.number().int().min(15).max(60).default(30),
   smartCrop: z.boolean().default(true),
   audioMode: z.enum(['keep', 'replace']).default('keep'),
-  subtitleStyle: z.enum(['none', 'default', 'tiktok', 'cinematic', 'minimal']).default('tiktok'),
+  subtitleStyle: z.enum(SUBTITLE_STYLES).default('tiktok'),
   useVision: z.boolean().default(false),
   targetClipCount: z.number().int().min(1).max(30).default(5),
   targetClipSeconds: z.number().min(3).max(180).default(30),
   workspaceProjectId: z.string().uuid().optional(),
+  config: z.record(z.unknown()).optional(),
+});
+
+const patchProjectSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  subtitleStyle: z.enum(SUBTITLE_STYLES).optional(),
+  audioMode: z.enum(['keep', 'replace']).optional(),
+  smartCrop: z.boolean().optional(),
+  targetClipSeconds: z.number().min(3).max(180).optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -378,6 +401,231 @@ export async function editorRoutes(app: FastifyInstance) {
     return { outputs };
   });
 
+  // ── Patch project settings ────────────────────────────────────────────────
+  app.patch('/projects/:id', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id } = req.params as { id: string };
+    const body = patchProjectSchema.parse(req.body);
+
+    const project = await db.editProject.findFirst({ where: { id, tenantId } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+
+    const currentConfig = (project.config as Record<string, unknown>) || {};
+    const updated = await db.editProject.update({
+      where: { id },
+      data: {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.subtitleStyle !== undefined ? { subtitleStyle: body.subtitleStyle } : {}),
+        ...(body.audioMode !== undefined ? { audioMode: body.audioMode } : {}),
+        ...(body.smartCrop !== undefined ? { smartCrop: body.smartCrop } : {}),
+        ...(body.targetClipSeconds !== undefined ? { targetClipSeconds: body.targetClipSeconds } : {}),
+        ...(body.config !== undefined ? { config: { ...currentConfig, ...body.config } as object } : {}),
+      },
+    });
+    return updated;
+  });
+
+  // ── Presets & Voices ────────────────────────────────────────────────────────
+  app.get('/voices', async () => {
+    return { voices: FISH_AUDIO_VOICES };
+  });
+
+  app.get('/projects/voices', async () => {
+    return { voices: FISH_AUDIO_VOICES };
+  });
+
+  app.get('/presets', async () => {
+    return {
+      subtitleStyles: [
+        {
+          id: 'tiktok',
+          name: 'TikTok Classic',
+          badge: 'Хит',
+          description: 'Яркое жёлтое караоке на белом тексте, плотный контур, безопасная зона 18%.',
+          highlightColor: '#FFE600',
+          preview: 'Смотри ролик ДО КОНЦА',
+        },
+        {
+          id: 'mrbeast',
+          name: 'MrBeast Bouncy',
+          badge: 'Вирусный',
+          description: 'Электрический неон, массивный жирный шрифт, анимация отскока при произнесении.',
+          highlightColor: '#00F0FF',
+          preview: 'ЭТО ШОКИРУЕТ КАЖДОГО!',
+        },
+        {
+          id: 'neon_glow',
+          name: 'Cyberpunk Neon',
+          badge: 'Стиль',
+          description: 'Неоновое свечение Cyan/Pink с полупрозрачной подложкой.',
+          highlightColor: '#00FFFF',
+          preview: 'Тренды нового поколения',
+        },
+        {
+          id: 'fire_hype',
+          name: 'Fire Hype',
+          badge: 'Драйв',
+          description: 'Огненный градиент, акцентная подача для динамичных нарезок и юмора.',
+          highlightColor: '#FF6600',
+          preview: 'НЕВЕРОЯТНЫЙ РЕЗУЛЬТАТ',
+        },
+        {
+          id: 'single_word',
+          name: '1-Word Flash',
+          badge: 'Удержание 100%',
+          description: 'Ровно одно активное слово по центру экрана. Максимальный темп для коротких шортсов.',
+          highlightColor: '#FFE600',
+          preview: 'СЕКРЕТ',
+        },
+        {
+          id: 'cinematic',
+          name: 'Cinematic',
+          badge: 'Кино',
+          description: 'Элегантный сдержанный шрифт, нижняя треть кадра, мягкая тень.',
+          highlightColor: '#FFFFFF',
+          preview: 'История одного проекта...',
+        },
+        {
+          id: 'minimal',
+          name: 'Minimal Clean',
+          badge: 'Минимал',
+          description: 'Лаконичная аккуратная плашка с субтитрами без лишних эффектов.',
+          highlightColor: '#CCCCCC',
+          preview: 'Кратко и по делу',
+        },
+        {
+          id: 'none',
+          name: 'Без субтитров',
+          badge: '',
+          description: 'Видео рендерится без наложения субтитров.',
+          highlightColor: '#888888',
+          preview: '—',
+        },
+      ],
+    };
+  });
+
+  // ── AI Script Generation (OpenRouter Free Cascade) ──────────────────────────
+  app.post('/projects/:id/generate-script', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id } = req.params as { id: string };
+
+    const project = await db.editProject.findFirst({
+      where: { id, tenantId },
+      include: { sources: { orderBy: { order: 'asc' } }, clips: { orderBy: { order: 'asc' } } },
+    });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+
+    const schema = z.object({
+      topic: z.string().min(1).max(500),
+      style: z.enum(['hype', 'educational', 'story', 'sales', 'humor', 'minimal']).default('hype'),
+      targetSeconds: z.number().min(5).max(180).optional(),
+      productInfo: z.string().max(1000).optional(),
+      useSourceTranscript: z.boolean().default(true),
+    });
+    const body = schema.parse(req.body);
+
+    let sourceTranscript = '';
+    if (body.useSourceTranscript) {
+      // Gather any recognized transcript snippets from sources
+      const snippets = project.sources
+        .map((s) => {
+          const a = (s.analysis as any) || {};
+          const t = a.transcript;
+          if (Array.isArray(t) && t.length > 0) {
+            return t.map((item: any) => item.text || '').join(' ');
+          }
+          return '';
+        })
+        .filter(Boolean);
+      sourceTranscript = snippets.join(' ').slice(0, 2000);
+    }
+
+    const openRouter = new OpenRouterService();
+    const result = await openRouter.generateScript({
+      topic: body.topic,
+      style: body.style,
+      targetSeconds: body.targetSeconds || Number(project.targetClipSeconds) || 30,
+      productInfo: body.productInfo,
+      sourceTranscript,
+      language: 'ru',
+      variantCount: 3,
+    });
+
+    // Save generated script into project config for convenience
+    const currentConfig = (project.config as Record<string, unknown>) || {};
+    await db.editProject.update({
+      where: { id },
+      data: {
+        config: {
+          ...currentConfig,
+          generatedScript: result.script,
+          scriptHook: result.hook,
+          scriptTitle: result.title,
+          socialCaptions: result.captions,
+          aiModelUsed: result.modelUsed,
+        } as object,
+      },
+    });
+
+    return result;
+  });
+
+  // ── Fish Audio Voice Synthesis (s2.1-pro-free) ──────────────────────────────
+  app.post('/projects/:id/generate-voice', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id: projectId } = req.params as { id: string };
+
+    const project = await db.editProject.findFirst({ where: { id: projectId, tenantId } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+
+    const schema = z.object({
+      text: z.string().min(1).max(3000),
+      voiceId: z.string().optional(),
+      speed: z.number().min(0.5).max(2.0).default(1.0),
+      volume: z.number().min(-20).max(20).default(0),
+    });
+    const body = schema.parse(req.body);
+
+    const fishAudio = new FishAudioService(app.storage);
+    const destinationKey = `tenants/${tenantId}/editor/${projectId}/voiceover.mp3`;
+
+    const { storageKey } = await fishAudio.ttsCreate({
+      text: body.text,
+      voiceId: body.voiceId,
+      speed: body.speed,
+      volume: body.volume,
+      tenantId,
+      destinationKey,
+    });
+
+    const presignedAudioUrl = await app.storage.presignedUrl(storageKey, 3600);
+
+    // Update project: set audioMode = 'replace', save voiceoverKey in config
+    const currentConfig = (project.config as Record<string, unknown>) || {};
+    await db.editProject.update({
+      where: { id: projectId },
+      data: {
+        audioMode: 'replace',
+        config: {
+          ...currentConfig,
+          voiceoverKey: storageKey,
+          voiceId: body.voiceId,
+          voiceSpeed: body.speed,
+          voiceVolume: body.volume,
+          voiceoverText: body.text,
+        } as object,
+      },
+    });
+
+    return {
+      storageKey,
+      audioUrl: presignedAudioUrl,
+      voiceId: body.voiceId,
+      status: 'ready',
+    };
+  });
+
   // ── Delete project ──────────────────────────────────────────────────────────
   app.delete('/projects/:id', async (req, reply) => {
     const { tenantId } = req.user;
@@ -388,3 +636,4 @@ export async function editorRoutes(app: FastifyInstance) {
     return reply.code(204).send();
   });
 }
+
