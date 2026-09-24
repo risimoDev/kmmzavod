@@ -1849,7 +1849,14 @@ export const editorApi = {
       method: 'PATCH', body: JSON.stringify(body),
     }),
 
-  getVoices: () => apiFetch<{ voices: FishAudioVoice[] }>('/api/v1/editor/voices'),
+  getVoices: (params?: { apiKey?: string; query?: string; language?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.apiKey) q.set('apiKey', params.apiKey);
+    if (params?.query) q.set('query', params.query);
+    if (params?.language) q.set('language', params.language);
+    const qs = q.toString();
+    return apiFetch<{ voices: FishAudioVoice[] }>(`/api/v1/editor/voices${qs ? `?${qs}` : ''}`);
+  },
 
   getPresets: () => apiFetch<{ subtitleStyles: SubtitlePreset[] }>('/api/v1/editor/presets'),
 
@@ -1859,6 +1866,7 @@ export const editorApi = {
     targetSeconds?: number;
     productInfo?: string;
     useSourceTranscript?: boolean;
+    apiKey?: string;
   }) =>
     apiFetch<GeneratedScriptResult>(`/api/v1/editor/projects/${id}/generate-script`, {
       method: 'POST', body: JSON.stringify(body),
@@ -1869,8 +1877,9 @@ export const editorApi = {
     voiceId?: string;
     speed?: number;
     volume?: number;
+    apiKey?: string;
   }) =>
-    apiFetch<{ storageKey: string; audioUrl: string; status: string }>(`/api/v1/editor/projects/${id}/generate-voice`, {
+    apiFetch<{ storageKey: string; audioUrl: string; status: string; cleanText?: string }>(`/api/v1/editor/projects/${id}/generate-voice`, {
       method: 'POST', body: JSON.stringify(body),
     }),
 

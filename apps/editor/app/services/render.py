@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -274,14 +275,14 @@ def _lines_from_clip(clip) -> list[SubLine]:
     for ln in raw:
         get = (lambda o, k, d=None: getattr(o, k, o.get(k, d) if isinstance(o, dict) else d))
         start, end = float(get(ln, "start", 0.0)), float(get(ln, "end", 0.0))
-        text = str(get(ln, "text", "") or "").strip()
+        text = re.sub(r'\[[a-zA-Z_\s-]+\]', '', str(get(ln, "text", "") or "")).strip()
         if not text or end <= start:
             continue
         words_raw = get(ln, "words", None) or []
         words = [
             SubWord(start=float(get(w, "start", 0.0)), end=float(get(w, "end", 0.0)),
-                    text=str(get(w, "text", "")).strip())
-            for w in words_raw if str(get(w, "text", "")).strip()
+                    text=re.sub(r'\[[a-zA-Z_\s-]+\]', '', str(get(w, "text", ""))).strip())
+            for w in words_raw if re.sub(r'\[[a-zA-Z_\s-]+\]', '', str(get(w, "text", ""))).strip()
         ]
         if not words:
             tokens = text.split()

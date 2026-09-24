@@ -19,7 +19,7 @@ import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import type { EditorAnalyzeJobPayload, EditorRenderJobPayload } from '@kmmzavod/queue';
 import { FishAudioService, FISH_AUDIO_VOICES } from '../services/fish-audio';
-import { OpenRouterService } from '../services/openrouter';
+import { OpenRouterService, stripEmotionTags } from '../services/openrouter';
 
 const SUBTITLE_STYLES = [
   'none',
@@ -51,6 +51,10 @@ const createProjectSchema = z.object({
 
 const patchProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
+  geometry: z.enum(['highlights', 'mix']).optional(),
+  aspect: z.enum(['9:16', '1:1', '16:9', '4:5']).optional(),
+  fps: z.number().int().min(15).max(60).optional(),
+  targetClipCount: z.number().int().min(1).max(30).optional(),
   subtitleStyle: z.enum(SUBTITLE_STYLES).optional(),
   audioMode: z.enum(['keep', 'replace']).optional(),
   smartCrop: z.boolean().optional(),
@@ -606,6 +610,10 @@ export async function editorRoutes(app: FastifyInstance) {
       where: { id },
       data: {
         ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.geometry !== undefined ? { geometry: body.geometry } : {}),
+        ...(body.aspect !== undefined ? { aspect: body.aspect } : {}),
+        ...(body.fps !== undefined ? { fps: body.fps } : {}),
+        ...(body.targetClipCount !== undefined ? { targetClipCount: body.targetClipCount } : {}),
         ...(body.subtitleStyle !== undefined ? { subtitleStyle: body.subtitleStyle } : {}),
         ...(body.audioMode !== undefined ? { audioMode: body.audioMode } : {}),
         ...(body.smartCrop !== undefined ? { smartCrop: body.smartCrop } : {}),
@@ -617,12 +625,26 @@ export async function editorRoutes(app: FastifyInstance) {
   });
 
   // ── Presets & Voices ────────────────────────────────────────────────────────
-  app.get('/voices', async () => {
-    return { voices: FISH_AUDIO_VOICES };
+  app.get('/voices', async (req) => {
+    const query = (req.query as any) || {};
+    const fishAudio = new FishAudioService(app.storage);
+    const voices = await fishAudio.searchPublicVoices({
+      apiKey: query.apiKey || (req.headers['x-fish-audio-key'] as string),
+      query: query.query,
+      language: query.language,
+    });
+    return { voices };
   });
 
-  app.get('/projects/voices', async () => {
-    return { voices: FISH_AUDIO_VOICES };
+  app.get('/projects/voices', async (req) => {
+    const query = (req.query as any) || {};
+    const fishAudio = new FishAudioService(app.storage);
+    const voices = await fishAudio.searchPublicVoices({
+      apiKey: query.apiKey || (req.headers['x-fish-audio-key'] as string),
+      query: query.query,
+      language: query.language,
+    });
+    return { voices };
   });
 
   app.get('/presets', async () => {
@@ -713,6 +735,7 @@ export async function editorRoutes(app: FastifyInstance) {
       targetSeconds: z.number().min(5).max(180).optional(),
       productInfo: z.string().max(1000).optional(),
       useSourceTranscript: z.boolean().default(true),
+      apiKey: z.string().optional(),
     });
     const body = schema.parse(req.body);
 
@@ -741,6 +764,7 @@ export async function editorRoutes(app: FastifyInstance) {
       sourceTranscript,
       language: 'ru',
       variantCount: 3,
+      apiKey: body.apiKey || (req.headers['x-openrouter-key'] as string),
     });
 
     // Save generated script into project config for convenience
@@ -767,7 +791,10 @@ export async function editorRoutes(app: FastifyInstance) {
     const { tenantId } = req.user;
     const { id: projectId } = req.params as { id: string };
 
-    const project = await db.editProject.findFirst({ where: { id: projectId, tenantId } });
+    const project = await db.editProject.findFirst({
+      where: { id: projectId, tenantId },
+      include: { clips: { orderBy: { order: 'asc' } } },
+    });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
 
     const schema = z.object({
@@ -775,46 +802,76 @@ export async function editorRoutes(app: FastifyInstance) {
       voiceId: z.string().optional(),
       speed: z.number().min(0.5).max(2.0).default(1.0),
       volume: z.number().min(-20).max(20).default(0),
+      apiKey: z.string().optional(),
     });
     const body = schema.parse(req.body);
 
     const fishAudio = new FishAudioService(app.storage);
     const destinationKey = `tenants/${tenantId}/editor/${projectId}/voiceover.mp3`;
 
-    const { storageKey } = await fishAudio.ttsCreate({
-      text: body.text,
-      voiceId: body.voiceId,
-      speed: body.speed,
-      volume: body.volume,
-      tenantId,
-      destinationKey,
-    });
+    try {
+      const { storageKey } = await fishAudio.ttsCreate({
+        text: body.text,
+        voiceId: body.voiceId,
+        speed: body.speed,
+        volume: body.volume,
+        tenantId,
+        destinationKey,
+        apiKey: body.apiKey || (req.headers['x-fish-audio-key'] as string),
+      });
 
-    const presignedAudioUrl = await app.storage.presignedUrl(storageKey, 3600);
+      const presignedAudioUrl = await app.storage.presignedUrl(storageKey, 3600);
+      const cleanSubText = stripEmotionTags(body.text);
 
-    // Update project: set audioMode = 'replace', save voiceoverKey in config
-    const currentConfig = (project.config as Record<string, unknown>) || {};
-    await db.editProject.update({
-      where: { id: projectId },
-      data: {
-        audioMode: 'replace',
-        config: {
-          ...currentConfig,
-          voiceoverKey: storageKey,
-          voiceId: body.voiceId,
-          voiceSpeed: body.speed,
-          voiceVolume: body.volume,
-          voiceoverText: body.text,
-        } as object,
-      },
-    });
+      // Update project: set audioMode = 'replace', save voiceoverKey in config
+      const currentConfig = (project.config as Record<string, unknown>) || {};
+      await db.editProject.update({
+        where: { id: projectId },
+        data: {
+          audioMode: 'replace',
+          config: {
+            ...currentConfig,
+            voiceoverKey: storageKey,
+            voiceId: body.voiceId,
+            voiceSpeed: body.speed,
+            voiceVolume: body.volume,
+            voiceoverText: body.text,
+            voiceoverCleanText: cleanSubText,
+          } as object,
+        },
+      });
 
-    return {
-      storageKey,
-      audioUrl: presignedAudioUrl,
-      voiceId: body.voiceId,
-      status: 'ready',
-    };
+      // Also update transcript snippet of the first clip to reflect voiceover
+      if (project.clips.length > 0) {
+        const firstClip = project.clips[0];
+        const clipEdl = (firstClip.edl as any) || {};
+        await db.editClip.update({
+          where: { id: firstClip.id },
+          data: {
+            transcriptSnippet: cleanSubText.slice(0, 200),
+            edl: {
+              ...clipEdl,
+              transcript_snippet: cleanSubText.slice(0, 200),
+            },
+          },
+        });
+      }
+
+      return {
+        storageKey,
+        audioUrl: presignedAudioUrl,
+        voiceId: body.voiceId,
+        cleanText: cleanSubText,
+        status: 'ready',
+      };
+    } catch (err: any) {
+      const isMissingKey = err.message?.includes('FISH_AUDIO_API_KEY_MISSING');
+      logger.error({ err: err.message, projectId }, 'FishAudio TTS endpoint error');
+      return reply.code(isMissingKey ? 400 : 502).send({
+        error: isMissingKey ? 'FishAudioKeyMissing' : 'FishAudioError',
+        message: err.message || 'Ошибка генерации озвучки через Fish Audio',
+      });
+    }
   });
 
   // ── Delete project ──────────────────────────────────────────────────────────

@@ -227,8 +227,9 @@ async def enrich_clips(clips: list[EdlClip], sources: list[SourceAnalysis], *,
 
     # Re-order by (refined) score, keep included first, renumber order.
     clips.sort(key=lambda c: (c.included, c.segments[0].score), reverse=True)
-    if target_count and len(clips) > target_count:
-        clips = clips[:target_count]
+    effective_target = max(target_count or 0, len(sources))
+    if effective_target and len(clips) > effective_target:
+        clips = clips[:effective_target]
     for order, clip in enumerate(clips):
         clip.order = order
     return clips

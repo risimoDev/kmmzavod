@@ -116,9 +116,10 @@ def create_router() -> APIRouter:
                              f"(max {settings.max_source_duration_sec})")
                 sources.append(analysis)
 
+            effective_target = max(req.target_clip_count, len(sources)) if req.geometry != Geometry.MIX else 1
             clips = selector.build_clips(
                 sources, req.geometry,
-                target_count=req.target_clip_count,
+                target_count=effective_target,
                 target_seconds=req.target_clip_seconds,
             )
             clips = _dedupe_visual(clips, locals_by_idx)
@@ -127,7 +128,7 @@ def create_router() -> APIRouter:
             # sources still exist (vision samples keyframes from them).
             clips = await enrich.enrich_clips(
                 clips, sources, use_vision=req.use_vision, locals_by_idx=locals_by_idx,
-                target_count=req.target_clip_count,
+                target_count=effective_target,
                 target_seconds=req.target_clip_seconds,
             )
             # Storyboard previews (midpoint frames) — after enrich so LLM-proposed

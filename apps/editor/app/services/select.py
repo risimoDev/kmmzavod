@@ -212,11 +212,17 @@ def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
     for c in candidates:
         candidates_by_src.setdefault(c[1], []).append(c)
 
+    effective_target = max(target_count, len(sources))
     balanced_candidates: list[tuple[float, int, float, float]] = []
     if len(sources) > 1:
-        # Round-robin top candidates from each source
+        # Guarantee: Candidate #0 from EVERY source comes first so all sources get represented
+        for s_idx in range(len(sources)):
+            s_list = candidates_by_src.get(s_idx, [])
+            if s_list:
+                balanced_candidates.append(s_list[0])
+        # Then round-robin the remaining candidates across sources
         max_len = max((len(lst) for lst in candidates_by_src.values()), default=0)
-        for i in range(max_len):
+        for i in range(1, max_len):
             for s_idx in range(len(sources)):
                 s_list = candidates_by_src.get(s_idx, [])
                 if i < len(s_list):
@@ -226,7 +232,7 @@ def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
 
     # Greedily pick top candidates allowing minimal overlap (< 35% of clip duration)
     chosen: list[tuple[float, int, float, float]] = []
-    surplus_limit = max(target_count * 2, target_count + 4)
+    surplus_limit = max(effective_target * 2, effective_target + 4)
 
     for score, idx, start, end in balanced_candidates:
         dur_cand = end - start
@@ -273,6 +279,22 @@ def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
         ))
         if len(clips) >= surplus_limit:
             break
+
+    # Fallback guarantee: if any source has no clip in clips yet, add its top candidate!
+    represented_sources = {c.segments[0].src_idx for c in clips if c.segments}
+    for s_idx in range(len(sources)):
+        if s_idx not in represented_sources:
+            s_list = candidates_by_src.get(s_idx, [])
+            if s_list:
+                sc, idx, st, en = s_list[0]
+                st, en = snap_window(sources[idx], st, en)
+                order = len(clips)
+                clips.append(EdlClip(
+                    title=f"Highlight {order + 1}",
+                    order=order,
+                    segments=[EdlSegment(src_idx=idx, start=round(st, 2), end=round(en, 2), score=sc)],
+                    transcript_snippet=_transcript_snippet(sources[idx], st, en),
+                ))
 
     return clips
 

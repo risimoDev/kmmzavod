@@ -98,8 +98,11 @@ export class FishAudioService {
     volume?: number;
     tenantId: string;
     destinationKey: string;
+    apiKey?: string;
+    allowMock?: boolean;
   }): Promise<{ storageKey: string; cost: number }> {
-    const isMock = !API_KEY || API_KEY.startsWith('mock_') || API_KEY.trim() === '';
+    const effectiveKey = (opts.apiKey || API_KEY || '').trim();
+    const isMock = !effectiveKey || effectiveKey.startsWith('mock_');
     const voiceId = opts.voiceId || DEFAULT_FISH_VOICE_ID;
     const speed = Math.max(0.5, Math.min(2.0, opts.speed ?? 1.0));
     const volume = Math.max(-20, Math.min(20, opts.volume ?? 0));
@@ -107,39 +110,76 @@ export class FishAudioService {
     let audioBuffer: Buffer;
 
     if (isMock) {
-      logger.warn(
-        { voiceId, textLength: opts.text.length },
-        'FishAudio: FISH_AUDIO_API_KEY is not configured or in mock mode. Generating placeholder audio.',
-      );
-      audioBuffer = createMockMp3Buffer();
+      if (opts.allowMock) {
+        logger.warn(
+          { voiceId, textLength: opts.text.length },
+          'FishAudio: Key not configured, generating placeholder audio in mock mode.',
+        );
+        audioBuffer = createMockMp3Buffer();
+      } else {
+        throw new Error(
+          'FISH_AUDIO_API_KEY_MISSING: FISH_AUDIO_API_KEY is not configured on the server.',
+        );
+      }
     } else {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${effectiveKey}`,
+        'Content-Type': 'application/json',
+        model: 's2.1-pro-free',
+      };
+      const payload: Record<string, any> = {
+        text: opts.text,
+        format: 'mp3',
+        prosody: { speed, volume },
+        normalize: true,
+        latency: 'balanced',
+      };
+      if (voiceId && !voiceId.startsWith('mock_')) {
+        payload.reference_id = voiceId;
+      }
+
       try {
         logger.info(
-          { voiceId, speed, volume, textLen: opts.text.length },
+          { voiceId: payload.reference_id, speed, volume, textLen: opts.text.length },
           'FishAudio: Requesting TTS via s2.1-pro-free',
         );
 
-        const res = await axios.post(
-          `${BASE_URL}/tts`,
-          {
-            text: opts.text,
-            reference_id: voiceId,
-            format: 'mp3',
-            prosody: {
-              speed,
-              volume,
-            },
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${API_KEY}`,
-              'Content-Type': 'application/json',
-              model: 's2.1-pro-free',
-            },
+        let res;
+        try {
+          res = await axios.post(`${BASE_URL}/tts`, payload, {
+            headers,
             responseType: 'arraybuffer',
             timeout: 120_000,
-          },
-        );
+          });
+        } catch (firstErr: unknown) {
+          if (axios.isAxiosError(firstErr) && (firstErr.response?.status === 400 || firstErr.response?.status === 404) && payload.reference_id) {
+            logger.warn({ voiceId: payload.reference_id }, 'FishAudio TTS: Voice not found, retrying with base default voice');
+            delete payload.reference_id;
+            try {
+              res = await axios.post(`${BASE_URL}/tts`, payload, {
+                headers,
+                responseType: 'arraybuffer',
+                timeout: 120_000,
+              });
+            } catch (retryVoiceErr) {
+              headers.model = 's2.1-pro';
+              res = await axios.post(`${BASE_URL}/tts`, payload, {
+                headers,
+                responseType: 'arraybuffer',
+                timeout: 120_000,
+              });
+            }
+          } else if (axios.isAxiosError(firstErr) && (firstErr.response?.status === 400 || firstErr.response?.status === 404) && headers.model === 's2.1-pro-free') {
+            headers.model = 's2.1-pro';
+            res = await axios.post(`${BASE_URL}/tts`, payload, {
+              headers,
+              responseType: 'arraybuffer',
+              timeout: 120_000,
+            });
+          } else {
+            throw firstErr;
+          }
+        }
 
         audioBuffer = Buffer.from(res.data);
       } catch (err: unknown) {
@@ -147,8 +187,8 @@ export class FishAudioService {
           ? `HTTP ${err.response?.status}: ${Buffer.isBuffer(err.response?.data) ? err.response.data.toString() : JSON.stringify(err.response?.data ?? err.message)}`
           : err instanceof Error ? err.message : String(err);
 
-        logger.error({ err: errMsg }, 'FishAudio TTS failed, falling back to mock placeholder');
-        audioBuffer = createMockMp3Buffer();
+        logger.error({ err: errMsg }, 'FishAudio TTS failed');
+        throw new Error(`Fish Audio TTS failed: ${errMsg}`);
       }
     }
 

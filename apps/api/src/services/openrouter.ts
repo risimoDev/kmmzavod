@@ -43,11 +43,18 @@ function extractJson(raw: string): any {
   return JSON.parse(s);
 }
 
+export function stripEmotionTags(text: string): string {
+  return text.replace(/\[[a-zA-Z_\s-]+\]/g, '').replace(/\s+/g, ' ').trim();
+}
+
 export function sanitizeForVoiceover(text: string): string {
+  // Preserve bracketed emotion tags like [excited], [confident], [whispering], etc.
+  // while removing emojis, markdown asterisks, hashes, backticks, quotes, and normalize spacing.
   return text
-    .replace(/[*#_~`\[\]\(\)\{\}<>]/g, ' ')
     .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
+    .replace(/[*#_~`\(\)\{\}<>]/g, ' ')
     .replace(/[«»"']/g, '')
+    .replace(/\[\s*([a-zA-Z_\s-]+?)\s*\]/g, '[$1]')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -60,33 +67,33 @@ function generateMockScript(opts: {
   const topic = opts.topic.trim() || 'Секреты создания вирусного контента';
   const sec = opts.targetSeconds ?? 30;
 
-  let hook = `Вы совершаете эту ошибку каждый день, когда речь заходит про ${topic}!`;
-  let body = `Большинство людей тратят часы на лишние действия. Но секрет в том, чтобы сосредоточиться на трех простых шагах, которые дают восемьдесят процентов результата прямо сейчас.`;
-  let cta = `Подпишитесь на канал, чтобы не пропустить продолжение в следующем ролике!`;
+  let hook = `[surprised] Вы совершаете эту ошибку каждый день, когда речь заходит про ${topic}!`;
+  let body = `[confident] Большинство людей тратят часы на лишние действия. [whispering] Но секрет в том, чтобы сосредоточиться на трех простых шагах, которые дают восемьдесят процентов результата прямо сейчас.`;
+  let cta = `[urgent] Подпишитесь на канал, чтобы не пропустить продолжение в следующем ролике!`;
 
   if (opts.style === 'sales') {
-    hook = `Ищете лучший способ решить вопрос с ${topic}? Досмотрите до конца.`;
-    body = `Мы протестировали десятки вариантов и нашли решение, которое экономит ваше время и бюджет уже с первого дня использования.`;
-    cta = `Переходите по ссылке в описании профиля и забирайте специальное предложение!`;
+    hook = `[confident] Ищете лучший способ решить вопрос с ${topic}? [excited] Досмотрите до конца!`;
+    body = `[confident] Мы протестировали десятки вариантов и нашли решение, которое экономит ваше время и бюджет уже с первого дня использования.`;
+    cta = `[urgent] Переходите по ссылке в описании профиля и забирайте специальное предложение!`;
   } else if (opts.style === 'story') {
-    hook = `Мало кто знает, с чего на самом деле началась история про ${topic}.`;
-    body = `Сначала в это никто не верил, и казалось, что проект обречен на провал. Но одно нестандартное решение перевернуло абсолютно всё.`;
-    cta = `Напишите в комментариях, как бы вы поступили в такой ситуации!`;
+    hook = `[curious] Мало кто знает, с чего на самом деле началась история про ${topic}.`;
+    body = `[whispering] Сначала в это никто не верил, и казалось, что проект обречен на провал. [confident] Но одно нестандартное решение перевернуло абсолютно всё.`;
+    cta = `[curious] Напишите в комментариях, как бы вы поступили в такой ситуации!`;
   } else if (opts.style === 'hype') {
-    hook = `Шок! Это полностью изменит ваше представление про ${topic}!`;
-    body = `То, что раньше казалось невозможным, теперь доступно каждому за считанные секунды. Смотрите, как это работает на практике.`;
-    cta = `Ставьте лайк и делитесь этим видео с друзьями прямо сейчас!`;
+    hook = `[surprised] Шок! [excited] Это полностью изменит ваше представление про ${topic}!`;
+    body = `[excited] То, что раньше казалось невозможным, теперь доступно каждому за считанные секунды. [confident] Смотрите, как это работает на практике.`;
+    cta = `[urgent] Ставьте лайк и делитесь этим видео с друзьями прямо сейчас!`;
   }
 
   const fullScript = sanitizeForVoiceover(`${hook} ${body} ${cta}`);
 
   return {
-    hook,
+    hook: stripEmotionTags(hook),
     script: fullScript,
     title: topic.slice(0, 60),
     captions: [
       {
-        caption: `${hook}\n\n${body}`,
+        caption: `${stripEmotionTags(hook)}\n\n${stripEmotionTags(body)}`,
         hashtags: ['#вирусное', '#тренды', '#рекомендации', '#reels', '#shorts'],
       },
       {
@@ -107,8 +114,10 @@ export class OpenRouterService {
     productInfo?: string;
     language?: string;
     variantCount?: number;
+    apiKey?: string;
   }): Promise<ScriptGenerationResult> {
-    const isMock = !API_KEY || API_KEY.startsWith('mock_') || API_KEY.trim() === '';
+    const effectiveKey = (opts.apiKey || API_KEY || '').trim();
+    const isMock = !effectiveKey || effectiveKey.startsWith('mock_');
     const style = opts.style || 'hype';
     const lang = opts.language || 'ru';
     const seconds = Math.max(10, Math.min(180, opts.targetSeconds ?? 30));
@@ -118,7 +127,7 @@ export class OpenRouterService {
     if (isMock) {
       logger.info(
         { topic: opts.topic, style },
-        'OpenRouter (api): Key not set or mock mode, using heuristic generator',
+        'OpenRouter (api): Key not set or mock mode, using heuristic generator with Fish Audio emotion tags',
       );
       return generateMockScript({ topic: opts.topic, style, targetSeconds: seconds });
     }
@@ -126,21 +135,36 @@ export class OpenRouterService {
     const systemPrompt = `Ты — лучший сценарист вирусных коротких видео (TikTok, Instagram Reels, YouTube Shorts).
 Твоя задача — создать захватывающий сценарий для озвучки ролика на русском языке.
 
+ОЗВУЧКА И ЭФФЕКТЫ (FISH AUDIO S2.1-PRO):
+Модель синтеза речи Fish Audio поддерживает теги эмоций и интонаций в квадратных скобках (bracket syntax).
+ОБЯЗАТЕЛЬНО используй от 2 до 5 тегов эмоций в тексте сценария перед ключевыми фразами:
+- [excited] — энергично, воодушевленно, максимальный драйв
+- [confident] — уверенно, авторитетно, экспертно
+- [whispering] — шёпотом, интригующе, по секрету
+- [laughing] — со смехом, весело, с иронией
+- [surprised] — с удивлением, шок
+- [gasp] — резкий вдох от неожиданности
+- [curious] — с любопытством, загадочно
+- [urgent] — призывно, срочно (для призыва к действию / CTA)
+- [calm] — спокойно, размеренно
+- [sigh] — со вздохом облегчения или усталости
+
 ПРАВИЛА ОЗВУЧКИ:
-1. ХУК В ПЕРВЫЕ 3 СЕКУНДЫ: мгновенно цепляет внимание зрителя, создает интригу или задает парадоксальный вопрос.
+1. ХУК В ПЕРВЫЕ 3 СЕКУНДЫ: мгновенно цепляет внимание зрителя с тегом эмоции (например, "[surprised] Вы ни за что не поверите!").
 2. ДИНАМИКА: короткие предложения, плотная подача без воды.
 3. ТЕКСТ ДЛЯ ОЗВУЧКИ (script):
-   - Только слова, которые диктор произносит вслух!
-   - НИКАКИХ смайликов/эмодзи, сносок, ссылок, звездочек и решеток!
+   - Только слова для произношения + теги эмоций в квадратных скобках!
+   - НИКАКИХ смайликов/эмодзи, ссылок, звездочек и решеток!
    - Все числа обязательно пиши СЛОВАМИ (например, "пять шагов", "двадцать шестой год", "сто тысяч рублей").
+   - Пример: "[surprised] Вы совершаете эту ошибку каждый день! [confident] Но всё решается за три простых шага. [whispering] Главное — никому об этом не говорите. [urgent] Жмите подписаться прямо сейчас!"
    - Точно уложись в объем: ${targetWords} слов (длительность ролика ~${seconds} сек).
-4. Заверши сценарий коротким призывом к действию (CTA).
+4. Заверши сценарий коротким призывом к действию (CTA) с тегом [urgent] или [excited].
 
 Ответ верни СТРОГО в формате JSON:
 {
-  "hook": "первая фраза-крючок (до 8 слов)",
+  "hook": "первая фраза-крючок (до 8 слов, без тегов)",
   "title": "цепляющий заголовок для ролика",
-  "script": "полный текст для диктора с хуком и призывом",
+  "script": "полный текст для диктора с тегами эмоций в скобках",
   "captions": [
     {
       "caption": "текст поста для соцсетей с призывом",
@@ -175,7 +199,7 @@ export class OpenRouterService {
         },
         {
           headers: {
-            Authorization: `Bearer ${API_KEY}`,
+            Authorization: `Bearer ${effectiveKey}`,
             'HTTP-Referer': 'https://kmmzavod.local',
             'X-Title': 'KMM Zavod Smart Editor',
             'Content-Type': 'application/json',
@@ -192,11 +216,14 @@ export class OpenRouterService {
       const scriptClean = sanitizeForVoiceover(parsed.script || rawText);
 
       return {
-        hook: parsed.hook || opts.topic,
+        hook: stripEmotionTags(parsed.hook || opts.topic),
         script: scriptClean,
         title: parsed.title || opts.topic,
         captions: Array.isArray(parsed.captions) && parsed.captions.length > 0
-          ? parsed.captions
+          ? parsed.captions.map((c: any) => ({
+              caption: stripEmotionTags(c.caption || ''),
+              hashtags: c.hashtags || [],
+            }))
           : [{ caption: parsed.title || opts.topic, hashtags: ['#viral', '#reels', '#shorts'] }],
         modelUsed,
       };
@@ -205,7 +232,7 @@ export class OpenRouterService {
         ? `HTTP ${err.response?.status}: ${JSON.stringify(err.response?.data ?? err.message)}`
         : err instanceof Error ? err.message : String(err);
 
-      logger.warn({ err: errMsg }, 'OpenRouter (api) failed, using heuristic script');
+      logger.warn({ err: errMsg }, 'OpenRouter (api) failed, using heuristic script with emotions');
       return generateMockScript({ topic: opts.topic, style, targetSeconds: seconds });
     }
   }

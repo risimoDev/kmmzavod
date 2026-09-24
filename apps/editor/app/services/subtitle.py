@@ -12,6 +12,7 @@ rendered audio, so lines are already on the output timeline).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -62,13 +63,18 @@ def _ts(sec: float) -> str:
 
 
 def _esc(text: str) -> str:
+    # Strip Fish Audio emotion brackets like [excited], [whispering]
+    text = re.sub(r'\[[a-zA-Z_\s-]+\]', '', text)
     return text.replace("\n", " ").replace("{", "(").replace("}", ")").strip()
 
 
 def regroup_words(lines: list[SubLine], style: str = "tiktok") -> list[SubLine]:
     """Re-split word-timestamped lines into punchy karaoke groups based on style.
     Breaks early on natural speech pauses."""
-    words = [w for ln in lines for w in ln.words if w.text.strip()]
+    words = [
+        w for ln in lines for w in ln.words
+        if w.text.strip() and not re.match(r'^\[[a-zA-Z_\s-]+\]$', w.text.strip())
+    ]
     if not words:
         return lines
 

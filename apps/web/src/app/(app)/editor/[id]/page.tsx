@@ -453,18 +453,66 @@ export default function EditorProjectDetailPage() {
   const [aiGenerating, setAiGenerating] = useState(false);
   const [voices, setVoices] = useState<FishAudioVoice[]>([]);
   const [selectedVoiceId, setSelectedVoiceId] = useState("e04b4c73046f491c89366fbca39d48dd");
+  const [customVoiceId, setCustomVoiceId] = useState("");
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [synthesizing, setSynthesizing] = useState(false);
   const [voiceoverAudioUrl, setVoiceoverAudioUrl] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [showSafeZones, setShowSafeZones] = useState(false);
+  const [fishApiKey, setFishApiKey] = useState("");
+  const [openRouterApiKey, setOpenRouterApiKey] = useState("");
+  const [showKeyConfig, setShowKeyConfig] = useState(false);
+  const [geometryNotice, setGeometryNotice] = useState(false);
+  const scriptTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    editorApi.getVoices().then((res) => {
+    if (typeof window !== "undefined") {
+      setFishApiKey(localStorage.getItem("fish_audio_api_key") || "");
+      setOpenRouterApiKey(localStorage.getItem("openrouter_api_key") || "");
+    }
+  }, []);
+
+  const saveFishApiKey = (key: string) => {
+    setFishApiKey(key);
+    if (typeof window !== "undefined") {
+      if (key.trim()) localStorage.setItem("fish_audio_api_key", key.trim());
+      else localStorage.removeItem("fish_audio_api_key");
+    }
+  };
+
+  const saveOpenRouterApiKey = (key: string) => {
+    setOpenRouterApiKey(key);
+    if (typeof window !== "undefined") {
+      if (key.trim()) localStorage.setItem("openrouter_api_key", key.trim());
+      else localStorage.removeItem("openrouter_api_key");
+    }
+  };
+
+  function insertEmotionTag(tag: string) {
+    const el = scriptTextareaRef.current;
+    const insertion = `[${tag}] `;
+    if (!el) {
+      setAiScript((prev) => (prev ? `${prev} ${insertion}` : insertion));
+      return;
+    }
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const text = el.value;
+    const updated = text.substring(0, start) + insertion + text.substring(end);
+    setAiScript(updated);
+    setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(start + insertion.length, start + insertion.length);
+    }, 10);
+  }
+
+  useEffect(() => {
+    editorApi.getVoices({ apiKey: fishApiKey || undefined }).then((res) => {
       if (res.voices?.length) {
         setVoices(res.voices);
       }
     }).catch(() => {});
-  }, []);
+  }, [fishApiKey]);
 
   useEffect(() => {
     if (project?.config) {
@@ -485,6 +533,7 @@ export default function EditorProjectDetailPage() {
         style: aiStyle,
         targetSeconds: aiSeconds,
         useSourceTranscript: true,
+        apiKey: openRouterApiKey.trim() || undefined,
       });
       setAiScript(res.script);
       setAiHook(res.hook);
@@ -498,19 +547,35 @@ export default function EditorProjectDetailPage() {
   async function handleGenerateVoice() {
     if (!aiScript.trim()) return;
     setSynthesizing(true);
+    setVoiceError(null);
     try {
       const res = await editorApi.generateVoice(id, {
         text: aiScript,
-        voiceId: selectedVoiceId,
+        voiceId: customVoiceId.trim() || selectedVoiceId,
         speed: voiceSpeed,
+        apiKey: fishApiKey.trim() || undefined,
       });
       setVoiceoverAudioUrl(res.audioUrl);
       await load();
     } catch (e: any) {
-      alert(e.message || "Ошибка генерации голоса");
+      setVoiceError(e.message || "Ошибка генерации голоса Fish Audio");
     } finally {
       setSynthesizing(false);
     }
+  }
+
+  async function changeGeometry(geometry: "highlights" | "mix") {
+    if (!project) return;
+    setProject({ ...project, geometry });
+    setGeometryNotice(true);
+    await editorApi.patchProject(id, { geometry }).catch(() => {});
+  }
+
+  async function changeTargetClipCount(targetClipCount: number) {
+    if (!project) return;
+    setProject({ ...project, targetClipCount });
+    setGeometryNotice(true);
+    await editorApi.patchProject(id, { targetClipCount }).catch(() => {});
   }
 
   async function changeSubtitleStyle(style: string) {
@@ -702,6 +767,69 @@ export default function EditorProjectDetailPage() {
           </div>
         </div>
 
+        {/* Панель сборки: Режим (Хайлайты / Микс) и число клипов */}
+        <div className="flex items-center justify-between flex-wrap gap-2.5 rounded-xl border border-border bg-surface-1 p-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <span className="text-2xs font-semibold uppercase text-text-tertiary">Режим сборки:</span>
+              <button
+                type="button"
+                onClick={() => changeGeometry("highlights")}
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-1 font-medium",
+                  project.geometry === "highlights"
+                    ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-semibold"
+                    : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                )}
+              >
+                <span>🎯 Хайлайты (нарезка клипов)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => changeGeometry("mix")}
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-1 font-medium",
+                  project.geometry === "mix"
+                    ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-semibold"
+                    : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                )}
+              >
+                <span>🎛️ Микс (1 ролик)</span>
+              </button>
+            </div>
+
+            {project.geometry === "highlights" && (
+              <div className="flex items-center gap-1.5 pl-2 border-l border-border">
+                <span className="text-2xs font-semibold uppercase text-text-tertiary">Клипов:</span>
+                {[1, 2, 3, 4, 5, 8, 10].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => changeTargetClipCount(num)}
+                    className={cn(
+                      "w-6 h-6 rounded flex items-center justify-center text-xs font-mono transition-all",
+                      project.targetClipCount === num
+                        ? "bg-brand-500 text-white font-bold"
+                        : "bg-surface-2 text-text-secondary hover:bg-surface-3"
+                    )}
+                  >
+                    {num}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {geometryNotice && (
+            <div className="flex items-center gap-2 animate-fade-in">
+              <span className="text-2xs text-warning">Параметры изменены.</span>
+              <Button size="xs" variant="primary" onClick={analyze} loading={busy || project.status === "analyzing"}>
+                🔍 Пересобрать раскадровку
+              </Button>
+            </div>
+          )}
+        </div>
+
         {/* Панель инструментов: AI Студия, Пресеты субтитров, Безопасные зоны */}
         <div className="flex items-center justify-between flex-wrap gap-2.5 rounded-xl border border-border bg-surface-1 p-3">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -846,8 +974,8 @@ export default function EditorProjectDetailPage() {
                   </Button>
                 </div>
 
-                {/* 2. Текст сценария (редактируемый) */}
-                <div className="space-y-2.5">
+                {/* 2. Текст сценария (редактируемый) + Эмоции Fish Audio */}
+                <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase text-text-tertiary">
                       2. Текст для диктора
@@ -863,16 +991,49 @@ export default function EditorProjectDetailPage() {
                     </div>
                   )}
 
+                  {/* Быстрые теги эмоций Fish Audio */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-3xs font-semibold uppercase text-text-tertiary">Эмоции Fish Audio:</span>
+                      <span className="text-3xs text-text-tertiary">клик для вставки</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        { tag: "excited", label: "🔥 Драйв", title: "Энергично, воодушевленно" },
+                        { tag: "confident", label: "💼 Уверенно", title: "Авторитетный эксперт" },
+                        { tag: "whispering", label: "🤫 Шёпотом", title: "Интрига, по секрету" },
+                        { tag: "laughing", label: "😂 Смех", title: "С лёгким смехом/юмором" },
+                        { tag: "surprised", label: "😲 Шок", title: "Удивление, сенсация" },
+                        { tag: "gasp", label: "😱 Вздох шока", title: "Резкий вдох от неожиданности" },
+                        { tag: "urgent", label: "⚡ Срочно", title: "Призыв к действию / CTA" },
+                        { tag: "curious", label: "🧐 Интрига", title: "С любопытством" },
+                        { tag: "calm", label: "😌 Спокойно", title: "Размеренно" },
+                        { tag: "sigh", label: "😮‍💨 Вздох", title: "Со вздохом" },
+                      ].map((em) => (
+                        <button
+                          key={em.tag}
+                          type="button"
+                          onClick={() => insertEmotionTag(em.tag)}
+                          title={em.title}
+                          className="px-1.5 py-0.5 rounded bg-surface-3 hover:bg-surface-4 text-3xs font-medium text-text-secondary hover:text-brand-300 transition-all border border-border"
+                        >
+                          {em.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   <textarea
+                    ref={scriptTextareaRef}
                     rows={6}
                     value={aiScript}
                     onChange={(e) => setAiScript(e.target.value)}
-                    placeholder="Здесь появится готовый текст для озвучки, либо напишите свой текст..."
+                    placeholder="Здесь появится готовый текст для озвучки с тегами [excited], [confident]... Или напишите свой."
                     className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-primary font-sans leading-relaxed resize-none focus:outline-none focus:ring-1 focus:ring-brand-500"
                   />
 
                   <p className="text-3xs text-text-tertiary">
-                    Текст будет озвучен диктором дословно. Числа рекомендуется писать словами.
+                    Теги в скобках управляют эмоциями диктора и автоматически вырезаются из видео-субтитров.
                   </p>
                 </div>
 
@@ -887,6 +1048,58 @@ export default function EditorProjectDetailPage() {
                     </span>
                   </div>
 
+                  {/* Настройки API-ключа Fish Audio */}
+                  <div className="space-y-1 rounded-lg bg-surface-2/80 p-2 border border-border">
+                    <div className="flex items-center justify-between text-2xs">
+                      <span className="text-text-secondary">API-ключ Fish Audio:</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowKeyConfig(!showKeyConfig)}
+                        className="text-brand-400 hover:underline"
+                      >
+                        {fishApiKey ? "✓ Указан (изменить)" : "+ Указать ключ"}
+                      </button>
+                    </div>
+                    {showKeyConfig && (
+                      <div className="space-y-1.5 pt-1 animate-fade-in">
+                        <input
+                          type="password"
+                          value={fishApiKey}
+                          onChange={(e) => saveFishApiKey(e.target.value)}
+                          placeholder="Вставьте бесплатный ключ fish.audio..."
+                          className="w-full bg-surface-1 border border-border rounded px-2 py-1 text-2xs text-text-primary"
+                        />
+                        <p className="text-3xs text-text-tertiary">
+                          Бесплатный ключ доступен на{" "}
+                          <a
+                            href="https://fish.audio"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-brand-400 underline"
+                          >
+                            fish.audio
+                          </a>
+                          . Сохраняется в браузере.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {voiceError && (
+                    <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5 text-2xs text-danger space-y-1 animate-fade-in">
+                      <p className="font-semibold">⚠️ {voiceError}</p>
+                      {voiceError.includes("FISH_AUDIO_API_KEY") && (
+                        <p className="text-3xs text-text-secondary">
+                          Получите бесплатный ключ на{" "}
+                          <a href="https://fish.audio" target="_blank" rel="noreferrer" className="text-brand-400 underline">
+                            fish.audio
+                          </a>{" "}
+                          и сохраните его выше в поле «API-ключ Fish Audio».
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   <select
                     value={selectedVoiceId}
                     onChange={(e) => setSelectedVoiceId(e.target.value)}
@@ -898,6 +1111,16 @@ export default function EditorProjectDetailPage() {
                       </option>
                     ))}
                   </select>
+
+                  <div className="space-y-1">
+                    <span className="text-3xs text-text-tertiary">Или свой Voice ID:</span>
+                    <input
+                      value={customVoiceId}
+                      onChange={(e) => setCustomVoiceId(e.target.value)}
+                      placeholder="Опционально: ID голоса из fish.audio"
+                      className="w-full bg-surface-2 border border-border rounded px-2 py-1 text-2xs text-text-primary placeholder:text-text-tertiary"
+                    />
+                  </div>
 
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-text-secondary">Скорость речи:</span>
@@ -925,7 +1148,7 @@ export default function EditorProjectDetailPage() {
                   </Button>
 
                   {voiceoverAudioUrl && (
-                    <div className="space-y-1 pt-1">
+                    <div className="space-y-1 pt-1 animate-fade-in">
                       <p className="text-3xs text-emerald-400 font-medium">✓ Озвучка готова и привязана:</p>
                       <audio controls src={voiceoverAudioUrl} className="w-full h-8 rounded" />
                     </div>
