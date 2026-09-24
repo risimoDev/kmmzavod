@@ -7,7 +7,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic-settings>=2.4,<3
 
-# Instagram private API (pure HTTP) — pulls pydantic==2.7.1, requests, Pillow, etc.
+# Instagram private API (pure HTTP) — requires Pillow for image/clip handling
+Pillow>=10.0.0
 instagrapi==2.1.2
 
 # TikTok upload (Selenium + headless Chromium) — pulls selenium, etc.

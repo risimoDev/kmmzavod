@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_configured() -> bool:
-    return bool(settings.gptunnel_api_key)
+    return bool(settings.gptunnel_api_key or settings.openrouter_api_key)
 
 
 def _extract_json(raw: str) -> str:
@@ -40,8 +40,22 @@ def _extract_json(raw: str) -> str:
 async def _post(payload: dict, timeout: float = 120.0) -> dict:
     import httpx
 
-    base = settings.gptunnel_base_url.rstrip("/")
-    headers = {"Authorization": settings.gptunnel_api_key, "Content-Type": "application/json"}
+    if settings.gptunnel_api_key:
+        base = settings.gptunnel_base_url.rstrip("/")
+        api_key = settings.gptunnel_api_key
+        auth = f"Bearer {api_key}" if not api_key.startswith("Bearer ") else api_key
+    elif settings.openrouter_api_key:
+        base = settings.openrouter_base_url.rstrip("/")
+        api_key = settings.openrouter_api_key
+        auth = f"Bearer {api_key}" if not api_key.startswith("Bearer ") else api_key
+        # For OpenRouter, map standard models to available models if needed
+        model = payload.get("model", "")
+        if "gpt-4o-mini" in model:
+            payload["model"] = "meta-llama/llama-3.3-70b-instruct:free"
+    else:
+        raise RuntimeError("No LLM API key configured (neither GPTunnel nor OpenRouter)")
+
+    headers = {"Authorization": auth, "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
         resp.raise_for_status()

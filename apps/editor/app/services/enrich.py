@@ -43,8 +43,8 @@ _PROPOSE_SYSTEM = (
     "завершением. Отвечай строго одним валидным JSON-объектом."
 )
 
-# Max characters of transcript shipped to the model (~4k tokens of RU text).
-_TRANSCRIPT_CHAR_CAP = 14000
+# Max characters of transcript shipped to the model (~15k tokens of text).
+_TRANSCRIPT_CHAR_CAP = 60000
 
 
 def _clip_midpoint(clip: EdlClip) -> tuple[int, float]:
@@ -115,13 +115,17 @@ async def _llm_propose(sources: list[SourceAnalysis], *, target_count: int,
     return out or None
 
 
-def _overlaps(a: EdlClip, b: EdlClip) -> bool:
+def _overlaps(a: EdlClip, b: EdlClip, threshold: float = 0.35) -> bool:
     sa, sb = a.segments[0], b.segments[0]
-    return sa.src_idx == sb.src_idx and not (sa.end <= sb.start or sa.start >= sb.end)
+    if sa.src_idx != sb.src_idx:
+        return False
+    ov = max(0.0, min(sa.end, sb.end) - max(sa.start, sb.start))
+    dur_min = min(sa.end - sa.start, sb.end - sb.start)
+    return dur_min > 0 and (ov / dur_min) > threshold
 
 
 def _merge(llm: list[EdlClip], heuristic: list[EdlClip], target_count: int) -> list[EdlClip]:
-    """LLM picks first; heuristic clips fill remaining slots if they don't overlap."""
+    """LLM picks first; heuristic clips fill remaining slots if they don't substantially overlap."""
     merged = list(llm)
     for clip in heuristic:
         if len(merged) >= target_count:
@@ -223,6 +227,8 @@ async def enrich_clips(clips: list[EdlClip], sources: list[SourceAnalysis], *,
 
     # Re-order by (refined) score, keep included first, renumber order.
     clips.sort(key=lambda c: (c.included, c.segments[0].score), reverse=True)
+    if target_count and len(clips) > target_count:
+        clips = clips[:target_count]
     for order, clip in enumerate(clips):
         clip.order = order
     return clips

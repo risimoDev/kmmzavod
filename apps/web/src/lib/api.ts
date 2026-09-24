@@ -1761,6 +1761,7 @@ export interface EditSource {
   durationSec?: number | null;
   width?: number | null;
   height?: number | null;
+  url?: string | null;
   /** Полный SourceAnalysis JSON; здесь типизировано только нужное UI. */
   analysis?: { transcript_error?: string | null } | null;
 }
@@ -1904,6 +1905,24 @@ export const editorApi = {
   }) =>
     apiFetch<EditClip>(`/api/v1/editor/projects/${id}/clips/${clipId}`, {
       method: 'PATCH', body: JSON.stringify(body),
+    }),
+
+  createClip: (id: string, body: {
+    title?: string;
+    segments: { src_idx: number; start: number; end: number }[];
+  }) =>
+    apiFetch<EditClip>(`/api/v1/editor/projects/${id}/clips`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+
+  deleteClip: (id: string, clipId: string) =>
+    apiFetch<void>(`/api/v1/editor/projects/${id}/clips/${clipId}`, {
+      method: 'DELETE',
+    }),
+
+  splitClip: (id: string, clipId: string, splitAtSec: number) =>
+    apiFetch<{ part1: EditClip; part2: EditClip }>(`/api/v1/editor/projects/${id}/clips/${clipId}/split`, {
+      method: 'POST', body: JSON.stringify({ splitAtSec }),
     }),
 
   render: (id: string) =>

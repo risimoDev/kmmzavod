@@ -96,6 +96,10 @@ services:
       INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
       YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
+      FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
+      FISH_AUDIO_BASE_URL: ${FISH_AUDIO_BASE_URL:-https://api.fish.audio/v1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       # Home-PC bridge to the native ADB phone farm, reached over AmneziaWG
       DEVICE_AGENT_URL: ${DEVICE_AGENT_URL:-http://10.66.66.2:8300}
     dns:
@@ -134,6 +138,10 @@ services:
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-}
       GPTUNNEL_API_KEY: ${GPTUNNEL_API_KEY}
       GPTUNNEL_BASE_URL: ${GPTUNNEL_BASE_URL:-https://gptunnel.ru/v1}
+      FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
+      FISH_AUDIO_BASE_URL: ${FISH_AUDIO_BASE_URL:-https://api.fish.audio/v1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       HEYGEN_API_KEY: ${HEYGEN_API_KEY}
       RUNWAY_API_KEY: ${RUNWAY_API_KEY}
       RUNWAY_VIDEO_MODEL: ${RUNWAY_VIDEO_MODEL:-gen4_turbo}
@@ -174,18 +182,16 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      # Downstream microservices the workers call. Without these, private
-      # publishing fails with "getaddrinfo ENOTFOUND publisher" because the
-      # container isn't running when the worker tries to reach it.
-      publisher:
-        condition: service_started
       editor:
         condition: service_started
       video-processor:
         condition: service_started
 
   # Private (non-official-API) publisher: Instagram (instagrapi) + TikTok (tiktok-uploader).
+  # Disabled via profile 'donotstart' because publishing is handled via the physical phone farm (device-agent).
   publisher:
+    profiles:
+      - donotstart
     build:
       context: apps/publisher
       dockerfile: Dockerfile

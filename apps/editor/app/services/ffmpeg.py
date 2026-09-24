@@ -76,13 +76,14 @@ def detect_scene_breaks(path: str, threshold: float | None = None,
                         sample_fps: float | None = None, timeout: int = 300) -> list[float]:
     """Detect scene-cut timestamps via ffmpeg ``select='gt(scene,T)'``.
 
-    Samples at a low fps to keep CPU bounded on long footage.
+    Scales down resolution (320px) to keep CPU low, while preserving full
+    temporal accuracy for real shot cuts (never downsample fps before scene
+    detection, which turns ordinary motion into false cuts).
     """
     thr = threshold if threshold is not None else settings.scene_threshold
-    sfps = sample_fps if sample_fps is not None else settings.analysis_sample_fps
     cmd = [
         _bin("ffmpeg"), "-threads", str(settings.ffmpeg_threads), "-i", path,
-        "-vf", f"fps={sfps},select='gt(scene,{thr})',showinfo",
+        "-vf", f"scale=320:-2,select='gt(scene,{thr})',showinfo",
         "-vsync", "vfr", "-f", "null", "-",
     ]
     breaks: list[float] = []
@@ -91,7 +92,10 @@ def detect_scene_breaks(path: str, threshold: float | None = None,
         for line in proc.stderr.split("\n"):
             m = re.search(r"pts_time:(\d+\.?\d*)", line)
             if m:
-                breaks.append(round(float(m.group(1)), 2))
+                t = round(float(m.group(1)), 2)
+                # Debounce cuts closer than 0.5s
+                if not breaks or t - breaks[-1] >= 0.5:
+                    breaks.append(t)
     except Exception as e:  # noqa: BLE001 — analysis is best-effort
         logger.warning("Scene detection failed for %s: %s", path, e)
     return breaks

@@ -416,7 +416,7 @@ async function main() {
       checkedAt: new Date().toISOString(),
     });
     connection.set(PUBLISHER_HEALTH_KEY, payload, 'EX', 120).catch(() => {});
-    if (reason) logger.warn({ reason, publisherUrl: config.PUBLISHER_URL }, 'Publisher service NOT reachable — private publishing will fail until it is up');
+    if (reason) logger.debug({ reason, publisherUrl: config.PUBLISHER_URL }, 'Publisher service not reachable (only needed if using private publishing)');
   };
   void pingPublisher();
   const publisherHealthTimer = setInterval(() => void pingPublisher(), 30_000);

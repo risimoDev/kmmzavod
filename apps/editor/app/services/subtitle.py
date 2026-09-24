@@ -111,10 +111,18 @@ def regroup_words(lines: list[SubLine], style: str = "tiktok") -> list[SubLine]:
 def _karaoke_text(line: SubLine, style: str = "tiktok") -> str:
     """ASS \\k / \\kf tags: each word holds SecondaryColour until its start,
     then flips to PrimaryColour. Smooth fill (\\kf) used for high-energy styles."""
+    if not line.words:
+        return _esc(line.text)
     tag = "\\kf" if style in ("mrbeast", "fire_hype", "neon_glow") else "\\k"
     parts: list[str] = []
+
+    # If the first word starts after the line starts, hold initial silence
+    initial_gap = round((line.words[0].start - line.start) * 100)
+    if initial_gap > 3:
+        parts.append(f"{{{tag}{initial_gap}}}")
+
     for i, w in enumerate(line.words):
-        nxt = line.words[i + 1].start if i + 1 < len(line.words) else line.end
+        nxt = line.words[i + 1].start if i + 1 < len(line.words) else max(w.end, line.end)
         dur_cs = max(1, round((nxt - w.start) * 100))
         parts.append(f"{{{tag}{dur_cs}}}{_esc(w.text)}")
     return " ".join(parts)

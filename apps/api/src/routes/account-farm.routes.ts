@@ -767,11 +767,6 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     // 4. Build the actionable checklist.
     const checks: Array<{ id: string; ok: boolean; label: string; fix?: string }> = [
       {
-        id: 'publisher', ok: publisher.ok,
-        label: publisher.ok ? 'Сервис публикации доступен' : 'Сервис публикации недоступен',
-        fix: publisher.ok ? undefined : (publisher.reason ?? 'Запустите: docker compose up -d publisher'),
-      },
-      {
         id: 'accounts', ok: rows.length > 0,
         label: rows.length > 0 ? `Аккаунтов: ${rows.length}` : 'Нет аккаунтов',
         fix: rows.length > 0 ? undefined : 'Импортируйте аккаунты на вкладке Accounts',
@@ -780,7 +775,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         id: 'ready', ok: canPublish > 0,
         label: `Готовы публиковать: ${canPublish} из ${rows.length}`,
         fix: canPublish > 0 ? undefined
-          : 'Ни один аккаунт не готов — см. причины ниже (чаще всего нет sessionid для TikTok)',
+          : 'Ни один аккаунт не готов — см. причины ниже',
       },
       {
         id: 'proxies', ok: proxyTotal === 0 || accountsNoProxy === 0,
@@ -788,6 +783,15 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         fix: accountsNoProxy > 0 ? 'Нажмите «Распределить прокси» на вкладке Proxies' : undefined,
       },
     ];
+
+    const hasPrivateAccounts = rows.some((a) => a.authMethod === 'private');
+    if (hasPrivateAccounts) {
+      checks.unshift({
+        id: 'publisher', ok: publisher.ok,
+        label: publisher.ok ? 'Сервис публикации (private) доступен' : 'Сервис публикации (private) недоступен',
+        fix: publisher.ok ? undefined : (publisher.reason ?? 'Запустите: docker compose up -d publisher'),
+      });
+    }
 
     const hasDeviceAccounts = rows.some((a) => a.authMethod === 'device');
     if (hasDeviceAccounts) {

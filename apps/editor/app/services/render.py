@@ -118,9 +118,10 @@ def _bias_expr(track: list[tuple[float, float]]) -> str:
 def _reframe_vf(out_w: int, out_h: int, track: list[tuple[float, float]]) -> str:
     """Cover-scale to fill the target box, then crop along the (possibly moving)
     horizontal bias path — the crop follows the tracked face."""
+    bias = _bias_expr(track)
     return (
         f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={out_w}:{out_h}:x=(in_w-{out_w})*{_bias_expr(track)}:y=(in_h-{out_h})/2,"
+        f"crop={out_w}:{out_h}:x=trunc((in_w-{out_w})*({bias})/2)*2:y=trunc((in_h-{out_h})/4)*2,"
         f"format=yuv420p"
     )
 
@@ -132,27 +133,33 @@ def _prepare_segment(src_path: str, start: float, end: float, out_path: str,
     vf = _reframe_vf(out_w, out_h, track) + f",fps={fps}"
     dur = max(0.1, end - start)
 
-    cmd = [fx._bin("ffmpeg"), "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", src_path]
+    probe = fx.probe(src_path)
+    has_audio = probe.has_audio and keep_audio
+
+    cmd = [
+        fx._bin("ffmpeg"), "-y",
+        "-ss", f"{start:.3f}", "-accurate_seek", "-i", src_path,
+    ]
     if keep_audio:
-        # Reframe video; ensure a stereo audio stream exists (silence if none).
-        cmd += [
-            "-filter_complex",
-            f"[0:v]{vf}[v];"
-            f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo[a]",
-            "-map", "[v]", "-map", "[a]",
-        ]
-        # If the source has no audio, the [0:a] reference fails → fallback below.
-        probe = fx.probe(src_path)
-        if not probe.has_audio:
-            cmd = [fx._bin("ffmpeg"), "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                   "-i", src_path,
-                   "-f", "lavfi", "-t", f"{dur:.3f}",
-                   "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                   "-filter_complex", f"[0:v]{vf}[v]",
-                   "-map", "[v]", "-map", "1:a"]
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
+        if has_audio:
+            cmd += [
+                "-t", f"{dur:.3f}",
+                "-filter_complex",
+                f"[0:v]{vf}[v];[0:a]aformat=sample_rates=44100:channel_layouts=stereo[a]",
+                "-map", "[v]", "-map", "[a]",
+                "-c:a", "aac", "-b:a", "128k",
+            ]
+        else:
+            cmd += [
+                "-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-t", f"{dur:.3f}",
+                "-filter_complex", f"[0:v]{vf}[v]",
+                "-map", "[v]", "-map", "1:a",
+                "-c:a", "aac", "-b:a", "128k",
+            ]
     else:
-        cmd += ["-an", "-vf", vf]
+        cmd += ["-t", f"{dur:.3f}", "-an", "-vf", vf]
 
     cmd += [
         "-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
@@ -349,10 +356,13 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
                          keep_audio, smart_crop, 1)
         seg_paths.append(out)
 
-    # 2. Concat with transitions (montage feel). Seed varies transitions per clip.
+    # 2. Concat. Highlights and speech cuts use clean hard cuts to preserve natural speech
+    # and keep subtitles perfectly synced without acrossfade audio blur.
+    # Mix montages use transitions.
     assembled = os.path.join(work_dir, "assembled.mp4")
     seed = abs(hash((clip.title, len(clip.segments)))) % 100000
-    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads, seed=seed)
+    is_mix = getattr(clip, "geometry", None) == "mix" or (len(clip.segments) > 2 and clip.title == "Mix")
+    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads, seed=seed, transitions=is_mix)
 
     # 3. Audio bed for replace mode.
     pre_final = assembled

@@ -73,6 +73,13 @@ def _speech_salience(src: SourceAnalysis, start: float, end: float) -> float:
 
 
 def _transcript_snippet(src: SourceAnalysis, start: float, end: float, limit: int = 160) -> str:
+    # First try word-level precision so we don't include text from outside the cut bounds
+    words = [
+        w.text.strip() for seg in src.transcript for w in seg.words
+        if w.end > start and w.start < end and w.text.strip()
+    ]
+    if words:
+        return " ".join(words)[:limit].strip()
     parts = [seg.text for seg in src.transcript if seg.end > start and seg.start < end]
     text = " ".join(p.strip() for p in parts if p.strip())
     return text[:limit].strip()
@@ -91,33 +98,63 @@ def _window_score(src: SourceAnalysis, start: float, end: float) -> float:
 
 
 def speech_pauses(src: SourceAnalysis) -> list[float]:
-    """Natural cut points: silence gaps between words (or segments) + scene breaks."""
-    pauses: list[float] = []
+    """Natural cut points: 0.0, end of video, sentence starts/ends, speech pauses >= 0.18s, scene breaks."""
+    pauses: list[float] = [0.0]
+    if src.duration_sec > 0:
+        pauses.append(src.duration_sec)
+
     words = [w for seg in src.transcript for w in seg.words]
     if words:
+        pauses.append(round(words[0].start, 2))
         for a, b in zip(words, words[1:]):
-            if b.start - a.end >= PAUSE_GAP:
+            if b.start - a.end >= 0.18:
                 pauses.append(round((a.end + b.start) / 2.0, 2))
+            else:
+                pauses.append(round(b.start, 2))
         pauses.append(round(words[-1].end, 2))
-    else:
-        for seg in src.transcript:
-            pauses.append(round(seg.end, 2))
+
+    for seg in src.transcript:
+        pauses.append(round(seg.start, 2))
+        pauses.append(round(seg.end, 2))
+
     pauses.extend(src.scene_breaks)
-    return sorted(set(pauses))
+    return sorted(set(p for p in pauses if 0.0 <= p <= src.duration_sec))
 
 
 def snap_window(src: SourceAnalysis, start: float, end: float,
                 tol: float = SNAP_TOL) -> tuple[float, float]:
-    """Snap both boundaries to the nearest pause/scene break within ``tol`` so
-    cuts land on silence, never mid-word. Keeps the window valid and in-range."""
+    """Snap boundaries to natural pauses, and critically: NEVER cut across an active word."""
+    words = [w for seg in src.transcript for w in seg.words if w.text.strip()]
+
+    # 1. Guard against cutting inside any spoken word
+    if words:
+        for w in words:
+            if w.start < start < w.end:
+                start = max(0.0, w.start - 0.04)
+            if w.start < end < w.end:
+                end = min(src.duration_sec, w.end + 0.04)
+
+    # 2. Snap to nearest natural pause/sentence boundary within tolerance
     pauses = speech_pauses(src)
     if pauses:
-        def _snap(t: float) -> float:
-            best = min(pauses, key=lambda p: abs(p - t))
-            return best if abs(best - t) <= tol else t
-        s, e = _snap(start), _snap(end)
+        def _snap(t: float, is_end: bool) -> float:
+            candidates = [p for p in pauses if abs(p - t) <= tol]
+            if candidates:
+                return min(candidates, key=lambda p: abs(p - t))
+            if words:
+                nearest_word_edge = min(
+                    [w.end if is_end else w.start for w in words],
+                    key=lambda x: abs(x - t),
+                    default=t,
+                )
+                if abs(nearest_word_edge - t) <= 1.5:
+                    return nearest_word_edge
+            return t
+
+        s, e = _snap(start, is_end=False), _snap(end, is_end=True)
         if e - s >= 2.0:
             start, end = s, e
+
     start = max(0.0, min(start, src.duration_sec - 0.5))
     end = max(start + 0.5, min(end, src.duration_sec))
     return round(start, 2), round(end, 2)
@@ -125,58 +162,118 @@ def snap_window(src: SourceAnalysis, start: float, end: float,
 
 def build_highlights(sources: list[SourceAnalysis], *, target_count: int,
                      target_seconds: float) -> list[EdlClip]:
-    """Slide a window over each source, score, take top non-overlapping windows,
-    snap boundaries to speech pauses / scene breaks."""
+    """Extract top highlights across sources.
+    Uses thought-based grouping (sentence clusters) when transcripts exist,
+    combined with fine-grained sliding windows, ensuring the entire video is covered
+    and no mid-word cuts occur."""
     candidates: list[tuple[float, int, float, float]] = []  # (score, src_idx, start, end)
+
+    min_dur = max(4.0, target_seconds * 0.5)
+    max_dur = min(180.0, target_seconds * 1.5)
+
     for idx, src in enumerate(sources):
-        if src.duration_sec <= target_seconds:
-            # Source not longer than one clip → use it whole (avoids the dead zone
-            # 0.5·T…T where neither branch produced any candidate).
-            candidates.append((_window_score(src, 0, src.duration_sec), idx, 0.0, src.duration_sec))
+        dur = src.duration_sec
+        if dur <= target_seconds * 1.1:
+            candidates.append((_window_score(src, 0, dur), idx, 0.0, dur))
             continue
-        step = max(2.0, target_seconds / 2)
+
+        # Strategy A: Thought / Sentence-based clusters from Whisper
+        if src.transcript:
+            segs = src.transcript
+            for i in range(len(segs)):
+                t_start = segs[i].start
+                for j in range(i, len(segs)):
+                    t_end = segs[j].end
+                    cluster_dur = t_end - t_start
+                    if min_dur <= cluster_dur <= max_dur:
+                        score = _window_score(src, t_start, t_end)
+                        dur_penalty = abs(cluster_dur - target_seconds) / target_seconds * 0.1
+                        candidates.append((score - dur_penalty, idx, round(t_start, 2), round(t_end, 2)))
+                    elif cluster_dur > max_dur:
+                        break
+
+        # Strategy B: Sliding window over the source with small step (target_seconds / 3)
+        step = max(3.0, target_seconds / 3.0)
         t = 0.0
-        while t + target_seconds <= src.duration_sec + 0.01:
-            end = min(t + target_seconds, src.duration_sec)
-            candidates.append((_window_score(src, t, end), idx, round(t, 2), round(end, 2)))
+        while t + min_dur <= dur:
+            w_end = min(t + target_seconds, dur)
+            candidates.append((_window_score(src, t, w_end), idx, round(t, 2), round(w_end, 2)))
             t += step
 
+        # Tail window of the source so the ending is never ignored
+        tail_start = max(0.0, dur - target_seconds)
+        candidates.append((_window_score(src, tail_start, dur), idx, round(tail_start, 2), round(dur, 2)))
+
+    # Sort all candidates by score descending
     candidates.sort(key=lambda c: c[0], reverse=True)
 
-    # Top non-overlapping windows. Adjacent (touching) windows are fine — they
-    # are different content; snapping below separates the cut points naturally.
+    # If multiple sources exist, balance candidate pool across sources
+    candidates_by_src: dict[int, list[tuple[float, int, float, float]]] = {}
+    for c in candidates:
+        candidates_by_src.setdefault(c[1], []).append(c)
+
+    balanced_candidates: list[tuple[float, int, float, float]] = []
+    if len(sources) > 1:
+        # Round-robin top candidates from each source
+        max_len = max((len(lst) for lst in candidates_by_src.values()), default=0)
+        for i in range(max_len):
+            for s_idx in range(len(sources)):
+                s_list = candidates_by_src.get(s_idx, [])
+                if i < len(s_list):
+                    balanced_candidates.append(s_list[i])
+    else:
+        balanced_candidates = candidates
+
+    # Greedily pick top candidates allowing minimal overlap (< 35% of clip duration)
     chosen: list[tuple[float, int, float, float]] = []
-    for score, idx, start, end in candidates:
-        overlap = any(
-            i == idx and not (end <= s or start >= e)
-            for (_sc, i, s, e) in chosen
-        )
+    surplus_limit = max(target_count * 2, target_count + 4)
+
+    for score, idx, start, end in balanced_candidates:
+        dur_cand = end - start
+        if dur_cand < 3.0:
+            continue
+        overlap = False
+        for (_sc, i, s, e) in chosen:
+            if i == idx:
+                ov = max(0.0, min(end, e) - max(start, s))
+                if ov > 0.35 * min(dur_cand, e - s):
+                    overlap = True
+                    break
         if overlap:
             continue
         chosen.append((score, idx, start, end))
-        if len(chosen) >= target_count:
+        if len(chosen) >= surplus_limit:
             break
 
-    # Snap to pauses, then clamp so clips of one source never overlap after the move.
-    taken: dict[int, list[tuple[float, float]]] = {}
+    # Snap boundaries to natural breath pauses, ensuring clips don't collide
     clips: list[EdlClip] = []
-    for order, (score, idx, start, end) in enumerate(chosen):
+    taken: dict[int, list[tuple[float, float]]] = {}
+
+    for score, idx, start, end in chosen:
         start, end = snap_window(sources[idx], start, end)
-        for (s, e) in taken.get(idx, []):
-            if start < e and end > s:  # overlap introduced by snapping
-                if start >= s:
-                    start = min(e, end - 0.5)
-                else:
-                    end = max(s, start + 0.5)
-        if end - start < 2.0:
+        if end - start < 3.0:
             continue
+
+        conflict = False
+        for s, e in taken.get(idx, []):
+            ov = max(0.0, min(end, e) - max(start, s))
+            if ov > 0.25 * (end - start):
+                conflict = True
+                break
+        if conflict:
+            continue
+
         taken.setdefault(idx, []).append((start, end))
+        order = len(clips)
         clips.append(EdlClip(
             title=f"Highlight {order + 1}",
             order=order,
             segments=[EdlSegment(src_idx=idx, start=round(start, 2), end=round(end, 2), score=score)],
             transcript_snippet=_transcript_snippet(sources[idx], start, end),
         ))
+        if len(clips) >= surplus_limit:
+            break
+
     return clips
 
 
@@ -252,17 +349,17 @@ def build_clips(sources: list[SourceAnalysis], geometry: Geometry, *,
 TRANSITION_SEC = 0.35
 
 
-def map_clip_subtitles(clip: EdlClip, sources: list[SourceAnalysis]):
-    """Project the source transcripts onto the clip's OUTPUT timeline (per-word),
-    compensating for the xfade overlap between segments. The result is stored on
-    the clip, shown/edited in the storyboard, and burned verbatim at render."""
+def map_clip_subtitles(clip: EdlClip, sources: list[SourceAnalysis], transition_sec: float = 0.0):
+    """Project the source transcripts onto the clip's OUTPUT timeline (per-word).
+    For clean hard cuts (default in Highlights and speech clips), transition_sec is 0.0.
+    For mix montages with crossfades, transition_sec compensates for the crossfade overlap."""
     from app.models import SubtitleLine, SubtitleWord  # local: avoid import cycle
 
     lines: list[SubtitleLine] = []
     offset = 0.0
     for k, seg in enumerate(clip.segments):
-        if k > 0:
-            offset -= TRANSITION_SEC
+        if k > 0 and transition_sec > 0:
+            offset -= transition_sec
         if seg.src_idx >= len(sources):
             offset += seg.end - seg.start
             continue

@@ -70,27 +70,74 @@ function clipDuration(c: EditClip): number {
 }
 
 /**
- * Панель правки клипа: границы сегментов (где ИИ порезал) и субтитры
+ * Панель правки клипа: плеер с превью видео, границы сегментов (где ИИ порезал) и субтитры
  * (что и когда написано). Сохранение — PATCH; при смене границ сервер сам
  * пересчитывает субтитры из транскрипта источника.
  */
-function ClipEditor({ projectId, clip, onSaved, onClose }: {
+function ClipEditor({
+  projectId,
+  clip,
+  sources,
+  onSaved,
+  onSplit,
+  onDelete,
+  onClose,
+}: {
   projectId: string;
   clip: EditClip;
+  sources: any[];
   onSaved: (updated: EditClip) => void;
+  onSplit?: (part1: EditClip, part2: EditClip) => void;
+  onDelete?: () => void;
   onClose: () => void;
 }) {
   const [segments, setSegments] = useState(
-    (clip.edl?.segments ?? []).map((s) => ({ src_idx: s.src_idx, start: s.start, end: s.end })));
+    (clip.edl?.segments ?? []).map((s) => ({ src_idx: s.src_idx, start: s.start, end: s.end }))
+  );
   const [subs, setSubs] = useState<EdlSubtitleLine[]>(
-    (clip.edl?.subtitles ?? []).map((l) => ({ start: l.start, end: l.end, text: l.text })));
+    (clip.edl?.subtitles ?? []).map((l) => ({ start: l.start, end: l.end, text: l.text }))
+  );
+  const [activeSegIdx, setActiveSegIdx] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [splitting, setSplitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const patchSeg = (i: number, field: "start" | "end", v: number) =>
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+
+  const curSeg = segments[activeSegIdx] || segments[0] || { src_idx: 0, start: 0, end: 5 };
+  const activeSource = sources[curSeg.src_idx];
+  const videoUrl = activeSource?.url;
+
+  const patchSeg = (i: number, field: "start" | "end" | "src_idx", v: number) =>
     setSegments((prev) => prev.map((s, j) => (j === i ? { ...s, [field]: Math.max(0, v) } : s)));
   const patchSub = (i: number, patch: Partial<EdlSubtitleLine>) =>
     setSubs((prev) => prev.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+
+  const playSegment = (start: number, end: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = start;
+    void videoRef.current.play();
+    const handleTime = () => {
+      if (videoRef.current && videoRef.current.currentTime >= end) {
+        videoRef.current.pause();
+        videoRef.current.removeEventListener("timeupdate", handleTime);
+      }
+    };
+    videoRef.current.addEventListener("timeupdate", handleTime);
+  };
+
+  const jumpTo = (time: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const setFromPlayer = (field: "start" | "end") => {
+    if (!videoRef.current) return;
+    const t = Math.round(videoRef.current.currentTime * 10) / 10;
+    patchSeg(activeSegIdx, field, t);
+  };
 
   async function save(kind: "segments" | "subtitles") {
     setSaving(true);
@@ -109,30 +156,155 @@ function ClipEditor({ projectId, clip, onSaved, onClose }: {
     }
   }
 
+  async function handleSplit() {
+    if (!videoRef.current) return;
+    const t = Math.round(videoRef.current.currentTime * 10) / 10;
+    if (t <= (curSeg?.start ?? 0) || t >= (curSeg?.end ?? 0)) {
+      alert("Переместите ползунок плеера внутрь границ сегмента для разреза");
+      return;
+    }
+    setSplitting(true);
+    try {
+      const res = await editorApi.splitClip(projectId, clip.id, t);
+      onSplit?.(res.part1, res.part2);
+    } catch (e: any) {
+      alert(e.message || "Ошибка при разрезании клипа");
+    } finally {
+      setSplitting(false);
+    }
+  }
+
   const numCls = "w-16 bg-surface-2 border border-border rounded px-1.5 py-1 text-xs font-mono text-text-primary";
 
   return (
-    <div className="border-t border-border bg-surface-2/50 p-2.5 space-y-3 animate-fade-in">
-      {/* Границы */}
+    <div className="border-t border-border bg-surface-2/60 p-3 space-y-3.5 animate-fade-in">
+      {/* Видеоплеер для визуальной подгонки границ */}
+      {videoUrl ? (
+        <div className="space-y-2 rounded-lg bg-surface-1 p-2.5 border border-border">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-semibold text-text-secondary flex items-center gap-1.5">
+              <span>🎬 Предпросмотр источника #{curSeg.src_idx + 1}</span>
+            </span>
+            <span className="font-mono text-brand-400 font-medium">
+              {currentTime.toFixed(1)}с / {activeSource?.durationSec ? `${Number(activeSource.durationSec).toFixed(1)}с` : "…"}
+            </span>
+          </div>
+          <video
+            ref={videoRef}
+            src={videoUrl}
+            controls
+            onTimeUpdate={() => videoRef.current && setCurrentTime(videoRef.current.currentTime)}
+            className="w-full max-h-44 rounded-md bg-black object-contain border border-border/50"
+          />
+          <div className="flex items-center justify-between flex-wrap gap-1.5 pt-0.5">
+            <div className="flex gap-1.5 items-center flex-wrap">
+              <Button
+                size="xs"
+                variant="primary"
+                onClick={() => playSegment(curSeg.start, curSeg.end)}
+              >
+                ▶ Играть сегмент ({curSeg.start}с → {curSeg.end}с)
+              </Button>
+              <button
+                type="button"
+                onClick={() => setFromPlayer("start")}
+                className="px-2 py-0.5 rounded bg-surface-2 hover:bg-surface-3 text-text-secondary hover:text-text-primary text-2xs font-medium border border-border"
+                title="Установить текущую позицию видео как начало сегмента"
+              >
+                ⏱ В начало ({currentTime.toFixed(1)}с)
+              </button>
+              <button
+                type="button"
+                onClick={() => setFromPlayer("end")}
+                className="px-2 py-0.5 rounded bg-surface-2 hover:bg-surface-3 text-text-secondary hover:text-text-primary text-2xs font-medium border border-border"
+                title="Установить текущую позицию видео как конец сегмента"
+              >
+                ⏱ В конец ({currentTime.toFixed(1)}с)
+              </button>
+            </div>
+            <Button
+              size="xs"
+              variant="secondary"
+              loading={splitting}
+              onClick={handleSplit}
+              title="Разрезать клип по текущей позиции плеера"
+            >
+              ✂ Разрезать здесь ({currentTime.toFixed(1)}с)
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Границы сегментов */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
-          <p className="text-2xs font-semibold text-text-tertiary uppercase">Границы (сек)</p>
-          <Button size="xs" variant="secondary" loading={saving} onClick={() => save("segments")}>
-            Сохранить границы
-          </Button>
+          <p className="text-2xs font-semibold text-text-tertiary uppercase">Границы сегментов (сек)</p>
+          <div className="flex gap-1.5">
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => {
+                const last = segments[segments.length - 1];
+                const newStart = last ? last.end : 0;
+                setSegments((prev) => [...prev, { src_idx: last ? last.src_idx : 0, start: newStart, end: newStart + 5 }]);
+              }}
+            >
+              + сегмент
+            </Button>
+            <Button size="xs" variant="secondary" loading={saving} onClick={() => save("segments")}>
+              Сохранить границы
+            </Button>
+          </div>
         </div>
         {segments.map((s, i) => (
-          <div key={i} className="flex items-center gap-1.5 text-xs">
-            <span className="text-text-tertiary w-10">#{s.src_idx + 1}</span>
-            <input type="number" step={0.1} min={0} value={s.start} className={numCls}
-              onChange={(e) => patchSeg(i, "start", Number(e.target.value))} />
+          <div
+            key={i}
+            onClick={() => setActiveSegIdx(i)}
+            className={cn(
+              "flex items-center gap-1.5 text-xs p-1 rounded transition-colors",
+              activeSegIdx === i ? "bg-surface-3 ring-1 ring-brand-500/30" : "hover:bg-surface-3/50"
+            )}
+          >
+            <select
+              value={s.src_idx}
+              onChange={(e) => patchSeg(i, "src_idx", Number(e.target.value))}
+              className="bg-surface-2 border border-border rounded px-1 py-1 text-2xs text-text-primary"
+            >
+              {sources.map((_, sIdx) => (
+                <option key={sIdx} value={sIdx}>#{sIdx + 1}</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              value={s.start}
+              className={numCls}
+              onChange={(e) => patchSeg(i, "start", Number(e.target.value))}
+            />
             <span className="text-text-tertiary">→</span>
-            <input type="number" step={0.1} min={0} value={s.end} className={numCls}
-              onChange={(e) => patchSeg(i, "end", Number(e.target.value))} />
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              value={s.end}
+              className={numCls}
+              onChange={(e) => patchSeg(i, "end", Number(e.target.value))}
+            />
             <span className="text-text-tertiary font-mono">{Math.max(0, s.end - s.start).toFixed(1)}с</span>
+            <button
+              type="button"
+              onClick={() => jumpTo(s.start)}
+              className="text-2xs text-brand-400 hover:underline px-1"
+              title="Перейти к началу сегмента в плеере"
+            >
+              перейти
+            </button>
             {segments.length > 1 && (
-              <button className="text-danger hover:underline ml-auto"
-                onClick={() => setSegments((prev) => prev.filter((_, j) => j !== i))}>
+              <button
+                className="text-danger hover:underline ml-auto text-xs"
+                onClick={() => setSegments((prev) => prev.filter((_, j) => j !== i))}
+              >
                 убрать
               </button>
             )}
@@ -147,12 +319,20 @@ function ClipEditor({ projectId, clip, onSaved, onClose }: {
             Субтитры ({subs.length} фраз)
           </p>
           <div className="flex gap-1.5">
-            <Button size="xs" variant="ghost"
-              onClick={() => setSubs((p) => [...p, {
-                start: p.length ? p[p.length - 1].end : 0,
-                end: (p.length ? p[p.length - 1].end : 0) + 2,
-                text: "",
-              }])}>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() =>
+                setSubs((p) => [
+                  ...p,
+                  {
+                    start: p.length ? p[p.length - 1].end : 0,
+                    end: (p.length ? p[p.length - 1].end : 0) + 2,
+                    text: "",
+                  },
+                ])
+              }
+            >
               + строка
             </Button>
             <Button size="xs" variant="secondary" loading={saving} onClick={() => save("subtitles")}>
@@ -165,30 +345,56 @@ function ClipEditor({ projectId, clip, onSaved, onClose }: {
             Нет фраз — речь не распознана. Добавьте строки вручную или проверьте, что в видео есть речь.
           </p>
         )}
-        <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+        <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
           {subs.map((l, i) => (
             <div key={i} className="flex items-center gap-1.5">
-              <input type="number" step={0.1} min={0} value={l.start} className={numCls}
-                onChange={(e) => patchSub(i, { start: Number(e.target.value) })} />
-              <input type="number" step={0.1} min={0} value={l.end} className={numCls}
-                onChange={(e) => patchSub(i, { end: Number(e.target.value) })} />
-              <input value={l.text} placeholder="текст фразы"
+              <input
+                type="number"
+                step={0.1}
+                min={0}
+                value={l.start}
+                className={numCls}
+                onChange={(e) => patchSub(i, { start: Number(e.target.value) })}
+              />
+              <input
+                type="number"
+                step={0.1}
+                min={0}
+                value={l.end}
+                className={numCls}
+                onChange={(e) => patchSub(i, { end: Number(e.target.value) })}
+              />
+              <input
+                value={l.text}
+                placeholder="текст фразы"
                 className="flex-1 bg-surface-2 border border-border rounded px-2 py-1 text-xs text-text-primary"
-                onChange={(e) => patchSub(i, { text: e.target.value })} />
-              <button className="text-danger text-xs hover:underline"
-                onClick={() => setSubs((prev) => prev.filter((_, j) => j !== i))}>
+                onChange={(e) => patchSub(i, { text: e.target.value })}
+              />
+              <button
+                className="text-danger text-xs hover:underline"
+                onClick={() => setSubs((prev) => prev.filter((_, j) => j !== i))}
+              >
                 ✕
               </button>
             </div>
           ))}
         </div>
-        <p className="text-2xs text-text-tertiary">
+        <p className="text-3xs text-text-tertiary">
           Отредактированные фразы будут вжжены в видео как есть (пословная подсветка сохранится).
         </p>
       </div>
 
       {error && <p className="text-xs text-danger">{error}</p>}
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between pt-1 border-t border-border/40">
+        {onDelete ? (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="text-danger text-xs hover:underline flex items-center gap-1"
+          >
+            🗑️ Удалить клип
+          </button>
+        ) : <div />}
         <Button size="xs" variant="ghost" onClick={onClose}>Свернуть</Button>
       </div>
     </div>
@@ -234,6 +440,7 @@ export default function EditorProjectDetailPage() {
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [editingClipId, setEditingClipId] = useState<string | null>(null);
+  const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // AI Studio (OpenRouter + Fish Audio)
@@ -401,6 +608,50 @@ export default function EditorProjectDetailPage() {
       ...p,
       clips: p.clips.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)),
     });
+  }
+
+  async function handleAddClip() {
+    if (!project || project.sources.length === 0) return;
+    try {
+      const newClip = await editorApi.createClip(id, {
+        title: `Новый клип ${project.clips.length + 1}`,
+        segments: [{
+          src_idx: 0,
+          start: 0,
+          end: Math.min(30, Number(project.sources[0]?.durationSec ?? 30)),
+        }],
+      });
+      setProject({
+        ...project,
+        clips: [...project.clips, newClip],
+      });
+      setEditingClipId(newClip.id);
+    } catch (e: any) {
+      alert(e.message || "Ошибка создания клипа");
+    }
+  }
+
+  function handleClipSplit(clipId: string, part1: EditClip, part2: EditClip) {
+    if (!project) return;
+    const clips: EditClip[] = [];
+    for (const c of project.clips) {
+      if (c.id === clipId) {
+        clips.push(part1, part2);
+      } else {
+        clips.push(c);
+      }
+    }
+    setProject({ ...project, clips });
+    setEditingClipId(null);
+  }
+
+  function handleClipDeleted(clipId: string) {
+    if (!project) return;
+    setProject({
+      ...project,
+      clips: project.clips.filter((c) => c.id !== clipId),
+    });
+    setEditingClipId(null);
   }
 
   const included = useMemo(() => project?.clips.filter((c) => c.included) ?? [], [project]);
@@ -742,19 +993,39 @@ export default function EditorProjectDetailPage() {
             </div>
 
             {project.sources.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {project.sources.map((s, i) => (
-                  <div key={s.id}
-                    className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-1.5 text-xs">
-                    <span className="w-5 h-5 rounded-full bg-brand-500/15 text-brand-400 font-bold flex items-center justify-center">
-                      {i + 1}
-                    </span>
-                    <span className="text-text-primary font-medium">
-                      {s.durationSec ? fmtTime(Number(s.durationSec)) : "…"}
-                    </span>
-                    {s.width ? <span className="text-text-tertiary">{s.width}×{s.height}</span> : null}
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-2">
+                  {project.sources.map((s, i) => (
+                    <div key={s.id}
+                      className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-1.5 text-xs">
+                      <span className="w-5 h-5 rounded-full bg-brand-500/15 text-brand-400 font-bold flex items-center justify-center">
+                        {i + 1}
+                      </span>
+                      <span className="text-text-primary font-medium">
+                        {s.durationSec ? fmtTime(Number(s.durationSec)) : "…"}
+                      </span>
+                      {s.width ? <span className="text-text-tertiary">{s.width}×{s.height}</span> : null}
+                      {s.url && (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewSourceUrl(previewSourceUrl === s.url ? null : s.url!)}
+                          className="text-2xs text-brand-400 hover:underline px-1 ml-1"
+                        >
+                          {previewSourceUrl === s.url ? "закрыть" : "▶ просмотр"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {previewSourceUrl && (
+                  <div className="p-2.5 rounded-lg bg-surface-2 border border-border space-y-1.5 animate-fade-in max-w-lg">
+                    <div className="flex items-center justify-between text-xs text-text-secondary">
+                      <span className="font-semibold">🎬 Просмотр исходного видео</span>
+                      <button onClick={() => setPreviewSourceUrl(null)} className="text-text-tertiary hover:text-text-primary text-xs">✕</button>
+                    </div>
+                    <video src={previewSourceUrl} controls className="max-h-56 rounded bg-black w-full object-contain" />
                   </div>
-                ))}
+                )}
               </div>
             )}
           </CardContent>
@@ -796,7 +1067,8 @@ export default function EditorProjectDetailPage() {
                     · {included.length}/{project.clips.length} выбрано · {fmtTime(totalSec)} суммарно
                   </span>
                 </h3>
-                <div className="flex gap-1.5">
+                <div className="flex gap-1.5 items-center">
+                  <Button variant="secondary" size="xs" onClick={handleAddClip}>+ Клип</Button>
                   <Button variant="ghost" size="xs" onClick={() => setAll(true)}>Все</Button>
                   <Button variant="ghost" size="xs" onClick={() => setAll(false)}>Ничего</Button>
                 </div>
@@ -911,6 +1183,18 @@ export default function EditorProjectDetailPage() {
                               )}>
                               ✎ правка
                             </button>
+                            <button
+                              type="button"
+                              title="Удалить клип"
+                              onClick={() => {
+                                if (confirm(`Удалить клип "${c.title}"?`)) {
+                                  editorApi.deleteClip(id, c.id).then(() => handleClipDeleted(c.id)).catch((err) => alert(err.message));
+                                }
+                              }}
+                              className="px-1 py-0.5 rounded text-danger/70 hover:text-danger hover:bg-danger/10 text-xs"
+                            >
+                              ✕
+                            </button>
                             <button onClick={() => moveClip(idx, -1)} disabled={idx === 0}
                               className="px-1.5 py-0.5 rounded hover:bg-surface-2 disabled:opacity-30">←</button>
                             <button onClick={() => moveClip(idx, 1)} disabled={idx === project.clips.length - 1}
@@ -923,7 +1207,14 @@ export default function EditorProjectDetailPage() {
                         <ClipEditor
                           projectId={id}
                           clip={c}
+                          sources={project.sources}
                           onSaved={mergeClip}
+                          onSplit={(part1, part2) => handleClipSplit(c.id, part1, part2)}
+                          onDelete={() => {
+                            if (confirm(`Удалить клип "${c.title}"?`)) {
+                              editorApi.deleteClip(id, c.id).then(() => handleClipDeleted(c.id)).catch((err) => alert(err.message));
+                            }
+                          }}
                           onClose={() => setEditingClipId(null)}
                         />
                       )}
