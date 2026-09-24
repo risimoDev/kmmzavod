@@ -248,17 +248,19 @@ def _build_voiceover_bed(video_path: str, voiceover_path: str, bgm_path: str | N
     inputs = ["-i", video_path, "-i", voiceover_path]
     if bgm_path:
         inputs += ["-i", bgm_path]
-    fc = ["[1:a]aformat=sample_rates=44100:channel_layouts=stereo,asplit=2[vo][vosc]"]
-    if bgm_path:
         fade = max(0.0, dur - 2.0)
-        fc.append(
+        fc = [
+            "[1:a]aformat=sample_rates=44100:channel_layouts=stereo,apad,asplit=2[vo][vosc]",
             f"[2:a]aloop=loop=-1:size=2147483647,aformat=sample_rates=44100:channel_layouts=stereo,"
             f"atrim=duration={dur:.3f},volume=0.16,afade=t=in:st=0:d=1.2,"
-            f"afade=t=out:st={fade:.3f}:d=2.0[bg]")
-        fc.append("[bg][vosc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[bgd]")
-        fc.append("[vo][bgd]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]")
+            f"afade=t=out:st={fade:.3f}:d=2.0[bg]",
+            "[bg][vosc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[bgd]",
+            "[vo][bgd]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[a]",
+        ]
     else:
-        fc.append("[vo]anull[a]")
+        # No BGM: simply format voiceover, pad with silence if shorter than video duration
+        fc = ["[1:a]aformat=sample_rates=44100:channel_layouts=stereo,apad[a]"]
+
     cmd = [fx._bin("ffmpeg"), "-y", *inputs, "-filter_complex", ";".join(fc),
            "-map", "0:v", "-map", "[a]", "-c:v", "copy",
            "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.3f}",

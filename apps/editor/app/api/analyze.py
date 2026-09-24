@@ -15,7 +15,7 @@ import tempfile
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.models import AnalyzeRequest, AnalyzeResponse, EdlClip
+from app.models import AnalyzeRequest, AnalyzeResponse, EdlClip, Geometry
 from app.services import enrich
 from app.services import ffmpeg as fx
 from app.services import select as selector
@@ -116,7 +116,7 @@ def create_router() -> APIRouter:
                              f"(max {settings.max_source_duration_sec})")
                 sources.append(analysis)
 
-            effective_target = max(req.target_clip_count, len(sources)) if req.geometry != Geometry.MIX else 1
+            effective_target = max(req.target_clip_count, len(sources)) if req.geometry not in (Geometry.MIX, "mix") else 1
             clips = selector.build_clips(
                 sources, req.geometry,
                 target_count=effective_target,

@@ -358,9 +358,9 @@ def build_mix(sources: list[SourceAnalysis], *, target_seconds: float,
     return [EdlClip(title="Mix", order=0, segments=segments, transcript_snippet=snippet)]
 
 
-def build_clips(sources: list[SourceAnalysis], geometry: Geometry, *,
+def build_clips(sources: list[SourceAnalysis], geometry: Geometry | str, *,
                 target_count: int, target_seconds: float) -> list[EdlClip]:
-    if geometry == Geometry.MIX:
+    if geometry in (Geometry.MIX, "mix"):
         return build_mix(sources, target_seconds=target_seconds)
     return build_highlights(sources, target_count=target_count, target_seconds=target_seconds)
 
