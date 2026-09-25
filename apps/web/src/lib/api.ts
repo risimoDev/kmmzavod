@@ -1863,10 +1863,13 @@ export const editorApi = {
   getPresets: () => apiFetch<{ subtitleStyles: SubtitlePreset[] }>('/api/v1/editor/presets'),
 
   generateScript: (id: string, body: {
-    topic: string;
+    topic?: string;
+    projectName?: string;
+    productInfo?: string;
+    currentScript?: string;
+    mode?: 'generate' | 'expand' | 'fit';
     style?: string;
     targetSeconds?: number;
-    productInfo?: string;
     useSourceTranscript?: boolean;
     apiKey?: string;
   }) =>

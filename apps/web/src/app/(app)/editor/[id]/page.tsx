@@ -446,6 +446,7 @@ export default function EditorProjectDetailPage() {
   // AI Studio (OpenRouter + Fish Audio)
   const [showAiStudio, setShowAiStudio] = useState(false);
   const [aiTopic, setAiTopic] = useState("");
+  const [aiProductInfo, setAiProductInfo] = useState("");
   const [aiStyle, setAiStyle] = useState("hype");
   const [aiSeconds, setAiSeconds] = useState(30);
   const [aiScript, setAiScript] = useState("");
@@ -515,19 +516,25 @@ export default function EditorProjectDetailPage() {
   }, [fishApiKey]);
 
   useEffect(() => {
-    if (project?.config) {
-      const cfg = project.config as Record<string, any>;
-      if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
-      if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
-      const vId = cfg.voiceId || (project as any).voiceId;
-      if (vId) {
-        setSelectedVoiceId(vId);
-        const isPreset = voices.some((v) => v.id === vId);
-        if (!isPreset && vId !== "e04b4c73046f491c89366fbca39d48dd") {
-          setCustomVoiceId(vId);
-        }
+    if (project) {
+      if (project.name && !aiTopic) {
+        setAiTopic(project.name);
       }
-      if (cfg.voiceSpeed) setVoiceSpeed(cfg.voiceSpeed);
+      if (project.config) {
+        const cfg = project.config as Record<string, any>;
+        if (cfg.productInfo && !aiProductInfo) setAiProductInfo(cfg.productInfo);
+        if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
+        if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
+        const vId = cfg.voiceId || (project as any).voiceId;
+        if (vId) {
+          setSelectedVoiceId(vId);
+          const isPreset = voices.some((v) => v.id === vId);
+          if (!isPreset && vId !== "e04b4c73046f491c89366fbca39d48dd") {
+            setCustomVoiceId(vId);
+          }
+        }
+        if (cfg.voiceSpeed) setVoiceSpeed(cfg.voiceSpeed);
+      }
     }
     // Auto-sync aiSeconds with total included clips duration
     if (project?.clips && project.clips.length > 0) {
@@ -556,13 +563,16 @@ export default function EditorProjectDetailPage() {
   }
 
   async function handleGenerateScript() {
-    if (!aiTopic.trim()) return;
+    const effectiveTopic = aiTopic.trim() || project?.name || "Видеоролик";
     setAiGenerating(true);
     try {
       const res = await editorApi.generateScript(id, {
-        topic: aiTopic,
+        topic: effectiveTopic,
+        projectName: project?.name,
+        productInfo: aiProductInfo.trim() || undefined,
         style: aiStyle,
         targetSeconds: aiSeconds,
+        mode: 'generate',
         useSourceTranscript: true,
         apiKey: openRouterApiKey.trim() || undefined,
       });
@@ -570,6 +580,32 @@ export default function EditorProjectDetailPage() {
       setAiHook(res.hook);
     } catch (e: any) {
       alert(e.message || "Ошибка генерации сценария");
+    } finally {
+      setAiGenerating(false);
+    }
+  }
+
+  async function handleFitScript() {
+    if (!aiScript.trim()) {
+      return handleGenerateScript();
+    }
+    setAiGenerating(true);
+    try {
+      const res = await editorApi.generateScript(id, {
+        topic: aiTopic.trim() || project?.name || "Видеоролик",
+        projectName: project?.name,
+        productInfo: aiProductInfo.trim() || undefined,
+        currentScript: aiScript,
+        mode: 'fit',
+        style: aiStyle,
+        targetSeconds: aiSeconds,
+        useSourceTranscript: true,
+        apiKey: openRouterApiKey.trim() || undefined,
+      });
+      setAiScript(res.script);
+      if (res.hook) setAiHook(res.hook);
+    } catch (e: any) {
+      alert(e.message || "Ошибка адаптации текста под хронометраж");
     } finally {
       setAiGenerating(false);
     }
@@ -950,12 +986,34 @@ export default function EditorProjectDetailPage() {
                     </span>
                   </div>
 
-                  <input
-                    value={aiTopic}
-                    onChange={(e) => setAiTopic(e.target.value)}
-                    placeholder="Тема ролика (например: 3 секрета продаж)..."
-                    className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  />
+                  <div>
+                    <label className="text-3xs text-text-tertiary mb-1 block">Тема / название ролика:</label>
+                    <input
+                      value={aiTopic}
+                      onChange={(e) => setAiTopic(e.target.value)}
+                      placeholder="Название или тема (например: 3 секрета продаж)..."
+                      className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-3xs text-text-tertiary">Оффер / описание / УТП:</label>
+                      <span className="text-3xs text-text-tertiary">автосохранение</span>
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={aiProductInfo}
+                      onChange={(e) => setAiProductInfo(e.target.value)}
+                      onBlur={() => {
+                        if (id && aiProductInfo.trim()) {
+                          editorApi.patchProject(id, { productInfo: aiProductInfo.trim() } as any).catch(() => {});
+                        }
+                      }}
+                      placeholder="О чем продукт, боли клиентов, выгоды, скидка, акция..."
+                      className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none leading-relaxed"
+                    />
+                  </div>
 
                   <div className="grid grid-cols-2 gap-1.5">
                     {[
@@ -999,7 +1057,7 @@ export default function EditorProjectDetailPage() {
                     variant="secondary"
                     className="w-full"
                     loading={aiGenerating}
-                    disabled={!aiTopic.trim()}
+                    disabled={!aiTopic.trim() && !project?.name}
                     onClick={handleGenerateScript}
                   >
                     ⚡ Сгенерировать сценарий
@@ -1050,10 +1108,11 @@ export default function EditorProjectDetailPage() {
                             </span>
                             <button
                               type="button"
-                              onClick={handleGenerateScript}
-                              className="underline hover:text-amber-200 font-semibold ml-2 shrink-0"
+                              disabled={aiGenerating}
+                              onClick={handleFitScript}
+                              className="underline hover:text-amber-200 font-semibold ml-2 shrink-0 disabled:opacity-50"
                             >
-                              Подогнать под {aiSeconds}с
+                              {aiGenerating ? "Подгонка..." : `Подогнать под ${aiSeconds}с`}
                             </button>
                           </div>
                         )}
@@ -1071,7 +1130,17 @@ export default function EditorProjectDetailPage() {
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="text-3xs font-semibold uppercase text-text-tertiary">Эмоции Fish Audio:</span>
-                      <span className="text-3xs text-text-tertiary">клик для вставки</span>
+                      {aiScript.trim() && (
+                        <button
+                          type="button"
+                          disabled={aiGenerating}
+                          onClick={handleFitScript}
+                          className="text-3xs font-semibold px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 border border-brand-500/40 hover:bg-brand-500/30 transition-all disabled:opacity-50"
+                          title={`Дополнить и улучшить текст ровно под ${aiSeconds} секунд`}
+                        >
+                          {aiGenerating ? "✨ Подгоняем..." : `✨ Подогнать под ${aiSeconds}с`}
+                        </button>
+                      )}
                     </div>
                     <div className="flex flex-wrap gap-1">
                       {[

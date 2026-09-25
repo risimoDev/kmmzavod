@@ -61,6 +61,7 @@ const patchProjectSchema = z.object({
   smartCrop: z.boolean().optional(),
   targetClipSeconds: z.number().min(3).max(180).optional(),
   voiceId: z.string().optional(),
+  productInfo: z.string().max(3000).optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -624,6 +625,7 @@ export async function editorRoutes(app: FastifyInstance) {
           ...currentConfig,
           ...(body.config ?? {}),
           ...(body.voiceId !== undefined ? { voiceId: body.voiceId } : {}),
+          ...(body.productInfo !== undefined ? { productInfo: body.productInfo } : {}),
         } as object,
       },
     });
@@ -738,14 +740,29 @@ export async function editorRoutes(app: FastifyInstance) {
     if (!project) return reply.code(404).send({ error: 'NotFound' });
 
     const schema = z.object({
-      topic: z.string().min(1).max(500),
+      topic: z.string().max(500).optional(),
+      projectName: z.string().max(200).optional(),
       style: z.enum(['hype', 'educational', 'story', 'sales', 'humor', 'minimal']).default('hype'),
       targetSeconds: z.number().min(5).max(180).optional(),
-      productInfo: z.string().max(1000).optional(),
+      productInfo: z.string().max(3000).optional(),
+      currentScript: z.string().max(5000).optional(),
+      mode: z.enum(['generate', 'expand', 'fit']).default('generate'),
       useSourceTranscript: z.boolean().default(true),
       apiKey: z.string().optional(),
     });
     const body = schema.parse(req.body);
+
+    const currentConfig = (project.config as Record<string, unknown>) || {};
+    const effectiveProjectName = body.projectName?.trim() || project.name || 'Видеоролик';
+    const effectiveTopic = body.topic?.trim() || effectiveProjectName;
+    const effectiveProductInfo = body.productInfo?.trim() || (currentConfig.productInfo as string) || '';
+
+    let effectiveSeconds = body.targetSeconds;
+    if (!effectiveSeconds || effectiveSeconds <= 0) {
+      const includedClips = project.clips.filter((c) => c.included);
+      const totalDur = includedClips.reduce((sum, c) => sum + Number(c.durationSec || 0), 0);
+      effectiveSeconds = totalDur > 0 ? Math.round(totalDur) : (Number(project.targetClipSeconds) || 30);
+    }
 
     let sourceTranscript = '';
     if (body.useSourceTranscript) {
@@ -765,10 +782,13 @@ export async function editorRoutes(app: FastifyInstance) {
 
     const openRouter = new OpenRouterService();
     const result = await openRouter.generateScript({
-      topic: body.topic,
+      topic: effectiveTopic,
+      projectName: effectiveProjectName,
       style: body.style,
-      targetSeconds: body.targetSeconds || Number(project.targetClipSeconds) || 30,
-      productInfo: body.productInfo,
+      targetSeconds: effectiveSeconds,
+      productInfo: effectiveProductInfo,
+      currentScript: body.currentScript,
+      mode: body.mode,
       sourceTranscript,
       language: 'ru',
       variantCount: 3,
@@ -776,12 +796,12 @@ export async function editorRoutes(app: FastifyInstance) {
     });
 
     // Save generated script into project config for convenience
-    const currentConfig = (project.config as Record<string, unknown>) || {};
     await db.editProject.update({
       where: { id },
       data: {
         config: {
           ...currentConfig,
+          ...(effectiveProductInfo ? { productInfo: effectiveProductInfo } : {}),
           generatedScript: result.script,
           scriptHook: result.hook,
           scriptTitle: result.title,
