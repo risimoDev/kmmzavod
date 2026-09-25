@@ -998,7 +998,7 @@ export default function EditorProjectDetailPage() {
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-3xs text-text-tertiary">Оффер / описание / УТП:</label>
+                      <label className="text-3xs text-text-tertiary">Польза / фишки / суть продукта:</label>
                       <span className="text-3xs text-text-tertiary">автосохранение</span>
                     </div>
                     <textarea
@@ -1010,17 +1010,17 @@ export default function EditorProjectDetailPage() {
                           editorApi.patchProject(id, { productInfo: aiProductInfo.trim() } as any).catch(() => {});
                         }
                       }}
-                      placeholder="О чем продукт, боли клиентов, выгоды, скидка, акция..."
+                      placeholder="Какую проблему решает, фишки, личный опыт, в чем польза для зрителя..."
                       className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none leading-relaxed"
                     />
                   </div>
 
                   <div className="grid grid-cols-2 gap-1.5">
                     {[
-                      { id: "hype", label: "🔥 Хайп / Драйв" },
-                      { id: "educational", label: "💡 Экспертный" },
-                      { id: "story", label: "📖 Сторителлинг" },
-                      { id: "sales", label: "💰 Продажи / Оффер" },
+                      { id: "hype", label: "🔥 Вирусный / Интрига" },
+                      { id: "educational", label: "💡 Экспертный лайфхак" },
+                      { id: "story", label: "📖 Личный опыт / Кейс" },
+                      { id: "sales", label: "🎯 Нативная рекомендация" },
                     ].map((st) => (
                       <button
                         key={st.id}
