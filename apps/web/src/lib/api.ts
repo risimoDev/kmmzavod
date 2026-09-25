@@ -1869,6 +1869,8 @@ export const editorApi = {
     currentScript?: string;
     mode?: 'generate' | 'expand' | 'fit';
     style?: string;
+    ctaType?: 'article' | 'direct' | 'auto';
+    directWord?: string;
     targetSeconds?: number;
     useSourceTranscript?: boolean;
     apiKey?: string;

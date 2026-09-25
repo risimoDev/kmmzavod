@@ -447,7 +447,9 @@ export default function EditorProjectDetailPage() {
   const [showAiStudio, setShowAiStudio] = useState(false);
   const [aiTopic, setAiTopic] = useState("");
   const [aiProductInfo, setAiProductInfo] = useState("");
-  const [aiStyle, setAiStyle] = useState("hype");
+  const [aiStyle, setAiStyle] = useState("blogger");
+  const [ctaType, setCtaType] = useState<"article" | "direct">("article");
+  const [directWord, setDirectWord] = useState("ХОЧУ");
   const [aiSeconds, setAiSeconds] = useState(30);
   const [aiScript, setAiScript] = useState("");
   const [aiHook, setAiHook] = useState("");
@@ -525,6 +527,8 @@ export default function EditorProjectDetailPage() {
         if (cfg.productInfo && !aiProductInfo) setAiProductInfo(cfg.productInfo);
         if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
         if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
+        if (cfg.ctaType === 'article' || cfg.ctaType === 'direct') setCtaType(cfg.ctaType);
+        if (cfg.directWord) setDirectWord(cfg.directWord);
         const vId = cfg.voiceId || (project as any).voiceId;
         if (vId) {
           setSelectedVoiceId(vId);
@@ -571,6 +575,8 @@ export default function EditorProjectDetailPage() {
         projectName: project?.name,
         productInfo: aiProductInfo.trim() || undefined,
         style: aiStyle,
+        ctaType,
+        directWord: ctaType === "direct" ? (directWord.trim() || "ХОЧУ") : undefined,
         targetSeconds: aiSeconds,
         mode: 'generate',
         useSourceTranscript: true,
@@ -598,6 +604,8 @@ export default function EditorProjectDetailPage() {
         currentScript: aiScript,
         mode: 'fit',
         style: aiStyle,
+        ctaType,
+        directWord: ctaType === "direct" ? (directWord.trim() || "ХОЧУ") : undefined,
         targetSeconds: aiSeconds,
         useSourceTranscript: true,
         apiKey: openRouterApiKey.trim() || undefined,
@@ -987,18 +995,18 @@ export default function EditorProjectDetailPage() {
                   </div>
 
                   <div>
-                    <label className="text-3xs text-text-tertiary mb-1 block">Тема / название ролика:</label>
+                    <label className="text-3xs text-text-tertiary mb-1 block">Товар / тема ролика:</label>
                     <input
                       value={aiTopic}
                       onChange={(e) => setAiTopic(e.target.value)}
-                      placeholder="Название или тема (например: 3 секрета продаж)..."
+                      placeholder="Например: Беспроводная плойка для волос..."
                       className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-3xs text-text-tertiary">Польза / фишки / суть продукта:</label>
+                      <label className="text-3xs text-text-tertiary">Фишки / особенности / польза:</label>
                       <span className="text-3xs text-text-tertiary">автосохранение</span>
                     </div>
                     <textarea
@@ -1010,32 +1018,101 @@ export default function EditorProjectDetailPage() {
                           editorApi.patchProject(id, { productInfo: aiProductInfo.trim() } as any).catch(() => {});
                         }
                       }}
-                      placeholder="Какую проблему решает, фишки, личный опыт, в чем польза для зрителя..."
+                      placeholder="Например: локоны за 5 секунд, керамика не портит волосы, держит укладку весь день..."
                       className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none leading-relaxed"
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {[
-                      { id: "hype", label: "🔥 Вирусный / Интрига" },
-                      { id: "educational", label: "💡 Экспертный лайфхак" },
-                      { id: "story", label: "📖 Личный опыт / Кейс" },
-                      { id: "sales", label: "🎯 Нативная рекомендация" },
-                    ].map((st) => (
+                  <div className="space-y-1">
+                    <label className="text-3xs text-text-tertiary block font-medium">Формат / Подача товара:</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {[
+                        { id: "blogger", label: "🛍️ Блогер / Находка", desc: "Распаковка, восторг, живой UGC" },
+                        { id: "story", label: "💡 Боль → Решение", desc: "Проблема с товаром До/После" },
+                        { id: "review", label: "🔍 Тест девайса", desc: "Честный краш-тест и разбор" },
+                        { id: "hype", label: "⚡ Вирусный POV", desc: "Шок-эффект, динамика, крючок" },
+                      ].map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => setAiStyle(st.id)}
+                          className={cn(
+                            "px-2 py-1.5 rounded text-left transition-all",
+                            aiStyle === st.id
+                              ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-medium"
+                              : "bg-surface-3 text-text-secondary hover:text-text-primary"
+                          )}
+                        >
+                          <div className="text-2xs font-medium">{st.label}</div>
+                          <div className="text-3xs text-text-tertiary">{st.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* CTA Selector: Артикул vs Слово в Директ */}
+                  <div className="space-y-1.5 rounded-lg bg-surface-2/60 p-2 border border-border/60">
+                    <div className="flex items-center justify-between">
+                      <label className="text-3xs text-text-tertiary font-semibold uppercase">Призыв к действию (CTA):</label>
+                      <span className="text-3xs text-text-tertiary">в конце ролика</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
                       <button
-                        key={st.id}
                         type="button"
-                        onClick={() => setAiStyle(st.id)}
+                        onClick={() => {
+                          setCtaType("article");
+                          if (id) editorApi.patchProject(id, { ctaType: "article" } as any).catch(() => {});
+                        }}
                         className={cn(
-                          "px-2 py-1.5 rounded text-2xs text-left transition-all",
-                          aiStyle === st.id
-                            ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-medium"
+                          "px-2 py-1 rounded text-2xs font-medium transition-all text-center",
+                          ctaType === "article"
+                            ? "bg-brand-500/25 text-brand-300 ring-1 ring-brand-500/50"
                             : "bg-surface-3 text-text-secondary hover:text-text-primary"
                         )}
                       >
-                        {st.label}
+                        📦 Артикул (WB/Ozon)
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCtaType("direct");
+                          if (id) editorApi.patchProject(id, { ctaType: "direct" } as any).catch(() => {});
+                        }}
+                        className={cn(
+                          "px-2 py-1 rounded text-2xs font-medium transition-all text-center",
+                          ctaType === "direct"
+                            ? "bg-brand-500/25 text-brand-300 ring-1 ring-brand-500/50"
+                            : "bg-surface-3 text-text-secondary hover:text-text-primary"
+                        )}
+                      >
+                        📩 Слово в Директ
+                      </button>
+                    </div>
+
+                    {ctaType === "article" ? (
+                      <p className="text-3xs text-text-tertiary leading-snug">
+                        AI нативно упомянет артикул: <i>«артикул оставил в описании / комментариях / закрепе»</i>
+                      </p>
+                    ) : (
+                      <div className="space-y-1 pt-1 animate-fade-in">
+                        <div className="flex items-center justify-between text-3xs text-text-tertiary">
+                          <span>Кодовое слово для Direct:</span>
+                          <span className="font-mono text-brand-400">«Пиши {directWord || '...'}»</span>
+                        </div>
+                        <input
+                          value={directWord}
+                          onChange={(e) => {
+                            const val = e.target.value.toUpperCase();
+                            setDirectWord(val);
+                          }}
+                          onBlur={() => {
+                            if (id) editorApi.patchProject(id, { directWord } as any).catch(() => {});
+                          }}
+                          placeholder="ПЛОЙКА, ХОЧУ, ССЫЛКА..."
+                          className="w-full bg-surface-1 border border-border rounded px-2 py-1 text-2xs font-mono text-text-primary uppercase tracking-wide focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between text-xs">

@@ -62,6 +62,8 @@ const patchProjectSchema = z.object({
   targetClipSeconds: z.number().min(3).max(180).optional(),
   voiceId: z.string().optional(),
   productInfo: z.string().max(3000).optional(),
+  ctaType: z.enum(['article', 'direct', 'auto']).optional(),
+  directWord: z.string().max(50).optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -626,6 +628,8 @@ export async function editorRoutes(app: FastifyInstance) {
           ...(body.config ?? {}),
           ...(body.voiceId !== undefined ? { voiceId: body.voiceId } : {}),
           ...(body.productInfo !== undefined ? { productInfo: body.productInfo } : {}),
+          ...(body.ctaType !== undefined ? { ctaType: body.ctaType } : {}),
+          ...(body.directWord !== undefined ? { directWord: body.directWord } : {}),
         } as object,
       },
     });
@@ -742,11 +746,13 @@ export async function editorRoutes(app: FastifyInstance) {
     const schema = z.object({
       topic: z.string().max(500).optional(),
       projectName: z.string().max(200).optional(),
-      style: z.enum(['hype', 'educational', 'story', 'sales', 'humor', 'minimal']).default('hype'),
+      style: z.enum(['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal']).default('blogger'),
       targetSeconds: z.number().min(5).max(180).optional(),
       productInfo: z.string().max(3000).optional(),
       currentScript: z.string().max(5000).optional(),
       mode: z.enum(['generate', 'expand', 'fit']).default('generate'),
+      ctaType: z.enum(['article', 'direct', 'auto']).default('article'),
+      directWord: z.string().max(50).optional(),
       useSourceTranscript: z.boolean().default(true),
       apiKey: z.string().optional(),
     });
@@ -789,6 +795,8 @@ export async function editorRoutes(app: FastifyInstance) {
       productInfo: effectiveProductInfo,
       currentScript: body.currentScript,
       mode: body.mode,
+      ctaType: body.ctaType,
+      directWord: body.directWord,
       sourceTranscript,
       language: 'ru',
       variantCount: 3,
@@ -802,6 +810,8 @@ export async function editorRoutes(app: FastifyInstance) {
         config: {
           ...currentConfig,
           ...(effectiveProductInfo ? { productInfo: effectiveProductInfo } : {}),
+          ctaType: body.ctaType,
+          ...(body.directWord ? { directWord: body.directWord } : {}),
           generatedScript: result.script,
           scriptHook: result.hook,
           scriptTitle: result.title,

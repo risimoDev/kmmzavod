@@ -1,11 +1,14 @@
 /**
  * OpenRouter AI Service for apps/api.
  * Features:
- *  - Native marketing & organic recommendation architecture (value-first, soft-sell, no "hard-sell in the face")
- *  - Project title and description integration for targeted messaging and organic discovery
+ *  - Native E-commerce & Product Review Architecture (goods/commodities on WB, Ozon, TikTok Shop)
+ *  - Automatic product category and audience deduction from project title and details
+ *  - Conversational, natural product naming (synonyms like "эта плойка", "стайлер", "эта малышка", "находка")
+ *  - Multiple personas: Live Blogger/UGC, Pain -> Solution (Before/After), Honest Crash-Test, Viral POV
+ *  - Diverse native CTAs: Dynamic marketplace articles in description/comments OR secret keyword to DM
  *  - Dedicated Text Expansion & Fit engine (when script is too short for video duration)
  *  - Automatic cascade fallback across free models (:free)
- *  - Natural Fish Audio emotion tags ([excited], [confident], [whispering], [surprised], [calm])
+ *  - Natural Fish Audio emotion tags ([excited], [confident], [whispering], [surprised], [gasp], [calm])
  *  - Offline / mock intelligent heuristic generator
  */
 
@@ -32,7 +35,15 @@ export interface ScriptGenerationResult {
   modelUsed: string;
 }
 
-export type ScriptStyle = 'hype' | 'educational' | 'story' | 'sales' | 'humor' | 'minimal';
+export type ScriptStyle =
+  | 'blogger'     // Живой блогер / Находка
+  | 'story'       // Боль → Решение (До/После)
+  | 'review'      // Честный краш-тест / Обзор
+  | 'hype'        // Вирусный POV / Шок
+  | 'educational' // Экспертный лайфхак
+  | 'sales'       // Нативная рекомендация
+  | 'humor'       // С юмором
+  | 'minimal';
 
 export interface GenerateScriptOptions {
   topic?: string;
@@ -43,6 +54,8 @@ export interface GenerateScriptOptions {
   sourceTranscript?: string;
   currentScript?: string;
   mode?: 'generate' | 'expand' | 'fit';
+  ctaType?: 'article' | 'direct' | 'auto';
+  directWord?: string;
   language?: string;
   variantCount?: number;
   apiKey?: string;
@@ -84,17 +97,24 @@ export function enrichScriptToWordCount(
   deficit: number,
   projectName?: string,
   productInfo?: string,
+  ctaType: 'article' | 'direct' | 'auto' = 'article',
+  directWord: string = 'ХОЧУ',
 ): string {
   if (deficit <= 0) return script;
-  const name = (projectName || 'этот инструмент').trim();
-  const infoSnippet = productInfo ? `Ведь ${productInfo.slice(0, 100).trim()}. ` : '';
+  const name = (projectName || 'этот товар').trim();
+  const infoSnippet = productInfo ? `Кстати, ${productInfo.slice(0, 90).trim()}. ` : '';
+
+  const ctaPhrase =
+    ctaType === 'direct'
+      ? `[whispering] Напиши слово ${directWord.toUpperCase()} мне в директ — сразу пришлю прямую ссылку, где заказывала!`
+      : `[whispering] Артикул на эту прелесть я уже закрепила в описании профиля, сохраняйте, пока не раскупили!`;
 
   const modules = [
-    `[confident] Самое приятное, что ${name} избавляет от всей рутины и экономит часы времени каждую неделю.`,
-    `[whispering] ${infoSnippet}Я сам перепробовал кучу вариантов, но именно это решение дало самый предсказуемый и качественный результат.`,
-    `[excited] Попробуйте применить этот подход сами — разницу почувствуете буквально с первых минут.`,
-    `[confident] Если вам тоже актуально упростить эту задачу — сохраняйте ролик, чтобы не потерять.`,
-    `[whispering] А ссылку на ${name} и все подробности я аккуратно оставил в описании профиля.`,
+    `[confident] Самое приятное, что эта штука реально избавляет от лишней возни и экономит кучу времени.`,
+    `[whispering] ${infoSnippet}Качество оказалось в разы лучше, чем я ожидала за эти деньги.`,
+    `[excited] Попробуйте сами — разницу заметите буквально с первого применения.`,
+    `[confident] Обязательно сохраняйте видео, чтобы не потерять классную находку.`,
+    ctaPhrase,
   ];
 
   let current = script.trim();
@@ -104,7 +124,11 @@ export function enrichScriptToWordCount(
   }
 
   while (countWords(current) < countWords(script) + deficit) {
-    current += ` [confident] Все детали и ссылку прикрепил в описании профиля, пользуйтесь на здоровье!`;
+    if (ctaType === 'direct') {
+      current += ` [confident] Напиши ${directWord.toUpperCase()} в директ, пришлю все подробности!`;
+    } else {
+      current += ` [confident] Все подробности и артикул оставила в описании, пользуйтесь!`;
+    }
   }
 
   return current;
@@ -126,18 +150,22 @@ function generateMockFitScript(opts: {
   projectName?: string;
   productInfo?: string;
   targetSeconds?: number;
+  ctaType?: 'article' | 'direct' | 'auto';
+  directWord?: string;
 }): ScriptGenerationResult {
-  const name = (opts.projectName || opts.topic || 'этот инструмент').trim();
+  const name = (opts.projectName || opts.topic || 'товар').trim();
   const info = (opts.productInfo || '').trim();
   const sec = Math.max(10, Math.min(180, opts.targetSeconds ?? 30));
   const targetWords = Math.round(sec * 2.05);
+  const cta = opts.ctaType || 'article';
+  const word = opts.directWord || 'ХОЧУ';
 
   let baseScript = opts.currentScript.trim();
   let currentCount = countWords(baseScript);
 
   if (currentCount < targetWords) {
     const deficit = targetWords - currentCount;
-    baseScript = enrichScriptToWordCount(baseScript, deficit, name, info);
+    baseScript = enrichScriptToWordCount(baseScript, deficit, name, info, cta, word);
   } else if (currentCount > Math.round(sec * 2.25)) {
     baseScript = truncateScriptToWordCount(baseScript, Math.round(sec * 2.15));
   }
@@ -153,7 +181,7 @@ function generateMockFitScript(opts: {
     captions: [
       {
         caption: `${hook}\n\n${stripEmotionTags(scriptClean).slice(0, 160)}...`,
-        hashtags: ['#вирусное', '#лайфхак', '#reels', '#shorts', '#находка'],
+        hashtags: ['#находка', '#распаковка', '#вайлдберриз', '#озон', '#тренды'],
       },
     ],
     modelUsed: 'mock-fit-fallback',
@@ -166,42 +194,57 @@ function generateMockScript(opts: {
   productInfo?: string;
   style?: ScriptStyle;
   targetSeconds?: number;
+  ctaType?: 'article' | 'direct' | 'auto';
+  directWord?: string;
 }): ScriptGenerationResult {
-  const name = (opts.projectName || opts.topic || 'этот инструмент').trim();
+  const rawName = (opts.projectName || opts.topic || 'плойка для волос').trim();
   const info = (opts.productInfo || '').trim();
   const sec = Math.max(10, Math.min(180, opts.targetSeconds ?? 30));
   const targetWords = Math.round(sec * 2.05);
+  const ctaType = opts.ctaType || 'article';
+  const directWord = (opts.directWord || 'ХОЧУ').trim();
 
-  let hook = `[surprised] Большинство людей даже не догадываются, сколько времени они теряют на эту простую задачу!`;
-  let body = `[confident] Вместо того чтобы часами делать всё вручную и переделывать по кругу, есть гораздо более удобный способ. [whispering] Я сам долго мучился, пока не открыл для себя ${name}. [excited] Фишка в том, что весь процесс теперь занимает считанные секунды и работает практически на автомате.`;
-  let cta = `[confident] Кому актуально — обязательно сохраняйте, [whispering] а ссылку на ${name} я оставил в описании профиля!`;
+  // Natural short name deduction for mock
+  let shortName = 'эта штука';
+  if (/плойк|стайлер|завивк|щипц/i.test(rawName)) shortName = 'эта плойка';
+  else if (/пылесос/i.test(rawName)) shortName = 'этот пылесос';
+  else if (/наушник/i.test(rawName)) shortName = 'эти наушники';
+  else if (/органайзер/i.test(rawName)) shortName = 'этот органайзер';
+  else if (/отпаривател/i.test(rawName)) shortName = 'этот отпариватель';
 
-  if (opts.style === 'sales' || !opts.style) {
-    hook = `[curious] Знаете, почему у одних уходит целый день на рутину, а другие закрывают этот вопрос за пять минут?`;
-    body = `[confident] Всё дело в правильном инструменте. [whispering] Мы долго тестировали разные варианты, пока не нашли ${name}. [excited] Это решение буквально забирает на себя девяносто процентов работы и выдает результат без лишней головной боли. [confident] Главное — один раз настроить и забыть о проблеме.`;
-    cta = `[whispering] Если хотите внедрить это у себя — загляните в описание профиля, там оставил подробный разбор и ссылку.`;
-  } else if (opts.style === 'hype') {
-    hook = `[gasp] Честно, я сам был в шоке, когда впервые увидел, как это работает!`;
-    body = `[excited] То, на что раньше уходили недели сложных действий, теперь делается буквально в один клик. [confident] Смотрите сами на эту скорость и аккуратность. [whispering] Про ${name} пока мало кто знает, но именно такие находки дают максимальное преимущество.`;
-    cta = `[confident] Сохраняйте себе этот лайфхак, а ссылку на инструмент я прикрепил в шапке профиля.`;
+  let cta = `[whispering] Артикул на эту прелесть оставила в описании профиля, сохраняйте!`;
+  if (ctaType === 'direct') {
+    cta = `[whispering] Напиши слово ${directWord.toUpperCase()} мне в директ, и я сразу пришлю прямую ссылку!`;
+  }
+
+  let hook = `[surprised] Девчонки, я просто в шоке от того, как работает ${shortName}!`;
+  let body = `[excited] Заказала на пробу чисто из любопытства, но это реально лучшая находка за последнее время. [confident] Локоны крутятся буквально за пять секунд, волосы не пережигаются и держатся до самого вечера. [whispering] Больше никаких сорока минут перед зеркалом — всё делается легко и на полном расслаблении.`;
+
+  if (opts.style === 'review') {
+    hook = `[curious] Проверяем самый вирусный девайс из соцсетей: реально ли ${shortName} стоит своих денег?`;
+    body = `[confident] Протестировала на себе вдоль и поперек. [excited] Нагревается моментально, покрытие качественное, а главное — пряди не путаются и укладка получается как из салона. [whispering] Честно, я ожидала подвоха, но тут всё сделано на совесть.`;
+    cta = ctaType === 'direct'
+      ? `[whispering] Кому интересно протестировать — пиши ${directWord.toUpperCase()} в директ, скину ссылку на проверенного продавца!`
+      : `[confident] Артикул на проверенный магазин закрепила в комментариях, пользуйтесь!`;
   } else if (opts.style === 'story') {
-    hook = `[curious] Мало кто знает, как мы случайно нашли способ упростить этот процесс в несколько раз.`;
-    body = `[whispering] Сначала казалось, что без огромной команды тут не справиться. [confident] Но однажды мы протестировали подход на базе ${name} — и всё изменилось. [excited] Рутина исчезла, а качество выросло так, что первые результаты удивили даже нас самих.`;
-    cta = `[confident] Кому интересно повторить этот опыт — загляните в профиль, там оставил все контакты и детали.`;
-  } else if (opts.style === 'educational') {
-    hook = `[confident] Вот три неочевидных правила, о которых молчат девяносто процентов специалистов.`;
-    body = `[confident] Первое — не усложнять то, что можно автоматизировать. [whispering] Второе — использовать проверенные решения вроде ${name}, которые берут базовую рутину на себя. [excited] И третье — сосредоточиться только на главном результате, пока система делает остальное.`;
-    cta = `[confident] Сохраняйте эту памятку, а ссылку на сам инструмент найдете в описании профиля!`;
+    hook = `[gasp] Если вас тоже бесит тратить кучу времени на сборы — смотрите сюда!`;
+    body = `[confident] Раньше у меня уходило полтора часа, чтобы привести себя в порядок. [whispering] Пока я случайно не наткнулась на эту находку. [excited] Теперь на всю красоту уходит ровно пять минут, а результат держится идеально. [confident] Просто спасение на каждый день.`;
+    cta = ctaType === 'direct'
+      ? `[whispering] Напиши ${directWord.toUpperCase()} в директ — поделюсь ссылкой и лайфхаком по настройке!`
+      : `[whispering] Сохраняйте, чтобы не потерять, а артикул уже ждет вас в описании профиля!`;
+  } else if (opts.style === 'hype') {
+    hook = `[gasp] Честно, я ни за что бы не поверила, пока сама не увидела этот эффект!`;
+    body = `[excited] Смотрите, как ${shortName} справляется всего за одно движение! [surprised] Никаких сложных настроек, просто берешь и делаешь салонный результат дома. [whispering] Удивительно, как такая компактная вещица заменяет кучу дорогих приборов.`;
   }
 
   if (info) {
-    body += ` [confident] Кстати, ключевая особенность: ${info.slice(0, 100)}.`;
+    body += ` [confident] Кстати, ${info.slice(0, 90)}.`;
   }
 
   let fullScript = `${hook} ${body} ${cta}`;
   const curWords = countWords(fullScript);
   if (curWords < targetWords) {
-    fullScript = enrichScriptToWordCount(fullScript, targetWords - curWords, name, info);
+    fullScript = enrichScriptToWordCount(fullScript, targetWords - curWords, rawName, info, ctaType, directWord);
   }
 
   fullScript = sanitizeForVoiceover(fullScript);
@@ -209,15 +252,15 @@ function generateMockScript(opts: {
   return {
     hook: stripEmotionTags(hook),
     script: fullScript,
-    title: name.slice(0, 60),
+    title: rawName.slice(0, 60),
     captions: [
       {
         caption: `${stripEmotionTags(hook)}\n\n${stripEmotionTags(body)}`,
-        hashtags: ['#лайфхак', '#полезное', '#рекомендации', '#reels', '#shorts'],
+        hashtags: ['#находка', '#распаковка', '#вайлдберриз', '#озон', '#shorts', '#reels'],
       },
       {
-        caption: `Полезная находка: ${name}! Подробности в видео.`,
-        hashtags: ['#лайфхак', '#советы', '#топ', '#тренды'],
+        caption: `Находка года: ${rawName}! Артикул и тест в видео.`,
+        hashtags: ['#вайлдберриз', '#озон', '#обзор', '#лайфхак', '#тренды'],
       },
     ],
     modelUsed: 'mock-heuristic-fallback',
@@ -228,23 +271,25 @@ export class OpenRouterService {
   async generateScript(opts: GenerateScriptOptions): Promise<ScriptGenerationResult> {
     const effectiveKey = (opts.apiKey || API_KEY || '').trim();
     const isMock = !effectiveKey || effectiveKey.startsWith('mock_');
-    const style = opts.style || 'hype';
+    const style = opts.style || 'blogger';
     const seconds = Math.max(10, Math.min(180, opts.targetSeconds ?? 30));
     const minWords = Math.max(15, Math.round(seconds * 1.95));
     const maxWords = Math.round(seconds * 2.20);
     const targetWords = Math.round(seconds * 2.05);
     const variantCount = Math.max(1, Math.min(10, opts.variantCount ?? 3));
 
-    const effectiveProjectName = (opts.projectName || opts.topic || 'Видеоролик').trim();
+    const effectiveProjectName = (opts.projectName || opts.topic || 'Товар').trim();
     const effectiveTopic = (opts.topic || effectiveProjectName).trim();
     const effectiveProductInfo = (opts.productInfo || '').trim();
+    const ctaType = opts.ctaType || 'article';
+    const directWord = (opts.directWord || 'ХОЧУ').trim();
 
     const isFitMode = (opts.mode === 'fit' || opts.mode === 'expand') && Boolean(opts.currentScript?.trim());
 
     if (isMock) {
       logger.info(
-        { projectName: effectiveProjectName, topic: effectiveTopic, style, seconds, targetWords, isFitMode },
-        'OpenRouter (api): Key not set or mock mode, using native heuristic generator with Fish Audio emotion tags',
+        { projectName: effectiveProjectName, topic: effectiveTopic, style, seconds, targetWords, isFitMode, ctaType },
+        'OpenRouter (api): Key not set or mock mode, using native product heuristic generator with Fish Audio emotion tags',
       );
       if (isFitMode) {
         return generateMockFitScript({
@@ -253,6 +298,8 @@ export class OpenRouterService {
           projectName: effectiveProjectName,
           productInfo: effectiveProductInfo,
           targetSeconds: seconds,
+          ctaType,
+          directWord,
         });
       }
       return generateMockScript({
@@ -261,7 +308,47 @@ export class OpenRouterService {
         productInfo: effectiveProductInfo,
         style,
         targetSeconds: seconds,
+        ctaType,
+        directWord,
       });
+    }
+
+    // Dynamic CTA specification
+    let ctaInstructions: string;
+    if (ctaType === 'direct') {
+      ctaInstructions = `ФИНАЛЬНЫЙ ПРИЗЫВ (СТРОГО В ДИРЕКТ):
+- В самом конце ролика призови написать в директ/личку кодовое слово "${directWord.toUpperCase()}".
+- Пример: "[whispering] Напиши слово ${directWord.toUpperCase()} мне в директ, и я сразу пришлю прямую ссылку, где заказывала со скидкой!" или "[confident] Пиши ${directWord.toUpperCase()} в директ — скину ссылочку на проверенного продавца!"`;
+    } else if (ctaType === 'article') {
+      ctaInstructions = `ФИНАЛЬНЫЙ ПРИЗЫВ (СТРОГО АРТИКУЛ НА МАРКЕТПЛЕЙСЕ):
+- В самом конце ролика нативно предложи артикул (на WB / Ozon), каждый раз формулируя по-разному, живо и без рекламы в лоб:
+  * "[whispering] Артикул на эту прелесть уже оставила в описании, сохраняйте, пока не раскупили!"
+  * "[confident] Артикул закрепила в комментариях под этим роликом — пользуйтесь на здоровье!"
+  * "[whispering] Сохраняйте лайфхак себе, а артикул на товар ждет вас в шапке профиля!"
+  * "[confident] Кому нужен артикул на эту находку — ищите прямо в описании!"`;
+    } else {
+      ctaInstructions = `ФИНАЛЬНЫЙ ПРИЗЫВ:
+- Нативно предложи артикул в описании/комментариях или кодовое слово в директ ("${directWord.toUpperCase()}"), выбери самый органичный вариант под контекст.`;
+    }
+
+    // Persona & Style specification
+    let personaGuidance: string;
+    if (style === 'blogger' || style === 'sales') {
+      personaGuidance = `ПЕРСОНАЖ: Искренний живой блогер / покупатель («Находка с маркетплейса / Распаковка»).
+- Тон: Разговорный, теплый, эмоциональный, как будто делишься крутой находкой с лучшей подругой или другом.
+- Лексика: «девчонки/ребята», «урвала на пробу», «эта малышка», «находка года», «я просто в шоке», «спасение на каждый день».`;
+    } else if (style === 'story') {
+      personaGuidance = `ПЕРСОНАЖ: Боль → Решение / Контраст «До и После».
+- Тон: Жизненный сторителлинг. Начни с наболевшей проблемы («Раньше я тратила сорок минут на укладку/уборку...», «Если вас тоже бесит, когда...»).
+- Развитие: Как случайно открыла для себя этот товар и как он решил проблему за считанные минуты.`;
+    } else if (style === 'review' || style === 'educational') {
+      personaGuidance = `ПЕРСОНАЖ: Честный краш-тест / Экспертный обзор вирусного товара.
+- Тон: Проверка на практике («Решила проверить самый вирусный девайс из Тиктока: реально ли он так хорош?»).
+- Подача: Честный разбор фактов, удобства, фишек, проверка заявленных свойств. Звучит авторитетно и независимо.`;
+    } else {
+      personaGuidance = `ПЕРСОНАЖ: Вирусный POV / Шок-эффект.
+- Тон: Высокий драйв, разрыв шаблона в первые 3 секунды («Ни за что бы не поверила, пока сама не попробовала!»).
+- Подача: Фокус на визуальном вау-эффекте от работы товара.`;
     }
 
     let systemPrompt: string;
@@ -269,118 +356,127 @@ export class OpenRouterService {
 
     if (isFitMode) {
       const currentWordCount = countWords(opts.currentScript || '');
-      systemPrompt = `Ты — ведущий сценарист вирусных коротких видео (TikTok, Instagram Reels, YouTube Shorts), мастер НАТИВНЫХ интеграций и скрытого органического маркетинга.
-Твоя задача — ДОРАБОТАТЬ, УЛУЧШИТЬ И АДАПТИРОВАТЬ имеющийся текст автора под хронометраж видео, сделав интеграцию продукта "${effectiveProjectName}" МАКСИМАЛЬНО НАТИВНОЙ, мягкой и органичной (БЕЗ агрессивных продаж в лоб).
+      systemPrompt = `Ты — топовый сценарист вирусных роликов для соцсетей (Reels, TikTok, Shorts), специализирующийся на товарном маркетинге (Wildberries, Ozon, TikTok Shop).
+Твоя задача — ДОРАБОТАТЬ, УЛУЧШИТЬ И АДАПТИРОВАТЬ текст автора под видеохронометраж, сделав озвучку МАКСИМАЛЬНО НАТИВНЫМ обзором товара (БЕЗ рекламы "в лоб").
 
-КОНТЕКСТ ПРОЕКТА:
-- Продукт/проект/инструмент: "${effectiveProjectName}"
-${effectiveProductInfo ? `- Описание, польза и фишки: "${effectiveProductInfo}"` : ''}
+ТОВАР В КАДРЕ:
+- Название/исходные данные: "${effectiveProjectName}"
+${effectiveProductInfo ? `- Особенности, польза и детали: "${effectiveProductInfo}"` : ''}
+
+ОПРЕДЕЛЕНИЕ ТОВАРА И НАИМЕНОВАНИЕ:
+1. По названию "${effectiveProjectName}" САМ определи, что это за конкретный товар (например, плойка/стайлер, отпариватель, автопылесос, увлажнитель, органайзер и т.д.).
+2. НЕ НАЗЫВАЙ товар формальным длинным названием! Называй его естественно и разнообразно в разговорной речи: "эта плойка", "стайлер", "эта малышка", "девайс", "находка", "эта штука", "прибор".
 
 КРИТИЧЕСКИ ВАЖНО — ТОЧНОСТЬ ХРОНОМЕТРАЖА:
 - Длительность видео: ровно ${seconds} секунд.
 - Озвучка ДОЛЖНА длиться ровно ${seconds} секунд!
 - Исходный черновик содержит всего ${currentWordCount} слов.
-- Итоговый объем слов (без тегов в скобках) ДОЛЖЕН составлять СТРОГО от ${minWords} до ${maxWords} слов (целевой объем: ровно ${targetWords} слов).
-- Если слов будет меньше ${minWords}, в конце видео образуется неловкая тишина!
+- Итоговый объем произносимых слов (без тегов в скобках) ДОЛЖЕН составлять СТРОГО от ${minWords} до ${maxWords} слов (целевой объем: ровно ${targetWords} слов).
+- Если слов меньше ${minWords}, в конце видео будет неловкая пауза и тишина!
 
-ГЛАВНЫЕ ПРИНЦИПЫ НАТИВНОЙ ПОДАЧИ:
-1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ агрессивные продажи в лоб ("купите прямо сейчас", "уникальная цена", "скидка", "спешите заказать").
-2. СОХРАНИ ГОЛОС И СУТЬ: Сохрани ключевой посыл, стиль и главные мысли автора из исходного текста.
-3. НАТИВНАЯ ИНТЕГРАЦИЯ:
-   - Раскрой подробности, личный опыт или практическую пользу инструмента "${effectiveProjectName}".
-   - Покажи, как продукт естественно закрывает рутину, экономит время или нервы.
-   - Используй живые разговорные связки ("И вот в чем секрет...", "Самое удобное, что...").
-4. МЯГКИЙ НАТИВНЫЙ ФИНАЛ: В конце не дави на зрителя, а мягко предложи заглянуть за подробностями ("Кому актуально — сохраняйте, ссылку оставил в описании", "Попробуйте сами, детали в профиле", "Если нужно такое же решение — ссылка в шапке").
-5. ТЕГИ ЭМОЦИЙ FISH AUDIO (обязательно 3–6 тегов перед ключевыми репликами):
-   - [whispering] — секрет, интрига, рекомендация по дружбе
-   - [confident] — экспертность, убедительность, польза
-   - [excited] — искреннее воодушевление результатом
-   - [surprised] — удивление, разрыв шаблона
-   - [calm] — спокойная, доверительная подача
-6. ЧИСТЫЙ ТЕКСТ ДЛЯ ОЗВУЧКИ (script):
+${personaGuidance}
+
+${ctaInstructions}
+
+ПРАВИЛА ОЗВУЧКИ:
+1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ телевизионные клише "в лоб": "купите прямо сейчас", "уникальная цена", "скидка пятьдесят процентов", "спешите приобрести". Зритель должен слышать живой искренний обзор, а не рекламу из телемагазина!
+2. СОХРАНИ ГОЛОС И СУТЬ: Сохрани ключевой посыл автора из исходного текста, но раскрой сочные детали использования товара, скорость работы и результат.
+3. ТЕГИ ЭМОЦИЙ FISH AUDIO (обязательно 3–6 тегов перед ключевыми фразами):
+   - [surprised] — удивление, шок
+   - [gasp] — резкий вдох от неожиданности
+   - [whispering] — секрет, интрига, доверительная рекомендация
+   - [confident] — экспертная польза, факт
+   - [excited] — восторг от вау-эффекта
+   - [calm] — спокойная дружеская реплика
+4. ЧИСТЫЙ ТЕКСТ ДЛЯ ДИКТОРСКОЙ ОЗВУЧКИ:
    - Никаких смайликов/эмодзи, решеток, звездочек и ссылок!
-   - Все числа обязательно пиши СЛОВАМИ (например, "пять шагов", "девяносто девять процентов", "две тысячи рублей").
-   - Итоговый объем: СТРОГО от ${minWords} до ${maxWords} слов!
+   - Все числа обязательно пиши СЛОВАМИ (например, "пять минут", "двести градусов", "три насадки").
 
 Ответ верни СТРОГО в формате JSON:
 {
   "hook": "первая цепляющая фраза-крючок (до 8 слов, без тегов)",
-  "title": "цепляющий заголовок для ролика",
-  "script": "нативно улучшенный и расширенный текст для диктора с тегами эмоций в скобках",
+  "title": "название товара или ролика",
+  "script": "нативно адаптированный текст для диктора с тегами эмоций в скобках",
   "captions": [
     {
-      "caption": "текст поста для соцсетей с мягкой рекомендацией",
-      "hashtags": ["#хэштег1", "#хэштег2", "#хэштег3", "#хэштег4"]
+      "caption": "текст поста для соцсетей с артикулом/призывом",
+      "hashtags": ["#вайлдберриз", "#озон", "#находка", "#reels", "#shorts"]
     }
   ]
 }`;
 
       userPrompt = [
-        `Исходный текст для нативной адаптации и расширения: "${opts.currentScript}"`,
-        `Продукт / инструмент: "${effectiveProjectName}"`,
-        effectiveProductInfo ? `Польза / особенности: "${effectiveProductInfo}"` : '',
+        `Черновик текста для адаптации и добора слов: "${opts.currentScript}"`,
+        `Товар: "${effectiveProjectName}"`,
+        effectiveProductInfo ? `Польза / фишки: "${effectiveProductInfo}"` : '',
         `СТРОГО СОБЛЮДАЙ ХРОНОМЕТРАЖ: ровно ${seconds} секунд видео (от ${minWords} до ${maxWords} слов текста, цель: ~${targetWords} слов).`,
-        `ВАЖНО: Никаких продаж в лоб. Только нативная, искренняя и мягкая подача через пользу.`,
+        `Цель: нативный обзор реального товара. Никаких продаж в лоб.`,
       ].filter(Boolean).join('\n');
     } else {
-      systemPrompt = `Ты — ведущий сценарист вирусных коротких видео (TikTok, Instagram Reels, YouTube Shorts), мастер НАТИВНЫХ интеграций и скрытого органического маркетинга.
-Твоя задача — создать захватывающий сценарий для озвучки ролика, который НЕ продает "в лоб", а воспринимается как ценный контент, полезный лайфхак или искренняя личная рекомендация, ненавязчиво подводя зрителя к продукту "${effectiveProjectName}".
+      systemPrompt = `Ты — топовый сценарист вирусных роликов для соцсетей (Reels, TikTok, Shorts), специализирующийся на товарном маркетинге (Wildberries, Ozon, TikTok Shop).
+Твоя задача — создать захватывающий сценарий для озвучки, который воспринимается как живой искренний обзор крутого товара или лайфхак (БЕЗ продаж "в лоб"), с мягким нативным предложением в финале.
 
-КОНТЕКСТ ПРОЕКТА:
-- Продукт/проект/инструмент: "${effectiveProjectName}"
-${effectiveProductInfo ? `- Описание, польза и особенности: "${effectiveProductInfo}"` : ''}
+ТОВАР В КАДРЕ:
+- Название/исходные данные: "${effectiveProjectName}"
+${effectiveProductInfo ? `- Особенности, польза и детали: "${effectiveProductInfo}"` : ''}
+
+ОПРЕДЕЛЕНИЕ ТОВАРА И НАИМЕНОВАНИЕ:
+1. По названию "${effectiveProjectName}" САМ логически определи, что это за конкретный товар (плойка/стайлер, отпариватель, робот-пылесос, увлажнитель, автоаксессуар, органайзер и т.д.).
+2. НЕ НАЗЫВАЙ товар формальным длинным магазинным названием! Называй его естественно и разговорно: "эта плойка", "стайлер", "эта малышка", "девайс", "находка", "эта штука", "прибор".
+3. Пойми боль целевой аудитории (что бесило раньше) и как этот товар быстро закрывает вопрос в реальной жизни.
 
 КРИТИЧЕСКИ ВАЖНО — ТОЧНОСТЬ ХРОНОМЕТРАЖА:
 - Длительность видео: ровно ${seconds} секунд.
 - Озвучка ДОЛЖНА звучать ровно ${seconds} секунд!
 - Общий объем произносимых слов (без учета тегов в скобках): СТРОГО от ${minWords} до ${maxWords} слов (в среднем ${targetWords} слов).
 - Рассчитывай тайминг:
-  * 0–3 сек: Взрывной хук (первая фраза-крючок, 6–8 слов, жизненная ситуация, неочевидный факт или инсайт)
-  * 3–${Math.max(4, seconds - 5)} сек: Удержание через пользу (разбор проблемы, личный опыт, как инструмент "${effectiveProjectName}" нативно решает вопрос)
-  * Последние 4–5 сек: Мягкое нативное предложение (сохранить, заглянуть в шапку профиля или описание)
+  * 0–3 сек: Взрывной эмоциональный хук (первая фраза-крючок, 6–8 слов, жизненная ситуация, разрыв шаблона или интрига)
+  * 3–${Math.max(4, seconds - 5)} сек: Динамичный обзор в реальном деле (как товар работает, скорость, простота, тактильные ощущения, решение проблемы)
+  * Последние 4–5 сек: Мягкий нативный CTA
 
-ЖЕСТКИЕ ПРАВИЛА — НАТИВНОСТЬ, А НЕ ПРОДАЖА В ЛОБ:
-1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ фразы телевизионной рекламы и агрессивные продажи в лоб: "купите прямо сейчас", "специальное предложение", "успейте купить", "уникальная цена", "скидка", "акция". Зритель мгновенно свайпает такую рекламу!
-2. ПОЗИЦИЯ АВТОРА: Эксперт, практик или друг, который делится инсайтом, решением наболевшей проблемы или крутой находкой ("я сам долго искал способ", "делюсь тем, что реально сработало", "многие даже не знают про эту фишку").
-3. РОЛЬ ПРОДУКТА: Продукт "${effectiveProjectName}" упоминается органично — как инструмент, который помог получить результат, автоматизировать рутину или сэкономить время.
-4. МЯГКИЙ НАТИВНЫЙ ФИНАЛ:
-   - "Кому актуально — сохраняйте, ссылку на ${effectiveProjectName} оставил в описании профиля."
-   - "Попробуйте применить сами — все подробности прикрепил в шапке."
-   - "Если нужно такое же решение без лишней головной боли — ссылка в профиле."
-   - "Сохраняйте лайфхак, чтобы не потерять!"
+${personaGuidance}
 
-ТЕГИ ЭМОЦИЙ FISH AUDIO (обязательно используй 3–6 тегов):
-[whispering] (секрет/делюсь находкой), [confident] (экспертная польза), [excited] (воодушевление результатом), [surprised] (удивление в хуке), [calm] (доверительный совет)
+${ctaInstructions}
 
-ПРАВИЛА ТЕКСТА ДЛЯ ОЗВУЧКИ:
-- Только слова для произношения + теги эмоций в квадратных скобках!
-- НИКАКИХ смайликов/эмодзи, ссылок, звездочек и решеток!
-- Все числа обязательно пиши СЛОВАМИ (например, "пять шагов", "двадцать шестой год", "сто тысяч рублей").
-- Проверь итоговое количество слов: ровно от ${minWords} до ${maxWords} слов!
+ПРАВИЛА ОЗВУЧКИ:
+1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ клише "магазина на диване": "купите прямо сейчас", "скидка пятьдесят процентов", "спешите приобрести". Зритель мгновенно свайпает такую рекламу!
+2. Говори живым языком реального человека, который сам пользуется этой вещью и в восторге от нее.
+3. ТЕГИ ЭМОЦИЙ FISH AUDIO (обязательно 3–6 тегов):
+   - [surprised] — удивление, шок
+   - [gasp] — резкий вдох от неожиданности
+   - [whispering] — секрет, интрига, рекомендация по дружбе
+   - [confident] — экспертная польза, факт
+   - [excited] — искренний восторг от вау-эффекта
+   - [calm] — доверительная реплика
+4. ТЕКСТ ДЛЯ ОЗВУЧКИ:
+   - Только слова для произношения + теги эмоций в квадратных скобках!
+   - НИКАКИХ смайликов/эмодзи, ссылок, звездочек и решеток!
+   - Все числа обязательно пиши СЛОВАМИ (например, "пять минут", "двести градусов", "три насадки").
+   - Проверь итоговое количество слов: ровно от ${minWords} до ${maxWords} слов!
 
 Ответ верни СТРОГО в формате JSON:
 {
   "hook": "первая фраза-крючок (до 8 слов, без тегов)",
-  "title": "цепляющий заголовок для ролика",
+  "title": "название товара или ролика",
   "script": "полный текст для диктора с тегами эмоций в скобках",
   "captions": [
     {
-      "caption": "текст поста для соцсетей с мягкой рекомендацией",
-      "hashtags": ["#хэштег1", "#хэштег2", "#хэштег3", "#хэштег4"]
+      "caption": "текст поста для соцсетей с артикулом/призывом",
+      "hashtags": ["#вайлдберриз", "#озон", "#находка", "#обзор", "#shorts"]
     }
   ]
 }`;
 
       userPrompt = [
-        `Продукт / тема ролика: "${effectiveProjectName}"`,
+        `Товар: "${effectiveProjectName}"`,
         effectiveTopic !== effectiveProjectName ? `Дополнительный контекст: "${effectiveTopic}"` : '',
-        opts.style ? `Стиль повествования: ${style}` : '',
-        effectiveProductInfo ? `Польза / особенности продукта: "${effectiveProductInfo}"` : '',
+        `Стиль / формат обзора: ${style}`,
+        effectiveProductInfo ? `Польза / особенности товара: "${effectiveProductInfo}"` : '',
         opts.sourceTranscript
-          ? `Исходная речь / транскрипт видео для вдохновения: "${opts.sourceTranscript.slice(0, 1500)}"`
+          ? `Транскрипт видеоряда для опоры: "${opts.sourceTranscript.slice(0, 1500)}"`
           : '',
         `СТРОГО СОБЛЮДАЙ ХРОНОМЕТРАЖ: ровно ${seconds} секунд видео (от ${minWords} до ${maxWords} слов текста, цель: ~${targetWords} слов).`,
-        `ВАЖНО: Подача ДОЛЖНА быть нативной и органической, без прямых продаж в лоб.`,
+        `ВАЖНО: Говори как живой человек, нативно обозревающий товар, БЕЗ рекламы в лоб.`,
         `Количество вариантов описаний (captions): ${variantCount}.`,
       ]
         .filter(Boolean)
@@ -428,6 +524,8 @@ ${effectiveProductInfo ? `- Описание, польза и особеннос
           targetWords - actualWords,
           effectiveProjectName,
           effectiveProductInfo,
+          ctaType,
+          directWord,
         );
         scriptClean = sanitizeForVoiceover(scriptClean);
       }
@@ -441,7 +539,7 @@ ${effectiveProductInfo ? `- Описание, польза и особеннос
               caption: stripEmotionTags(c.caption || ''),
               hashtags: c.hashtags || [],
             }))
-          : [{ caption: parsed.title || effectiveProjectName, hashtags: ['#лайфхак', '#reels', '#shorts'] }],
+          : [{ caption: parsed.title || effectiveProjectName, hashtags: ['#вайлдберриз', '#озон', '#находка'] }],
         modelUsed,
       };
     } catch (err: unknown) {
@@ -449,7 +547,7 @@ ${effectiveProductInfo ? `- Описание, польза и особеннос
         ? `HTTP ${err.response?.status}: ${JSON.stringify(err.response?.data ?? err.message)}`
         : err instanceof Error ? err.message : String(err);
 
-      logger.warn({ err: errMsg }, 'OpenRouter (api) failed, using native heuristic script generator');
+      logger.warn({ err: errMsg }, 'OpenRouter (api) failed, using native product heuristic script generator');
       if (isFitMode) {
         return generateMockFitScript({
           currentScript: opts.currentScript!,
@@ -457,6 +555,8 @@ ${effectiveProductInfo ? `- Описание, польза и особеннос
           projectName: effectiveProjectName,
           productInfo: effectiveProductInfo,
           targetSeconds: seconds,
+          ctaType,
+          directWord,
         });
       }
       return generateMockScript({
@@ -465,6 +565,8 @@ ${effectiveProductInfo ? `- Описание, польза и особеннос
         productInfo: effectiveProductInfo,
         style,
         targetSeconds: seconds,
+        ctaType,
+        directWord,
       });
     }
   }
