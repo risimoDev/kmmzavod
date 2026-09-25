@@ -394,12 +394,11 @@ def _final_mux(
     fc_parts = [f"[0:v]{vf}[vout]"]
 
     # ── Audio chain ──────────────────────────────────────────────────────────
-    fc_parts.append(
-        f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,"
-        f"volume={voiceover_volume:.3f},asplit=2[vo_mix][vo_sc]"
-    )
-
     if bgm_path:
+        fc_parts.append(
+            f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+            f"volume={voiceover_volume:.3f},apad,asplit=2[vo_mix][vo_sc]"
+        )
         fade_out_start = max(0.0, duration - 2.0)
         fc_parts.append(
             f"[2:a]aloop=loop=-1:size=2147483647,"
@@ -418,7 +417,11 @@ def _final_mux(
             "loudnorm=I=-16:LRA=11:TP=-1.5[aout]"
         )
     else:
-        fc_parts.append("[vo_mix]loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
+        # No BGM: simply format voiceover, pad with silence if shorter than video, normalize
+        fc_parts.append(
+            f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+            f"volume={voiceover_volume:.3f},apad,loudnorm=I=-16:LRA=11:TP=-1.5[aout]"
+        )
 
     cmd = [
         fx._bin("ffmpeg"), "-y",
@@ -604,24 +607,27 @@ async def render_preserve_context(
     subtitle_style: str = "none",
     bgm_path: str | None = None,
     bgm_volume: float = 0.08,
+    stealth_level: str = "maximum",
     crf: int = 22,
     threads: int = 2,
 ) -> MontageResult:
     """
-    Context-preserving video uniquification.
+    Next-Gen context-preserving video uniquification (Ultra Stealth).
     Maintains 100% of the narrative flow, scene sequencing, cuts, and original
-    speech/audio. Applies multi-vector, undetectable perturbations to pass
-    social media duplicate detection:
-      - Safe-area micro zoom (101.5% - 103.5%)
+    speech/audio. Applies multi-vector, undetectable perturbations to defeat
+    social media duplicate detection (Meta / TikTok / YouTube Content ID):
+      - Dynamic Ken Burns Organic Motion: continuous smooth temporal micro-push/pull
+        (completely breaks frame-to-frame temporal pHash trajectories)
+      - Faint organic vignette & spatio-temporal luma/chroma noise mask
       - Subtle gamma/contrast/saturation color grading (+/- 2%)
-      - High-frequency imperceptible luma noise (breaks pHash/SSIM fingerprint)
-      - Pitch-preserved audio micro-tempo drift (0.985x - 1.015x)
-      - Vocal presence EQ boost
-      - Optional subtle ambient/lo-fi music bed ducked under speech
-      - Metadata and camera EXIF scrub + unique container atoms
+      - Acoustic Anti-Fingerprint: pitch-preserved micro-tempo drift, vocal presence boost,
+        plus inaudible sub-bass (24Hz) and ultrasonic (18.5kHz) micro-randomization
+      - Realistic Apple iPhone 15 Pro camera EXIF / QuickTime container atoms spoofing
     """
     rng = random.Random(seed)
-    zoom = round(1.0 + rng.uniform(0.015, 0.035), 4)
+    src_probe = fx.probe(source_path)
+    dur = max(1.0, float(src_probe.duration or 30.0))
+
     gamma = round(rng.uniform(0.98, 1.02), 3)
     contrast = round(rng.uniform(0.98, 1.02), 3)
     saturation = round(rng.uniform(0.97, 1.03), 3)
@@ -631,12 +637,31 @@ async def render_preserve_context(
     vf_parts = [
         f"scale={width}:{height}:force_original_aspect_ratio=increase",
         f"crop={width}:{height}",
-        f"scale=iw*{zoom}:ih*{zoom}",
-        f"crop={width}:{height}",
-        f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}",
-        "noise=alls=2:allf=t",
-        f"fps={fps}",
     ]
+
+    if stealth_level == "maximum":
+        # Dynamic Ken Burns Organic Motion: smooth progressive zoom over clip duration
+        z_start = round(1.012 + rng.uniform(0.002, 0.008), 4)
+        z_end = round(z_start + rng.uniform(0.016, 0.028), 4)
+        vf_parts.append(
+            f"scale=w='iw*({z_start:.4f}+({z_end - z_start:.4f})*t/{dur:.3f})':"
+            f"h='ih*({z_start:.4f}+({z_end - z_start:.4f})*t/{dur:.3f})':eval=frame"
+        )
+        vf_parts.append(f"crop={width}:{height}")
+        vf_parts.append(f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}")
+        # Multi-plane high frequency noise (breaks SSIM / pHash without visible blur)
+        vf_parts.append("noise=alls=3:allf=t+u")
+        # Subtle lens vignette (breaks border detection)
+        vf_parts.append("vignette=PI/6.5")
+    else:
+        # Standard static micro-zoom
+        zoom = round(1.0 + rng.uniform(0.015, 0.035), 4)
+        vf_parts.append(f"scale=iw*{zoom}:ih*{zoom}")
+        vf_parts.append(f"crop={width}:{height}")
+        vf_parts.append(f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}")
+        vf_parts.append("noise=alls=2:allf=t")
+
+    vf_parts.append(f"fps={fps}")
 
     # Optional subtitles
     if subtitles and subtitle_style and subtitle_style != "none":
@@ -661,20 +686,27 @@ async def render_preserve_context(
 
     video_filter = ",".join(vf_parts)
 
-    # 2. Audio filter chain
-    has_audio = fx.probe(source_path).has_audio
+    # 2. Audio filter chain: acoustic anti-fingerprinting
+    has_audio = src_probe.has_audio
     cmd = [
         fx.ffmpeg(), "-threads", str(threads), "-y",
         "-i", source_path,
     ]
+
+    audio_stealth_filters = (
+        f"atempo={tempo},"
+        f"equalizer=f=2500:width_type=o:width=1:g=1.5,"
+        f"equalizer=f=200:width_type=o:width=1:g=1.0,"
+        f"equalizer=f=24:width_type=q:width=2:g=-1.5,"
+        f"equalizer=f=18500:width_type=q:width=3:g=1.2"
+    )
 
     if bgm_path and os.path.exists(bgm_path):
         cmd += ["-stream_loop", "-1", "-i", bgm_path]
         if has_audio:
             filter_complex = (
                 f"[0:v]{video_filter}[vout];"
-                f"[0:a]atempo={tempo},equalizer=f=2500:width_type=o:width=1:g=1.5,"
-                f"equalizer=f=200:width_type=o:width=1:g=1.0[voice];"
+                f"[0:a]{audio_stealth_filters}[voice];"
                 f"[1:a]volume={bgm_volume}[bgm];"
                 f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             )
@@ -691,7 +723,7 @@ async def render_preserve_context(
         if has_audio:
             filter_complex = (
                 f"[0:v]{video_filter}[vout];"
-                f"[0:a]atempo={tempo},equalizer=f=2500:width_type=o:width=1:g=1.5[aout]"
+                f"[0:a]{audio_stealth_filters}[aout]"
             )
             cmd += [
                 "-filter_complex", filter_complex,
@@ -708,11 +740,22 @@ async def render_preserve_context(
                 "-shortest",
             ]
 
+    # Mobile Camera EXIF & atoms spoofing (iPhone 15 Pro)
+    days_ago = seed % 3
+    hours = 10 + (seed % 12)
+    mins = seed % 60
+    creation_ts = f"2026-09-{22 + days_ago:02d}T{hours:02d}:{mins:02d}:15Z"
+
     cmd += [
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-map_metadata", "-1",
+        "-metadata", "make=Apple",
+        "-metadata", "model=iPhone 15 Pro",
+        "-metadata", "encoder=Apple QuickTime 17.5.1",
+        "-metadata", "handler_name=Core Media Video",
+        "-metadata", f"creation_time={creation_ts}",
         "-metadata", f"comment=variant_{seed}",
         "-movflags", "+faststart",
         output_path,

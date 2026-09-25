@@ -358,8 +358,9 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               height,
               fps,
               beatSync,
+              stealth_level: (config.stealthLevel as string) || (config.stealth_level as string) || 'maximum',
               sceneBreaks: sceneBreaksBySource,
-            },
+            } as any,
             opts: QUEUES['uniquify-render'].defaultJobOptions as any,
           });
         }

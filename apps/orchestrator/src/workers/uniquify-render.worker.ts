@@ -93,6 +93,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           bgm_volume: bgmVolume,
           voiceover_volume: voiceoverVolume,
           beat_sync: beatSync,
+          stealth_level: (job.data as any).stealthLevel ?? (job.data as any).stealth_level ?? 'maximum',
           scene_breaks: sceneBreaks ?? [],
         }, { timeout: 900_000 });
 

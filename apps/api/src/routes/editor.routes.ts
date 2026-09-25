@@ -20,6 +20,7 @@ import { logger } from '../logger';
 import type { EditorAnalyzeJobPayload, EditorRenderJobPayload } from '@kmmzavod/queue';
 import { FishAudioService, FISH_AUDIO_VOICES } from '../services/fish-audio';
 import { OpenRouterService, stripEmotionTags } from '../services/openrouter';
+import { config } from '../config';
 
 const SUBTITLE_STYLES = [
   'none',
@@ -59,6 +60,7 @@ const patchProjectSchema = z.object({
   audioMode: z.enum(['keep', 'replace']).optional(),
   smartCrop: z.boolean().optional(),
   targetClipSeconds: z.number().min(3).max(180).optional(),
+  voiceId: z.string().optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -618,7 +620,11 @@ export async function editorRoutes(app: FastifyInstance) {
         ...(body.audioMode !== undefined ? { audioMode: body.audioMode } : {}),
         ...(body.smartCrop !== undefined ? { smartCrop: body.smartCrop } : {}),
         ...(body.targetClipSeconds !== undefined ? { targetClipSeconds: body.targetClipSeconds } : {}),
-        ...(body.config !== undefined ? { config: { ...currentConfig, ...body.config } as object } : {}),
+        config: {
+          ...currentConfig,
+          ...(body.config ?? {}),
+          ...(body.voiceId !== undefined ? { voiceId: body.voiceId } : {}),
+        } as object,
       },
     });
     return updated;
@@ -633,7 +639,8 @@ export async function editorRoutes(app: FastifyInstance) {
       query: query.query,
       language: query.language,
     });
-    return { voices };
+    const configured = Boolean(config.FISH_AUDIO_API_KEY && !config.FISH_AUDIO_API_KEY.startsWith('mock_'));
+    return { voices, configured };
   });
 
   app.get('/projects/voices', async (req) => {
@@ -644,7 +651,8 @@ export async function editorRoutes(app: FastifyInstance) {
       query: query.query,
       language: query.language,
     });
-    return { voices };
+    const configured = Boolean(config.FISH_AUDIO_API_KEY && !config.FISH_AUDIO_API_KEY.startsWith('mock_'));
+    return { voices, configured };
   });
 
   app.get('/presets', async () => {

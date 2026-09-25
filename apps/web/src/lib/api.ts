@@ -1747,6 +1747,7 @@ export interface EditProject {
   useVision: boolean;
   targetClipCount: number;
   targetClipSeconds: number;
+  voiceId?: string;
   error?: string | null;
   workspaceProjectId?: string | null;
   config?: Record<string, unknown> | null;
@@ -1855,7 +1856,7 @@ export const editorApi = {
     if (params?.query) q.set('query', params.query);
     if (params?.language) q.set('language', params.language);
     const qs = q.toString();
-    return apiFetch<{ voices: FishAudioVoice[] }>(`/api/v1/editor/voices${qs ? `?${qs}` : ''}`);
+    return apiFetch<{ voices: FishAudioVoice[]; configured?: boolean }>(`/api/v1/editor/voices${qs ? `?${qs}` : ''}`);
   },
 
   getPresets: () => apiFetch<{ subtitleStyles: SubtitlePreset[] }>('/api/v1/editor/presets'),

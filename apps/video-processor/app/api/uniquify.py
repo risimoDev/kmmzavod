@@ -105,6 +105,7 @@ class RenderRequest(BaseModel):
     bgm_volume: float = 0.16
     voiceover_volume: float = 1.0
     beat_sync: bool = True
+    stealth_level: str = "maximum"  # "standard" | "maximum"
     # Scene-break timestamps per source clip (aligned to source_storage_keys),
     # so the montage cuts on real scene boundaries.
     scene_breaks: list[list[float]] = Field(default_factory=list)
@@ -214,6 +215,7 @@ def create_router() -> APIRouter:
                         subtitle_style=req.subtitle_style,
                         bgm_path=bgm_path,
                         bgm_volume=req.bgm_volume,
+                        stealth_level=req.stealth_level,
                     )
             else:
                 # Download the shared voiceover for remix montage

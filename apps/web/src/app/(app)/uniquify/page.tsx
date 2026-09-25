@@ -433,6 +433,7 @@ function CreateJobModal({
   const [enableSubtitles, setEnableSubtitles] = useState(true);
   const [enableBgm, setEnableBgm] = useState(true);
   const [beatSync, setBeatSync] = useState(true);
+  const [stealthLevel, setStealthLevel] = useState<"maximum" | "standard">("maximum");
 
   const [tracks, setTracks] = useState<BgmTrack[]>([]);
   const [selectedTracks, setSelectedTracks] = useState<string[]>([]);
@@ -473,6 +474,7 @@ function CreateJobModal({
         variantCount,
         config: {
           mode,
+          stealthLevel,
           aspectRatio,
           language,
           voiceId: mode === 'preserve_context' ? undefined : (voiceId.trim() || undefined),
@@ -548,11 +550,56 @@ function CreateJobModal({
         </div>
 
         {mode === "preserve_context" ? (
-          <div className="p-3 rounded-lg bg-surface-2 ring-1 ring-border text-[11px] text-text-secondary space-y-1">
-            <p className="font-medium text-emerald-400">Целостность сюжета гарантирована</p>
-            <p className="text-text-tertiary">
-              Оригинальная речь, интонации и монтажные склейки останутся 100% нетронутыми. Нейросеть сгенерирует уникальные заголовки и хэштеги для публикации каждого варианта.
-            </p>
+          <div className="space-y-3">
+            <div className="p-3 rounded-lg bg-surface-2 ring-1 ring-border text-[11px] text-text-secondary space-y-1">
+              <p className="font-medium text-emerald-400">Целостность сюжета гарантирована</p>
+              <p className="text-text-tertiary">
+                Оригинальная речь, интонации и монтажные склейки останутся 100% нетронутыми.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-text-secondary">Уровень защиты от дубликатов (Anti-Detection)</label>
+                <span className="text-3xs text-emerald-400 font-medium">Meta & TikTok Safe</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div
+                  onClick={() => setStealthLevel("maximum")}
+                  className={cn(
+                    "cursor-pointer rounded-lg p-2.5 ring-1 transition-all space-y-1",
+                    stealthLevel === "maximum"
+                      ? "bg-emerald-500/10 ring-emerald-500/50 text-text-primary"
+                      : "bg-surface-2 ring-border text-text-secondary hover:bg-surface-3"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 font-semibold text-2xs text-emerald-400">
+                    <span>🛡️ Ultra Stealth</span>
+                    <span className="text-3xs px-1 rounded bg-emerald-500/20 text-emerald-300">Хит</span>
+                  </div>
+                  <p className="text-3xs text-text-tertiary leading-snug">
+                    Динамический Ken Burns зум, акустический рандомизатор частот, EXIF камеры iPhone 15 Pro, микро-зерно.
+                  </p>
+                </div>
+
+                <div
+                  onClick={() => setStealthLevel("standard")}
+                  className={cn(
+                    "cursor-pointer rounded-lg p-2.5 ring-1 transition-all space-y-1",
+                    stealthLevel === "standard"
+                      ? "bg-brand-500/10 ring-brand-500/50 text-text-primary"
+                      : "bg-surface-2 ring-border text-text-secondary hover:bg-surface-3"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 font-semibold text-2xs text-brand-400">
+                    <span>⚡ Быстрый</span>
+                  </div>
+                  <p className="text-3xs text-text-tertiary leading-snug">
+                    Статический микро-зум, базовая цветокоррекция, очистка метаданных.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         ) : (
           <Field label="Что за товар (для написания сценария и озвучки)">

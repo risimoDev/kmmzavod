@@ -519,10 +519,41 @@ export default function EditorProjectDetailPage() {
       const cfg = project.config as Record<string, any>;
       if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
       if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
-      if (cfg.voiceId) setSelectedVoiceId(cfg.voiceId);
+      const vId = cfg.voiceId || (project as any).voiceId;
+      if (vId) {
+        setSelectedVoiceId(vId);
+        const isPreset = voices.some((v) => v.id === vId);
+        if (!isPreset && vId !== "e04b4c73046f491c89366fbca39d48dd") {
+          setCustomVoiceId(vId);
+        }
+      }
       if (cfg.voiceSpeed) setVoiceSpeed(cfg.voiceSpeed);
     }
-  }, [project]);
+    // Auto-sync aiSeconds with total included clips duration
+    if (project?.clips && project.clips.length > 0) {
+      const includedClips = project.clips.filter((c: any) => c.included);
+      const totalDur = includedClips.reduce((sum: number, c: any) => sum + (Number(c.durationSec) || 0), 0);
+      if (totalDur > 0) {
+        setAiSeconds(Math.round(totalDur));
+      }
+    }
+  }, [project, voices]);
+
+  async function handleSelectVoice(vId: string) {
+    setSelectedVoiceId(vId);
+    setCustomVoiceId("");
+    if (id) {
+      await editorApi.patchProject(id, { voiceId: vId } as any).catch(() => {});
+    }
+  }
+
+  async function handleCustomVoiceChange(val: string) {
+    setCustomVoiceId(val);
+    const effective = val.trim() || selectedVoiceId;
+    if (id && val.trim()) {
+      await editorApi.patchProject(id, { voiceId: effective } as any).catch(() => {});
+    }
+  }
 
   async function handleGenerateScript() {
     if (!aiTopic.trim()) return;
@@ -549,9 +580,10 @@ export default function EditorProjectDetailPage() {
     setSynthesizing(true);
     setVoiceError(null);
     try {
+      const effectiveVoiceId = customVoiceId.trim() || selectedVoiceId;
       const res = await editorApi.generateVoice(id, {
         text: aiScript,
-        voiceId: customVoiceId.trim() || selectedVoiceId,
+        voiceId: effectiveVoiceId,
         speed: voiceSpeed,
         apiKey: fishApiKey.trim() || undefined,
       });
@@ -975,15 +1007,59 @@ export default function EditorProjectDetailPage() {
                 </div>
 
                 {/* 2. Текст сценария (редактируемый) + Эмоции Fish Audio */}
+                {/* 2. Текст сценария & Озвучка */}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase text-text-tertiary">
-                      2. Текст для диктора
-                    </span>
-                    <span className="text-2xs text-text-secondary font-mono">
-                      {aiScript.trim().split(/\s+/).filter(Boolean).length} слов · ~{Math.round(aiScript.trim().split(/\s+/).filter(Boolean).length / 2.4)}с
-                    </span>
-                  </div>
+                  {(() => {
+                    const cleanText = aiScript.replace(/\[[a-zA-Z_\s-]+\]/g, '').trim();
+                    const scriptWords = cleanText ? cleanText.split(/\s+/).filter(Boolean).length : 0;
+                    const estSpeechSec = Math.round(scriptWords / 2.05);
+                    const diffSec = estSpeechSec - aiSeconds;
+                    const isSynced = Math.abs(diffSec) <= 2;
+                    return (
+                      <>
+                        <div className="flex items-center justify-between text-2xs">
+                          <span className="font-semibold uppercase text-text-tertiary">
+                            2. Текст для диктора
+                          </span>
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="text-text-secondary">{scriptWords} слов</span>
+                            <span className="text-text-tertiary">·</span>
+                            <span
+                              className={cn(
+                                "px-1.5 py-0.5 rounded text-3xs font-semibold",
+                                scriptWords === 0
+                                  ? "text-text-tertiary bg-surface-2"
+                                  : isSynced
+                                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                                  : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                              )}
+                              title="Расчётная длительность озвучки относительно хронометража ролика"
+                            >
+                              ~{estSpeechSec}с / ролик {aiSeconds}с
+                              {scriptWords > 0 && !isSynced && ` (${diffSec > 0 ? `+${diffSec}` : diffSec}с)`}
+                            </span>
+                          </div>
+                        </div>
+
+                        {scriptWords > 0 && !isSynced && (
+                          <div className="flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-3xs text-amber-300 animate-fade-in">
+                            <span>
+                              {diffSec < 0
+                                ? `⚠️ Текст короче видео на ${Math.abs(diffSec)} сек (в конце останется тишина).`
+                                : `⚠️ Текст длиннее видео на ${diffSec} сек (голос может обрезаться).`}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleGenerateScript}
+                              className="underline hover:text-amber-200 font-semibold ml-2 shrink-0"
+                            >
+                              Подогнать под {aiSeconds}с
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
 
                   {aiHook && (
                     <div className="rounded-md bg-brand-500/10 border border-brand-500/30 p-2 text-2xs text-brand-300">
@@ -1048,38 +1124,32 @@ export default function EditorProjectDetailPage() {
                     </span>
                   </div>
 
-                  {/* Настройки API-ключа Fish Audio */}
-                  <div className="space-y-1 rounded-lg bg-surface-2/80 p-2 border border-border">
+                  {/* Статус API-ключа Fish Audio */}
+                  <div className="rounded-lg bg-surface-2/80 p-2.5 border border-border space-y-1.5">
                     <div className="flex items-center justify-between text-2xs">
-                      <span className="text-text-secondary">API-ключ Fish Audio:</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        <span className="text-text-primary font-medium">Fish Audio API: подключен (.env)</span>
+                      </div>
                       <button
                         type="button"
                         onClick={() => setShowKeyConfig(!showKeyConfig)}
-                        className="text-brand-400 hover:underline"
+                        className="text-text-tertiary hover:text-text-secondary text-3xs underline"
                       >
-                        {fishApiKey ? "✓ Указан (изменить)" : "+ Указать ключ"}
+                        {showKeyConfig ? "скрыть" : (fishApiKey ? "свой ключ (активен)" : "свой ключ")}
                       </button>
                     </div>
                     {showKeyConfig && (
-                      <div className="space-y-1.5 pt-1 animate-fade-in">
+                      <div className="space-y-1 pt-1 border-t border-border/50 animate-fade-in">
                         <input
                           type="password"
                           value={fishApiKey}
                           onChange={(e) => saveFishApiKey(e.target.value)}
-                          placeholder="Вставьте бесплатный ключ fish.audio..."
+                          placeholder="Опционально: свой ключ (по умолчанию берётся из .env сервера)"
                           className="w-full bg-surface-1 border border-border rounded px-2 py-1 text-2xs text-text-primary"
                         />
                         <p className="text-3xs text-text-tertiary">
-                          Бесплатный ключ доступен на{" "}
-                          <a
-                            href="https://fish.audio"
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-brand-400 underline"
-                          >
-                            fish.audio
-                          </a>
-                          . Сохраняется в браузере.
+                          Если оставить пустым — используется системный ключ из .env сервера.
                         </p>
                       </div>
                     )}
@@ -1088,21 +1158,12 @@ export default function EditorProjectDetailPage() {
                   {voiceError && (
                     <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5 text-2xs text-danger space-y-1 animate-fade-in">
                       <p className="font-semibold">⚠️ {voiceError}</p>
-                      {voiceError.includes("FISH_AUDIO_API_KEY") && (
-                        <p className="text-3xs text-text-secondary">
-                          Получите бесплатный ключ на{" "}
-                          <a href="https://fish.audio" target="_blank" rel="noreferrer" className="text-brand-400 underline">
-                            fish.audio
-                          </a>{" "}
-                          и сохраните его выше в поле «API-ключ Fish Audio».
-                        </p>
-                      )}
                     </div>
                   )}
 
                   <select
                     value={selectedVoiceId}
-                    onChange={(e) => setSelectedVoiceId(e.target.value)}
+                    onChange={(e) => handleSelectVoice(e.target.value)}
                     className="w-full bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
                   >
                     {voices.map((v) => (
@@ -1113,11 +1174,14 @@ export default function EditorProjectDetailPage() {
                   </select>
 
                   <div className="space-y-1">
-                    <span className="text-3xs text-text-tertiary">Или свой Voice ID:</span>
+                    <div className="flex items-center justify-between text-3xs text-text-tertiary">
+                      <span>Или свой Voice ID:</span>
+                      {customVoiceId.trim() && <span className="text-emerald-400 font-medium">✓ сохранен в БД</span>}
+                    </div>
                     <input
                       value={customVoiceId}
-                      onChange={(e) => setCustomVoiceId(e.target.value)}
-                      placeholder="Опционально: ID голоса из fish.audio"
+                      onChange={(e) => handleCustomVoiceChange(e.target.value)}
+                      placeholder="Опционально: ID голоса из fish.audio (сохраняется в проект)"
                       className="w-full bg-surface-2 border border-border rounded px-2 py-1 text-2xs text-text-primary placeholder:text-text-tertiary"
                     />
                   </div>

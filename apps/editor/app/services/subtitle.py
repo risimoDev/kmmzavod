@@ -36,21 +36,21 @@ class SubLine:
 #  outline_w, bold, align, margin_v_frac, border_style, back_colour, fontname)
 _STYLES = {
     # TikTok classic: Bright yellow highlight, crisp white unspoken, thick black stroke
-    "tiktok":      (0.056, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 3.8, -1, 2, 0.18, 1, "&H00000000", "Arial"),
+    "tiktok":      (0.040, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 3.4, -1, 2, 0.18, 1, "&H00000000", "Arial"),
     # MrBeast style: Electric neon yellow, chunky bold, safe higher placement (avoiding TikTok UI), bouncy
-    "mrbeast":     (0.065, "&H0000E6FF", "&H00FFFFFF", "&H00000000", 4.8, -1, 2, 0.22, 1, "&H00000000", "Arial Black"),
+    "mrbeast":     (0.044, "&H0000E6FF", "&H00FFFFFF", "&H00000000", 4.0, -1, 2, 0.22, 1, "&H00000000", "Arial Black"),
     # Neon Glow: Cyberpunk cyan highlight with vivid magenta outline & dark pill backing
-    "neon_glow":   (0.052, "&H00FFFF00", "&H00E0E0E0", "&H00FF0080", 3.2, -1, 2, 0.18, 1, "&H80000000", "Arial"),
+    "neon_glow":   (0.038, "&H00FFFF00", "&H00E0E0E0", "&H00FF0080", 3.0, -1, 2, 0.18, 1, "&H80000000", "Arial"),
     # Fire Hype: Fiery orange-red highlight on pure white, high-energy impact
-    "fire_hype":   (0.060, "&H000077FF", "&H00FFFFFF", "&H00000000", 4.0, -1, 2, 0.20, 1, "&H00000000", "Arial Black"),
+    "fire_hype":   (0.042, "&H000077FF", "&H00FFFFFF", "&H00000000", 3.6, -1, 2, 0.20, 1, "&H00000000", "Arial Black"),
     # 1-Word Flash: 1 word at a time, center screen, maximum retention for ultra-fast shorts
-    "single_word": (0.075, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 5.0, -1, 5, 0.45, 1, "&H00000000", "Arial Black"),
+    "single_word": (0.050, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 4.5, -1, 5, 0.45, 1, "&H00000000", "Arial Black"),
     # Cinematic: Elegant serif/clean sans, wider tracking, lower third
-    "cinematic":   (0.042, "&H00FFFFFF", "&H00CCCCCC", "&H64000000", 2.0, 0, 2, 0.10, 1, "&H00000000", "Arial"),
+    "cinematic":   (0.032, "&H00FFFFFF", "&H00CCCCCC", "&H64000000", 2.0, 0, 2, 0.12, 1, "&H00000000", "Arial"),
     # Minimal: Subtle, translucent back box, modern aesthetic
-    "minimal":     (0.038, "&H00FFFFFF", "&H00A0A0A0", "&H00000000", 1.5, 0, 2, 0.12, 1, "&H00000000", "Arial"),
+    "minimal":     (0.028, "&H00FFFFFF", "&H00A0A0A0", "&H00000000", 1.5, 0, 2, 0.12, 1, "&H00000000", "Arial"),
     # Classic default
-    "default":     (0.050, "&H0000D7FF", "&H00FFFFFF", "&H00000000", 2.8, -1, 2, 0.16, 1, "&H00000000", "Arial"),
+    "default":     (0.038, "&H0000D7FF", "&H00FFFFFF", "&H00000000", 2.8, -1, 2, 0.18, 1, "&H00000000", "Arial"),
 }
 
 
@@ -68,9 +68,30 @@ def _esc(text: str) -> str:
     return text.replace("\n", " ").replace("{", "(").replace("}", ")").strip()
 
 
+def _wrap_line_fallback(text: str, max_chars: int = 22) -> str:
+    """Break long plain lines with \\N for ASS rendering when word timestamps are absent."""
+    words = text.split()
+    if not words:
+        return text
+    lines: list[str] = []
+    cur_line: list[str] = []
+    cur_len = 0
+    for w in words:
+        if cur_line and (cur_len + 1 + len(w) > max_chars):
+            lines.append(" ".join(cur_line))
+            cur_line = [w]
+            cur_len = len(w)
+        else:
+            cur_line.append(w)
+            cur_len += (1 if cur_line else 0) + len(w)
+    if cur_line:
+        lines.append(" ".join(cur_line))
+    return "\\N".join(lines)
+
+
 def regroup_words(lines: list[SubLine], style: str = "tiktok") -> list[SubLine]:
     """Re-split word-timestamped lines into punchy karaoke groups based on style.
-    Breaks early on natural speech pauses."""
+    Enforces word count, character width, and breaks on speech pauses."""
     words = [
         w for ln in lines for w in ln.words
         if w.text.strip() and not re.match(r'^\[[a-zA-Z_\s-]+\]$', w.text.strip())
@@ -80,27 +101,34 @@ def regroup_words(lines: list[SubLine], style: str = "tiktok") -> list[SubLine]:
 
     if style == "single_word":
         max_words = 1
+        max_chars = 14
         max_line_sec = 1.0
         break_gap = 0.15
     elif style in ("mrbeast", "fire_hype"):
         max_words = 3
+        max_chars = 18
         max_line_sec = 1.8
         break_gap = 0.4
     elif style == "cinematic":
-        max_words = 6
-        max_line_sec = 3.5
-        break_gap = 0.7
+        max_words = 5
+        max_chars = 28
+        max_line_sec = 3.0
+        break_gap = 0.6
     else:
         # Default / TikTok / Neon
-        max_words = 4
-        max_line_sec = 2.2
-        break_gap = 0.5
+        max_words = 3
+        max_chars = 20
+        max_line_sec = 2.0
+        break_gap = 0.45
 
     out: list[SubLine] = []
     cur: list[SubWord] = []
     for w in words:
+        cur_chars = sum(len(x.text.strip()) for x in cur) + max(0, len(cur) - 1)
+        w_len = len(w.text.strip())
         if cur and (
             len(cur) >= max_words
+            or (cur_chars + 1 + w_len > max_chars)
             or w.end - cur[0].start > max_line_sec
             or w.start - cur[-1].end > break_gap
         ):
@@ -118,7 +146,7 @@ def _karaoke_text(line: SubLine, style: str = "tiktok") -> str:
     """ASS \\k / \\kf tags: each word holds SecondaryColour until its start,
     then flips to PrimaryColour. Smooth fill (\\kf) used for high-energy styles."""
     if not line.words:
-        return _esc(line.text)
+        return _wrap_line_fallback(_esc(line.text))
     tag = "\\kf" if style in ("mrbeast", "fire_hype", "neon_glow") else "\\k"
     parts: list[str] = []
 
@@ -141,8 +169,9 @@ def generate_ass(lines: list[SubLine], out_path: str, width: int, height: int,
      border_style, back_colour, fontname) = style_spec
 
     fontsize = max(18, int(height * fsz_frac))
-    margin_v = int(height * mv_frac)
-    margin_h = int(width * 0.08)
+    margin_v = max(80, int(height * mv_frac))
+    # Safe horizontal padding: at least 10% of width (108px on 1080px canvas)
+    margin_h = max(50, int(width * 0.10))
 
     karaoke = any(ln.words for ln in lines)
     if karaoke:
@@ -153,8 +182,9 @@ def generate_ass(lines: list[SubLine], out_path: str, width: int, height: int,
         "ScriptType: v4.00+\n"
         f"PlayResX: {width}\n"
         f"PlayResY: {height}\n"
-        "WrapStyle: 2\n"
-        "ScaledBorderAndShadow: yes\n\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "Collisions: Normal\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
         "OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, "
@@ -178,9 +208,9 @@ def generate_ass(lines: list[SubLine], out_path: str, width: int, height: int,
         elif style in ("mrbeast", "fire_hype"):
             # Slight bounce on line start + karaoke highlighting
             anim = "{\\t(0,80,\\fscx104\\fscy104)\\t(80,160,\\fscx100\\fscy100)}"
-            text = anim + (_karaoke_text(ln, style) if ln.words else _esc(ln.text).upper())
+            text = anim + (_karaoke_text(ln, style) if ln.words else _wrap_line_fallback(_esc(ln.text).upper()))
         else:
-            text = _karaoke_text(ln, style) if ln.words else _esc(ln.text)
+            text = _karaoke_text(ln, style) if ln.words else _wrap_line_fallback(_esc(ln.text))
 
         if not text:
             continue
@@ -188,3 +218,4 @@ def generate_ass(lines: list[SubLine], out_path: str, width: int, height: int,
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(header + "\n".join(body) + "\n")
+
