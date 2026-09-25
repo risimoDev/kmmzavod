@@ -303,6 +303,8 @@ export interface UniquifyRenderJobPayload {
   variantId: string;
   tenantId: string;
   mode?: 'preserve_context' | 'remix_montage';
+  stealthLevel?: 'standard' | 'maximum';
+  stealth_level?: 'standard' | 'maximum';
   /** One or more source clips (pool mode reorders across several). */
   sourceStorageKeys: string[];
   outputKey: string;

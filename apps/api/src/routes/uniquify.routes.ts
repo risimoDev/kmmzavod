@@ -35,6 +35,7 @@ const CreateUniquifyJobBody = z.object({
   config: z.object({
     // Mode: 'preserve_context' keeps narrative/cuts intact and perturbs visual/audio tensors; 'remix_montage' chops & remixes.
     mode: z.enum(['preserve_context', 'remix_montage']).default('preserve_context'),
+    stealthLevel: z.enum(['standard', 'maximum']).default('maximum'),
     // Extra source clips to recombine alongside the primary one (pool mode).
     additionalSourceVideoIds: z.array(z.string().uuid()).max(20).optional(),
     // Background-music library — one different track is picked per variant so the

@@ -1561,6 +1561,7 @@ export const uniquifyApi = {
     targetPlatforms?: string[];
     config?: {
       mode?: 'preserve_context' | 'remix_montage';
+      stealthLevel?: 'standard' | 'maximum';
       additionalSourceVideoIds?: string[];
       bgmTrackKeys?: string[];
       bgmVolume?: number;
