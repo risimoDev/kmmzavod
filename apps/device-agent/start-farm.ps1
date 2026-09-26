@@ -50,11 +50,15 @@ if (Test-Path (Join-Path $localPlatformTools "adb.exe")) {
     Write-Host "[ВНИМАНИЕ] adb.exe не найден! Поместите папку platform-tools рядом со скриптом." -ForegroundColor Yellow
 }
 
-# 3. Очистка старых зависших процессов ADB и запуск сервера
+# 3. Очистка старых зависших процессов ADB и Gnirehtet
 Write-Host ""
-Write-Host "Проверка и перезапуск службы ADB..." -ForegroundColor Yellow
-Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 800
+Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
+Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+try {
+    $port5037Pid = (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue).OwningProcess
+    if ($port5037Pid) { Stop-Process -Id $port5037Pid -Force -ErrorAction SilentlyContinue }
+} catch {}
+Start-Sleep -Seconds 2
 
 if ($adbBin) {
     & $adbBin start-server

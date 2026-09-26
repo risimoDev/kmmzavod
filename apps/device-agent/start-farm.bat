@@ -55,19 +55,22 @@ if "%ADB_FOUND%"=="0" (
     echo.
 )
 
-:: 3. Очистка старых/зависших процессов ADB и безопасный запуск службы
+:: 3. Очистка старых/зависших процессов (ADB и Gnirehtet должны перезапускаться вместе)
 echo.
-echo Проверка процессов ADB...
+echo Очистка старых процессов ADB и Gnirehtet...
+taskkill /F /IM gnirehtet.exe >nul 2>nul
 taskkill /F /IM adb.exe >nul 2>nul
-ping 127.0.0.1 -n 2 >nul
+powershell -NoProfile -Command "$p = (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue).OwningProcess; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }" >nul 2>nul
+ping 127.0.0.1 -n 3 >nul
 
 echo Запуск службы ADB...
 adb start-server
 if errorlevel 1 (
     echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
     echo Сброс и повторный запуск...
+    taskkill /F /IM gnirehtet.exe >nul 2>nul
     taskkill /F /IM adb.exe >nul 2>nul
-    ping 127.0.0.1 -n 2 >nul
+    ping 127.0.0.1 -n 3 >nul
     adb start-server
 )
 
