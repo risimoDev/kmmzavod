@@ -145,6 +145,11 @@ app.post('/proxy/rotate-ip', async (req, reply) => {
   }
 });
 
+app.post('/proxy/reapply', async () => {
+  const result = await proxyManager.reapplyAll();
+  return { ok: true, ...result };
+});
+
 const RestartInterfaceBody = z.object({
   deviceId: z.string().min(1),
   mode: z.enum(['ethernet', 'wifi', 'all']).default('ethernet'),

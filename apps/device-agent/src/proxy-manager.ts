@@ -3,7 +3,7 @@ import path from 'node:path';
 import axios from 'axios';
 import type { Logger } from 'pino';
 import { config } from './config';
-import { AdbClient } from './adb-client';
+import { AdbClient, AdbDevice } from './adb-client';
 import { LocalProxyForwarder } from './proxy-forwarder';
 
 export interface DeviceProxyConfig {
@@ -50,30 +50,120 @@ export class ProxyManager {
 
   /**
    * Initialize forwarders and ADB reverse tunnels for all saved proxies on agent startup.
+   * Waits gracefully for ADB to finish USB device discovery before applying.
    */
   async init(): Promise<void> {
+    if (this.proxyMap.size === 0) return;
     this.logger.info({ count: this.proxyMap.size }, 'proxy-manager: restoring saved device proxies');
-    for (const [deviceId, proxy] of this.proxyMap.entries()) {
+
+    // Wait up to 10 seconds for ADB to enumerate USB devices
+    let onlineDevices: AdbDevice[] = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        if (proxy.username && proxy.password) {
-          const fwd = await this.getOrCreateForwarder(proxy);
-          const key = this.getForwarderKey(proxy);
-          this.deviceForwarderKey.set(deviceId, key);
+        const list = await this.adb.listDevices();
+        onlineDevices = list.filter((d) => d.state === 'device');
+        if (onlineDevices.length > 0) break;
+      } catch {
+        // adb still initializing
+      }
+      if (attempt < 4) {
+        this.logger.info('proxy-manager: waiting for ADB USB device enumeration (2s)...');
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
 
-          await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-          await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
+    const onlineSerials = new Set(onlineDevices.map((d) => d.serial));
+    let restored = 0;
 
-          const cmd = [
-            'settings put global http_proxy 127.0.0.1:8888',
-            'settings put global global_http_proxy_host 127.0.0.1',
-            'settings put global global_http_proxy_port 8888',
-          ].join(' && ');
-          await this.adb.shell(deviceId, cmd);
-          this.logger.info({ deviceId, port: fwd.boundPort }, 'proxy-manager: restored forwarder and reverse tunnel');
-        }
+    for (const [deviceId, proxy] of this.proxyMap.entries()) {
+      if (!onlineSerials.has(deviceId)) {
+        this.logger.info({ deviceId }, 'proxy-manager: device currently offline, proxy will be applied upon reconnect');
+        continue;
+      }
+      try {
+        await this.applyDeviceProxy(deviceId, proxy);
+        restored++;
       } catch (err) {
         this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to restore proxy for device');
       }
+    }
+
+    this.logger.info(
+      { restored, totalConfigured: this.proxyMap.size, online: onlineSerials.size },
+      'proxy-manager: proxy restoration complete'
+    );
+  }
+
+  /**
+   * Reapply saved proxies to all currently connected devices in the rack.
+   */
+  async reapplyAll(): Promise<{ total: number; restored: number; offline: number }> {
+    const devices = await this.adb.listDevices().catch(() => []);
+    const onlineSerials = new Set(
+      devices.filter((d) => d.state === 'device').map((d) => d.serial)
+    );
+
+    let restored = 0;
+    let offline = 0;
+
+    for (const [deviceId, proxy] of this.proxyMap.entries()) {
+      if (onlineSerials.has(deviceId)) {
+        try {
+          await this.applyDeviceProxy(deviceId, proxy);
+          restored++;
+        } catch (err) {
+          this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to reapply proxy');
+        }
+      } else {
+        offline++;
+      }
+    }
+
+    this.logger.info({ restored, offline, total: this.proxyMap.size }, 'proxy-manager: reapplyAll finished');
+    return { total: this.proxyMap.size, restored, offline };
+  }
+
+  /**
+   * Apply proxy configuration (reverse tunnel and global Android settings) to an active device.
+   */
+  async applyDeviceProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<void> {
+    const oldKey = this.deviceForwarderKey.get(deviceId);
+
+    if (proxy.username && proxy.password) {
+      // Android does not support proxy credentials natively in settings put global http_proxy.
+      // Route through local forwarder on Farm PC via ADB reverse.
+      const fwd = await this.getOrCreateForwarder(proxy);
+      const newKey = this.getForwarderKey(proxy);
+      this.deviceForwarderKey.set(deviceId, newKey);
+
+      // Map device 127.0.0.1:8888 -> Farm PC local forwarder port
+      await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+      await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
+
+      const cmd = [
+        'settings put global http_proxy 127.0.0.1:8888',
+        'settings put global global_http_proxy_host 127.0.0.1',
+        'settings put global global_http_proxy_port 8888',
+      ].join(' && ');
+
+      await this.adb.shell(deviceId, cmd);
+      this.logger.info({ deviceId, port: fwd.boundPort }, 'proxy-manager: forwarder and reverse tunnel applied');
+    } else {
+      // Open or IP-whitelisted proxy
+      await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+      this.deviceForwarderKey.delete(deviceId);
+
+      const cmd = [
+        `settings put global http_proxy ${proxy.host}:${proxy.port}`,
+        `settings put global global_http_proxy_host ${proxy.host}`,
+        `settings put global global_http_proxy_port ${proxy.port}`,
+      ].join(' && ');
+
+      await this.adb.shell(deviceId, cmd);
+    }
+
+    if (oldKey && oldKey !== this.deviceForwarderKey.get(deviceId)) {
+      await this.releaseForwarder(oldKey);
     }
   }
 
@@ -170,45 +260,8 @@ export class ProxyManager {
       'proxy-manager: applying proxy to device'
     );
 
-    const oldKey = this.deviceForwarderKey.get(deviceId);
-
     try {
-      if (proxy.username && proxy.password) {
-        // Android does not support proxy credentials natively in settings put global http_proxy.
-        // Route through local forwarder on Farm PC via ADB reverse.
-        const fwd = await this.getOrCreateForwarder(proxy);
-        const newKey = this.getForwarderKey(proxy);
-        this.deviceForwarderKey.set(deviceId, newKey);
-
-        // Map device 127.0.0.1:8888 -> Farm PC local forwarder port
-        await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-        await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
-
-        const cmd = [
-          'settings put global http_proxy 127.0.0.1:8888',
-          'settings put global global_http_proxy_host 127.0.0.1',
-          'settings put global global_http_proxy_port 8888',
-        ].join(' && ');
-
-        await this.adb.shell(deviceId, cmd);
-      } else {
-        // Open or IP-whitelisted proxy
-        await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-        this.deviceForwarderKey.delete(deviceId);
-
-        const cmd = [
-          `settings put global http_proxy ${proxy.host}:${proxy.port}`,
-          `settings put global global_http_proxy_host ${proxy.host}`,
-          `settings put global global_http_proxy_port ${proxy.port}`,
-        ].join(' && ');
-
-        await this.adb.shell(deviceId, cmd);
-      }
-
-      if (oldKey && oldKey !== this.deviceForwarderKey.get(deviceId)) {
-        await this.releaseForwarder(oldKey);
-      }
-
+      await this.applyDeviceProxy(deviceId, proxy);
       this.proxyMap.set(deviceId, proxy);
       this.saveState();
     } catch (err) {
@@ -263,6 +316,12 @@ export class ProxyManager {
     let cmd = '';
 
     if (cfg && cfg.username && cfg.password) {
+      // Ensure reverse tunnel and settings are active before testing (self-healing)
+      try {
+        await this.applyDeviceProxy(deviceId, cfg);
+      } catch {
+        // non-fatal, proceed with test
+      }
       // Forwarder is running on 127.0.0.1:8888 via ADB reverse tunnel
       cmd = [
         'curl -k -s -S -x http://127.0.0.1:8888 --max-time 12 http://api.ipify.org',

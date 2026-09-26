@@ -58,7 +58,8 @@ Start-Sleep -Milliseconds 800
 
 if ($adbBin) {
     & $adbBin start-server
-    Start-Sleep -Milliseconds 500
+    Write-Host "Ожидание обнаружения USB-плат в стойке (3 сек)..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
 
     Write-Host ""
     Write-Host "Подключенные платы в стойке:" -ForegroundColor Cyan

@@ -33,12 +33,21 @@ function resolveScriptsDir(): string {
   return String.raw`C:\device-agent\scripts`;
 }
 
+function resolveAdbPath(): string {
+  if (process.env.ADB_PATH) return process.env.ADB_PATH;
+  const localAdb = path.resolve(__dirname, '../platform-tools/adb.exe');
+  if (fs.existsSync(localAdb)) return localAdb;
+  const rootAdb = path.resolve(__dirname, '../../../platform-tools/adb.exe');
+  if (fs.existsSync(rootAdb)) return rootAdb;
+  return 'adb';
+}
+
 export const config = {
   // Bind to the AmneziaWG interface IP only — never 0.0.0.0. See infra/amneziawg/README.md.
   HOST: detectTunnelHost(),
   PORT: Number(env('DEVICE_AGENT_PORT', '8300')),
-  // Path to Google adb executable (defaults to adb in PATH)
-  ADB_PATH: env('ADB_PATH', 'adb'),
+  // Path to Google adb executable (prioritizes local platform-tools)
+  ADB_PATH: resolveAdbPath(),
   // Local scripts folder on host PC
   SCRIPTS_DIR: resolveScriptsDir(),
   // Target folder on Android device for videos

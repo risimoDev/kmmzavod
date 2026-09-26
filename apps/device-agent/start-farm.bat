@@ -71,6 +71,9 @@ if errorlevel 1 (
     adb start-server
 )
 
+echo Ожидание обнаружения USB-плат в стойке (3 сек)...
+ping 127.0.0.1 -n 4 >nul
+
 echo.
 echo Подключенные платы в стойке:
 adb devices -l
