@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "kmmzavod"
     minio_secure: bool = False
+    minio_region: str = "us-east-1"
 
     # ── FFmpeg knobs ──────────────────────────────────────────────────
     # Directory containing ffmpeg/ffprobe binaries (auto-detected if empty)
@@ -50,10 +51,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-# If MINIO_ENDPOINT has no port, append MINIO_PORT
-if ":" not in settings.minio_endpoint:
-    settings.minio_endpoint = f"{settings.minio_endpoint}:{settings.minio_port}"
 
 # Auto-detect FFmpeg bin directory if not explicitly configured
 if not settings.ffmpeg_bin_dir:

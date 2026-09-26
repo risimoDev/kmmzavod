@@ -88,6 +88,7 @@ async function main() {
     secretKey: config.MINIO_SECRET_KEY,
     bucket: config.MINIO_BUCKET,
     publicBaseUrl: config.MINIO_PUBLIC_URL,
+    region: config.MINIO_REGION,
   });
 
   // GPTunnel service for TTS, image generation, and chat completions

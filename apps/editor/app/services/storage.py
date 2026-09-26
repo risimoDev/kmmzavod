@@ -29,12 +29,30 @@ def _s3():
     import aioboto3
     from botocore.config import Config
 
-    scheme = "https" if settings.minio_secure else "http"
+    raw_ep = settings.minio_endpoint.strip()
+    if raw_ep.startswith("https://"):
+        scheme = "https"
+        clean_ep = raw_ep[8:].rstrip("/")
+    elif raw_ep.startswith("http://"):
+        scheme = "http"
+        clean_ep = raw_ep[7:].rstrip("/")
+    else:
+        scheme = "https" if settings.minio_secure else "http"
+        clean_ep = raw_ep.rstrip("/")
+
+    if ":" not in clean_ep:
+        if scheme == "http" and settings.minio_port and settings.minio_port != 80:
+            clean_ep = f"{clean_ep}:{settings.minio_port}"
+        elif scheme == "https" and settings.minio_port and settings.minio_port != 443:
+            clean_ep = f"{clean_ep}:{settings.minio_port}"
+
+    region = getattr(settings, "minio_region", "us-east-1")
     return aioboto3.Session().client(
         "s3",
-        endpoint_url=f"{scheme}://{settings.minio_endpoint}",
+        endpoint_url=f"{scheme}://{clean_ep}",
         aws_access_key_id=settings.minio_access_key,
         aws_secret_access_key=settings.minio_secret_key,
+        region_name=region,
         config=Config(signature_version="s3v4", proxies={}),
     )
 

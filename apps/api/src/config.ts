@@ -26,6 +26,7 @@ const schema = z.object({
   MINIO_ACCESS_KEY: z.string(),
   MINIO_SECRET_KEY: z.string(),
   MINIO_BUCKET: z.string().default('kmmzavod'),
+  MINIO_REGION: z.string().default('us-east-1'),
   MINIO_PUBLIC_URL: z.string().optional(),
 
   RATE_LIMIT_MAX: z.coerce.number().default(100),

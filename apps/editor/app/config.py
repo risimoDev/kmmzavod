@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "kmmzavod"
     minio_secure: bool = False
+    minio_region: str = "us-east-1"
 
     # ── FFmpeg knobs (mirror video-processor) ─────────────────────────
     ffmpeg_bin_dir: str = ""

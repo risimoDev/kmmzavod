@@ -7,22 +7,46 @@ export class MinioStorageClient implements IStorageClient {
   private client: MinioClient;
   private bucket: string;
   private _publicBaseUrl: string | undefined;
+  private _region: string;
 
   constructor(opts: {
     endPoint: string;
-    port: number;
-    useSSL: boolean;
+    port?: number;
+    useSSL?: boolean;
     accessKey: string;
     secretKey: string;
     bucket: string;
     publicBaseUrl?: string;
+    region?: string;
   }) {
+    let cleanEndpoint = (opts.endPoint || 'localhost').trim();
+    const hasHttps = cleanEndpoint.startsWith('https://');
+    cleanEndpoint = cleanEndpoint.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+
+    let port = opts.port;
+    if (cleanEndpoint.includes(':')) {
+      const parts = cleanEndpoint.split(':');
+      cleanEndpoint = parts[0];
+      const parsedPort = parseInt(parts[1], 10);
+      if (!isNaN(parsedPort) && parsedPort > 0) {
+        port = parsedPort;
+      }
+    }
+
+    const useSSL = opts.useSSL !== undefined ? opts.useSSL : (hasHttps || port === 443);
+    if (!port || (port === 9000 && (useSSL || hasHttps))) {
+      // If secure (HTTPS) and port is not explicitly set or was defaulted to 9000, use 443
+      port = useSSL ? 443 : 9000;
+    }
+
+    this._region = opts.region || 'us-east-1';
     this.client = new MinioClient({
-      endPoint: opts.endPoint,
-      port: opts.port,
-      useSSL: opts.useSSL,
+      endPoint: cleanEndpoint,
+      port,
+      useSSL,
       accessKey: opts.accessKey,
       secretKey: opts.secretKey,
+      region: this._region,
     });
     this.bucket = opts.bucket;
     this._publicBaseUrl = opts.publicBaseUrl?.replace(/\/+$/, '');
@@ -30,22 +54,29 @@ export class MinioStorageClient implements IStorageClient {
 
   /** Ensure the configured bucket exists (call once at startup). */
   async ensureBucket(): Promise<void> {
-    const exists = await this.client.bucketExists(this.bucket);
-    if (!exists) {
-      await this.client.makeBucket(this.bucket);
-    }
-    // If public proxy is configured, set bucket policy to allow anonymous read
-    if (this._publicBaseUrl) {
-      const policy = JSON.stringify({
-        Version: '2012-10-17',
-        Statement: [{
-          Effect: 'Allow',
-          Principal: { AWS: ['*'] },
-          Action: ['s3:GetObject'],
-          Resource: [`arn:aws:s3:::${this.bucket}/*`],
-        }],
-      });
-      await this.client.setBucketPolicy(this.bucket, policy);
+    try {
+      const exists = await this.client.bucketExists(this.bucket);
+      if (!exists) {
+        await this.client.makeBucket(this.bucket, this._region);
+      }
+      // If public proxy is configured, set bucket policy to allow anonymous read
+      if (this._publicBaseUrl) {
+        const policy = JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [{
+            Effect: 'Allow',
+            Principal: { AWS: ['*'] },
+            Action: ['s3:GetObject'],
+            Resource: [`arn:aws:s3:::${this.bucket}/*`],
+          }],
+        });
+        await this.client.setBucketPolicy(this.bucket, policy).catch(() => {});
+      }
+    } catch (err: any) {
+      // In external cloud S3 (AWS, Timeweb, Selectel, Yandex), bucketExists or makeBucket
+      // might fail with AccessDenied if credentials have scoped object permissions.
+      // We log a warning instead of crashing the server on startup.
+      console.warn(`[storage] Notice: ensureBucket('${this.bucket}') skipped/warn:`, err?.message || err);
     }
   }
 
