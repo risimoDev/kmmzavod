@@ -79,6 +79,15 @@ echo Подключенные платы в стойке:
 adb devices -l
 echo.
 
+:: 3b. Автозапуск Gnirehtet (раздача интернета по USB для стоек без Wi-Fi)
+if exist "%~dp0platform-tools\gnirehtet.exe" (
+    echo [GNIREHTET] Запуск службы раздачи интернета по USB...
+    taskkill /F /IM gnirehtet.exe >nul 2>nul
+    start "KMMZAVOD - Gnirehtet USB Reverse Tethering" "%~dp0platform-tools\gnirehtet.exe" autorun
+    echo [OK] Служба Gnirehtet активна.
+    echo.
+)
+
 :: 4. Проверка интерфейса AmneziaWG
 echo Проверка туннеля с сервером:
 ipconfig | findstr "10.66.66.2 10.13.13.2" >nul

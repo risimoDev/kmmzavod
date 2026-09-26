@@ -84,6 +84,16 @@ if ($adbBin) {
     }
 }
 
+# 3b. Автозапуск Gnirehtet для раздачи интернета по USB (стойки без Wi-Fi)
+$gnirehtetExe = Join-Path $PSScriptRoot "platform-tools\gnirehtet.exe"
+if (Test-Path $gnirehtetExe) {
+    Write-Host ""
+    Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
+    Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun"
+    Write-Host "[OK] Служба Gnirehtet запущена для всех USB-плат." -ForegroundColor Green
+}
+
 # 4. Проверка VPN-туннеля AmneziaWG
 Write-Host ""
 Write-Host "Проверка туннеля с сервером платформы:" -ForegroundColor Cyan

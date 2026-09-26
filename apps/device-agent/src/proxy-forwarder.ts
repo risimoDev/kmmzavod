@@ -56,14 +56,14 @@ export class LocalProxyForwarder {
         this.logger.error({ err: err.message, config: this.config }, 'proxy-forwarder: server error');
       });
 
-      // Bind to 127.0.0.1 so only local host and adb reverse can access it
-      this.server.listen(0, '127.0.0.1', () => {
+      // Bind to 0.0.0.0 so both adb reverse (127.0.0.1) and Gnirehtet VPN (10.0.0.1) can reach it
+      this.server.listen(0, '0.0.0.0', () => {
         const addr = this.server?.address();
         if (typeof addr === 'object' && addr !== null) {
           this.boundPort = addr.port;
           this.logger.info(
             { boundPort: this.boundPort, upstream: `${this.config.host}:${this.config.port}` },
-            'proxy-forwarder: local proxy started'
+            'proxy-forwarder: local proxy started (listening on 0.0.0.0 for adb reverse & gnirehtet)'
           );
           resolve(this.boundPort);
         } else {
