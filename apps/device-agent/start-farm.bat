@@ -24,47 +24,64 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 2. Проверка adb
-where adb >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [ПРЕДУПРЕЖДЕНИЕ] ADB не найден в системном PATH.
-    echo Поиск в каталогах Android SDK / Platform-Tools...
-    if exist "%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" (
-        set "PATH=%PATH%;%LOCALAPPDATA%\Android\Sdk\platform-tools"
-        echo [OK] ADB обнаружен в Android SDK.
-    ) else if exist ".\platform-tools\adb.exe" (
-        set "PATH=%PATH%;%~dp0platform-tools"
-        echo [OK] ADB обнаружен в локальной папке platform-tools.
-    ) else if exist "..\..\platform-tools\adb.exe" (
-        set "PATH=%PATH%;%~dp0..\..\platform-tools"
-        echo [OK] ADB обнаружен в корневой папке platform-tools.
-    ) else (
-        echo.
-        echo [ВНИМАНИЕ] Утилита adb.exe не найдена!
-        echo Скачайте бесплатный Google Android platform-tools:
-        echo https://developer.android.com/tools/releases/platform-tools
-        echo и положите папку platform-tools рядом с этим скриптом.
-        echo.
-    )
+:: 2. Приоритетный поиск ADB (локальная папка platform-tools всегда в приоритете)
+set "ADB_FOUND=0"
+if exist "%~dp0platform-tools\adb.exe" (
+    set "PATH=%~dp0platform-tools;%PATH%"
+    set "ADB_FOUND=1"
+    echo [OK] ADB обнаружен в локальной папке: %~dp0platform-tools
+) else if exist "%~dp0..\..\platform-tools\adb.exe" (
+    set "PATH=%~dp0..\..\platform-tools;%PATH%"
+    set "ADB_FOUND=1"
+    echo [OK] ADB обнаружен в корне проекта platform-tools
+) else if exist "%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" (
+    set "PATH=%LOCALAPPDATA%\Android\Sdk\platform-tools;%PATH%"
+    set "ADB_FOUND=1"
+    echo [OK] ADB обнаружен в Android SDK: %LOCALAPPDATA%\Android\Sdk\platform-tools
 ) else (
-    echo [OK] ADB доступен в PATH.
+    where adb >nul 2>nul
+    if not errorlevel 1 (
+        set "ADB_FOUND=1"
+        echo [OK] ADB доступен в системном PATH.
+    )
 )
 
-:: 3. Запуск ADB-сервера и опрос плат
-echo.
-echo Запуск службы ADB...
-adb start-server >nul 2>nul
+if "%ADB_FOUND%"=="0" (
+    echo.
+    echo [ВНИМАНИЕ] Утилита adb.exe не найдена!
+    echo Скачайте бесплатный Google Android platform-tools:
+    echo https://developer.android.com/tools/releases/platform-tools
+    echo и положите папку platform-tools рядом с этим скриптом.
+    echo.
+)
 
+:: 3. Очистка старых/зависших процессов ADB и безопасный запуск службы
+echo.
+echo Проверка процессов ADB...
+taskkill /F /IM adb.exe >nul 2>nul
+ping 127.0.0.1 -n 2 >nul
+
+echo Запуск службы ADB...
+adb start-server
+if errorlevel 1 (
+    echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
+    echo Сброс и повторный запуск...
+    taskkill /F /IM adb.exe >nul 2>nul
+    ping 127.0.0.1 -n 2 >nul
+    adb start-server
+)
+
+echo.
 echo Подключенные платы в стойке:
 adb devices -l
 echo.
 
 :: 4. Проверка интерфейса AmneziaWG
-echo Проверка туннеля с сервером AWS:
+echo Проверка туннеля с сервером:
 ipconfig | findstr "10.66.66.2 10.13.13.2" >nul
 if errorlevel 1 (
     echo [ВНИМАНИЕ] Туннельный IP 10.66.66.2 или 10.13.13.2 не найден в ipconfig!
-    echo Убедитесь, что AmneziaWG клиент подключен к серверу AWS.
+    echo Убедитесь, что AmneziaWG клиент подключен к серверу платформы.
 ) else (
     echo [OK] Интерфейс AmneziaWG активен.
 )
