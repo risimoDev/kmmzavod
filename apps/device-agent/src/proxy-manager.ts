@@ -4,6 +4,7 @@ import axios from 'axios';
 import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
+import { LocalProxyForwarder } from './proxy-forwarder';
 
 export interface DeviceProxyConfig {
   host: string;
@@ -31,6 +32,11 @@ export class ProxyManager {
   private hostPublicIp: string | null = null;
   private lastHostIpCheck = 0;
 
+  /** Forwarders indexed by upstream signature: type://user:pass@host:port */
+  private forwarders: Map<string, LocalProxyForwarder> = new Map();
+  /** Mapping of deviceId -> forwarder signature */
+  private deviceForwarderKey: Map<string, string> = new Map();
+
   constructor(
     private readonly adb: AdbClient,
     private readonly logger: Logger,
@@ -40,6 +46,71 @@ export class ProxyManager {
     this.refreshHostIp().catch((err) => {
       this.logger.warn({ err: String(err) }, 'proxy-manager: initial host IP resolution failed');
     });
+  }
+
+  /**
+   * Initialize forwarders and ADB reverse tunnels for all saved proxies on agent startup.
+   */
+  async init(): Promise<void> {
+    this.logger.info({ count: this.proxyMap.size }, 'proxy-manager: restoring saved device proxies');
+    for (const [deviceId, proxy] of this.proxyMap.entries()) {
+      try {
+        if (proxy.username && proxy.password) {
+          const fwd = await this.getOrCreateForwarder(proxy);
+          const key = this.getForwarderKey(proxy);
+          this.deviceForwarderKey.set(deviceId, key);
+
+          await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+          await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
+
+          const cmd = [
+            'settings put global http_proxy 127.0.0.1:8888',
+            'settings put global global_http_proxy_host 127.0.0.1',
+            'settings put global global_http_proxy_port 8888',
+          ].join(' && ');
+          await this.adb.shell(deviceId, cmd);
+          this.logger.info({ deviceId, port: fwd.boundPort }, 'proxy-manager: restored forwarder and reverse tunnel');
+        }
+      } catch (err) {
+        this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to restore proxy for device');
+      }
+    }
+  }
+
+  private getForwarderKey(proxy: DeviceProxyConfig): string {
+    return `${proxy.type || 'http'}://${proxy.username || ''}:${proxy.password || ''}@${proxy.host}:${proxy.port}`;
+  }
+
+  private async getOrCreateForwarder(proxy: DeviceProxyConfig): Promise<LocalProxyForwarder> {
+    const key = this.getForwarderKey(proxy);
+    let fwd = this.forwarders.get(key);
+    if (!fwd) {
+      fwd = new LocalProxyForwarder(
+        {
+          host: proxy.host,
+          port: proxy.port,
+          username: proxy.username,
+          password: proxy.password,
+          type: proxy.type,
+        },
+        this.logger
+      );
+      await fwd.start();
+      this.forwarders.set(key, fwd);
+    }
+    return fwd;
+  }
+
+  private async releaseForwarder(key: string): Promise<void> {
+    // Check if any active device still uses this forwarder key
+    for (const assignedKey of this.deviceForwarderKey.values()) {
+      if (assignedKey === key) return;
+    }
+    const fwd = this.forwarders.get(key);
+    if (fwd) {
+      await fwd.stop();
+      this.forwarders.delete(key);
+    }
   }
 
   private loadState(): void {
@@ -89,18 +160,55 @@ export class ProxyManager {
     return this.hostPublicIp;
   }
 
-  /** Set global HTTP proxy on device via ADB and persist configuration. */
+  /**
+   * Set global HTTP proxy on device via ADB and persist configuration.
+   * If proxy has credentials, a LocalProxyForwarder is spawned and bridged via `adb reverse tcp:8888`.
+   */
   async setProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<DeviceIpCheckResult> {
-    this.logger.info({ deviceId, host: proxy.host, port: proxy.port }, 'proxy-manager: applying proxy to device');
+    this.logger.info(
+      { deviceId, host: proxy.host, port: proxy.port, hasAuth: Boolean(proxy.username && proxy.password) },
+      'proxy-manager: applying proxy to device'
+    );
 
-    const cmd = [
-      `settings put global http_proxy ${proxy.host}:${proxy.port}`,
-      `settings put global global_http_proxy_host ${proxy.host}`,
-      `settings put global global_http_proxy_port ${proxy.port}`,
-    ].join(' && ');
+    const oldKey = this.deviceForwarderKey.get(deviceId);
 
     try {
-      await this.adb.shell(deviceId, cmd);
+      if (proxy.username && proxy.password) {
+        // Android does not support proxy credentials natively in settings put global http_proxy.
+        // Route through local forwarder on Farm PC via ADB reverse.
+        const fwd = await this.getOrCreateForwarder(proxy);
+        const newKey = this.getForwarderKey(proxy);
+        this.deviceForwarderKey.set(deviceId, newKey);
+
+        // Map device 127.0.0.1:8888 -> Farm PC local forwarder port
+        await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+        await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
+
+        const cmd = [
+          'settings put global http_proxy 127.0.0.1:8888',
+          'settings put global global_http_proxy_host 127.0.0.1',
+          'settings put global global_http_proxy_port 8888',
+        ].join(' && ');
+
+        await this.adb.shell(deviceId, cmd);
+      } else {
+        // Open or IP-whitelisted proxy
+        await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+        this.deviceForwarderKey.delete(deviceId);
+
+        const cmd = [
+          `settings put global http_proxy ${proxy.host}:${proxy.port}`,
+          `settings put global global_http_proxy_host ${proxy.host}`,
+          `settings put global global_http_proxy_port ${proxy.port}`,
+        ].join(' && ');
+
+        await this.adb.shell(deviceId, cmd);
+      }
+
+      if (oldKey && oldKey !== this.deviceForwarderKey.get(deviceId)) {
+        await this.releaseForwarder(oldKey);
+      }
+
       this.proxyMap.set(deviceId, proxy);
       this.saveState();
     } catch (err) {
@@ -118,6 +226,16 @@ export class ProxyManager {
   /** Clear proxy settings on device. */
   async clearProxy(deviceId: string): Promise<{ ok: boolean }> {
     this.logger.info({ deviceId }, 'proxy-manager: clearing proxy on device');
+
+    const oldKey = this.deviceForwarderKey.get(deviceId);
+    this.deviceForwarderKey.delete(deviceId);
+
+    // Remove ADB reverse tunnel
+    await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+
+    if (oldKey) {
+      await this.releaseForwarder(oldKey);
+    }
 
     const cmd = [
       'settings put global http_proxy :0',
@@ -141,14 +259,19 @@ export class ProxyManager {
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
     await this.refreshHostIp();
 
-    // Run curl or wget on the device to get its outward IP (testing through proxy if configured)
     const cfg = this.proxyMap.get(deviceId);
     let cmd = '';
-    if (cfg && cfg.host && cfg.port) {
-      const auth = cfg.username && cfg.password ? `${cfg.username}:${cfg.password}@` : '';
+
+    if (cfg && cfg.username && cfg.password) {
+      // Forwarder is running on 127.0.0.1:8888 via ADB reverse tunnel
+      cmd = [
+        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 12 http://api.ipify.org',
+        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 12 https://api.ipify.org',
+        'curl -k -s -S --max-time 12 http://api.ipify.org',
+      ].join(' || ');
+    } else if (cfg && cfg.host && cfg.port) {
       const proto = cfg.type === 'socks5' ? 'socks5://' : 'http://';
-      const proxyOpt = `-x ${proto}${auth}${cfg.host}:${cfg.port}`;
-      // Test strictly through proxy with SSL ignore (-k) and show errors (-S)
+      const proxyOpt = `-x ${proto}${cfg.host}:${cfg.port}`;
       cmd = `curl -k -s -S ${proxyOpt} --max-time 12 http://api.ipify.org || curl -k -s -S ${proxyOpt} --max-time 12 https://api.ipify.org`;
     } else {
       cmd = `curl -k -s -S --max-time 10 http://api.ipify.org || curl -k -s -S --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 http://api.ipify.org`;
@@ -228,7 +351,6 @@ export class ProxyManager {
     const url = rotateUrlOverride || cfg?.rotateUrl;
     if (!url) {
       // Для Shared-прокси с ротацией по таймеру провайдера URL-вебхук отсутствует.
-      // Не падаем с ошибкой, а проверяем текущий выходной IP и статус.
       this.logger.info({ deviceId }, 'proxy-manager: no rotateUrl configured (Shared/timer rotation) - checking current IP');
       const check = await this.checkDeviceIp(deviceId);
       return {

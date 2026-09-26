@@ -953,8 +953,11 @@ app.post('/device/scripts/run', async (req, reply) => {
   }
 });
 
-app.listen({ host: config.HOST, port: config.PORT }).then(() => {
+app.listen({ host: config.HOST, port: config.PORT }).then(async () => {
   logger.info({ host: config.HOST, port: config.PORT }, 'device-agent: listening (Native ADB Controller over AmneziaWG)');
+  await proxyManager.init().catch((err) => {
+    logger.warn({ err: String(err) }, 'device-agent: proxy forwarder restoration failed on startup');
+  });
 }).catch((err) => {
   logger.error({ err }, 'device-agent: failed to start');
   process.exit(1);
