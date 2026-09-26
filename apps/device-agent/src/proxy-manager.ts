@@ -143,13 +143,16 @@ export class ProxyManager {
 
     // Run curl or wget on the device to get its outward IP (testing through proxy if configured)
     const cfg = this.proxyMap.get(deviceId);
-    let proxyOpt = '';
+    let cmd = '';
     if (cfg && cfg.host && cfg.port) {
       const auth = cfg.username && cfg.password ? `${cfg.username}:${cfg.password}@` : '';
       const proto = cfg.type === 'socks5' ? 'socks5://' : 'http://';
-      proxyOpt = `-x ${proto}${auth}${cfg.host}:${cfg.port} `;
+      const proxyOpt = `-x ${proto}${auth}${cfg.host}:${cfg.port}`;
+      // Test strictly through proxy with SSL ignore (-k) and show errors (-S)
+      cmd = `curl -k -s -S ${proxyOpt} --max-time 12 http://api.ipify.org || curl -k -s -S ${proxyOpt} --max-time 12 https://api.ipify.org`;
+    } else {
+      cmd = `curl -k -s -S --max-time 10 http://api.ipify.org || curl -k -s -S --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 http://api.ipify.org`;
     }
-    const cmd = `curl -s ${proxyOpt}--max-time 10 https://api.ipify.org || curl -s --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 https://api.ipify.org`;
 
     try {
       const text = await this.adb.shell(deviceId, cmd);
