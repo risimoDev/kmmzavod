@@ -198,10 +198,12 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       });
 
       return reply.code(201).send(updated);
-    } catch (err) {
+    } catch (err: any) {
+      try { data.file.resume(); } catch {}
       logger.error({ err, sourceVideoId: sourceVideo.id }, 'Source video upload failed');
       await db.sourceVideo.update({ where: { id: sourceVideo.id }, data: { status: 'failed', storageKey } }).catch(() => {});
-      return reply.code(500).send({ error: 'UploadFailed', message: 'Не удалось загрузить видео' });
+      const detail = err?.message ? `: ${err.message}` : '';
+      return reply.code(500).send({ error: 'UploadFailed', message: `Не удалось загрузить видео${detail}` });
     }
   });
 
@@ -375,9 +377,11 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       }
       const url = await app.storage.presignedUrl(key, 3600).catch(() => null);
       return reply.code(201).send({ key, name: filename, url });
-    } catch (err) {
+    } catch (err: any) {
+      try { data.file.resume(); } catch {}
       logger.error({ err, tenantId }, 'BGM upload failed');
-      return reply.code(500).send({ error: 'UploadFailed', message: 'Не удалось загрузить трек' });
+      const detail = err?.message ? `: ${err.message}` : '';
+      return reply.code(500).send({ error: 'UploadFailed', message: `Не удалось загрузить трек${detail}` });
     }
   });
 

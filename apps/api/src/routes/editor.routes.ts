@@ -246,10 +246,12 @@ export async function editorRoutes(app: FastifyInstance) {
       }
       const updated = await db.editSource.update({ where: { id: source.id }, data: { storageKey } });
       return reply.code(201).send(updated);
-    } catch (err) {
+    } catch (err: any) {
+      try { data.file.resume(); } catch {}
       logger.error({ err, sourceId: source.id }, 'Editor source upload failed');
       await db.editSource.delete({ where: { id: source.id } }).catch(() => {});
-      return reply.code(500).send({ error: 'UploadFailed' });
+      const detail = err?.message ? `: ${err.message}` : '';
+      return reply.code(500).send({ error: 'UploadFailed', message: `Ошибка при сохранении видео${detail}` });
     }
   });
 

@@ -382,6 +382,89 @@ function GroupsTab() {
   );
 }
 
+// ── Proxy parser helper ───────────────────────────────────────────────────────
+
+function parseSingleProxyString(rawLine: string): {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  type?: 'http' | 'socks5' | 'mobile' | 'residential';
+  rotateUrl?: string;
+} | null {
+  const line = rawLine.trim();
+  if (!line || line.startsWith('#')) return null;
+
+  let mainPart = line;
+  let rotUrl: string | undefined;
+  if (line.includes('|')) {
+    const parts = line.split('|');
+    mainPart = parts[0].trim();
+    rotUrl = parts[1].trim();
+  }
+
+  // URL format: http://user:pass@host:port or socks5://user:pass@host:port
+  if (mainPart.startsWith('http://') || mainPart.startsWith('https://') || mainPart.startsWith('socks5://')) {
+    try {
+      const u = new URL(mainPart);
+      const proto = u.protocol.replace(':', '');
+      return {
+        host: u.hostname,
+        port: Number(u.port) || (proto === 'socks5' ? 1080 : 8080),
+        username: u.username ? decodeURIComponent(u.username) : undefined,
+        password: u.password ? decodeURIComponent(u.password) : undefined,
+        type: proto === 'socks5' ? 'socks5' : 'http',
+        rotateUrl: rotUrl,
+      };
+    } catch {
+      // fallback to tokens
+    }
+  }
+
+  // Token format: host:port[:user:pass[:rotateUrl]] OR host:port:type:country:user:pass
+  const tokens = mainPart.split(':');
+  if (tokens.length >= 2) {
+    const host = tokens[0].trim();
+    const port = Number(tokens[1].trim());
+    if (!host || isNaN(port)) return null;
+
+    let username: string | undefined;
+    let password: string | undefined;
+    let type: 'http' | 'socks5' | 'mobile' | 'residential' = 'http';
+    let potentialUrl = rotUrl;
+
+    if (tokens.length >= 6) {
+      const candidateType = tokens[2]?.trim().toLowerCase();
+      if (['http', 'https', 'socks5', 'mobile', 'residential'].includes(candidateType)) {
+        type = candidateType === 'https' ? 'http' : (candidateType as any);
+        username = tokens[4]?.trim() || undefined;
+        password = tokens[5]?.trim() || undefined;
+      } else {
+        username = tokens[2]?.trim() || undefined;
+        password = tokens[3]?.trim() || undefined;
+        potentialUrl = tokens.slice(4).join(':').trim() || rotUrl;
+      }
+    } else if (tokens.length >= 4) {
+      username = tokens[2]?.trim() || undefined;
+      password = tokens[3]?.trim() || undefined;
+      potentialUrl = tokens.slice(4).join(':').trim() || rotUrl;
+    } else if (tokens.length === 3) {
+      username = tokens[2]?.trim() || undefined;
+    }
+
+    return {
+      host,
+      port,
+      username,
+      password,
+      type,
+      rotateUrl: potentialUrl && potentialUrl.startsWith('http') ? potentialUrl : undefined,
+    };
+  }
+
+  return null;
+}
+
 // ── Proxies ───────────────────────────────────────────────────────────────────
 
 function ProxiesTab() {
@@ -408,35 +491,30 @@ function ProxiesTab() {
   useEffect(() => { load(); }, [load]);
 
   const handleImport = async () => {
-    // Parse lines: host:port:type[:country[:username:password]]
     const parsed = raw
       .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [host, port, type = "http", country, username, password] = line.split(":");
-        return {
-          host,
-          port: Number(port),
-          type: (["http", "https", "socks5", "residential", "mobile"].includes(type) ? type : "http") as
-            "http" | "https" | "socks5" | "residential" | "mobile",
-          country: country || undefined,
-          username: username || undefined,
-          password: password || undefined,
-        };
-      })
-      .filter((p) => p.host && p.port);
+      .map((l) => parseSingleProxyString(l))
+      .filter((p): p is NonNullable<typeof p> => p !== null);
 
-    if (parsed.length === 0) { alert("No valid proxies parsed"); return; }
+    if (parsed.length === 0) {
+      alert("Не удалось распознать прокси. Проверьте формат (например: host:port:user:pass или http://user:pass@host:port)");
+      return;
+    }
     setImporting(true);
     try {
-      const res = await accountFarmApi.bulkImportProxies(parsed);
-      alert(`Imported ${res.imported} proxies`);
+      const res = await accountFarmApi.bulkImportProxies(parsed.map((p) => ({
+        host: p.host,
+        port: p.port,
+        type: p.type || 'http',
+        username: p.username,
+        password: p.password,
+      })));
+      alert(`Успешно импортировано ${res.imported} прокси`);
       setShowImport(false);
       setRaw("");
       load();
     } catch (e: any) {
-      alert(e.message ?? "Import failed");
+      alert(e.message ?? "Ошибка импорта");
     } finally {
       setImporting(false);
     }
@@ -1100,6 +1178,10 @@ function DevicesTab() {
   const [customHost, setCustomHost] = useState('');
   const [customPort, setCustomPort] = useState<number>(8080);
   const [customType, setCustomType] = useState<'http' | 'socks5' | 'mobile'>('http');
+  const [customUsername, setCustomUsername] = useState('');
+  const [customPassword, setCustomPassword] = useState('');
+  const [customRotateUrl, setCustomRotateUrl] = useState('');
+  const [customFastLine, setCustomFastLine] = useState('');
   const [proxySaving, setProxySaving] = useState(false);
 
   // Assign account modal form
@@ -1335,17 +1417,56 @@ function DevicesTab() {
     }
   };
 
+  const handleOpenProxyModal = (device: FarmDevice) => {
+    setSelectedDevice(device);
+    setSelectedProxyId('');
+    if (device.proxy) {
+      setCustomHost(device.proxy.host || '');
+      setCustomPort(device.proxy.port || 8080);
+      setCustomType((device.proxy.type as any) || 'http');
+      setCustomUsername((device.proxy as any).username || '');
+      setCustomPassword((device.proxy as any).password || '');
+      setCustomRotateUrl(device.proxy.rotateUrl || '');
+    } else {
+      setCustomHost('');
+      setCustomPort(8080);
+      setCustomType('http');
+      setCustomUsername('');
+      setCustomPassword('');
+      setCustomRotateUrl('');
+    }
+    setCustomFastLine('');
+    setProxyModalOpen(true);
+  };
+
+  const handleFastLinePaste = (val: string) => {
+    setCustomFastLine(val);
+    const parsed = parseSingleProxyString(val);
+    if (parsed) {
+      setCustomHost(parsed.host);
+      setCustomPort(parsed.port);
+      if (parsed.username) setCustomUsername(parsed.username);
+      if (parsed.password) setCustomPassword(parsed.password);
+      if (parsed.type) setCustomType(parsed.type as any);
+      if (parsed.rotateUrl) setCustomRotateUrl(parsed.rotateUrl);
+      setSelectedProxyId('');
+    }
+  };
+
   const handleSaveProxy = async () => {
     if (!selectedDevice) return;
     setProxySaving(true);
     try {
       if (selectedProxyId) {
         await accountFarmApi.setDeviceProxy(selectedDevice.deviceId, { proxyId: selectedProxyId });
-      } else if (customHost && customPort) {
+      } else if (customHost.trim() && customPort) {
         await accountFarmApi.setDeviceProxy(selectedDevice.deviceId, {
-          host: customHost,
-          port: customPort,
+          host: customHost.trim(),
+          port: Number(customPort),
           type: customType,
+          username: customUsername.trim() || undefined,
+          password: customPassword.trim() || undefined,
+          rotateUrl: customRotateUrl.trim() || undefined,
         });
       }
       setProxyModalOpen(false);
@@ -2355,54 +2476,10 @@ function DevicesTab() {
   };
 
   const parseBatchProxyLines = (text: string) => {
-    const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('#'));
-    const parsed: Array<{ host: string; port: number; username?: string; password?: string; rotateUrl?: string }> = [];
-
-    for (const line of lines) {
-      let mainPart = line;
-      let rotUrl: string | undefined;
-      if (line.includes('|')) {
-        const parts = line.split('|');
-        mainPart = parts[0].trim();
-        rotUrl = parts[1].trim();
-      }
-
-      if (mainPart.startsWith('http://') || mainPart.startsWith('https://') || mainPart.startsWith('socks5://')) {
-        try {
-          const u = new URL(mainPart);
-          parsed.push({
-            host: u.hostname,
-            port: Number(u.port) || 8080,
-            username: u.username || undefined,
-            password: u.password || undefined,
-            rotateUrl: rotUrl,
-          });
-          continue;
-        } catch {
-          // fallback to tokens
-        }
-      }
-
-      const tokens = mainPart.split(':');
-      if (tokens.length >= 2) {
-        const host = tokens[0].trim();
-        const port = Number(tokens[1].trim());
-        const username = tokens[2]?.trim() || undefined;
-        const password = tokens[3]?.trim() || undefined;
-        const potentialUrl = tokens.slice(4).join(':').trim() || rotUrl;
-
-        if (host && !isNaN(port)) {
-          parsed.push({
-            host,
-            port,
-            username,
-            password,
-            rotateUrl: potentialUrl && potentialUrl.startsWith('http') ? potentialUrl : undefined,
-          });
-        }
-      }
-    }
-    return parsed;
+    return text
+      .split('\n')
+      .map((l) => parseSingleProxyString(l))
+      .filter((p): p is NonNullable<typeof p> => p !== null);
   };
 
   const handleApplyBatchProxies = async () => {
@@ -2426,7 +2503,7 @@ function DevicesTab() {
               port: p.port,
               username: p.username,
               password: p.password,
-              type: batchProxyType,
+              type: (p.type || batchProxyType) as any,
               rotateUrl: p.rotateUrl,
             };
           })
@@ -2436,7 +2513,7 @@ function DevicesTab() {
             port: parsed[idx].port,
             username: parsed[idx].username,
             password: parsed[idx].password,
-            type: batchProxyType,
+            type: (parsed[idx].type || batchProxyType) as any,
             rotateUrl: parsed[idx].rotateUrl,
           }));
 
@@ -2765,10 +2842,7 @@ function DevicesTab() {
                     size="sm"
                     variant="outline"
                     className="text-[11px] py-1 h-auto"
-                    onClick={() => {
-                      setSelectedDevice(device);
-                      setProxyModalOpen(true);
-                    }}
+                    onClick={() => handleOpenProxyModal(device)}
                   >
                     🌐 Прокси
                   </Button>
@@ -3105,12 +3179,26 @@ function DevicesTab() {
         >
           <div className="space-y-4 text-xs">
             <p className="text-text-secondary">
-              Укажите прокси, через который плата будет выходить в сеть для работы Instagram и TikTok.
+              Укажите параметры мобильного или резидентского прокси (с авторизацией или без). Поддерживаются HTTP, SOCKS5 и мобильные 4G/LTE.
             </p>
+
+            {/* Fast paste bar */}
+            <div className="space-y-1.5 p-2.5 rounded-lg bg-surface-2 border border-border">
+              <label className="text-text-primary font-medium text-[11px] flex items-center justify-between">
+                <span>⚡ Быстрая вставка строки прокси:</span>
+                <span className="text-[10px] text-text-tertiary">host:port:user:pass или http://...</span>
+              </label>
+              <Input
+                placeholder="185.x.x.x:8080:login:password или socks5://user:pass@host:port"
+                value={customFastLine}
+                onChange={(e) => handleFastLinePaste(e.target.value)}
+                className="font-mono text-[11px]"
+              />
+            </div>
 
             {proxies.length > 0 && (
               <div className="space-y-1.5">
-                <label className="text-text-primary font-medium">Выбрать из базы прокси организации:</label>
+                <label className="text-text-primary font-medium">Или выбрать из базы сохранённых:</label>
                 <select
                   value={selectedProxyId}
                   onChange={(e) => {
@@ -3121,7 +3209,7 @@ function DevicesTab() {
                   }}
                   className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
                 >
-                  <option value="">-- Ввести вручную --</option>
+                  <option value="">-- Ввести вручную / из строки выше --</option>
                   {proxies.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.type.toUpperCase()} - {p.host}:{p.port} ({p.country || 'Global'})
@@ -3132,7 +3220,7 @@ function DevicesTab() {
             )}
 
             {!selectedProxyId && (
-              <div className="space-y-3 pt-1 border-t border-border">
+              <div className="space-y-3 pt-2 border-t border-border">
                 <div className="grid grid-cols-3 gap-2">
                   <div className="col-span-2 space-y-1">
                     <label className="text-text-secondary">Host / IP:</label>
@@ -3152,17 +3240,48 @@ function DevicesTab() {
                     />
                   </div>
                 </div>
-                <div className="space-y-1">
-                  <label className="text-text-secondary">Тип:</label>
-                  <select
-                    value={customType}
-                    onChange={(e) => setCustomType(e.target.value as any)}
-                    className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
-                  >
-                    <option value="http">HTTP / HTTPS</option>
-                    <option value="socks5">SOCKS5</option>
-                    <option value="mobile">Мобильный 4G/LTE</option>
-                  </select>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-text-secondary">Логин (если есть):</label>
+                    <Input
+                      placeholder="username"
+                      value={customUsername}
+                      onChange={(e) => setCustomUsername(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-text-secondary">Пароль (если есть):</label>
+                    <Input
+                      type="password"
+                      placeholder="••••••••"
+                      value={customPassword}
+                      onChange={(e) => setCustomPassword(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-text-secondary">Тип / Протокол:</label>
+                    <select
+                      value={customType}
+                      onChange={(e) => setCustomType(e.target.value as any)}
+                      className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
+                    >
+                      <option value="http">HTTP / HTTPS</option>
+                      <option value="socks5">SOCKS5</option>
+                      <option value="mobile">Мобильный 4G / LTE</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-text-secondary">Webhook ротации (опционально):</label>
+                    <Input
+                      placeholder="https://...rotate_url"
+                      value={customRotateUrl}
+                      onChange={(e) => setCustomRotateUrl(e.target.value)}
+                    />
+                  </div>
                 </div>
               </div>
             )}
@@ -3186,7 +3305,7 @@ function DevicesTab() {
             onConfirm={handleSaveProxy}
             confirmLabel="Применить и проверить"
             loading={proxySaving}
-            disabled={!selectedProxyId && !customHost}
+            disabled={!selectedProxyId && (!customHost.trim() || !customPort)}
           />
         </Modal>
       )}

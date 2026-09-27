@@ -247,10 +247,12 @@ export async function projectRoutes(app: FastifyInstance) {
 
       const url = await app.storage.presignedUrl(storageKey, 3600).catch(() => null);
       return reply.code(201).send({ ...updated, url });
-    } catch (err) {
+    } catch (err: any) {
+      try { data.file.resume(); } catch {}
       logger.error({ err, sourceId: source.id }, 'Project source video upload failed');
       await db.sourceVideo.delete({ where: { id: source.id } }).catch(() => {});
-      return reply.code(500).send({ error: 'UploadFailed', message: 'Ошибка при сохранении видео' });
+      const detail = err?.message ? `: ${err.message}` : '';
+      return reply.code(500).send({ error: 'UploadFailed', message: `Ошибка при сохранении видео${detail}` });
     }
   });
 

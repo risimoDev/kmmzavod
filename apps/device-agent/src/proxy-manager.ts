@@ -34,6 +34,8 @@ export class ProxyManager {
 
   /** Forwarders indexed by upstream signature: type://user:pass@host:port */
   private forwarders: Map<string, LocalProxyForwarder> = new Map();
+  /** Pending forwarder initialization promises to avoid race conditions across concurrent boards */
+  private forwarderPromises: Map<string, Promise<LocalProxyForwarder>> = new Map();
   /** Mapping of deviceId -> forwarder signature */
   private deviceForwarderKey: Map<string, string> = new Map();
 
@@ -144,6 +146,7 @@ export class ProxyManager {
         'settings put global http_proxy 127.0.0.1:8888',
         'settings put global global_http_proxy_host 127.0.0.1',
         'settings put global global_http_proxy_port 8888',
+        'ndc resolver flushdefaultif 2>/dev/null || true',
       ].join(' && ');
 
       await this.adb.shell(deviceId, cmd);
@@ -157,6 +160,7 @@ export class ProxyManager {
         `settings put global http_proxy ${proxy.host}:${proxy.port}`,
         `settings put global global_http_proxy_host ${proxy.host}`,
         `settings put global global_http_proxy_port ${proxy.port}`,
+        'ndc resolver flushdefaultif 2>/dev/null || true',
       ].join(' && ');
 
       await this.adb.shell(deviceId, cmd);
@@ -173,9 +177,18 @@ export class ProxyManager {
 
   private async getOrCreateForwarder(proxy: DeviceProxyConfig): Promise<LocalProxyForwarder> {
     const key = this.getForwarderKey(proxy);
-    let fwd = this.forwarders.get(key);
-    if (!fwd) {
-      fwd = new LocalProxyForwarder(
+    const existing = this.forwarders.get(key);
+    if (existing && existing.boundPort > 0) {
+      return existing;
+    }
+
+    const pending = this.forwarderPromises.get(key);
+    if (pending) {
+      return pending;
+    }
+
+    const promise = (async () => {
+      const fwd = new LocalProxyForwarder(
         {
           host: proxy.host,
           port: proxy.port,
@@ -187,8 +200,13 @@ export class ProxyManager {
       );
       await fwd.start();
       this.forwarders.set(key, fwd);
-    }
-    return fwd;
+      return fwd;
+    })().finally(() => {
+      this.forwarderPromises.delete(key);
+    });
+
+    this.forwarderPromises.set(key, promise);
+    return promise;
   }
 
   private async releaseForwarder(key: string): Promise<void> {
@@ -316,24 +334,23 @@ export class ProxyManager {
     let cmd = '';
 
     if (cfg && cfg.username && cfg.password) {
-      // Ensure reverse tunnel and settings are active before testing (self-healing)
-      try {
-        await this.applyDeviceProxy(deviceId, cfg);
-      } catch {
-        // non-fatal, proceed with test
-      }
       // Forwarder is running on 127.0.0.1:8888 via ADB reverse tunnel
+      // Check HTTPS first (CONNECT tunnel supports both HTTP and SOCKS5), then HTTP, then toybox wget
       cmd = [
-        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 12 http://api.ipify.org',
-        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 12 https://api.ipify.org',
-        'curl -k -s -S --max-time 12 http://api.ipify.org',
+        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 15 https://api.ipify.org',
+        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 15 http://api.ipify.org',
+        'http_proxy=http://127.0.0.1:8888 toybox wget -q -O - http://api.ipify.org',
       ].join(' || ');
     } else if (cfg && cfg.host && cfg.port) {
       const proto = cfg.type === 'socks5' ? 'socks5://' : 'http://';
       const proxyOpt = `-x ${proto}${cfg.host}:${cfg.port}`;
-      cmd = `curl -k -s -S ${proxyOpt} --max-time 12 http://api.ipify.org || curl -k -s -S ${proxyOpt} --max-time 12 https://api.ipify.org`;
+      cmd = [
+        `curl -k -s -S ${proxyOpt} --max-time 15 https://api.ipify.org`,
+        `curl -k -s -S ${proxyOpt} --max-time 15 http://api.ipify.org`,
+        `http_proxy=http://${cfg.host}:${cfg.port} toybox wget -q -O - http://api.ipify.org`,
+      ].join(' || ');
     } else {
-      cmd = `curl -k -s -S --max-time 10 http://api.ipify.org || curl -k -s -S --max-time 10 https://api.ipify.org || wget -qO- --timeout=10 http://api.ipify.org`;
+      cmd = 'curl -k -s -S --max-time 10 https://api.ipify.org || curl -k -s -S --max-time 10 http://api.ipify.org || wget -qO- --timeout=10 http://api.ipify.org';
     }
 
     try {
@@ -345,7 +362,7 @@ export class ProxyManager {
       if (!ipMatch) {
         return {
           ok: false,
-          error: `No valid IP returned from device. Raw response: ${text.slice(0, 200)}`,
+          error: `Прокси не отвечает или отклонил подключение: ${text.slice(0, 200)}`,
           leakDetected: false,
           hostIp: this.hostPublicIp ?? undefined,
         };
@@ -511,7 +528,7 @@ export class ProxyManager {
     };
   }
 
-  /** Batch set proxy across multiple devices in parallel */
+  /** Batch set proxy across multiple devices in parallel (chunked for ADB daemon stability) */
   async batchSetProxy(
     assignments: Array<{ deviceId: string; proxy: DeviceProxyConfig }>
   ): Promise<{
@@ -526,24 +543,38 @@ export class ProxyManager {
       error?: string;
     }>;
   }> {
-    const results = await Promise.allSettled(
-      assignments.map(async ({ deviceId, proxy }) => {
-        const check = await this.setProxy(deviceId, proxy);
-        return { deviceId, ok: true, check };
-      })
-    );
+    const formatted: Array<{
+      deviceId: string;
+      ok: boolean;
+      check?: DeviceIpCheckResult;
+      error?: string;
+    }> = [];
 
-    const formatted = results.map((r, i) => {
-      const devId = assignments[i].deviceId;
-      if (r.status === 'fulfilled') {
-        return r.value;
+    // Process in batches of 4 boards to prevent Windows ADB server daemon socket contention
+    const chunkSize = 4;
+    for (let i = 0; i < assignments.length; i += chunkSize) {
+      const chunk = assignments.slice(i, i + chunkSize);
+      const chunkResults = await Promise.allSettled(
+        chunk.map(async ({ deviceId, proxy }) => {
+          const check = await this.setProxy(deviceId, proxy);
+          return { deviceId, ok: true, check };
+        })
+      );
+
+      for (let j = 0; j < chunkResults.length; j++) {
+        const r = chunkResults[j];
+        const devId = chunk[j].deviceId;
+        if (r.status === 'fulfilled') {
+          formatted.push(r.value);
+        } else {
+          formatted.push({
+            deviceId: devId,
+            ok: false,
+            error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+          });
+        }
       }
-      return {
-        deviceId: devId,
-        ok: false,
-        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
-      };
-    });
+    }
 
     const successful = formatted.filter((f) => f.ok).length;
     return {

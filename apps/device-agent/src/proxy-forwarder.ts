@@ -137,10 +137,10 @@ export class LocalProxyForwarder {
           const headerEnd = buffer.indexOf('\r\n\r\n');
           if (headerEnd !== -1) {
             handshakeDone = true;
+            upstreamSocket.removeListener('data', onData);
             const headerStr = buffer.subarray(0, headerEnd).toString('utf-8');
             if (headerStr.includes('200')) {
               clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-              upstreamSocket.removeListener('data', onData);
 
               const remainder = buffer.subarray(headerEnd + 4);
               if (remainder.length > 0) {
@@ -153,6 +153,7 @@ export class LocalProxyForwarder {
               upstreamSocket.pipe(clientSocket);
               clientSocket.pipe(upstreamSocket);
             } else {
+              this.logger.warn({ targetUrl, status: headerStr.split('\r\n')[0] }, 'proxy-forwarder: upstream HTTP proxy rejected CONNECT');
               clientSocket.write(headerStr + '\r\n\r\n');
               clientSocket.end();
               upstreamSocket.end();
@@ -162,6 +163,11 @@ export class LocalProxyForwarder {
       };
 
       upstreamSocket.on('data', onData);
+    });
+
+    upstreamSocket.setTimeout(15_000);
+    upstreamSocket.on('timeout', () => {
+      upstreamSocket.destroy(new Error('Upstream HTTP proxy timeout (15s)'));
     });
 
     upstreamSocket.on('error', (err) => {
@@ -182,6 +188,11 @@ export class LocalProxyForwarder {
     const upstreamSocket = net.connect(this.config.port, this.config.host, () => {
       // Send SOCKS5 Greeting: support both NO_AUTH (0x00) and USER_PASS (0x02)
       upstreamSocket.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+    });
+
+    upstreamSocket.setTimeout(15_000);
+    upstreamSocket.on('timeout', () => {
+      upstreamSocket.destroy(new Error('Upstream SOCKS5 timeout (15s)'));
     });
 
     let stage: 'greeting' | 'auth' | 'connect' = 'greeting';
@@ -233,6 +244,19 @@ export class LocalProxyForwarder {
           clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
           upstreamSocket.removeAllListeners('data');
 
+          // Preserve any extra bytes that arrived with the SOCKS5 connect response
+          let headerLen = 10; // default IPv4 reply
+          if (data[3] === 0x03 && data.length > 4) {
+            headerLen = 5 + data[4] + 2; // domain ATYP: 4 + 1(len) + len + 2
+          } else if (data[3] === 0x04) {
+            headerLen = 22; // IPv6: 4 + 16 + 2
+          }
+
+          const remainder = data.subarray(headerLen);
+          if (remainder.length > 0) {
+            clientSocket.write(remainder);
+          }
+
           if (head && head.length > 0) {
             upstreamSocket.write(head);
           }
@@ -275,6 +299,99 @@ export class LocalProxyForwarder {
 
   /** Handle plain HTTP requests (GET, POST, etc.) */
   private handleHttpRequest(clientReq: http.IncomingMessage, clientRes: http.ServerResponse): void {
+    const rawUrl = clientReq.url || '/';
+    const hostHeader = (clientReq.headers.host || '').split(':')[0] || this.config.host;
+
+    let targetPath = rawUrl;
+    if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+      targetPath = `http://${hostHeader}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+    }
+
+    if (this.config.type === 'socks5') {
+      // Connect via SOCKS5 tunnel to target on port 80
+      const targetPort = 80;
+      const targetHost = hostHeader;
+
+      const upstreamSocket = net.connect(this.config.port, this.config.host, () => {
+        upstreamSocket.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+      });
+
+      upstreamSocket.setTimeout(15_000);
+      upstreamSocket.on('timeout', () => {
+        upstreamSocket.destroy(new Error('SOCKS5 timeout'));
+      });
+
+      let stage: 'greeting' | 'auth' | 'connect' = 'greeting';
+
+      upstreamSocket.on('data', (data: Buffer) => {
+        if (stage === 'greeting') {
+          if (data[0] !== 0x05) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end('SOCKS5 handshake failed');
+            upstreamSocket.destroy();
+            return;
+          }
+          if (data[1] === 0x02) {
+            stage = 'auth';
+            const u = Buffer.from(this.config.username || '');
+            const p = Buffer.from(this.config.password || '');
+            upstreamSocket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+          } else {
+            stage = 'connect';
+            this.sendSocks5Connect(upstreamSocket, targetHost, targetPort);
+          }
+        } else if (stage === 'auth') {
+          if (data[1] === 0x00) {
+            stage = 'connect';
+            this.sendSocks5Connect(upstreamSocket, targetHost, targetPort);
+          } else {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end('SOCKS5 authentication failed');
+            upstreamSocket.destroy();
+          }
+        } else if (stage === 'connect') {
+          if (data[1] === 0x00) {
+            upstreamSocket.removeAllListeners('data');
+            // Write HTTP request line
+            let reqLine = `${clientReq.method} ${rawUrl} HTTP/1.1\r\n`;
+            let headers = '';
+            for (const [k, v] of Object.entries(clientReq.headers)) {
+              if (v === undefined) continue;
+              if (Array.isArray(v)) {
+                v.forEach((val) => { headers += `${k}: ${val}\r\n`; });
+              } else {
+                headers += `${k}: ${v}\r\n`;
+              }
+            }
+            upstreamSocket.write(reqLine + headers + '\r\n');
+            clientReq.pipe(upstreamSocket);
+
+            upstreamSocket.on('data', (chunk) => {
+              if (!clientRes.headersSent) {
+                // Let raw stream through to client socket
+                (clientRes.socket as net.Socket)?.write(chunk);
+              } else {
+                clientRes.write(chunk);
+              }
+            });
+            upstreamSocket.on('end', () => { clientRes.end(); });
+          } else {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end('SOCKS5 connect failed');
+            upstreamSocket.destroy();
+          }
+        }
+      });
+
+      upstreamSocket.on('error', (err) => {
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+        }
+        clientRes.end(`Upstream SOCKS5 error: ${err.message}`);
+      });
+      return;
+    }
+
     let authHeader: string | undefined;
     if (this.config.username && this.config.password) {
       const creds = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
@@ -284,12 +401,13 @@ export class LocalProxyForwarder {
     const options: http.RequestOptions = {
       hostname: this.config.host,
       port: this.config.port,
-      path: clientReq.url,
+      path: targetPath,
       method: clientReq.method,
       headers: {
         ...clientReq.headers,
         ...(authHeader ? { 'proxy-authorization': authHeader } : {}),
       },
+      timeout: 15_000,
     };
 
     const upstreamReq = http.request(options, (upstreamRes) => {

@@ -47,9 +47,16 @@ export class MinioStorageClient implements IStorageClient {
       accessKey: opts.accessKey,
       secretKey: opts.secretKey,
       region: this._region,
+      partSize: 10 * 1024 * 1024, // 10MB chunks for streaming multipart uploads (prevents memory bloat / OOM)
     });
     this.bucket = opts.bucket;
     this._publicBaseUrl = opts.publicBaseUrl?.replace(/\/+$/, '');
+
+    if (this._publicBaseUrl && !['minio', 'localhost', '127.0.0.1'].includes(cleanEndpoint)) {
+      if (this._publicBaseUrl.includes('/storage')) {
+        console.warn(`[storage] Warning: MINIO_PUBLIC_URL is set to '${this._publicBaseUrl}', but external S3 (${cleanEndpoint}) is used. This will route media requests to local MinIO instead of ${cleanEndpoint}. Clear MINIO_PUBLIC_URL to use direct presigned S3 URLs.`);
+      }
+    }
   }
 
   /** Ensure the configured bucket exists (call once at startup). */

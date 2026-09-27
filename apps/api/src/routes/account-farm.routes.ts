@@ -100,13 +100,13 @@ const SetDeviceProxyBody = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-  rotateUrl: z.string().url().optional(),
+  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
 }).refine((data) => data.proxyId || (data.host && data.port), {
   message: 'Either proxyId or both host and port must be provided',
 });
 
 const RotateDeviceIpBody = z.object({
-  rotateUrl: z.string().url().optional(),
+  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
   cooldownMs: z.number().int().min(0).max(30000).optional(),
 });
 
@@ -124,7 +124,7 @@ const BatchSetDeviceProxyBody = z.object({
     username: z.string().optional(),
     password: z.string().optional(),
     type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-    rotateUrl: z.string().url().optional(),
+    rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
   })).min(1),
 });
 
@@ -1486,6 +1486,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         apkUrl,
       });
     } catch (err: any) {
+      try { data.file.resume(); } catch {}
       logger.error({ err, storageKey }, 'failed to upload APK');
       return reply.status(500).send({ error: 'UploadFailed', message: err.message });
     }

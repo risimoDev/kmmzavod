@@ -62,7 +62,7 @@ const SetProxyBody = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-  rotateUrl: z.string().url().optional(),
+  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
 });
 
 app.post('/proxy/set', async (req, reply) => {
@@ -124,7 +124,7 @@ app.post('/proxy/check', async (req, reply) => {
 
 const RotateIpBody = z.object({
   deviceId: z.string().min(1),
-  rotateUrl: z.string().url().optional(),
+  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
   cooldownMs: z.number().int().min(0).max(30000).optional(),
 });
 
@@ -202,7 +202,7 @@ const BatchSetProxyBody = z.object({
     username: z.string().optional(),
     password: z.string().optional(),
     type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-    rotateUrl: z.string().url().optional(),
+    rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
   })).min(1),
 });
 
