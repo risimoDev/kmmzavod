@@ -15,6 +15,8 @@ export interface DeviceProxyConfig {
   rotateUrl?: string;
 }
 
+export type ProxyMode = 'shared_sequential' | 'private_parallel';
+
 export interface DeviceIpCheckResult {
   ok: boolean;
   ip?: string;
@@ -31,6 +33,11 @@ export class ProxyManager {
   private proxyMap: Map<string, DeviceProxyConfig> = new Map();
   private hostPublicIp: string | null = null;
   private lastHostIpCheck = 0;
+
+  /** Mode: 'shared_sequential' (1 device at a time, protecting 50 TCP limit) vs 'private_parallel' (all devices) */
+  public mode: ProxyMode = 'shared_sequential';
+  public activeDeviceId: string | null = null;
+  public sharedProxy: DeviceProxyConfig | null = null;
 
   /** Forwarders indexed by upstream signature: type://user:pass@host:port */
   private forwarders: Map<string, LocalProxyForwarder> = new Map();
@@ -55,8 +62,11 @@ export class ProxyManager {
    * Waits gracefully for ADB to finish USB device discovery before applying.
    */
   async init(): Promise<void> {
-    if (this.proxyMap.size === 0) return;
-    this.logger.info({ count: this.proxyMap.size }, 'proxy-manager: restoring saved device proxies');
+    if (this.proxyMap.size === 0 && !this.sharedProxy) return;
+    this.logger.info(
+      { mode: this.mode, activeDeviceId: this.activeDeviceId, count: this.proxyMap.size },
+      'proxy-manager: initializing device proxies'
+    );
 
     // Wait up to 10 seconds for ADB to enumerate USB devices
     let onlineDevices: AdbDevice[] = [];
@@ -75,25 +85,58 @@ export class ProxyManager {
     }
 
     const onlineSerials = new Set(onlineDevices.map((d) => d.serial));
-    let restored = 0;
 
-    for (const [deviceId, proxy] of this.proxyMap.entries()) {
-      if (!onlineSerials.has(deviceId)) {
-        this.logger.info({ deviceId }, 'proxy-manager: device currently offline, proxy will be applied upon reconnect');
-        continue;
+    if (this.mode === 'shared_sequential') {
+      // In shared sequential mode: apply proxy to ONE active device only to respect 50 TCP connection limit.
+      const targetDevice = (this.activeDeviceId && onlineSerials.has(this.activeDeviceId))
+        ? this.activeDeviceId
+        : (onlineDevices[0]?.serial ?? null);
+
+      this.activeDeviceId = targetDevice;
+
+      // Ensure all other online devices have proxy removed (direct clean Gnirehtet connection)
+      for (const dev of onlineDevices) {
+        if (dev.serial !== targetDevice) {
+          await this.adb.exec(['-s', dev.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+          await this.adb.shell(dev.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+        }
       }
-      try {
-        await this.applyDeviceProxy(deviceId, proxy);
-        restored++;
-      } catch (err) {
-        this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to restore proxy for device');
+
+      if (targetDevice) {
+        const proxy = this.proxyMap.get(targetDevice) || this.sharedProxy;
+        if (proxy) {
+          try {
+            await this.applyDeviceProxy(targetDevice, proxy);
+            this.logger.info(
+              { targetDevice, proxyHost: proxy.host, port: proxy.port },
+              'proxy-manager: applied shared proxy to single active device (sequential mode)'
+            );
+          } catch (err) {
+            this.logger.warn({ targetDevice, err: String(err) }, 'proxy-manager: failed to apply proxy to active device');
+          }
+        }
       }
+      this.saveState();
+    } else {
+      // In private_parallel mode (private proxy without connection limits): restore on all online devices
+      let restored = 0;
+      for (const [deviceId, proxy] of this.proxyMap.entries()) {
+        if (!onlineSerials.has(deviceId)) {
+          this.logger.info({ deviceId }, 'proxy-manager: device offline, proxy will be applied upon reconnect');
+          continue;
+        }
+        try {
+          await this.applyDeviceProxy(deviceId, proxy);
+          restored++;
+        } catch (err) {
+          this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to restore proxy for device');
+        }
+      }
+      this.logger.info(
+        { restored, totalConfigured: this.proxyMap.size, online: onlineSerials.size },
+        'proxy-manager: private parallel proxy restoration complete'
+      );
     }
-
-    this.logger.info(
-      { restored, totalConfigured: this.proxyMap.size, online: onlineSerials.size },
-      'proxy-manager: proxy restoration complete'
-    );
   }
 
   /**
@@ -227,8 +270,26 @@ export class ProxyManager {
         const raw = fs.readFileSync(this.stateFilePath, 'utf-8');
         const data = JSON.parse(raw);
         if (typeof data === 'object' && data !== null) {
+          if (data._mode === 'shared_sequential' || data._mode === 'private_parallel') {
+            this.mode = data._mode;
+          }
+          if (typeof data._activeDeviceId === 'string') {
+            this.activeDeviceId = data._activeDeviceId;
+          }
+          if (typeof data._sharedProxy === 'object' && data._sharedProxy !== null) {
+            this.sharedProxy = data._sharedProxy as DeviceProxyConfig;
+          }
+
           for (const [deviceId, cfg] of Object.entries(data)) {
+            if (deviceId.startsWith('_')) continue;
             this.proxyMap.set(deviceId, cfg as DeviceProxyConfig);
+            if (!this.sharedProxy) {
+              this.sharedProxy = cfg as DeviceProxyConfig;
+            }
+          }
+
+          if (this.mode === 'shared_sequential' && !this.activeDeviceId && this.proxyMap.size > 0) {
+            this.activeDeviceId = Array.from(this.proxyMap.keys())[0];
           }
         }
       }
@@ -239,7 +300,13 @@ export class ProxyManager {
 
   private saveState(): void {
     try {
-      const obj: Record<string, DeviceProxyConfig> = {};
+      const obj: Record<string, any> = {
+        _mode: this.mode,
+        _activeDeviceId: this.activeDeviceId,
+      };
+      if (this.sharedProxy) {
+        obj._sharedProxy = this.sharedProxy;
+      }
       for (const [id, cfg] of this.proxyMap.entries()) {
         obj[id] = cfg;
       }
@@ -247,6 +314,98 @@ export class ProxyManager {
     } catch (err) {
       this.logger.error({ err }, 'proxy-manager: failed to save state file');
     }
+  }
+
+  /** Get current operating mode and active device */
+  getMode(): { mode: ProxyMode; activeDeviceId: string | null; hasSharedProxy: boolean } {
+    return {
+      mode: this.mode,
+      activeDeviceId: this.activeDeviceId,
+      hasSharedProxy: Boolean(this.sharedProxy || this.proxyMap.size > 0),
+    };
+  }
+
+  /**
+   * Toggle proxy allocation mode:
+   * - 'shared_sequential': 1 active device at a time (protects from 50 TCP connection limits)
+   * - 'private_parallel': all 20 devices concurrently (for private proxies)
+   */
+  async setMode(newMode: ProxyMode): Promise<{ ok: boolean; mode: ProxyMode }> {
+    if (this.mode === newMode) return { ok: true, mode: this.mode };
+    this.mode = newMode;
+    this.saveState();
+
+    this.logger.info({ mode: this.mode }, 'proxy-manager: proxy mode updated');
+
+    if (this.mode === 'shared_sequential') {
+      // Switching to shared sequential: keep only active device, clear all others
+      const devices = await this.adb.listDevices().catch(() => []);
+      const online = devices.filter((d) => d.state === 'device');
+      const active = (this.activeDeviceId && online.some((d) => d.serial === this.activeDeviceId))
+        ? this.activeDeviceId
+        : (online[0]?.serial ?? null);
+
+      this.activeDeviceId = active;
+
+      for (const dev of online) {
+        if (dev.serial !== active) {
+          await this.adb.exec(['-s', dev.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+          await this.adb.shell(dev.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+        }
+      }
+
+      if (active) {
+        const proxy = this.proxyMap.get(active) || this.sharedProxy;
+        if (proxy) {
+          await this.applyDeviceProxy(active, proxy);
+        }
+      }
+      this.saveState();
+    } else {
+      // Switching to private parallel mode (bought private proxy without connection limit):
+      // Apply proxy to all online devices in rack!
+      await this.reapplyAll();
+    }
+
+    return { ok: true, mode: this.mode };
+  }
+
+  /**
+   * Transfer the shared proxy to a specific target device.
+   * In shared_sequential mode, removes proxy from previous device and applies to new target device.
+   */
+  async switchActiveDevice(targetDeviceId: string): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    const previousDeviceId = this.activeDeviceId ?? undefined;
+    this.logger.info({ previousDeviceId, targetDeviceId }, 'proxy-manager: switching active proxy device');
+
+    const proxy = this.proxyMap.get(targetDeviceId) || this.sharedProxy || (previousDeviceId ? this.proxyMap.get(previousDeviceId) : undefined);
+    if (!proxy) {
+      throw new Error('Нет сохранённой конфигурации прокси для передачи');
+    }
+
+    this.sharedProxy = proxy;
+
+    // 1. Remove proxy from previous device if different
+    if (previousDeviceId && previousDeviceId !== targetDeviceId) {
+      try {
+        await this.adb.exec(['-s', previousDeviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+        await this.adb.shell(previousDeviceId, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+      } catch (err) {
+        this.logger.warn({ previousDeviceId, err: String(err) }, 'proxy-manager: failed to clear previous device proxy');
+      }
+    }
+
+    // 2. Apply proxy to target device
+    await this.applyDeviceProxy(targetDeviceId, proxy);
+    this.proxyMap.set(targetDeviceId, proxy);
+    this.activeDeviceId = targetDeviceId;
+    this.saveState();
+
+    return {
+      ok: true,
+      activeDeviceId: targetDeviceId,
+      previousDeviceId,
+    };
   }
 
   /** Resolve public IP of the host PC running device-agent (used for leak detection). */
@@ -279,6 +438,20 @@ export class ProxyManager {
     );
 
     try {
+      this.sharedProxy = proxy;
+
+      if (this.mode === 'shared_sequential') {
+        // In shared sequential mode: set this as active device and clear proxy on all other devices
+        this.activeDeviceId = deviceId;
+        const devices = await this.adb.listDevices().catch(() => []);
+        for (const d of devices) {
+          if (d.serial !== deviceId && d.state === 'device') {
+            await this.adb.exec(['-s', d.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+            await this.adb.shell(d.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+          }
+        }
+      }
+
       await this.applyDeviceProxy(deviceId, proxy);
       this.proxyMap.set(deviceId, proxy);
       this.saveState();

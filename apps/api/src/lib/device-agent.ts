@@ -107,6 +107,21 @@ export const deviceAgentClient = {
     return res.data;
   },
 
+  async getProxyMode(): Promise<{ ok: boolean; mode: 'shared_sequential' | 'private_parallel'; activeDeviceId: string | null; hasSharedProxy: boolean }> {
+    const res = await axios.get(`${BASE}/proxy/mode`, { timeout: 8_000 });
+    return res.data;
+  },
+
+  async setProxyMode(mode: 'shared_sequential' | 'private_parallel'): Promise<{ ok: boolean; mode: string }> {
+    const res = await axios.post(`${BASE}/proxy/mode`, { mode }, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async switchActiveProxyDevice(deviceId: string): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    const res = await axios.post(`${BASE}/proxy/switch-active`, { deviceId }, { timeout: 15_000 });
+    return res.data;
+  },
+
   async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
     ok: boolean;
     deviceId: string;

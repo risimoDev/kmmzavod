@@ -686,6 +686,26 @@ export const accountFarmApi = {
       results: Array<{ deviceId: string } & DeviceIpCheck>;
     }>('/api/v1/farm/devices/proxy/batch-check-ip', { method: 'POST', body: JSON.stringify({ deviceIds }) }),
 
+  getProxyMode: () =>
+    apiFetch<{
+      ok: boolean;
+      mode: 'shared_sequential' | 'private_parallel';
+      activeDeviceId: string | null;
+      hasSharedProxy: boolean;
+    }>('/api/v1/farm/devices/proxy/mode'),
+
+  setProxyMode: (mode: 'shared_sequential' | 'private_parallel') =>
+    apiFetch<{ ok: boolean; mode: 'shared_sequential' | 'private_parallel' }>('/api/v1/farm/devices/proxy/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  switchActiveProxyDevice: (deviceId: string) =>
+    apiFetch<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }>(
+      '/api/v1/farm/devices/proxy/switch-active',
+      { method: 'POST', body: JSON.stringify({ deviceId }) }
+    ),
+
   viewTarget: (deviceId: string, body: ViewTargetParams) =>
     apiFetch<ViewTargetResponse>(`/api/v1/farm/devices/${deviceId}/view-target`, { method: 'POST', body: JSON.stringify(body) }),
 

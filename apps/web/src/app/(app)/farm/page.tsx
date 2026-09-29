@@ -1316,18 +1316,29 @@ function DevicesTab() {
   const [networkFeedbackMsg, setNetworkFeedbackMsg] = useState<string | null>(null);
   const [editingRotateUrl, setEditingRotateUrl] = useState<Record<string, string>>({});
 
+  // Proxy Mode: shared sequential vs private parallel
+  const [proxyMode, setProxyMode] = useState<'shared_sequential' | 'private_parallel'>('shared_sequential');
+  const [activeProxyDeviceId, setActiveProxyDeviceId] = useState<string | null>(null);
+  const [switchingProxyId, setSwitchingProxyId] = useState<string | null>(null);
+  const [togglingProxyMode, setTogglingProxyMode] = useState(false);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [devRes, proxyRes, accRes] = await Promise.allSettled([
+      const [devRes, proxyRes, accRes, modeRes] = await Promise.allSettled([
         accountFarmApi.listDevices(),
         accountFarmApi.listProxies(),
         accountFarmApi.listAccounts({ limit: 100 }),
+        accountFarmApi.getProxyMode(),
       ]);
 
       if (proxyRes.status === 'fulfilled') setProxies(proxyRes.value);
       if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
+      if (modeRes.status === 'fulfilled' && modeRes.value?.ok) {
+        setProxyMode(modeRes.value.mode);
+        setActiveProxyDeviceId(modeRes.value.activeDeviceId);
+      }
 
       if (devRes.status === 'fulfilled') {
         const list = devRes.value.devices || [];
@@ -2376,6 +2387,37 @@ function DevicesTab() {
   };
 
   // ── Network Management & Proxy Hub Handlers ────────────────────────────────
+  const handleToggleProxyMode = async () => {
+    const nextMode = proxyMode === 'shared_sequential' ? 'private_parallel' : 'shared_sequential';
+    setTogglingProxyMode(true);
+    try {
+      const res = await accountFarmApi.setProxyMode(nextMode);
+      if (res.ok) {
+        setProxyMode(res.mode);
+        await loadData();
+      }
+    } catch (err: any) {
+      alert(`Ошибка переключения режима прокси: ${err.message}`);
+    } finally {
+      setTogglingProxyMode(false);
+    }
+  };
+
+  const handleSwitchActiveProxy = async (deviceId: string) => {
+    setSwitchingProxyId(deviceId);
+    try {
+      const res = await accountFarmApi.switchActiveProxyDevice(deviceId);
+      if (res.ok) {
+        setActiveProxyDeviceId(res.activeDeviceId);
+        await loadData();
+      }
+    } catch (err: any) {
+      alert(`Не удалось переключить прокси на плату: ${err.message}`);
+    } finally {
+      setSwitchingProxyId(null);
+    }
+  };
+
   const handleOpenNetworkModal = () => {
     setNetworkModalOpen(true);
     setNetworkFeedbackMsg(null);
@@ -2705,6 +2747,61 @@ function DevicesTab() {
         </div>
       </div>
 
+      {/* ── Proxy Allocation Mode Banner ── */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-surface-2/80 border border-border rounded-xl shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className={cn(
+            "w-3 h-3 rounded-full flex-shrink-0 animate-pulse",
+            proxyMode === 'shared_sequential' ? "bg-amber-400 shadow-sm shadow-amber-400/50" : "bg-emerald-400 shadow-sm shadow-emerald-400/50"
+          )} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-text-primary">
+                {proxyMode === 'shared_sequential'
+                  ? "🔄 Режим Shared-прокси (Поочередный: 1 активная плата)"
+                  : "🚀 Режим Private-прокси (Параллельный: все платы сразу)"}
+              </span>
+              <span className={cn(
+                "text-[10px] px-2 py-0.5 rounded font-semibold",
+                proxyMode === 'shared_sequential'
+                  ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+              )}>
+                {proxyMode === 'shared_sequential' ? "Защита от лимита 50 сокетов" : "Безлимитный канал"}
+              </span>
+            </div>
+            <div className="text-[11px] text-text-secondary mt-0.5">
+              {proxyMode === 'shared_sequential' ? (
+                <>
+                  Сейчас прокси активен на: <strong className="font-mono text-cyan-300">{activeProxyDeviceId || '—'}</strong>. Остальные платы работают через прямой интернет. Нажмите <code className="bg-surface-3 px-1 rounded text-cyan-400">⚡ Взять прокси</code> на любой плате для мгновенной передачи.
+                </>
+              ) : (
+                "Все платы стойки используют приватный прокси одновременно без ограничений."
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            loading={togglingProxyMode}
+            onClick={handleToggleProxyMode}
+            className={cn(
+              "text-xs font-semibold shadow-sm transition-all",
+              proxyMode === 'shared_sequential'
+                ? "border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/15"
+                : "border-amber-500/50 text-amber-300 hover:bg-amber-500/15"
+            )}
+          >
+            {proxyMode === 'shared_sequential'
+              ? "🔓 Включить Private-режим (для всех плат)"
+              : "🔒 Включить Shared-режим (поочередный)"}
+          </Button>
+        </div>
+      </div>
+
       {/* 20 Boards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {devices.map((device, idx) => {
@@ -2798,6 +2895,27 @@ function DevicesTab() {
                       <span className="text-[11px] text-amber-400/80">Не задан</span>
                     )}
                   </div>
+
+                  {/* In Shared mode: show whether this board holds the active proxy or offer one-click transfer */}
+                  {proxyMode === 'shared_sequential' && (
+                    <div className="flex items-center justify-between pt-0.5">
+                      <span className="text-text-tertiary text-[11px]">Статус Shared:</span>
+                      {device.deviceId === activeProxyDeviceId ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                          🟢 АКТИВЕН
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={switchingProxyId === device.deviceId}
+                          onClick={() => handleSwitchActiveProxy(device.deviceId)}
+                          className="px-2 py-0.5 rounded text-[10px] font-medium bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/30 transition-colors flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {switchingProxyId === device.deviceId ? "⏳ Перенос..." : "⚡ Взять прокси"}
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* IP Check result */}
                   {check && (

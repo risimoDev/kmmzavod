@@ -1000,6 +1000,35 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   app.post('/devices/proxy/batch-check-ip', batchCheckIpHandler);
   app.post('/proxies/batch-check-ip', batchCheckIpHandler);
 
+  app.get('/devices/proxy/mode', async (_request, reply) => {
+    try {
+      const res = await deviceAgentClient.getProxyMode();
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/mode', async (request, reply) => {
+    const body = z.object({ mode: z.enum(['shared_sequential', 'private_parallel']) }).parse(request.body);
+    try {
+      const res = await deviceAgentClient.setProxyMode(body.mode);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/switch-active', async (request, reply) => {
+    const body = z.object({ deviceId: z.string().min(1) }).parse(request.body);
+    try {
+      const res = await deviceAgentClient.switchActiveProxyDevice(body.deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
   const installApkHandler = async (request: any, reply: any) => {
     const body = InstallApkBody.parse(request.body || {});
     try {

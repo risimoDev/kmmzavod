@@ -59,6 +59,13 @@ export async function runViewTarget(
   const cleanUsername = targetUsername.replace(/^@+/, '').trim();
   let ipCheck: DeviceIpCheckResult | undefined;
 
+  // In shared sequential mode, automatically transfer the single shared proxy to this device
+  if (proxyManager.getMode().mode === 'shared_sequential' && proxyManager.getMode().hasSharedProxy) {
+    await proxyManager.switchActiveDevice(deviceId).catch((err) => {
+      logger.warn({ deviceId, err: String(err) }, 'view-target: could not auto-switch shared proxy to device');
+    });
+  }
+
   // 1. Guardrail: Anti-Leak check before touching social apps
   if (checkIpFirst) {
     logger.info({ deviceId }, 'view-target: running pre-flight IP check');

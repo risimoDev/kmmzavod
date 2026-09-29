@@ -150,6 +150,49 @@ app.post('/proxy/reapply', async () => {
   return { ok: true, ...result };
 });
 
+// ── Proxy Mode (Shared Sequential vs Private Parallel) ─────────────────────
+
+app.get('/proxy/mode', async () => {
+  return {
+    ok: true,
+    ...proxyManager.getMode(),
+  };
+});
+
+const SetProxyModeBody = z.object({
+  mode: z.enum(['shared_sequential', 'private_parallel']),
+});
+
+app.post('/proxy/mode', async (req, reply) => {
+  const parsed = SetProxyModeBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  const res = await proxyManager.setMode(parsed.data.mode);
+  return res;
+});
+
+const SwitchActiveProxyBody = z.object({
+  deviceId: z.string().min(1),
+});
+
+app.post('/proxy/switch-active', async (req, reply) => {
+  const parsed = SwitchActiveProxyBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  try {
+    const res = await proxyManager.switchActiveDevice(parsed.data.deviceId);
+    return res;
+  } catch (err) {
+    logger.error({ err, deviceId: parsed.data.deviceId }, 'device-agent: /proxy/switch-active failed');
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
 const RestartInterfaceBody = z.object({
   deviceId: z.string().min(1),
   mode: z.enum(['ethernet', 'wifi', 'all']).default('ethernet'),

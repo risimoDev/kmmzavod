@@ -68,6 +68,13 @@ export async function runWbWarmup(
 
   let ipCheck: DeviceIpCheckResult | undefined;
 
+  // In shared sequential mode, automatically transfer the single shared proxy to this device
+  if (proxyManager.getMode().mode === 'shared_sequential' && proxyManager.getMode().hasSharedProxy) {
+    await proxyManager.switchActiveDevice(deviceId).catch((err) => {
+      logger.warn({ deviceId, err: String(err) }, 'wb-warmup: could not auto-switch shared proxy to device');
+    });
+  }
+
   // 1. Guardrail: Anti-Leak check on clean mobile proxy
   if (checkIpFirst) {
     logger.info({ deviceId, sku }, 'wb-warmup: running pre-flight IP check');
