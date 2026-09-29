@@ -41,9 +41,12 @@ export class LocalProxyForwarder {
   async start(): Promise<number> {
     if (this.server) return this.boundPort;
 
-    // Detect actual protocol: if explicitly socks5, use socks5; otherwise probe whether port speaks SOCKS5 or HTTP
+    // Detect actual protocol: if explicitly socks5, use socks5;
+    // if explicitly http/mobile/residential, use http immediately; otherwise probe.
     if (this.config.type === 'socks5') {
       this.effectiveType = 'socks5';
+    } else if (this.config.type === 'http' || this.config.type === 'mobile' || this.config.type === 'residential') {
+      this.effectiveType = 'http';
     } else {
       this.effectiveType = await this.probeProtocol();
     }
@@ -187,9 +190,7 @@ export class LocalProxyForwarder {
       const connectPayload =
         `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
         `Host: ${targetHost}:${targetPort}\r\n` +
-        `User-Agent: Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\r\n` +
         `Proxy-Connection: Keep-Alive\r\n` +
-        `Connection: Keep-Alive\r\n` +
         authHeader +
         `\r\n`;
 
@@ -227,8 +228,10 @@ export class LocalProxyForwarder {
               upstreamSocket.pipe(clientSocket);
               clientSocket.pipe(upstreamSocket);
             } else {
+              const locationMatch = headerStr.match(/location:\s*([^\r\n]+)/i);
+              const location = locationMatch ? locationMatch[1].trim() : undefined;
               this.logger.warn(
-                { targetHost, targetPort, statusCode, firstLine },
+                { targetHost, targetPort, statusCode, firstLine, location },
                 'proxy-forwarder: upstream HTTP proxy rejected CONNECT'
               );
               // Cleanly respond with 502 Bad Gateway to the Android client
