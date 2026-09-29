@@ -54,13 +54,20 @@ export function createEditorRenderWorker(deps: Deps): Worker {
 
         const clips: EdlClip[] = clipRows.map((row, i) => {
           const edl = (row.edl ?? {}) as Partial<EdlClip>;
+          let segments = Array.isArray(edl.segments)
+            ? edl.segments.filter((s) => s && typeof s.src_idx === 'number' && Number(s.end) > Number(s.start))
+            : [];
+          if (segments.length === 0) {
+            const dur = Math.max(1, Number(row.durationSec) || 5);
+            segments = [{ src_idx: 0, start: 0, end: dur, score: 0 }];
+          }
           return {
             title: row.title || edl.title || `Clip ${i + 1}`,
             included: true,
             order: row.order,
-            segments: edl.segments ?? [],
+            segments,
             transcript_snippet: edl.transcript_snippet ?? row.transcriptSnippet ?? '',
-            subtitles: edl.subtitles ?? null,
+            subtitles: Array.isArray(edl.subtitles) ? edl.subtitles : null,
           };
         });
 

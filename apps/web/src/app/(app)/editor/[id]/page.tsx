@@ -1370,15 +1370,29 @@ export default function EditorProjectDetailPage() {
         )}
 
         {project.status === "failed" && project.error && (
-          <Card className="border-danger/40">
-            <CardContent className="p-4 flex items-center justify-between gap-4">
-              <div>
+          <Card className="border-danger/40 bg-danger/5">
+            <CardContent className="p-4 flex items-center justify-between gap-4 flex-wrap">
+              <div className="space-y-1 max-w-xl">
                 <p className="text-sm font-medium text-danger">Ошибка обработки</p>
-                <p className="text-xs text-text-secondary mt-0.5 break-all">{project.error}</p>
+                <p className="text-xs text-text-secondary break-all">
+                  {typeof project.error === "string" ? project.error : JSON.stringify(project.error)}
+                </p>
+                {String(project.error).includes("422") && (
+                  <p className="text-2xs text-text-tertiary">
+                    Совет: проверьте параметры (стиль субтитров, границы клипов) и попробуйте запустить рендер снова.
+                  </p>
+                )}
               </div>
-              <Button variant="secondary" size="sm" onClick={analyze} loading={busy}>
-                Повторить анализ
-              </Button>
+              <div className="flex items-center gap-2">
+                {project.clips.length > 0 && (
+                  <Button variant="primary" size="sm" onClick={render} loading={busy}>
+                    🎬 Повторить рендер
+                  </Button>
+                )}
+                <Button variant="secondary" size="sm" onClick={analyze} loading={busy}>
+                  🔍 Повторить анализ
+                </Button>
+              </div>
             </CardContent>
           </Card>
         )}

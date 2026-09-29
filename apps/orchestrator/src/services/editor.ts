@@ -84,9 +84,39 @@ export interface RenderResult {
 export function describeEditorError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const status = err.response?.status;
-    const data = err.response?.data as { detail?: string } | string | undefined;
-    const body = typeof data === 'string' ? data : data?.detail ?? err.message;
-    return `HTTP ${status ?? '?'}: ${String(body).slice(0, 800)}`;
+    const data = err.response?.data;
+    let detailStr = '';
+
+    if (typeof data === 'string') {
+      detailStr = data;
+    } else if (data && typeof data === 'object') {
+      const d = (data as Record<string, unknown>).detail;
+      if (typeof d === 'string') {
+        detailStr = d;
+      } else if (Array.isArray(d)) {
+        detailStr = d
+          .map((item) => {
+            if (item && typeof item === 'object') {
+              const loc = Array.isArray(item.loc)
+                ? item.loc.filter((x: unknown) => x !== 'body').join('.')
+                : '';
+              const msg = item.msg || item.message || JSON.stringify(item);
+              return loc ? `${loc}: ${msg}` : String(msg);
+            }
+            return String(item);
+          })
+          .join('; ');
+      } else if (d && typeof d === 'object') {
+        detailStr = JSON.stringify(d);
+      } else if ('message' in data && typeof (data as any).message === 'string') {
+        detailStr = (data as any).message;
+      } else {
+        detailStr = JSON.stringify(data);
+      }
+    }
+
+    const body = detailStr || err.message;
+    return `HTTP ${status ?? '?'}: ${body.slice(0, 800)}`;
   }
   return err instanceof Error ? err.message : String(err);
 }

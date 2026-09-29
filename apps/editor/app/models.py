@@ -58,21 +58,25 @@ class SubtitleStyle(str, Enum):
     TIKTOK = "tiktok"
     CINEMATIC = "cinematic"
     MINIMAL = "minimal"
+    MRBEAST = "mrbeast"
+    NEON_GLOW = "neon_glow"
+    FIRE_HYPE = "fire_hype"
+    SINGLE_WORD = "single_word"
 
 
 # ── Analysis data types ───────────────────────────────────────────────────────
 
 class WordToken(BaseModel):
-    start: float
-    end: float
-    text: str
+    start: float = 0.0
+    end: float = 0.0
+    text: str = ""
 
 
 class TranscriptSegment(BaseModel):
-    start: float
-    end: float
-    text: str
-    words: list[WordToken] = []
+    start: float = 0.0
+    end: float = 0.0
+    text: str = ""
+    words: list[WordToken] = Field(default_factory=list)
 
 
 class SourceAnalysis(BaseModel):
@@ -114,19 +118,19 @@ class EdlSegment(BaseModel):
 
 
 class SubtitleWord(BaseModel):
-    start: float
-    end: float
-    text: str
+    start: float = 0.0
+    end: float = 0.0
+    text: str = ""
 
 
 class SubtitleLine(BaseModel):
     """One subtitle line on the OUTPUT timeline of a clip. Proposed at analyze
     time from the source transcript; user-editable in the storyboard; consumed
     verbatim by the render (no re-transcription when present)."""
-    start: float
-    end: float
-    text: str
-    words: list[SubtitleWord] = []
+    start: float = 0.0
+    end: float = 0.0
+    text: str = ""
+    words: list[SubtitleWord] | None = Field(default_factory=list)
 
 
 class EdlClip(BaseModel):
@@ -176,7 +180,7 @@ class RenderRequest(BaseModel):
     fps: int = Field(default=30, ge=15, le=60)
     smart_crop: bool = True
     audio_mode: AudioMode = AudioMode.KEEP
-    subtitle_style: SubtitleStyle = SubtitleStyle.TIKTOK
+    subtitle_style: SubtitleStyle | str = SubtitleStyle.TIKTOK
     # Optional shared voiceover + BGM keys for audio_mode=replace.
     voiceover_url: str | None = None
     bgm_url: str | None = None
