@@ -42,10 +42,14 @@ class CutType(str, Enum):
 
 
 class SubtitleStyle(str, Enum):
-    DEFAULT = "default"      # White Arial, black outline, bottom-center
-    TIKTOK = "tiktok"        # Bold, large, word-wrapped, yellow highlight
-    CINEMATIC = "cinematic"  # Smaller italic font, semi-transparent box
-    MINIMAL = "minimal"      # Small, no outline, upper-center
+    DEFAULT = "default"          # White Arial, black outline, bottom-center
+    TIKTOK = "tiktok"            # Bold, large, word-wrapped, yellow highlight
+    CINEMATIC = "cinematic"      # Smaller italic font, semi-transparent box
+    MINIMAL = "minimal"          # Small, no outline, upper-center
+    MRBEAST = "mrbeast"          # Ultra-punchy bold with vibrant yellow/green highlight
+    NEON_GLOW = "neon_glow"      # Glowing cyan/magenta cyberpunk style
+    FIRE_HYPE = "fire_hype"      # High-energy flame orange/gold style
+    SINGLE_WORD = "single_word"  # Fast-paced single word display
 
 
 # ── Scene ─────────────────────────────────────────────────────────────────────

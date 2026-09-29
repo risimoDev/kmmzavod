@@ -25,6 +25,23 @@ interface Deps {
   connection: ConnectionOptions;
 }
 
+function describeAxios(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    const data = err.response?.data;
+    if (typeof data === 'object' && data !== null) {
+      const detail = (data as any).detail || (data as any).message || (data as any).error;
+      if (detail) {
+        return typeof detail === 'string' ? detail : JSON.stringify(detail);
+      }
+      return `HTTP ${status ?? '?'}: ${JSON.stringify(data).slice(0, 800)}`;
+    }
+    const body = typeof data === 'string' ? data : err.message;
+    return `HTTP ${status ?? '?'}: ${String(body).slice(0, 800)}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function createUniquifyRenderWorker(deps: Deps): Worker {
   const { db, videoProcessorUrl, uniquifyStateQueue, connection } = deps;
 
@@ -126,7 +143,8 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           'Uniquify-render: variant completed',
         );
       } catch (err: unknown) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorMsg = describeAxios(err);
+        logger.error({ variantId, uniquifyJobId, err: errorMsg }, 'Uniquify-render: variant failed');
         await db.uniqueVariant.update({
           where: { id: variantId },
           data: { status: 'failed', error: errorMsg },

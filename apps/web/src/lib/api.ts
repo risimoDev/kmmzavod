@@ -1619,6 +1619,12 @@ export const uniquifyApi = {
     return apiFetch<{ items: UniqueVariant[]; pagination: Pagination }>(`/api/v1/uniquify/uniquify-jobs/${jobId}/variants?${q}`);
   },
 
+  cancelJob: (id: string) =>
+    apiFetch<{ status: string }>(`/api/v1/uniquify/uniquify-jobs/${id}/cancel`, { method: 'POST' }),
+
+  retryFailed: (id: string) =>
+    apiFetch<{ status: string; retriedCount: number }>(`/api/v1/uniquify/uniquify-jobs/${id}/retry-failed`, { method: 'POST' }),
+
   createDistribute: (jobId: string, body: {
     socialAccountIds: string[];
     staggerMinutes?: number;

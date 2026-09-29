@@ -61,6 +61,21 @@ function JobDetailContent({ jobId }: { jobId: string }) {
   const [captionTemplate, setCaptionTemplate] = useState("");
   const [hashtags, setHashtags] = useState("");
 
+  const [retrying, setRetrying] = useState(false);
+  const [previewVariant, setPreviewVariant] = useState<UniqueVariant | null>(null);
+
+  const handleRetryFailed = async () => {
+    setRetrying(true);
+    try {
+      await uniquifyApi.retryFailed(jobId);
+      load();
+    } catch (e: any) {
+      alert(e.message ?? "Не удалось перезапустить варианты");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   interface MatrixRow {
     variantId: string;
     variantIndex: number;
@@ -211,11 +226,18 @@ function JobDetailContent({ jobId }: { jobId: string }) {
         title="Задача уникализации"
         subtitle={job ? `ID: ${job.id.slice(0, 8)} · ${job.variantCount} вариантов` : undefined}
         actions={
-          job?.status === "completed" && (
-            <Button variant="primary" size="sm" onClick={openDistributeModal}>
-              <DistributeIcon /> Матрица публикации
-            </Button>
-          )
+          <div className="flex items-center gap-2">
+            {job && job.failedCount > 0 && job.status !== "generating" && job.status !== "analyzing" && (
+              <Button variant="outline" size="sm" onClick={handleRetryFailed} loading={retrying}>
+                Повторить упавшие ({job.failedCount})
+              </Button>
+            )}
+            {job?.status === "completed" && (
+              <Button variant="primary" size="sm" onClick={openDistributeModal}>
+                <DistributeIcon /> Матрица публикации
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -248,7 +270,14 @@ function JobDetailContent({ jobId }: { jobId: string }) {
                 </div>
                 <Progress value={progress} max={100} size="md" showLabel />
                 {job.error && (
-                  <Badge variant="danger">{job.error}</Badge>
+                  <div className="flex items-center justify-between gap-3 p-2.5 rounded-lg bg-danger/10 border border-danger/20">
+                    <span className="text-xs text-danger font-medium break-words">{job.error}</span>
+                    {job.failedCount > 0 && (
+                      <Button variant="outline" size="sm" onClick={handleRetryFailed} loading={retrying} className="shrink-0 text-xs">
+                        Повторить неудачные
+                      </Button>
+                    )}
+                  </div>
                 )}
                 <div className="flex items-center gap-2 text-xs text-text-tertiary">
                   <span>Создано {relativeTime(job.createdAt)}</span>
@@ -277,7 +306,11 @@ function JobDetailContent({ jobId }: { jobId: string }) {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {variants.map((v) => (
-                    <VariantCard key={v.id} variant={v} />
+                    <VariantCard
+                      key={v.id}
+                      variant={v}
+                      onPreview={(variant) => setPreviewVariant(variant)}
+                    />
                   ))}
                 </div>
               )}
@@ -663,13 +696,55 @@ function JobDetailContent({ jobId }: { jobId: string }) {
           </div>
         </div>
       )}
+
+      {/* Video Preview Modal */}
+      {previewVariant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-3xl flex flex-col rounded-xl border border-border bg-surface-1 shadow-elevation-3 overflow-hidden">
+            <div className="p-4 border-b border-border flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-text-primary">
+                Вариант #{previewVariant.variantIndex + 1}
+              </h3>
+              <button
+                onClick={() => setPreviewVariant(null)}
+                className="text-text-tertiary hover:text-text-primary text-sm p-1 rounded hover:bg-surface-2"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 flex items-center justify-center bg-black">
+              {previewVariant.downloadUrl ? (
+                <video
+                  src={previewVariant.downloadUrl}
+                  controls
+                  autoPlay
+                  className="max-h-[70vh] rounded"
+                />
+              ) : (
+                <p className="text-sm text-text-tertiary">Видео недоступно</p>
+              )}
+            </div>
+            <div className="p-3 border-t border-border bg-surface-0 flex justify-end">
+              <Button variant="ghost" size="sm" onClick={() => setPreviewVariant(null)}>
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-function VariantCard({ variant }: { variant: UniqueVariant }) {
+function VariantCard({
+  variant,
+  onPreview,
+}: {
+  variant: UniqueVariant;
+  onPreview: (variant: UniqueVariant) => void;
+}) {
   return (
-    <Card className="overflow-hidden">
+    <Card className="overflow-hidden group">
       <div className="aspect-video bg-surface-2 flex items-center justify-center relative">
         {variant.thumbnailUrl ? (
           <img
@@ -687,6 +762,18 @@ function VariantCard({ variant }: { variant: UniqueVariant }) {
           status={variant.status}
           className="absolute top-2 right-2"
         />
+        {variant.downloadUrl && (
+          <button
+            type="button"
+            onClick={() => onPreview(variant)}
+            className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+            title="Просмотр"
+          >
+            <div className="w-10 h-10 rounded-full bg-white/90 text-black flex items-center justify-center shadow-lg hover:scale-105 transition-transform">
+              <PlayIcon />
+            </div>
+          </button>
+        )}
       </div>
       <CardContent className="space-y-2">
         <div className="flex items-center gap-2 text-xs text-text-tertiary">
@@ -701,19 +788,29 @@ function VariantCard({ variant }: { variant: UniqueVariant }) {
           )}
         </div>
         {variant.downloadUrl && (
-          <a
-            href={variant.downloadUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="block w-full"
-          >
-            <Button variant="outline" size="sm" className="w-full">
-              <DownloadIcon /> Download
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              onClick={() => onPreview(variant)}
+            >
+              <PlayIcon /> Просмотр
             </Button>
-          </a>
+            <a
+              href={variant.downloadUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1"
+            >
+              <Button variant="outline" size="sm" className="w-full">
+                <DownloadIcon /> Скачать
+              </Button>
+            </a>
+          </div>
         )}
         {variant.error && (
-          <p className="text-xs text-danger">{variant.error}</p>
+          <p className="text-xs text-danger break-words">{variant.error}</p>
         )}
       </CardContent>
     </Card>
@@ -836,3 +933,12 @@ function DownloadIcon() {
     </svg>
   );
 }
+
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden>
+      <polygon points="5 3 19 12 5 21 5 3" />
+    </svg>
+  );
+}
+

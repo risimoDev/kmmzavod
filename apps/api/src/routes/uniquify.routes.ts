@@ -2,11 +2,11 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { uniquifyAnalyzeQueue, distributeQueue } from '../lib/queues';
+import { uniquifyAnalyzeQueue, uniquifyRenderQueue, distributeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import { config } from '../config';
-import type { UniquifyAnalyzeJobPayload, DistributeJobPayload } from '@kmmzavod/queue';
+import { QUEUES, type UniquifyAnalyzeJobPayload, type UniquifyRenderJobPayload, type DistributeJobPayload } from '@kmmzavod/queue';
 
 const AUDIO_EXT_RE = /\.(mp3|wav|aac|m4a|ogg|flac)$/i;
 
@@ -600,6 +600,101 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ status: 'ok' });
+  });
+
+  /**
+   * POST /uniquify-jobs/:id/retry-failed
+   * Retry failed variants for a uniquification job.
+   */
+  app.post('/uniquify-jobs/:id/retry-failed', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { tenantId } = req.user;
+
+    const job = await db.uniquifyJob.findFirst({
+      where: { id, tenantId },
+      include: {
+        sourceVideo: true,
+        variants: {
+          where: { status: 'failed' },
+        },
+      },
+    });
+    if (!job) return reply.code(404).send({ error: 'NotFound' });
+    if (job.variants.length === 0) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Нет вариантов со статусом ошибки' });
+    }
+
+    const config = (job.config ?? {}) as Record<string, unknown>;
+    const extraIds = Array.isArray(config.additionalSourceVideoIds) ? (config.additionalSourceVideoIds as string[]) : [];
+    const poolVideos = extraIds.length
+      ? await db.sourceVideo.findMany({
+          where: { id: { in: extraIds }, tenantId },
+          select: { storageKey: true },
+        })
+      : [];
+    const sourceStorageKeys = [
+      job.sourceVideo.storageKey,
+      ...poolVideos.map((v) => v.storageKey),
+    ].filter(Boolean);
+
+    const mode = (config.mode as 'preserve_context' | 'remix_montage') ?? 'preserve_context';
+    const isPreserveContext = mode === 'preserve_context';
+    const bgmVolume = typeof config.bgmVolume === 'number' ? config.bgmVolume : 0.16;
+
+    // Reset status of failed variants
+    await db.uniqueVariant.updateMany({
+      where: { uniquifyJobId: id, status: 'failed' },
+      data: { status: 'pending', error: null },
+    });
+
+    // Update job status if it was failed
+    await db.uniquifyJob.update({
+      where: { id },
+      data: {
+        status: 'generating',
+        error: null,
+        failedCount: { decrement: job.variants.length },
+      },
+    });
+
+    const renderJobs = job.variants.map((v) => {
+      const transforms = (v.transforms ?? {}) as Record<string, any>;
+      const seed = typeof transforms.seed === 'number' ? transforms.seed : Math.floor(Math.random() * 1_000_000);
+      const subtitleStyle = v.subtitleStyle || transforms.subtitleStyle || 'none';
+      const bgmKey = v.bgmTrackKey || transforms.bgmKey;
+      const width = typeof transforms.width === 'number' ? transforms.width : 1080;
+      const height = typeof transforms.height === 'number' ? transforms.height : 1920;
+      const fps = typeof transforms.fps === 'number' ? transforms.fps : 30;
+
+      return {
+        name: `uniquify-render-retry-${v.id}`,
+        data: {
+          uniquifyJobId: id,
+          variantId: v.id,
+          tenantId,
+          mode,
+          sourceStorageKeys,
+          outputKey: `tenants/${tenantId}/uniquify/${id}/${v.id}.mp4`,
+          seed,
+          subtitleStyle,
+          bgmStorageKey: bgmKey,
+          bgmVolume: isPreserveContext ? 0.08 : bgmVolume,
+          voiceoverVolume: 1.0,
+          width,
+          height,
+          fps,
+          beatSync: config.beatSync !== false,
+          stealth_level: (config.stealthLevel as string) || 'maximum',
+        } as UniquifyRenderJobPayload,
+        opts: QUEUES['uniquify-render'].defaultJobOptions as any,
+      };
+    });
+
+    await uniquifyRenderQueue.addBulk(renderJobs);
+
+    logger.info({ uniquifyJobId: id, retriedCount: renderJobs.length }, 'Retrying failed uniquify variants');
+
+    return reply.send({ status: 'ok', retriedCount: renderJobs.length });
   });
 
   // ── Variants ────────────────────────────────────────────────────────────

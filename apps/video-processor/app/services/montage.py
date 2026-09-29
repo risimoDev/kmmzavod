@@ -28,6 +28,7 @@ extract_thumbnail, escaping) and `app.services.subtitle` (ASS karaoke styles).
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import logging
 import os
 import random
@@ -210,10 +211,23 @@ def build_plan(
             transition_dur=tdur,
         )
         segments.append(seg)
-        accumulated += seg.screen_dur - tdur
+    # Safeguard: if guard loop couldn't accumulate segments, add at least one default segment
+    if not segments and sources:
+        src0 = sources[0]
+        segments.append(Segment(
+            src_idx=0,
+            start=0.0,
+            span=round(min(max(0.8, src0.duration), target_duration), 3),
+            speed=1.0,
+            zoom=1.0,
+            crop_bias_x=0.5,
+            crop_bias_y=0.5,
+            transition="cut",
+            transition_dur=0.0,
+        ))
 
     # Optionally snap cut points to the music beat for a rhythmic feel.
-    if beats:
+    if beats and len(segments) > 1:
         _snap_plan_to_beats(segments, beats)
 
     return MontagePlan(segments=segments, style=style)
@@ -305,6 +319,8 @@ def _concat_video(clip_paths: list[str], plan_segments: list[Segment], output: s
     ``Σ screen_dur[0..i] − Σ transition_dur[1..i]``.
     """
     n = len(clip_paths)
+    if n == 0:
+        raise ValueError("No video segments to concatenate")
     if n == 1:
         fx._run([fx._bin("ffmpeg"), "-y", "-i", clip_paths[0], "-c", "copy", output], "single_seg_copy")
         return plan_segments[0].screen_dur
@@ -344,17 +360,34 @@ def _concat_video(clip_paths: list[str], plan_segments: list[Segment], output: s
 
     total = cum_dur - cum_trans
 
-    cmd += [
-        "-filter_complex", ";".join(fc_parts),
-        "-map", "[vout]",
-        "-an",
-        "-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-t", f"{total:.3f}",
-        "-threads", str(threads),
-        output,
-    ]
-    fx._run(cmd, "montage_concat")
+    filter_script_path: str | None = None
+    try:
+        filter_str = ";".join(fc_parts)
+        if len(fc_parts) > 10:
+            filter_script_path = output + ".filter.txt"
+            with open(filter_script_path, "w", encoding="utf-8") as f:
+                f.write(filter_str)
+            cmd += ["-filter_complex_script", filter_script_path]
+        else:
+            cmd += ["-filter_complex", filter_str]
+
+        cmd += [
+            "-map", "[vout]",
+            "-an",
+            "-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-t", f"{total:.3f}",
+            "-threads", str(threads),
+            output,
+        ]
+        fx._run(cmd, "montage_concat")
+    finally:
+        if filter_script_path and os.path.exists(filter_script_path):
+            try:
+                os.remove(filter_script_path)
+            except OSError:
+                pass
+
     return total
 
 
@@ -632,6 +665,7 @@ async def render_preserve_context(
     contrast = round(rng.uniform(0.98, 1.02), 3)
     saturation = round(rng.uniform(0.97, 1.03), 3)
     tempo = round(rng.uniform(0.985, 1.015), 4)
+    out_dur = round(dur / tempo, 3)
 
     # 1. Video filter chain
     vf_parts = [
@@ -661,7 +695,12 @@ async def render_preserve_context(
         vf_parts.append(f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}")
         vf_parts.append("noise=alls=2:allf=t")
 
+    # Keep video speed synchronized with audio tempo so lipsync is 100% preserved
+    if abs(tempo - 1.0) > 0.001:
+        vf_parts.append(f"setpts=PTS/{tempo:.5f}")
+
     vf_parts.append(f"fps={fps}")
+    vf_parts.append("format=yuv420p")
 
     # Optional subtitles
     if subtitles and subtitle_style and subtitle_style != "none":
@@ -681,19 +720,21 @@ async def render_preserve_context(
             except ValueError:
                 style_enum = SubtitleStyle.TIKTOK
             await asyncio.to_thread(generate_ass_file, entries, ass_path, width, height, style_enum)
-            escaped_ass = fx.escape_filter_path(ass_path)
-            vf_parts.append(f"subtitles='{escaped_ass}'")
+            safe_ass = fx._safe_filter_path(ass_path)
+            vf_parts.append(f"ass='{safe_ass}'")
 
     video_filter = ",".join(vf_parts)
 
     # 2. Audio filter chain: acoustic anti-fingerprinting
+    # First resample to 44.1kHz stereo to guarantee 18.5kHz equalizer stays below Nyquist limit
     has_audio = src_probe.has_audio
     cmd = [
-        fx.ffmpeg(), "-threads", str(threads), "-y",
+        fx._bin("ffmpeg"), "-threads", str(threads), "-y",
         "-i", source_path,
     ]
 
     audio_stealth_filters = (
+        f"aformat=sample_rates=44100:channel_layouts=stereo,"
         f"atempo={tempo},"
         f"equalizer=f=2500:width_type=o:width=1:g=1.5,"
         f"equalizer=f=200:width_type=o:width=1:g=1.0,"
@@ -707,17 +748,18 @@ async def render_preserve_context(
             filter_complex = (
                 f"[0:v]{video_filter}[vout];"
                 f"[0:a]{audio_stealth_filters}[voice];"
-                f"[1:a]volume={bgm_volume}[bgm];"
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={bgm_volume}[bgm];"
                 f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             )
         else:
             filter_complex = (
                 f"[0:v]{video_filter}[vout];"
-                f"[1:a]volume={bgm_volume}[aout]"
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=duration={out_dur:.3f},volume={bgm_volume}[aout]"
             )
         cmd += [
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "[aout]",
+            "-t", f"{out_dur:.3f}",
         ]
     else:
         if has_audio:
@@ -728,23 +770,26 @@ async def render_preserve_context(
             cmd += [
                 "-filter_complex", filter_complex,
                 "-map", "[vout]", "-map", "[aout]",
+                "-t", f"{out_dur:.3f}",
             ]
         else:
             filter_complex = (
                 f"[0:v]{video_filter}[vout];"
-                f"anullsrc=channel_layout=stereo:sample_rate=44100[aout]"
+                f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={out_dur:.3f}[aout]"
             )
             cmd += [
                 "-filter_complex", filter_complex,
                 "-map", "[vout]", "-map", "[aout]",
-                "-shortest",
+                "-t", f"{out_dur:.3f}",
             ]
 
     # Mobile Camera EXIF & atoms spoofing (iPhone 15 Pro)
-    days_ago = seed % 3
-    hours = 10 + (seed % 12)
-    mins = seed % 60
-    creation_ts = f"2026-09-{22 + days_ago:02d}T{hours:02d}:{mins:02d}:15Z"
+    days_ago = seed % 5
+    hours_ago = (seed * 3) % 24
+    mins_ago = (seed * 7) % 60
+    secs_ago = (seed * 11) % 60
+    dt = datetime.now(timezone.utc) - timedelta(days=days_ago, hours=hours_ago, minutes=mins_ago, seconds=secs_ago)
+    creation_ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     cmd += [
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
@@ -761,7 +806,7 @@ async def render_preserve_context(
         output_path,
     ]
 
-    await asyncio.to_thread(fx.run, cmd, 600)
+    await asyncio.to_thread(fx._run, cmd, "preserve_context_render")
 
     # Thumbnail + perceptual hash
     thumb_path = output_path.rsplit(".", 1)[0] + "_thumb.jpg"

@@ -50,6 +50,11 @@ export const uniquifyAnalyzeQueue = new Queue(QUEUE_DEFS.UNIQUIFY_ANALYZE.name, 
   defaultJobOptions: QUEUE_DEFS.UNIQUIFY_ANALYZE.defaultJobOptions,
 });
 
+export const uniquifyRenderQueue = new Queue(QUEUE_DEFS.UNIQUIFY_RENDER.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.UNIQUIFY_RENDER.defaultJobOptions,
+});
+
 export const distributeQueue = new Queue(QUEUE_DEFS.UNIQUIFY_DISTRIBUTE.name, {
   connection,
   defaultJobOptions: QUEUE_DEFS.UNIQUIFY_DISTRIBUTE.defaultJobOptions,

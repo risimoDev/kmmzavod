@@ -115,37 +115,41 @@ export class LocalProxyForwarder {
   private async probeProtocol(): Promise<'http' | 'socks5'> {
     return new Promise((resolve) => {
       let resolved = false;
-      const done = (proto: 'http' | 'socks5') => {
+      const done = (proto: 'http' | 'socks5', detail: string) => {
         if (!resolved) {
           resolved = true;
           socket.destroy();
+          this.logger.info(
+            { upstream: `${this.config.host}:${this.config.port}`, protocol: proto, detail },
+            'proxy-forwarder: upstream protocol determined'
+          );
           resolve(proto);
         }
       };
 
       const socket = net.connect(this.config.port, this.config.host, () => {
-        socket.write(Buffer.from([0x05, 0x01, 0x00]));
+        // Send SOCKS5 greeting offering both NO_AUTH (0x00) and USER_PASS (0x02)
+        socket.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
       });
 
       socket.setTimeout(2500);
       socket.once('data', (chunk) => {
+        // Any SOCKS5 proxy responds with [0x05, <method>] (e.g. 05 00, 05 02, or 05 FF)
         if (chunk.length > 0 && chunk[0] === 0x05) {
-          this.logger.info(
-            { upstream: `${this.config.host}:${this.config.port}` },
-            'proxy-forwarder: detected upstream proxy protocol: SOCKS5'
-          );
-          done('socks5');
+          done('socks5', `SOCKS5 handshake header: 0x${chunk.toString('hex')}`);
+        } else if (chunk.toString().startsWith('HTTP/')) {
+          done('http', `HTTP response header: ${chunk.toString().slice(0, 30).trim()}`);
         } else {
-          this.logger.info(
-            { upstream: `${this.config.host}:${this.config.port}` },
-            'proxy-forwarder: detected upstream proxy protocol: HTTP'
-          );
-          done('http');
+          done(this.config.type === 'socks5' ? 'socks5' : 'http', `Non-standard response: 0x${chunk.toString('hex')}`);
         }
       });
 
-      socket.once('error', () => done(this.config.type === 'socks5' ? 'socks5' : 'http'));
-      socket.once('timeout', () => done(this.config.type === 'socks5' ? 'socks5' : 'http'));
+      socket.once('error', (err) => {
+        done(this.config.type === 'socks5' ? 'socks5' : 'http', `Socket error during probe: ${err.message}`);
+      });
+      socket.once('timeout', () => {
+        done(this.config.type === 'socks5' ? 'socks5' : 'http', 'Socket timeout during probe');
+      });
     });
   }
 
@@ -424,10 +428,16 @@ export class LocalProxyForwarder {
       let buffer = Buffer.alloc(0);
 
       const sendHttpConnect = () => {
-        const domBuf = Buffer.from(hostHeader);
+        const isIp = net.isIP(hostHeader);
         const portBuf = Buffer.alloc(2);
         portBuf.writeUInt16BE(80, 0);
-        upstreamSocket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, domBuf.length]), domBuf, portBuf]));
+        if (isIp === 4) {
+          const parts = hostHeader.split('.').map(Number);
+          upstreamSocket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x01, ...parts]), portBuf]));
+        } else {
+          const domBuf = Buffer.from(hostHeader);
+          upstreamSocket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, domBuf.length]), domBuf, portBuf]));
+        }
       };
 
       upstreamSocket.on('data', (chunk: Buffer) => {
@@ -481,8 +491,18 @@ export class LocalProxyForwarder {
 
           upstreamSocket.removeAllListeners('data');
 
+          let pathOnly = rawUrl;
+          try {
+            if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+              const u = new URL(rawUrl);
+              pathOnly = (u.pathname || '/') + (u.search || '');
+            }
+          } catch {
+            pathOnly = rawUrl;
+          }
+
           // Send plain HTTP request line & headers over the established SOCKS5 tunnel
-          let reqLine = `${clientReq.method} ${rawUrl} HTTP/1.1\r\n`;
+          let reqLine = `${clientReq.method} ${pathOnly} HTTP/1.1\r\n`;
           let headers = '';
           for (const [k, v] of Object.entries(clientReq.headers)) {
             if (v === undefined) continue;

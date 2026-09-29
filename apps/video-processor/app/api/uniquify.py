@@ -169,7 +169,10 @@ def create_router() -> APIRouter:
             )
         except Exception as e:
             logger.exception("Analyze failed for %s", req.source_video_id)
-            raise HTTPException(status_code=500, detail=str(e))
+            err_msg = str(e)
+            if hasattr(e, "stderr") and getattr(e, "stderr"):
+                err_msg = f"{err_msg}: {str(getattr(e, 'stderr'))[-500:].strip()}"
+            raise HTTPException(status_code=500, detail=err_msg)
         finally:
             if work_dir and os.path.exists(work_dir):
                 shutil.rmtree(work_dir, ignore_errors=True)
@@ -260,7 +263,10 @@ def create_router() -> APIRouter:
             )
         except Exception as e:
             logger.exception("Render failed for variant %s", req.variant_id)
-            raise HTTPException(status_code=500, detail=str(e))
+            err_msg = str(e)
+            if hasattr(e, "stderr") and getattr(e, "stderr"):
+                err_msg = f"{err_msg}: {str(getattr(e, 'stderr'))[-500:].strip()}"
+            raise HTTPException(status_code=500, detail=err_msg)
         finally:
             if work_dir and os.path.exists(work_dir):
                 shutil.rmtree(work_dir, ignore_errors=True)

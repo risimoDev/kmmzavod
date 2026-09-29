@@ -54,7 +54,8 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
         const finished =
           totalDone >= uniquifyJob.variantCount &&
           uniquifyJob.status !== 'completed' &&
-          uniquifyJob.status !== 'failed';
+          uniquifyJob.status !== 'failed' &&
+          uniquifyJob.status !== 'cancelled';
 
         const data: Record<string, unknown> = { completedCount, failedCount };
         if (finished) {
