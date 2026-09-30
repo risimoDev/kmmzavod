@@ -173,107 +173,139 @@ export class LocalProxyForwarder {
     }
   }
 
-  /** CONNECT via upstream HTTP proxy with Proxy-Authorization header */
+  /**
+   * CONNECT via upstream HTTP proxy with Proxy-Authorization header.
+   * Includes automatic retry with backoff on 403 (rate-limit burst), 502, or network resets.
+   */
   private connectViaHttpProxy(
     targetHost: string,
     targetPort: number,
     clientSocket: net.Socket,
-    head: Buffer
+    head: Buffer,
+    attempt = 1
   ): void {
-    const upstreamSocket = net.connect(this.config.port, this.config.host, () => {
-      let authHeader = '';
-      if (this.config.username && this.config.password) {
-        const creds = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
-        authHeader = `Proxy-Authorization: Basic ${creds}\r\n`;
+    if (clientSocket.destroyed) return;
+
+    let authHeader = '';
+    if (this.config.username && this.config.password) {
+      const creds = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
+      authHeader = `Proxy-Authorization: Basic ${creds}\r\n`;
+    }
+
+    const connectPayload =
+      `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+      `Host: ${targetHost}:${targetPort}\r\n` +
+      `Proxy-Connection: Keep-Alive\r\n` +
+      authHeader +
+      `\r\n`;
+
+    let cleanedUp = false;
+    let upstreamSocket: net.Socket | null = null;
+
+    const retry = (reason: string) => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      if (upstreamSocket) {
+        upstreamSocket.removeAllListeners();
+        upstreamSocket.destroy();
       }
+      if (clientSocket.destroyed) return;
 
-      const connectPayload =
-        `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
-        `Host: ${targetHost}:${targetPort}\r\n` +
-        `Proxy-Connection: Keep-Alive\r\n` +
-        authHeader +
-        `\r\n`;
+      if (attempt < 3) {
+        const delay = attempt * 250;
+        this.logger.debug(
+          { targetHost, targetPort, attempt, delay, reason },
+          'proxy-forwarder: retrying upstream CONNECT'
+        );
+        setTimeout(() => {
+          this.connectViaHttpProxy(targetHost, targetPort, clientSocket, head, attempt + 1);
+        }, delay);
+      } else {
+        this.logger.warn(
+          { targetHost, targetPort, reason },
+          'proxy-forwarder: upstream HTTP CONNECT failed after retries'
+        );
+        if (!clientSocket.destroyed) {
+          clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+          clientSocket.end();
+        }
+      }
+    };
 
-      upstreamSocket.write(connectPayload);
+    upstreamSocket = net.connect(this.config.port, this.config.host, () => {
+      if (cleanedUp || clientSocket.destroyed) {
+        upstreamSocket?.destroy();
+        return;
+      }
+      upstreamSocket?.write(connectPayload);
+    });
 
-      let handshakeDone = false;
-      let buffer = Buffer.alloc(0);
+    upstreamSocket.setTimeout(12_000);
+    upstreamSocket.on('timeout', () => {
+      retry('Upstream HTTP proxy timeout (12s)');
+    });
 
-      const onData = (chunk: Buffer) => {
-        if (!handshakeDone) {
-          buffer = Buffer.concat([buffer, chunk]);
-          const headerEnd = buffer.indexOf('\r\n\r\n');
-          const headerEndAlt = headerEnd === -1 ? buffer.indexOf('\n\n') : headerEnd;
-          const delimLen = headerEnd !== -1 ? 4 : 2;
+    upstreamSocket.on('error', (err) => {
+      retry(`Socket error: ${err.message}`);
+    });
 
-          if (headerEndAlt !== -1) {
-            handshakeDone = true;
-            upstreamSocket.removeListener('data', onData);
-            const headerStr = buffer.subarray(0, headerEndAlt).toString('ascii');
-            const firstLine = headerStr.split(/\r?\n/)[0] || '';
-            const match = firstLine.match(/^HTTP\/1\.[01]\s+(\d{3})/i);
-            const statusCode = match ? parseInt(match[1], 10) : 0;
+    clientSocket.once('error', () => {
+      cleanedUp = true;
+      upstreamSocket?.destroy();
+    });
 
-            if (statusCode === 200) {
-              clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    let handshakeDone = false;
+    let buffer = Buffer.alloc(0);
 
-              const remainder = buffer.subarray(headerEndAlt + delimLen);
-              if (remainder.length > 0) {
-                clientSocket.write(remainder);
-              }
-              if (head && head.length > 0) {
-                upstreamSocket.write(head);
-              }
+    const onData = (chunk: Buffer) => {
+      if (cleanedUp) return;
+      if (!handshakeDone) {
+        buffer = Buffer.concat([buffer, chunk]);
+        const headerEnd = buffer.indexOf('\r\n\r\n');
+        const headerEndAlt = headerEnd === -1 ? buffer.indexOf('\n\n') : headerEnd;
+        const delimLen = headerEnd !== -1 ? 4 : 2;
 
-              // Reset to 60s idle timeout for active tunnel
-              upstreamSocket.setTimeout(60_000);
+        if (headerEndAlt !== -1) {
+          handshakeDone = true;
+          upstreamSocket?.removeListener('data', onData);
+          const headerStr = buffer.subarray(0, headerEndAlt).toString('ascii');
+          const firstLine = headerStr.split(/\r?\n/)[0] || '';
+          const match = firstLine.match(/^HTTP\/1\.[01]\s+(\d{3})/i);
+          const statusCode = match ? parseInt(match[1], 10) : 0;
 
+          if (statusCode === 200) {
+            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+            const remainder = buffer.subarray(headerEndAlt + delimLen);
+            if (remainder.length > 0) {
+              clientSocket.write(remainder);
+            }
+            if (head && head.length > 0) {
+              upstreamSocket?.write(head);
+            }
+
+            // Reset to 60s idle timeout for active tunnel
+            upstreamSocket?.setTimeout(60_000);
+
+            if (upstreamSocket) {
               upstreamSocket.pipe(clientSocket);
               clientSocket.pipe(upstreamSocket);
 
               clientSocket.once('close', () => {
-                upstreamSocket.destroy();
+                upstreamSocket?.destroy();
               });
               upstreamSocket.once('close', () => {
                 clientSocket.destroy();
               });
-            } else {
-              const locationMatch = headerStr.match(/location:\s*([^\r\n]+)/i);
-              const location = locationMatch ? locationMatch[1].trim() : undefined;
-              this.logger.warn(
-                { targetHost, targetPort, statusCode, firstLine, location },
-                'proxy-forwarder: upstream HTTP proxy rejected CONNECT'
-              );
-              // Cleanly respond with 502 Bad Gateway to the Android client
-              if (!clientSocket.destroyed) {
-                clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-                clientSocket.end();
-              }
-              upstreamSocket.destroy();
             }
+          } else {
+            retry(`Rejected: ${firstLine}`);
           }
         }
-      };
-
-      upstreamSocket.on('data', onData);
-    });
-
-    upstreamSocket.setTimeout(15_000);
-    upstreamSocket.on('timeout', () => {
-      upstreamSocket.destroy(new Error('Upstream HTTP proxy timeout (15s)'));
-    });
-
-    upstreamSocket.on('error', (err) => {
-      this.logger.debug({ err: err.message, targetHost, targetPort }, 'proxy-forwarder: upstream HTTP CONNECT error');
-      if (!clientSocket.destroyed) {
-        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-        clientSocket.end();
       }
-    });
+    };
 
-    clientSocket.on('error', () => {
-      upstreamSocket.destroy();
-    });
+    upstreamSocket.on('data', onData);
   }
 
   /**

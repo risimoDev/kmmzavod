@@ -184,10 +184,12 @@ export class ProxyManager {
       await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
       await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
 
+      const exclusionList = 'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn';
       const cmd = [
         'settings put global http_proxy 127.0.0.1:8888',
         'settings put global global_http_proxy_host 127.0.0.1',
         'settings put global global_http_proxy_port 8888',
+        `settings put global global_http_proxy_exclusion_list "${exclusionList}"`,
         'ndc resolver flushdefaultif 2>/dev/null || true',
       ].join(' && ');
 
@@ -198,10 +200,12 @@ export class ProxyManager {
       await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
       this.deviceForwarderKey.delete(deviceId);
 
+      const exclusionList = 'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn';
       const cmd = [
         `settings put global http_proxy ${proxy.host}:${proxy.port}`,
         `settings put global global_http_proxy_host ${proxy.host}`,
         `settings put global global_http_proxy_port ${proxy.port}`,
+        `settings put global global_http_proxy_exclusion_list "${exclusionList}"`,
         'ndc resolver flushdefaultif 2>/dev/null || true',
       ].join(' && ');
 
@@ -271,6 +275,7 @@ export class ProxyManager {
       'settings delete global http_proxy',
       'settings delete global global_http_proxy_host',
       'settings delete global global_http_proxy_port',
+      'settings delete global global_http_proxy_exclusion_list',
       'ndc resolver flushdefaultif 2>/dev/null || true',
     ].join(' && ');
     await this.adb.shell(deviceId, cmd).catch(() => {});
