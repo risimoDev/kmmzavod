@@ -225,8 +225,18 @@ export class LocalProxyForwarder {
                 upstreamSocket.write(head);
               }
 
+              // Reset to 60s idle timeout for active tunnel
+              upstreamSocket.setTimeout(60_000);
+
               upstreamSocket.pipe(clientSocket);
               clientSocket.pipe(upstreamSocket);
+
+              clientSocket.once('close', () => {
+                upstreamSocket.destroy();
+              });
+              upstreamSocket.once('close', () => {
+                clientSocket.destroy();
+              });
             } else {
               const locationMatch = headerStr.match(/location:\s*([^\r\n]+)/i);
               const location = locationMatch ? locationMatch[1].trim() : undefined;
@@ -391,8 +401,18 @@ export class LocalProxyForwarder {
           upstreamSocket.write(head);
         }
 
+        // Reset to 60s idle timeout for active tunnel
+        upstreamSocket.setTimeout(60_000);
+
         upstreamSocket.pipe(clientSocket);
         clientSocket.pipe(upstreamSocket);
+
+        clientSocket.once('close', () => {
+          upstreamSocket.destroy();
+        });
+        upstreamSocket.once('close', () => {
+          clientSocket.destroy();
+        });
       }
     });
 
@@ -569,5 +589,8 @@ export class LocalProxyForwarder {
     });
 
     clientReq.pipe(upstreamReq);
+    clientReq.on('close', () => {
+      upstreamReq.destroy();
+    });
   }
 }

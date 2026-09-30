@@ -97,8 +97,7 @@ export class ProxyManager {
       // Ensure all other online devices have proxy removed (direct clean Gnirehtet connection)
       for (const dev of onlineDevices) {
         if (dev.serial !== targetDevice) {
-          await this.adb.exec(['-s', dev.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-          await this.adb.shell(dev.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+          await this.clearDeviceProxySettings(dev.serial);
         }
       }
 
@@ -264,10 +263,24 @@ export class ProxyManager {
     }
   }
 
+  /** Clear global HTTP proxy settings and reverse port on device via ADB */
+  private async clearDeviceProxySettings(deviceId: string): Promise<void> {
+    await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
+    const cmd = [
+      'settings put global http_proxy :0',
+      'settings delete global http_proxy',
+      'settings delete global global_http_proxy_host',
+      'settings delete global global_http_proxy_port',
+      'ndc resolver flushdefaultif 2>/dev/null || true',
+    ].join(' && ');
+    await this.adb.shell(deviceId, cmd).catch(() => {});
+  }
+
   private loadState(): void {
     try {
       if (fs.existsSync(this.stateFilePath)) {
-        const raw = fs.readFileSync(this.stateFilePath, 'utf-8');
+        const raw = fs.readFileSync(this.stateFilePath, 'utf-8').replace(/^\uFEFF/, '').trim();
+        if (!raw) return;
         const data = JSON.parse(raw);
         if (typeof data === 'object' && data !== null) {
           if (data._mode === 'shared_sequential' || data._mode === 'private_parallel') {
@@ -349,8 +362,7 @@ export class ProxyManager {
 
       for (const dev of online) {
         if (dev.serial !== active) {
-          await this.adb.exec(['-s', dev.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-          await this.adb.shell(dev.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+          await this.clearDeviceProxySettings(dev.serial);
         }
       }
 
@@ -387,12 +399,7 @@ export class ProxyManager {
 
     // 1. Remove proxy from previous device if different
     if (previousDeviceId && previousDeviceId !== targetDeviceId) {
-      try {
-        await this.adb.exec(['-s', previousDeviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-        await this.adb.shell(previousDeviceId, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
-      } catch (err) {
-        this.logger.warn({ previousDeviceId, err: String(err) }, 'proxy-manager: failed to clear previous device proxy');
-      }
+      await this.clearDeviceProxySettings(previousDeviceId);
     }
 
     // 2. Apply proxy to target device
@@ -446,8 +453,7 @@ export class ProxyManager {
         const devices = await this.adb.listDevices().catch(() => []);
         for (const d of devices) {
           if (d.serial !== deviceId && d.state === 'device') {
-            await this.adb.exec(['-s', d.serial, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-            await this.adb.shell(d.serial, 'settings put global http_proxy :0 2>/dev/null || true').catch(() => {});
+            await this.clearDeviceProxySettings(d.serial);
           }
         }
       }
@@ -474,23 +480,16 @@ export class ProxyManager {
     const oldKey = this.deviceForwarderKey.get(deviceId);
     this.deviceForwarderKey.delete(deviceId);
 
-    // Remove ADB reverse tunnel
-    await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-
     if (oldKey) {
       await this.releaseForwarder(oldKey);
     }
 
-    const cmd = [
-      'settings put global http_proxy :0',
-      'settings delete global http_proxy',
-      'settings delete global global_http_proxy_host',
-      'settings delete global global_http_proxy_port',
-    ].join(' && ');
-
     try {
-      await this.adb.shell(deviceId, cmd);
+      await this.clearDeviceProxySettings(deviceId);
       this.proxyMap.delete(deviceId);
+      if (this.activeDeviceId === deviceId) {
+        this.activeDeviceId = null;
+      }
       this.saveState();
       return { ok: true };
     } catch (err) {
