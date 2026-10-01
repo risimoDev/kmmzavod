@@ -91,6 +91,18 @@ if exist "%~dp0platform-tools\gnirehtet.exe" (
     echo.
 )
 
+:: 3c. Проверка нативного движка sing-box (для прозрачного проксирования на платах)
+if not exist "%~dp0bin\sing-box" (
+    echo [PROXIES] Загрузка нативного движка sing-box для Android ARM64...
+    if not exist "%~dp0bin" mkdir "%~dp0bin"
+    curl.exe -L -s -o "%~dp0bin\sing-box.tar.gz" https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz
+    if exist "%~dp0bin\sing-box.tar.gz" (
+        tar -xzf "%~dp0bin\sing-box.tar.gz" -C "%~dp0bin" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box
+        del "%~dp0bin\sing-box.tar.gz" >nul 2>nul
+        echo [OK] Нативный движок sing-box загружен в bin\sing-box.
+    )
+)
+
 :: 4. Проверка интерфейса AmneziaWG
 echo Проверка туннеля с сервером:
 ipconfig | findstr "10.66.66.2 10.13.13.2" >nul

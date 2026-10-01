@@ -168,9 +168,189 @@ export class ProxyManager {
   }
 
   /**
-   * Apply proxy configuration (reverse tunnel and global Android settings) to an active device.
+   * Check if device has superuser (Root) rights via Magisk `su`.
+   */
+  async isDeviceRooted(deviceId: string): Promise<boolean> {
+    try {
+      const res = await this.adb.shell(deviceId, 'su -c id 2>/dev/null || true');
+      return res.includes('uid=0(root)');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ensure native sing-box binary for Android ARM64 exists in bin/ directory.
+   * Automatically downloads and extracts from GitHub if not already present.
+   */
+  private async ensureSingBoxBinary(): Promise<string> {
+    const binDir = path.resolve(config.SCRIPTS_DIR, '..', 'bin');
+    const binPath = path.join(binDir, 'sing-box');
+    if (fs.existsSync(binPath)) {
+      return binPath;
+    }
+
+    if (!fs.existsSync(binDir)) {
+      fs.mkdirSync(binDir, { recursive: true });
+    }
+
+    this.logger.info('proxy-manager: downloading native sing-box engine for Android ARM64...');
+    const tarPath = path.join(binDir, 'sing-box.tar.gz');
+    const url = 'https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz';
+
+    const { execSync } = await import('node:child_process');
+    try {
+      execSync(`curl.exe -L -s -o "${tarPath}" "${url}"`, { stdio: 'ignore' });
+      execSync(`tar -xzf "${tarPath}" -C "${binDir}" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box`, { stdio: 'ignore' });
+      if (fs.existsSync(tarPath)) {
+        fs.unlinkSync(tarPath);
+      }
+    } catch (err) {
+      this.logger.error({ err }, 'proxy-manager: failed to auto-download sing-box binary');
+      throw new Error(`Не удалось скачать бинарник sing-box: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (!fs.existsSync(binPath)) {
+      throw new Error(`Бинарник sing-box не найден по пути ${binPath}`);
+    }
+
+    return binPath;
+  }
+
+  /**
+   * Apply hardware-level transparent proxy using native sing-box and iptables on a rooted board.
+   * Completely transparent to all Android apps (Chrome, Instagram, TikTok) without VPN conflicts!
+   */
+  private async applyRootTransparentProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<void> {
+    const binPath = await this.ensureSingBoxBinary();
+
+    // 1. Check if binary exists on device
+    const checkBin = await this.adb.shell(deviceId, 'ls -l /data/local/tmp/sing-box 2>/dev/null || true');
+    if (!checkBin.includes('sing-box') || checkBin.includes('No such file')) {
+      this.logger.info({ deviceId }, 'proxy-manager: pushing native sing-box binary to rooted device');
+      await this.adb.exec(['-s', deviceId, 'push', binPath, '/data/local/tmp/sing-box']);
+      await this.adb.shell(deviceId, 'su -c "chmod 755 /data/local/tmp/sing-box"');
+    }
+
+    // 2. Prepare singbox config
+    const isSocks = proxy.type === 'socks5';
+    const singboxConfig = {
+      log: {
+        level: 'warn',
+      },
+      inbounds: [
+        {
+          type: 'redirect',
+          tag: 'redirect-in',
+          listen: '127.0.0.1',
+          listen_port: 12345,
+        },
+      ],
+      outbounds: [
+        isSocks
+          ? {
+              type: 'socks',
+              tag: 'proxy-out',
+              server: proxy.host,
+              server_port: proxy.port,
+              username: proxy.username,
+              password: proxy.password,
+              version: '5',
+            }
+          : {
+              type: 'http',
+              tag: 'proxy-out',
+              server: proxy.host,
+              server_port: proxy.port,
+              username: proxy.username,
+              password: proxy.password,
+            },
+      ],
+      route: {
+        rules: [
+          {
+            inbound: 'redirect-in',
+            outbound: 'proxy-out',
+          },
+        ],
+      },
+    };
+
+    const b64 = Buffer.from(JSON.stringify(singboxConfig, null, 2)).toString('base64');
+    await this.adb.shell(deviceId, `su -c "echo '${b64}' | base64 -d > /data/local/tmp/singbox.json"`);
+
+    // 3. Stop old sing-box and clean old iptables rules
+    await this.clearRootTransparentProxy(deviceId);
+
+    // 4. Start sing-box daemon in background with root
+    await this.adb.shell(
+      deviceId,
+      'su -c "nohup /data/local/tmp/sing-box run -c /data/local/tmp/singbox.json >/dev/null 2>&1 &"'
+    );
+
+    // Give daemon 400ms to bind to 127.0.0.1:12345
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 5. Apply iptables redirect rules
+    const iptablesCmd = [
+      'iptables -t nat -N SINGBOX 2>/dev/null || iptables -t nat -F SINGBOX',
+      'iptables -t nat -A SINGBOX -d 0.0.0.0/8 -j RETURN',
+      'iptables -t nat -A SINGBOX -d 10.0.0.0/8 -j RETURN',
+      'iptables -t nat -A SINGBOX -d 127.0.0.0/8 -j RETURN',
+      'iptables -t nat -A SINGBOX -d 169.254.0.0/16 -j RETURN',
+      'iptables -t nat -A SINGBOX -d 172.16.0.0/12 -j RETURN',
+      'iptables -t nat -A SINGBOX -d 192.168.0.0/16 -j RETURN',
+      `iptables -t nat -A SINGBOX -d ${proxy.host} -j RETURN`,
+      'iptables -t nat -A SINGBOX -p tcp -j REDIRECT --to-ports 12345',
+      'iptables -t nat -D OUTPUT -p tcp -j SINGBOX 2>/dev/null || true',
+      'iptables -t nat -A OUTPUT -p tcp -j SINGBOX',
+    ].join(' && ');
+
+    await this.adb.shell(deviceId, `su -c "${iptablesCmd}"`);
+
+    // 6. Clear Android userspace global proxy so it doesn't conflict
+    const cleanGlobalCmd = [
+      'settings put global http_proxy :0',
+      'settings delete global http_proxy',
+      'settings delete global global_http_proxy_host',
+      'settings delete global global_http_proxy_port',
+      'settings delete global global_http_proxy_exclusion_list',
+      'ndc resolver flushdefaultif 2>/dev/null || true',
+    ].join(' && ');
+    await this.adb.shell(deviceId, cleanGlobalCmd).catch(() => {});
+
+    this.logger.info(
+      { deviceId, proxyHost: proxy.host, port: proxy.port, method: 'native_root_singbox' },
+      'proxy-manager: native root transparent proxy applied successfully'
+    );
+  }
+
+  /**
+   * Stop native sing-box daemon and flush iptables redirect rules on device.
+   */
+  private async clearRootTransparentProxy(deviceId: string): Promise<void> {
+    const clearCmd = [
+      'iptables -t nat -D OUTPUT -p tcp -j SINGBOX 2>/dev/null || true',
+      'iptables -t nat -F SINGBOX 2>/dev/null || true',
+      'iptables -t nat -X SINGBOX 2>/dev/null || true',
+      'pkill -9 -f /data/local/tmp/sing-box 2>/dev/null || killall -9 sing-box 2>/dev/null || true',
+    ].join(' && ');
+
+    await this.adb.shell(deviceId, `su -c "${clearCmd}"`).catch(() => {});
+  }
+
+  /**
+   * Apply proxy configuration to an active device.
+   * If the board is rooted (Magisk su), uses native sing-box + iptables transparent redirect.
+   * If non-rooted, falls back to local HTTP forwarder + adb reverse.
    */
   async applyDeviceProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<void> {
+    const isRoot = await this.isDeviceRooted(deviceId);
+    if (isRoot) {
+      await this.applyRootTransparentProxy(deviceId, proxy);
+      return;
+    }
+
     const oldKey = this.deviceForwarderKey.get(deviceId);
 
     if (proxy.username && proxy.password) {
@@ -267,8 +447,9 @@ export class ProxyManager {
     }
   }
 
-  /** Clear global HTTP proxy settings and reverse port on device via ADB */
+  /** Clear global HTTP proxy settings, root transparent proxy, and reverse port on device via ADB */
   private async clearDeviceProxySettings(deviceId: string): Promise<void> {
+    await this.clearRootTransparentProxy(deviceId);
     await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
     const cmd = [
       'settings put global http_proxy :0',
@@ -510,7 +691,17 @@ export class ProxyManager {
     const cfg = this.proxyMap.get(deviceId);
     let cmd = '';
 
-    if (cfg && cfg.username && cfg.password) {
+    const isRoot = await this.isDeviceRooted(deviceId);
+    if (isRoot) {
+      // With root transparent proxy (iptables + sing-box), traffic is intercepted automatically
+      cmd = [
+        'su -c "curl -k -s -S --max-time 15 https://api.ipify.org"',
+        'su -c "curl -k -s -S --max-time 15 http://api.ipify.org"',
+        'curl -k -s -S --max-time 15 https://api.ipify.org',
+        'curl -k -s -S --max-time 15 http://api.ipify.org',
+        'toybox wget -q -O - http://api.ipify.org',
+      ].join(' || ');
+    } else if (cfg && cfg.username && cfg.password) {
       // Forwarder is running on 127.0.0.1:8888 via ADB reverse tunnel
       // Check HTTPS first (CONNECT tunnel supports both HTTP and SOCKS5), then HTTP, then toybox wget
       cmd = [
