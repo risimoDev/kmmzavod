@@ -17,3 +17,6 @@ DEPLOYMENT_REPORT.md
 IMPROVEMENT_PLAN.md
 FIX_REPORT.md
 apps/device-agent/bin/
+# phone-farm proxy assignments incl. proxy passwords
+apps/device-agent/devices-proxy-state.json
+apps/device-agent/devices-proxy-state.json.tmp

@@ -47,6 +47,7 @@ model Tenant {
   editProjects        EditProject[]
   distributeSchedules DistributeSchedule[]
   campaigns           Campaign[]
+  autopilots          Autopilot[]
 
   @@map("tenants")
 }
@@ -135,6 +136,7 @@ model Project {
   videos       Video[]
   products     Product[]
   sourceVideos SourceVideo[]
+  autopilots   Autopilot[]
 
   @@index([tenantId])
   @@index([tenantId, isArchived])
@@ -964,6 +966,9 @@ model SourceVideo {
   transcript    Json? // Whisper transcript with word timestamps
   sceneBreaks   Json?             @map("scene_breaks") // detected scene cut timestamps
   audioProfile  Json?             @map("audio_profile") // volume levels, silence zones, etc.
+  // Where the file came from: upload (user footage) | editor (smart-editor master)
+  // | autopilot (autopilot montage). Autopilot draws its source pool from uploads only.
+  origin        String            @default("upload")
   //
   error         String?
   isArchived    Boolean           @default(false) @map("is_archived")
@@ -1119,6 +1124,7 @@ model DistributeJob {
   uniquifyJobId   String              @map("uniquify_job_id") @db.Uuid
   createdBy       String?             @map("created_by") @db.Uuid
   campaignId      String?             @map("campaign_id") @db.Uuid // если раздачу создала кампания
+  autopilotId     String?             @map("autopilot_id") @db.Uuid // если раздачу создал автопилот
   status          DistributeJobStatus @default(pending)
   // Config
   staggerMinutes  Int                 @default(15) @map("stagger_minutes") // задержка между публикациями
@@ -1140,6 +1146,7 @@ model DistributeJob {
   @@index([tenantId, status])
   @@index([uniquifyJobId])
   @@index([campaignId])
+  @@index([autopilotId])
   @@map("distribute_jobs")
 }
 
@@ -1445,4 +1452,139 @@ model EditClip {
 
   @@index([projectId, included])
   @@map("edit_clips")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTOPILOT (новая «Фабрика»): настроил на проект один раз → каждый день
+// несколько раз в день: исходники проекта → AI-сценарий + озвучка → умный монтаж
+// → уникализация в N копий → публикация через ферму телефонов. Без участия человека.
+// См. docs/AUTOPILOT_PLAN.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum AutopilotStatus {
+  draft // настроен, не запущен
+  active // работает
+  paused // поставлен на паузу пользователем
+  error // остановлен после серии ошибок — нужна проверка
+
+  @@map("autopilot_status")
+}
+
+enum AutopilotBatchStatus {
+  pending // создан, ждёт воркер производства
+  scripting // сценарий + озвучка
+  analyzing // анализ исходников / раскадровка
+  rendering // рендер монтажа
+  uniquifying // уникализация в N копий
+  ready // копии готовы к публикации
+  failed // ошибка на одном из шагов
+
+  @@map("autopilot_batch_status")
+}
+
+model Autopilot {
+  id                  String           @id @default(uuid()) @db.Uuid
+  tenantId            String           @map("tenant_id") @db.Uuid
+  projectId           String           @map("project_id") @db.Uuid
+  name                String
+  status              AutopilotStatus  @default(draft)
+  // ── Монтаж ─────────────────────────────────────────────────────────────
+  montageMode         String           @default("multi") @map("montage_mode") // single (из одного видео) | multi (из нескольких)
+  sourcesPerMontage   Int              @default(3) @map("sources_per_montage")
+  sourceStrategy      String           @default("fresh_first") @map("source_strategy") // fresh_first | pool | fresh_only
+  targetSeconds       Int              @default(30) @map("target_seconds")
+  aspect              String           @default("9:16")
+  subtitleStyle       String           @default("tiktok") @map("subtitle_style")
+  smartCrop           Boolean          @default(true) @map("smart_crop")
+  bgmKeys             String[]         @default([]) @map("bgm_keys")
+  // ── AI-сценарий + озвучка ─────────────────────────────────────────────
+  productInfo         String?          @map("product_info") @db.Text
+  scriptStyles        String[]         @default(["blogger"]) @map("script_styles") // ротация стилей подачи
+  ctaType             String           @default("article") @map("cta_type") // article | direct | auto
+  directWord          String?          @map("direct_word")
+  voiceIds            String[]         @default([]) @map("voice_ids") // ротация голосов Fish Audio
+  voiceSpeed          Decimal          @default(1.0) @map("voice_speed") @db.Decimal(3, 2)
+  // ── Уникализация ───────────────────────────────────────────────────────
+  uniquifyMode        String           @default("preserve_context") @map("uniquify_mode")
+  stealthLevel        String           @default("maximum") @map("stealth_level")
+  variantsPerMontage  Int?             @map("variants_per_montage") // null = по числу аккаунтов
+  // ── Публикация (только ферма телефонов) ───────────────────────────────
+  accountGroupId      String?          @map("account_group_id") @db.Uuid
+  socialAccountIds    String[]         @map("social_account_ids") @db.Uuid
+  platforms           SocialPlatform[]
+  publishTimes        String[]         @map("publish_times") // ["10:00","14:30","19:00"] в timezone
+  timezone            String           @default("Europe/Moscow")
+  jitterMinutes       Int              @default(20) @map("jitter_minutes")
+  staggerMinutes      Int              @default(7) @map("stagger_minutes")
+  minHealth           Int              @default(30) @map("min_health")
+  captionTemplate     String?          @map("caption_template") @db.Text
+  hashtags            String[]         @default([])
+  bufferWindows       Int              @default(2) @map("buffer_windows") // держать готовых копий на N окон вперёд
+  maxParallelBatches  Int              @default(2) @map("max_parallel_batches")
+  // ── Состояние ──────────────────────────────────────────────────────────
+  nextWindowAt        DateTime?        @map("next_window_at")
+  lastWindowAt        DateTime?        @map("last_window_at")
+  lastTickAt          DateTime?        @map("last_tick_at")
+  consecutiveFailures Int              @default(0) @map("consecutive_failures")
+  forceProduce        Boolean          @default(false) @map("force_produce") // «Смонтировать сейчас»: один батч вне расчёта спроса
+  lastError           String?          @map("last_error")
+  // ── Статистика ─────────────────────────────────────────────────────────
+  montagesProduced    Int              @default(0) @map("montages_produced")
+  variantsProduced    Int              @default(0) @map("variants_produced")
+  postsScheduled      Int              @default(0) @map("posts_scheduled")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  tenant  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  project Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  batches AutopilotBatch[]
+  runs    AutopilotRun[]
+
+  @@index([tenantId, status])
+  @@index([status, nextWindowAt])
+  @@map("autopilots")
+}
+
+model AutopilotBatch {
+  id             String               @id @default(uuid()) @db.Uuid
+  autopilotId    String               @map("autopilot_id") @db.Uuid
+  tenantId       String               @map("tenant_id") @db.Uuid
+  status         AutopilotBatchStatus @default(pending)
+  sourceVideoIds String[]             @map("source_video_ids") @db.Uuid
+  script         String?              @db.Text
+  scriptStyle    String?              @map("script_style")
+  caption        String?              @db.Text
+  voiceId        String?              @map("voice_id")
+  voiceoverKey   String?              @map("voiceover_key")
+  voiceDuration  Decimal?             @map("voice_duration") @db.Decimal(8, 2)
+  variantCount   Int                  @default(0) @map("variant_count")
+  editProjectId  String?              @map("edit_project_id") @db.Uuid
+  uniquifyJobId  String?              @map("uniquify_job_id") @db.Uuid
+  error          String?
+  stageStartedAt DateTime             @default(now()) @map("stage_started_at")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+  completedAt    DateTime?            @map("completed_at")
+
+  autopilot Autopilot @relation(fields: [autopilotId], references: [id], onDelete: Cascade)
+
+  @@index([autopilotId, status])
+  @@index([status])
+  @@map("autopilot_batches")
+}
+
+model AutopilotRun {
+  id          String   @id @default(uuid()) @db.Uuid
+  autopilotId String   @map("autopilot_id") @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  kind        String // produce | advance | distribute | error
+  message     String?
+  summary     Json     @default("{}")
+  error       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  autopilot Autopilot @relation(fields: [autopilotId], references: [id], onDelete: Cascade)
+
+  @@index([autopilotId, createdAt(sort: Desc)])
+  @@map("autopilot_runs")
 }

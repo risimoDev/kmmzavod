@@ -1,6 +1,6 @@
 /**
- * Client for apps/device-agent — the bridge running on the home PC that talks to
- * Laixi Master (real Android phone farm) over AmneziaWG. See
+ * Client for apps/device-agent — the bridge running on the home PC that drives the
+ * Android phone farm over native ADB, reached over AmneziaWG. See
  * docs/PHONE_FARM_INTEGRATION_PLAN.md.
  *
  * Unlike the private publisher (instagrapi/tiktok-uploader), this path has no
@@ -31,7 +31,9 @@ export interface DeviceIpCheckResult {
   city?: string;
   isp?: string;
   leakDetected: boolean;
+  exposesHostIp?: boolean;
   hostIp?: string;
+  route?: 'proxy' | 'direct' | 'block' | 'none';
   error?: string;
 }
 
@@ -61,14 +63,17 @@ export interface ViewTargetResult {
 export function describeDeviceAgentError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const code = err.code;
-    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+    if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+      return `device-agent at ${BASE} did not answer in time (${code}) — the phone may still be busy`;
+    }
+    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'EHOSTUNREACH' || code === 'ECONNRESET') {
       return `device-agent unreachable at ${BASE} (${code}). ` +
         `Is the AmneziaWG tunnel up and device-agent running on the home PC? See infra/amneziawg/README.md`;
     }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string; error?: unknown } | string | undefined;
     const body = typeof data === 'string' ? data : (data?.detail ?? data?.error ?? err.message);
-    return `HTTP ${status ?? '?'}: ${JSON.stringify(body).slice(0, 800)}`;
+    return `HTTP ${status ?? '?'}: ${(typeof body === 'string' ? body : JSON.stringify(body)).slice(0, 800)}`;
   }
   return err instanceof Error ? err.message : String(err);
 }
@@ -94,7 +99,9 @@ export const deviceAgentService = {
       platform: opts.platform,
       videoUrl: opts.videoUrl,
       caption: opts.caption,
-    }, { timeout: 300_000 });
+      // The agent refuses to open the app if the phone would post from the farm's own IP.
+      checkIpFirst: true,
+    }, { timeout: 600_000 });
     return { ok: res.data.ok, detail: res.data.detail };
   },
 
@@ -107,22 +114,22 @@ export const deviceAgentService = {
     const res = await axios.post(`${BASE}/proxy/set`, {
       deviceId,
       ...proxy,
-    }, { timeout: 20_000 });
+    }, { timeout: 120_000 });
     return res.data;
   },
 
   async clearProxy(deviceId: string): Promise<{ ok: boolean; error?: string }> {
-    const res = await axios.post(`${BASE}/proxy/clear`, { deviceId }, { timeout: 10_000 });
+    const res = await axios.post(`${BASE}/proxy/clear`, { deviceId }, { timeout: 60_000 });
     return res.data;
   },
 
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 15_000 });
+    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 90_000 });
     return res.data;
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {
-    const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 360_000 });
+    const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 660_000 });
     return res.data;
   },
 

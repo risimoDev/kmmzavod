@@ -173,6 +173,17 @@ export const QUEUE_DEFS = {
     },
     concurrency: 1, // sequential renders keep CPU saturated without thrashing
   },
+  // ── Autopilot (montage → uniquify → phone farm) ───────────────────────────
+  AUTOPILOT_PRODUCE: {
+    name: 'autopilot-produce',
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'exponential' as const, delay: 30000 },
+      removeOnComplete: { count: 200 },
+      removeOnFail: { count: 200 },
+    },
+    concurrency: 2, // network-bound (LLM + TTS); heavy work is delegated to editor queues
+  },
 } as const;
 
 export type QueueName = typeof QUEUE_DEFS[keyof typeof QUEUE_DEFS]['name'];
@@ -385,6 +396,16 @@ export interface EditorRenderJobPayload {
   tenantId: string;
 }
 
+/**
+ * Autopilot production step for one AutopilotBatch: pick sources, write a fresh
+ * AI script, synthesize the voiceover, then create the EditProject and enqueue
+ * editor-analyze. Later stages are advanced by the scheduler loop.
+ */
+export interface AutopilotProducePayload {
+  batchId: string;
+  tenantId: string;
+}
+
 // ── QUEUES — flat lookup keyed by queue-name string ───────────────────────────
 // Workers and index.ts use QUEUES['name'].foo to access config.
 
@@ -429,4 +450,5 @@ export const QUEUES: Record<string, QueueEntry> = {
   'account-warmup':      flatten(QUEUE_DEFS.ACCOUNT_WARMUP),
   'editor-analyze':      flatten(QUEUE_DEFS.EDITOR_ANALYZE),
   'editor-render':       flatten(QUEUE_DEFS.EDITOR_RENDER),
+  'autopilot-produce':   flatten(QUEUE_DEFS.AUTOPILOT_PRODUCE),
 };

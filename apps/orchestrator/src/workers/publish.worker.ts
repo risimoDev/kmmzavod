@@ -220,7 +220,7 @@ export function createPublishWorker(deps: Deps): Worker {
         } else if (
           accountRaw.authMethod === 'device' && (platform === 'instagram' || platform === 'tiktok' || platform === 'youtube_shorts')
         ) {
-          // ── Device path (real phone farm via Laixi + apps/device-agent) ──────
+          // ── Device path (real phone farm via native ADB + apps/device-agent) ──
           if (!accountRaw.deviceId) {
             throw new Error(`device-${platform}: account has authMethod=device but no deviceId set`);
           }
@@ -228,7 +228,8 @@ export function createPublishWorker(deps: Deps): Worker {
           const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
           const redis = getRedisConnection();
-          const locked = await acquireDeviceLock(redis, accountRaw.deviceId, 120, 60_000);
+          // TTL covers the agent call (600s): it may wait for the shared farm proxy before uploading.
+          const locked = await acquireDeviceLock(redis, accountRaw.deviceId, 660, 60_000);
           if (!locked) {
             throw new Error(`Устройство ${accountRaw.deviceId} занято публикацией другого ролика. Задача вернётся в очередь.`);
           }

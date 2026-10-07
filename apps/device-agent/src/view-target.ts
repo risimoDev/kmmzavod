@@ -59,37 +59,16 @@ export async function runViewTarget(
   const cleanUsername = targetUsername.replace(/^@+/, '').trim();
   let ipCheck: DeviceIpCheckResult | undefined;
 
-  // In shared sequential mode, automatically transfer the single shared proxy to this device
-  if (proxyManager.getMode().mode === 'shared_sequential' && proxyManager.getMode().hasSharedProxy) {
-    await proxyManager.switchActiveDevice(deviceId).catch((err) => {
-      logger.warn({ deviceId, err: String(err) }, 'view-target: could not auto-switch shared proxy to device');
-    });
-  }
-
-  // 1. Guardrail: Anti-Leak check before touching social apps
+  // 1. Guardrail: the phone must leave via its proxy (shared proxy is already leased by the caller)
   if (checkIpFirst) {
     logger.info({ deviceId }, 'view-target: running pre-flight IP check');
-    ipCheck = await proxyManager.checkDeviceIp(deviceId);
-
-    if (!ipCheck.ok) {
-      logger.warn({ deviceId, error: ipCheck.error }, 'view-target: device IP check failed, aborting');
-      return {
-        ok: false,
-        detail: `Не удалось проверить IP на устройстве: ${ipCheck.error}. Запуск отменён для защиты аккаунта.`,
-        ipCheck,
-      };
+    const guard = await proxyManager.preflight(deviceId);
+    ipCheck = guard.ipCheck;
+    if (!guard.ok) {
+      logger.warn({ deviceId, detail: guard.detail }, 'view-target: network pre-flight failed, aborting');
+      return { ok: false, detail: `${guard.detail}. Просмотр отменён для защиты аккаунта.`, ipCheck };
     }
-
-    if (ipCheck.leakDetected) {
-      logger.error({ deviceId, ip: ipCheck.ip, hostIp: ipCheck.hostIp }, 'view-target: IP LEAK DETECTED, aborting');
-      return {
-        ok: false,
-        detail: `Обнаружена утечка реального IP хоста (${ipCheck.ip})! Прокси не активен. Просмотр отменён во избежание блокировки.`,
-        ipCheck,
-      };
-    }
-
-    logger.info({ deviceId, ip: ipCheck.ip, country: ipCheck.country }, 'view-target: IP verified safe');
+    logger.info({ deviceId, ip: ipCheck?.ip, country: ipCheck?.country }, 'view-target: IP verified safe');
   }
 
   try {

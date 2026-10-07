@@ -88,6 +88,9 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         });
 
         const workspaceProjectId = typeof config.workspaceProjectId === 'string' ? config.workspaceProjectId : null;
+        // Autopilot masters are intermediate files: keep them out of project
+        // libraries (and out of the autopilot source pool) via origin.
+        const isAutopilot = typeof config.autopilotBatchId === 'string';
 
         // Persist outputs onto the included clip rows (aligned by index).
         for (let i = 0; i < result.clips.length; i++) {
@@ -99,7 +102,8 @@ export function createEditorRenderWorker(deps: Deps): Worker {
           const sv = await db.sourceVideo.create({
             data: {
               tenantId,
-              projectId: workspaceProjectId,
+              projectId: isAutopilot ? null : workspaceProjectId,
+              origin: isAutopilot ? 'autopilot' : 'editor',
               title: out.title || `${project.name} (Мастер #${i + 1})`,
               status: 'ready',
               storageKey: out.output_key,
@@ -126,7 +130,7 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         await db.editProject.update({ where: { id: projectId }, data: { status: 'completed' } });
         logger.info({ projectId, rendered: result.clips.length }, 'Editor-render: complete');
 
-        await db.notification.create({
+        if (!isAutopilot) await db.notification.create({
           data: {
             tenantId,
             type: 'system',

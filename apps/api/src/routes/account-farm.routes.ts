@@ -9,7 +9,7 @@ import { encrypt, decrypt } from '../lib/crypto';
 import { computeReadiness } from '../lib/publish-readiness';
 import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
-import { deviceAgentClient, describeDeviceAgentError } from '../lib/device-agent';
+import { deviceAgentClient, describeDeviceAgentError, deviceAgentErrorStatus, type DeviceProxyConfig } from '../lib/device-agent';
 import { farmScheduler } from '../lib/farm-scheduler';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
@@ -93,15 +93,28 @@ const SetCredentialsBody = z.object({
   deviceId: z.string().optional(),
 });
 
-const SetDeviceProxyBody = z.object({
+const ProxySourceFields = {
   proxyId: z.string().uuid().optional(),
-  host: z.string().optional(),
+  host: z.string().trim().optional(),
   port: z.number().int().min(1).max(65535).optional(),
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
   rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
-}).refine((data) => data.proxyId || (data.host && data.port), {
+};
+
+const hasProxySource = (data: { proxyId?: string; host?: string; port?: number }) =>
+  Boolean(data.proxyId || (data.host && data.port));
+
+const SetDeviceProxyBody = z.object({
+  ...ProxySourceFields,
+  // shared_sequential mode: also hand the shared proxy to this phone (default true)
+  activate: z.boolean().optional(),
+}).refine(hasProxySource, {
+  message: 'Either proxyId or both host and port must be provided',
+});
+
+const TestProxyBody = z.object(ProxySourceFields).refine(hasProxySource, {
   message: 'Either proxyId or both host and port must be provided',
 });
 
@@ -312,6 +325,123 @@ function buildProxyUrl(proxy: {
     ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password ? decrypt(proxy.password) : '')}@`
     : '';
   return `${scheme}://${auth}${proxy.host}:${proxy.port}`;
+}
+
+type ProxyRow = { id: string; type: string; host: string; port: number; username: string | null; password: string | null };
+
+/**
+ * Proxy.type keeps the wire protocol when the farm detected it (socks5 must stay socks5 for
+ * proxyUrl), otherwise the declared category (mobile / residential / http).
+ */
+function resolveStoredProxyType(declared?: string, detected?: string, fallback = 'http'): string {
+  if (detected === 'socks5') return 'socks5';
+  if (detected === 'http') return declared && declared !== 'socks5' ? declared : 'http';
+  return declared ?? fallback;
+}
+
+/** Resolve a request's proxy source (pool record or raw fields) into a full config for the agent. */
+async function resolveProxySource(
+  tenantId: string,
+  body: {
+    proxyId?: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    type?: DeviceProxyConfig['type'];
+    rotateUrl?: string;
+  },
+): Promise<{ cfg: DeviceProxyConfig; record: ProxyRow | null } | null> {
+  if (body.proxyId) {
+    const p = await db.proxy.findFirst({ where: { id: body.proxyId, tenantId } });
+    if (!p) return null;
+    return {
+      record: p,
+      cfg: {
+        host: p.host,
+        port: p.port,
+        username: p.username ?? undefined,
+        password: p.password ? decrypt(p.password) : undefined,
+        type: p.type as DeviceProxyConfig['type'],
+        rotateUrl: body.rotateUrl,
+      },
+    };
+  }
+  return {
+    record: null,
+    cfg: {
+      host: body.host!,
+      port: body.port!,
+      username: body.username?.trim() || undefined,
+      password: body.password || undefined,
+      type: body.type,
+      rotateUrl: body.rotateUrl,
+    },
+  };
+}
+
+/**
+ * Keep the tenant's proxy pool in sync with what was applied on the farm: every proxy put on
+ * a phone shows up under Proxies (and is reused instead of duplicated).
+ */
+async function upsertProxyRecord(tenantId: string, cfg: DeviceProxyConfig, detectedProtocol?: string): Promise<ProxyRow> {
+  const username = cfg.username?.trim() || null;
+  const existing = await db.proxy.findFirst({ where: { tenantId, host: cfg.host, port: cfg.port, username } });
+  const type = resolveStoredProxyType(cfg.type, detectedProtocol, existing?.type ?? 'http');
+  if (existing) {
+    return db.proxy.update({
+      where: { id: existing.id },
+      data: {
+        type,
+        isActive: true,
+        failCount: 0,
+        lastError: null,
+        healthCheckAt: new Date(),
+        ...(cfg.password ? { password: encrypt(cfg.password) } : {}),
+      },
+    });
+  }
+  return db.proxy.create({
+    data: {
+      tenantId,
+      host: cfg.host,
+      port: cfg.port,
+      type,
+      username,
+      password: cfg.password ? encrypt(cfg.password) : null,
+      healthCheckAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Accounts that live on a phone use that phone's network, so their proxy link must follow the
+ * phone's proxy. Keeps Proxy.assignedAccounts consistent. `proxy = null` unlinks.
+ */
+async function linkDeviceAccountsToProxy(tenantId: string, deviceId: string, proxy: ProxyRow | null): Promise<number> {
+  const accounts = await db.socialAccount.findMany({
+    where: { tenantId, deviceId },
+    select: { id: true, proxyId: true },
+  });
+  if (accounts.length === 0) return 0;
+  const proxyUrl = proxy ? buildProxyUrl(proxy) : null;
+  await db.$transaction(async (tx) => {
+    for (const acc of accounts) {
+      if (acc.proxyId !== (proxy?.id ?? null)) {
+        if (acc.proxyId) {
+          await tx.proxy.updateMany({
+            where: { id: acc.proxyId, assignedAccounts: { gt: 0 } },
+            data: { assignedAccounts: { decrement: 1 } },
+          });
+        }
+        if (proxy) {
+          await tx.proxy.update({ where: { id: proxy.id }, data: { assignedAccounts: { increment: 1 } } });
+        }
+      }
+      await tx.socialAccount.update({ where: { id: acc.id }, data: { proxyId: proxy?.id ?? null, proxyUrl } });
+    }
+  });
+  return accounts.length;
 }
 
 /**
@@ -885,7 +1015,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
 
   app.get('/devices', async (request, reply) => {
     const { tenantId } = request.user;
-    let farmResult: { ok: boolean; raw?: unknown; proxies?: Record<string, any>; error?: string };
+    let farmResult: Awaited<ReturnType<typeof deviceAgentClient.listDevices>>;
     try {
       farmResult = await deviceAgentClient.listDevices();
     } catch (err) {
@@ -915,6 +1045,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
 
     const proxies = farmResult.proxies || {};
+    const proxyStatus = farmResult.proxyStatus || {};
     const devices = rawList.map((d: any) => {
       const devId = String(d.deviceid || d.deviceId || d.id || d.serial || '');
       const assigned = accountByDeviceId.get(devId);
@@ -932,11 +1063,16 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           warmupStatus: assigned.warmupStatus,
           warmupCount: assigned.warmupCount,
         } : null,
-        proxy: proxies[devId] || (assigned?.proxy ? {
+        // What is actually applied on the phone (from the farm agent).
+        proxy: proxies[devId] ?? null,
+        proxyStatus: proxyStatus[devId] ?? null,
+        // What the assigned account is linked to in the DB — differs from `proxy` only if out of sync.
+        accountProxy: assigned?.proxy ? {
+          id: assigned.proxy.id,
           host: assigned.proxy.host,
           port: assigned.proxy.port,
           type: assigned.proxy.type,
-        } : null),
+        } : null,
       };
     });
 
@@ -944,6 +1080,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       ok: true,
       total: devices.length,
       devices,
+      proxyMode: farmResult.proxyMode ?? null,
     });
   });
 
@@ -977,13 +1114,32 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   app.post('/network/restart', restartNetworkHandler);
 
   const batchSetProxyHandler = async (request: any, reply: any) => {
+    const { tenantId } = request.user;
     const body = BatchSetDeviceProxyBody.parse(request.body);
+    let res: Awaited<ReturnType<typeof deviceAgentClient.batchSetProxy>>;
     try {
-      const res = await deviceAgentClient.batchSetProxy(body.assignments);
-      return reply.send(res);
+      res = await deviceAgentClient.batchSetProxy(body.assignments);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
+    // Mirror successfully applied proxies into the pool and link the phones' accounts.
+    const records = new Map<string, ProxyRow>();
+    for (const r of res.results.filter((x) => x.ok)) {
+      const a = body.assignments.find((x) => x.deviceId === r.deviceId);
+      if (!a) continue;
+      try {
+        const key = `${a.host}:${a.port}:${a.username ?? ''}`;
+        let record = records.get(key);
+        if (!record) {
+          record = await upsertProxyRecord(tenantId, a, r.upstream?.protocol);
+          records.set(key, record);
+        }
+        await linkDeviceAccountsToProxy(tenantId, r.deviceId, record);
+      } catch (err) {
+        logger.warn({ err: String(err), deviceId: r.deviceId }, 'farm: failed to sync applied proxy into DB');
+      }
+    }
+    return reply.send(res);
   };
   app.post('/devices/proxy/batch-set', batchSetProxyHandler);
   app.post('/proxies/batch-set', batchSetProxyHandler);
@@ -994,7 +1150,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       const results = await deviceAgentClient.batchCheckDeviceIp(body.deviceIds);
       return reply.send({ ok: true, count: results.length, results });
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   };
   app.post('/devices/proxy/batch-check-ip', batchCheckIpHandler);
@@ -1010,22 +1166,58 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   });
 
   app.post('/devices/proxy/mode', async (request, reply) => {
-    const body = z.object({ mode: z.enum(['shared_sequential', 'private_parallel']) }).parse(request.body);
+    const body = z.object({
+      mode: z.enum(['shared_sequential', 'private_parallel']),
+      inactivePolicy: z.enum(['direct', 'block']).optional(),
+    }).parse(request.body);
     try {
-      const res = await deviceAgentClient.setProxyMode(body.mode);
+      const res = await deviceAgentClient.setProxyMode(body.mode, body.inactivePolicy);
       return reply.send(res);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
   app.post('/devices/proxy/switch-active', async (request, reply) => {
-    const body = z.object({ deviceId: z.string().min(1) }).parse(request.body);
+    const body = z.object({ deviceId: z.string().min(1), force: z.boolean().optional() }).parse(request.body);
     try {
-      const res = await deviceAgentClient.switchActiveProxyDevice(body.deviceId);
+      const res = await deviceAgentClient.switchActiveProxyDevice(body.deviceId, body.force);
       return reply.send(res);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  // Check a proxy from the farm PC (the network the phones actually use) without touching phones.
+  app.post('/devices/proxy/test', async (request, reply) => {
+    const { tenantId } = request.user;
+    const body = TestProxyBody.parse(request.body);
+    const source = await resolveProxySource(tenantId, body);
+    if (!source) return reply.status(404).send({ error: 'Proxy record not found' });
+    try {
+      const res = await deviceAgentClient.testProxy(source.cfg);
+      if (source.record) {
+        await db.proxy.update({
+          where: { id: source.record.id },
+          data: {
+            healthCheckAt: new Date(),
+            ...(res.ok
+              ? { failCount: 0, lastError: null, type: resolveStoredProxyType(source.record.type, res.protocol) }
+              : { failCount: { increment: 1 }, lastError: res.error?.slice(0, 500) }),
+          },
+        });
+      }
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.get('/devices/proxy/status', async (_request, reply) => {
+    try {
+      return reply.send(await deviceAgentClient.getProxyStatus());
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1140,43 +1332,24 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = SetDeviceProxyBody.parse(request.body);
 
-    let proxyConfig: { host: string; port: number; username?: string; password?: string; type?: any; rotateUrl?: string };
-    let proxyRecordId: string | null = null;
+    const source = await resolveProxySource(tenantId, body);
+    if (!source) return reply.status(404).send({ error: 'Proxy record not found' });
 
-    if (body.proxyId) {
-      const p = await db.proxy.findFirst({ where: { id: body.proxyId, tenantId } });
-      if (!p) return reply.status(404).send({ error: 'Proxy record not found' });
-      proxyRecordId = p.id;
-      proxyConfig = {
-        host: p.host,
-        port: p.port,
-        username: p.username ?? undefined,
-        password: p.password ? decrypt(p.password) : undefined,
-        type: p.type as any,
-        rotateUrl: body.rotateUrl,
-      };
-    } else {
-      proxyConfig = {
-        host: body.host!,
-        port: body.port!,
-        username: body.username,
-        password: body.password,
-        type: body.type,
-        rotateUrl: body.rotateUrl,
-      };
+    let res: Awaited<ReturnType<typeof deviceAgentClient.setProxy>>;
+    try {
+      // The agent verifies the proxy from the farm PC first and refuses (400) a dead / wrong-password proxy.
+      res = await deviceAgentClient.setProxy(deviceId, source.cfg, { activate: body.activate });
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
 
     try {
-      const res = await deviceAgentClient.setProxy(deviceId, proxyConfig);
-      if (proxyRecordId) {
-        await db.socialAccount.updateMany({
-          where: { tenantId, deviceId },
-          data: { proxyId: proxyRecordId, proxyUrl: `${proxyConfig.type || 'http'}://${proxyConfig.host}:${proxyConfig.port}` },
-        });
-      }
-      return reply.send(res);
+      const record = source.record ?? (await upsertProxyRecord(tenantId, source.cfg, res.upstream?.protocol));
+      const linkedAccounts = await linkDeviceAccountsToProxy(tenantId, deviceId, record);
+      return reply.send({ ...res, proxyId: record.id, linkedAccounts });
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      logger.warn({ err: String(err), deviceId }, 'farm: proxy applied on phone but DB sync failed');
+      return reply.send(res);
     }
   });
 
@@ -1185,13 +1358,10 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     try {
       const res = await deviceAgentClient.clearProxy(deviceId);
-      await db.socialAccount.updateMany({
-        where: { tenantId, deviceId },
-        data: { proxyId: null, proxyUrl: null },
-      });
+      await linkDeviceAccountsToProxy(tenantId, deviceId, null);
       return reply.send(res);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1201,7 +1371,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       const check = await deviceAgentClient.checkDeviceIp(deviceId);
       return reply.send(check);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1212,7 +1382,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       const res = await deviceAgentClient.rotateProxyIp(deviceId, body.rotateUrl, body.cooldownMs);
       return reply.send(res);
     } catch (err) {
-      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1314,6 +1484,22 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     });
     if (!account) return reply.status(404).send({ error: 'Social account not found' });
 
+    // Accounts leaving this phone also leave its network: drop their device-proxy link.
+    const previous = await db.socialAccount.findMany({
+      where: { tenantId, deviceId, NOT: { id: socialAccountId } },
+      select: { id: true, proxyId: true, authMethod: true },
+    });
+    for (const prev of previous) {
+      if (prev.authMethod !== 'device' || !prev.proxyId) continue;
+      await db.$transaction([
+        db.proxy.updateMany({
+          where: { id: prev.proxyId, assignedAccounts: { gt: 0 } },
+          data: { assignedAccounts: { decrement: 1 } },
+        }),
+        db.socialAccount.update({ where: { id: prev.id }, data: { proxyId: null, proxyUrl: null } }),
+      ]);
+    }
+
     await db.socialAccount.updateMany({
       where: { tenantId, deviceId },
       data: { deviceId: null },
@@ -1324,7 +1510,22 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       data: { deviceId, authMethod: 'device' },
     });
 
-    return reply.send({ ok: true, deviceId, socialAccountId });
+    // The account now posts from this phone — link it to the phone's proxy (best-effort).
+    let proxyLinked = false;
+    try {
+      const farm = await deviceAgentClient.listDevices();
+      const applied = farm.proxies?.[deviceId];
+      if (applied) {
+        const record = await db.proxy.findFirst({
+          where: { tenantId, host: applied.host, port: applied.port, username: applied.username ?? null },
+        });
+        if (record) proxyLinked = (await linkDeviceAccountsToProxy(tenantId, deviceId, record)) > 0;
+      }
+    } catch (err) {
+      logger.warn({ err: describeDeviceAgentError(err), deviceId }, 'farm: could not link account to phone proxy');
+    }
+
+    return reply.send({ ok: true, deviceId, socialAccountId, proxyLinked });
   });
 
   app.post('/devices/:deviceId/screenshot', async (request, reply) => {

@@ -68,38 +68,16 @@ export async function runWbWarmup(
 
   let ipCheck: DeviceIpCheckResult | undefined;
 
-  // In shared sequential mode, automatically transfer the single shared proxy to this device
-  if (proxyManager.getMode().mode === 'shared_sequential' && proxyManager.getMode().hasSharedProxy) {
-    await proxyManager.switchActiveDevice(deviceId).catch((err) => {
-      logger.warn({ deviceId, err: String(err) }, 'wb-warmup: could not auto-switch shared proxy to device');
-    });
-  }
-
-  // 1. Guardrail: Anti-Leak check on clean mobile proxy
+  // 1. Guardrail: the phone must leave via its proxy (shared proxy is already leased by the caller)
   if (checkIpFirst) {
     logger.info({ deviceId, sku }, 'wb-warmup: running pre-flight IP check');
-    ipCheck = await proxyManager.checkDeviceIp(deviceId);
-
-    if (!ipCheck.ok) {
-      return {
-        ok: false,
-        sku,
-        detail: `Не удалось подтвердить прокси на плате: ${ipCheck.error}. Запуск отменён для защиты аккаунта WB.`,
-        ipCheck,
-      };
+    const guard = await proxyManager.preflight(deviceId);
+    ipCheck = guard.ipCheck;
+    if (!guard.ok) {
+      logger.warn({ deviceId, sku, detail: guard.detail }, 'wb-warmup: network pre-flight failed, aborting');
+      return { ok: false, sku, detail: `${guard.detail}. Прогрев отменён для защиты аккаунта WB.`, ipCheck };
     }
-
-    if (ipCheck.leakDetected) {
-      logger.error({ deviceId, ip: ipCheck.ip }, 'wb-warmup: IP LEAK DETECTED! Aborting WB session');
-      return {
-        ok: false,
-        sku,
-        detail: `Обнаружена утечка прямого IP хоста (${ipCheck.ip})! Прокси не активен. Прогрев отменён во избежание блокировки устройства в WB.`,
-        ipCheck,
-      };
-    }
-
-    logger.info({ deviceId, sku, ip: ipCheck.ip }, 'wb-warmup: IP verified safe for Wildberries');
+    logger.info({ deviceId, sku, ip: ipCheck?.ip }, 'wb-warmup: IP verified safe for Wildberries');
   }
 
   try {

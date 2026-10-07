@@ -20,6 +20,7 @@ import {
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
+import { runAutopilotsTick, type AutopilotLoopDeps } from '../autopilot/loop';
 
 const logger = rootLogger.child({ worker: 'scheduler' });
 
@@ -28,6 +29,8 @@ interface Deps {
   pipelineQueue: Queue<PipelineJobPayload>;
   warmupQueue?: Queue<AccountWarmupPayload>;
   distributeQueue?: Queue<DistributeJobPayload>;
+  /** Autopilot loop (montage → uniquify → phone farm); omitted → disabled. */
+  autopilot?: Omit<AutopilotLoopDeps, 'db'>;
   connection: ConnectionOptions;
 }
 
@@ -102,7 +105,7 @@ function resolveEditStyle(editStyle: string): string {
 }
 
 export function createSchedulerWorker(deps: Deps): Worker {
-  const { db, pipelineQueue, warmupQueue, distributeQueue, connection } = deps;
+  const { db, pipelineQueue, warmupQueue, distributeQueue, autopilot, connection } = deps;
 
   return new Worker<SchedulerTickPayload>(
     QUEUES['scheduler'].name,
@@ -131,6 +134,15 @@ export function createSchedulerWorker(deps: Deps): Worker {
           await runCampaignsTick(db, distributeQueue, now);
         } catch (err: any) {
           logger.error({ err: err.message }, 'Scheduler: campaigns tick failed');
+        }
+      }
+
+      // ── Autopilots (новая фабрика: монтаж → уникализация → ферма телефонов) ─
+      if (autopilot) {
+        try {
+          await runAutopilotsTick({ db, ...autopilot }, now);
+        } catch (err: any) {
+          logger.error({ err: err.message }, 'Scheduler: autopilot tick failed');
         }
       }
 

@@ -46,6 +46,7 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
             tenantId: true,
             variantCount: true,
             status: true,
+            config: true,
             sourceVideo: { select: { title: true, projectId: true } },
           },
         });
@@ -74,7 +75,9 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
             'Uniquify-state: job finished',
           );
 
-          await tx.notification.create({
+          // Autopilot jobs report through the autopilot journal instead.
+          const fromAutopilot = Boolean((uniquifyJob.config as Record<string, unknown> | null)?.autopilotBatchId);
+          if (!fromAutopilot) await tx.notification.create({
             data: {
               tenantId: uniquifyJob.tenantId,
               type: allFailed ? 'job_failed' : 'system',

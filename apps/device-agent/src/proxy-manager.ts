@@ -1,21 +1,65 @@
+/**
+ * ProxyManager — wires every phone of the rack to its mobile/residential proxy.
+ *
+ *   app on phone ──► 127.0.0.1:8888 (phone) ──adb reverse──► DeviceProxyListener (PC, per phone)
+ *                                                            ├─► upstream proxy (HTTP or SOCKS5, auth)
+ *                                                            ├─► direct from the PC
+ *                                                            └─► blocked
+ *
+ * Capture on the phone:
+ *   - every phone: Android global HTTP proxy = 127.0.0.1:8888 (apps that honour system proxy);
+ *   - rooted phones: additionally iptables → sing-box → 127.0.0.1:8888 for ALL TCP (see root-proxy.ts).
+ *
+ * Modes:
+ *   - private_parallel  — every configured phone goes through its own upstream at the same time;
+ *   - shared_sequential — one "active" phone uses the proxy, the rest are routed `direct` or
+ *     `block`ed (inactivePolicy). Switching happens inside the PC gateway: no ADB churn.
+ *
+ * Self-healing: a watchdog re-creates lost `adb reverse` mappings (reboot / USB re-plug),
+ * re-applies the system proxy and restarts sing-box when needed.
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import axios from 'axios';
 import type { Logger } from 'pino';
 import { config } from './config';
-import { AdbClient, AdbDevice } from './adb-client';
-import { LocalProxyForwarder } from './proxy-forwarder';
+import type { AdbClient } from './adb-client';
+import {
+  DeviceProxyListener,
+  ProxyError,
+  UpstreamProxy,
+  extractIp,
+  upstreamKey,
+  type ListenerStats,
+  type ProxyType,
+  type RouteDecision,
+  type UpstreamProtocol,
+  type UpstreamTestResult,
+} from './proxy-forwarder';
+import { RootTransparentProxy } from './root-proxy';
+
+export { ProxyError } from './proxy-forwarder';
 
 export interface DeviceProxyConfig {
   host: string;
   port: number;
   username?: string;
   password?: string;
-  type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  type?: ProxyType;
   rotateUrl?: string;
 }
 
+/** Proxy config as exposed over HTTP — never contains the password. */
+export interface MaskedProxyConfig extends Omit<DeviceProxyConfig, 'password'> {
+  hasPassword: boolean;
+}
+
 export type ProxyMode = 'shared_sequential' | 'private_parallel';
+/** What non-active phones do in shared_sequential mode. */
+export type InactivePolicy = 'direct' | 'block';
+/** Where a phone's proxied traffic currently goes. `none` = no proxy configured for it. */
+export type DeviceRoute = 'proxy' | 'direct' | 'block' | 'none';
+export type CaptureMethod = 'transparent' | 'system_proxy';
 
 export interface DeviceIpCheckResult {
   ok: boolean;
@@ -23,596 +67,787 @@ export interface DeviceIpCheckResult {
   country?: string;
   city?: string;
   isp?: string;
+  /** The phone must be proxied but leaves via the farm PC's own public IP. */
   leakDetected: boolean;
+  /** The phone leaves via the farm PC's public IP (expected for `direct`/`none` routes). */
+  exposesHostIp: boolean;
   hostIp?: string;
+  route: DeviceRoute;
+  method?: CaptureMethod;
   error?: string;
 }
 
+export interface DeviceProxyStatus {
+  deviceId: string;
+  configured: boolean;
+  route: DeviceRoute;
+  method: CaptureMethod | null;
+  proxy?: MaskedProxyConfig;
+  protocol?: UpstreamProtocol | null;
+  gatewayPort?: number;
+  gateway?: ListenerStats;
+  appliedAt?: string;
+  applyError?: string;
+  transparentError?: string;
+}
+
+interface DeviceEntry {
+  proxy: DeviceProxyConfig;
+  listenPort?: number;
+}
+
+interface DeviceRuntime {
+  method: CaptureMethod | null;
+  appliedAt?: number;
+  applyError?: string;
+  transparentError?: string;
+  nextRetryAt?: number;
+}
+
+interface PersistedStateV2 {
+  version: 2;
+  mode: ProxyMode;
+  inactivePolicy: InactivePolicy;
+  activeDeviceId: string | null;
+  sharedProxy: DeviceProxyConfig | null;
+  devices: Record<string, DeviceEntry>;
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function sameEndpoint(a: DeviceProxyConfig | undefined, b: DeviceProxyConfig): boolean {
+  return Boolean(a && a.host === b.host && a.port === b.port && (a.username ?? '') === (b.username ?? ''));
+}
+
+export function maskProxy(p: DeviceProxyConfig): MaskedProxyConfig {
+  const { password, ...rest } = p;
+  return { ...rest, hasPassword: Boolean(password) };
+}
+
 export class ProxyManager {
-  private stateFilePath: string;
-  private proxyMap: Map<string, DeviceProxyConfig> = new Map();
+  mode: ProxyMode = 'shared_sequential';
+  inactivePolicy: InactivePolicy = 'direct';
+  activeDeviceId: string | null = null;
+  sharedProxy: DeviceProxyConfig | null = null;
+
+  private devices = new Map<string, DeviceEntry>();
+  private runtimes = new Map<string, DeviceRuntime>();
+  private listeners = new Map<string, DeviceProxyListener>();
+  private listenerStarts = new Map<string, Promise<DeviceProxyListener>>();
+  private upstreams = new Map<string, UpstreamProxy>();
+  private locks = new Map<string, Promise<unknown>>();
+  private readonly root: RootTransparentProxy;
+
+  /** Shared-mode lease: a running task (publish / warmup) owns the shared proxy until it finishes. */
+  private lease: { deviceId: string; count: number } | null = null;
+  private leaseWaiters: Array<() => void> = [];
+
   private hostPublicIp: string | null = null;
   private lastHostIpCheck = 0;
-
-  /** Mode: 'shared_sequential' (1 device at a time, protecting 50 TCP limit) vs 'private_parallel' (all devices) */
-  public mode: ProxyMode = 'shared_sequential';
-  public activeDeviceId: string | null = null;
-  public sharedProxy: DeviceProxyConfig | null = null;
-
-  /** Forwarders indexed by upstream signature: type://user:pass@host:port */
-  private forwarders: Map<string, LocalProxyForwarder> = new Map();
-  /** Pending forwarder initialization promises to avoid race conditions across concurrent boards */
-  private forwarderPromises: Map<string, Promise<LocalProxyForwarder>> = new Map();
-  /** Mapping of deviceId -> forwarder signature */
-  private deviceForwarderKey: Map<string, string> = new Map();
+  private geoCache = new Map<string, { country?: string; city?: string; isp?: string }>();
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  private watchdogRunning = false;
 
   constructor(
     private readonly adb: AdbClient,
     private readonly logger: Logger,
   ) {
-    this.stateFilePath = path.join(config.SCRIPTS_DIR, '..', 'devices-proxy-state.json');
+    this.root = new RootTransparentProxy(adb, logger);
     this.loadState();
-    this.refreshHostIp().catch((err) => {
-      this.logger.warn({ err: String(err) }, 'proxy-manager: initial host IP resolution failed');
-    });
+    this.refreshHostIp().catch(() => {});
   }
 
-  /**
-   * Initialize forwarders and ADB reverse tunnels for all saved proxies on agent startup.
-   * Waits gracefully for ADB to finish USB device discovery before applying.
-   */
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  /** Start gateways, wait for USB enumeration, wire every online phone, start the watchdog. */
   async init(): Promise<void> {
-    if (this.proxyMap.size === 0 && !this.sharedProxy) return;
-    this.logger.info(
-      { mode: this.mode, activeDeviceId: this.activeDeviceId, count: this.proxyMap.size },
-      'proxy-manager: initializing device proxies'
-    );
-
-    // Wait up to 10 seconds for ADB to enumerate USB devices
-    let onlineDevices: AdbDevice[] = [];
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const list = await this.adb.listDevices();
-        onlineDevices = list.filter((d) => d.state === 'device');
-        if (onlineDevices.length > 0) break;
-      } catch {
-        // adb still initializing
-      }
-      if (attempt < 4) {
-        this.logger.info('proxy-manager: waiting for ADB USB device enumeration (2s)...');
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-    }
-
-    const onlineSerials = new Set(onlineDevices.map((d) => d.serial));
-
-    if (this.mode === 'shared_sequential') {
-      // In shared sequential mode: apply proxy to ONE active device only to respect 50 TCP connection limit.
-      const targetDevice = (this.activeDeviceId && onlineSerials.has(this.activeDeviceId))
-        ? this.activeDeviceId
-        : (onlineDevices[0]?.serial ?? null);
-
-      this.activeDeviceId = targetDevice;
-
-      // Ensure all other online devices have proxy removed (direct clean Gnirehtet connection)
-      for (const dev of onlineDevices) {
-        if (dev.serial !== targetDevice) {
-          await this.clearDeviceProxySettings(dev.serial);
-        }
-      }
-
-      if (targetDevice) {
-        const proxy = this.proxyMap.get(targetDevice) || this.sharedProxy;
-        if (proxy) {
-          try {
-            await this.applyDeviceProxy(targetDevice, proxy);
-            this.logger.info(
-              { targetDevice, proxyHost: proxy.host, port: proxy.port },
-              'proxy-manager: applied shared proxy to single active device (sequential mode)'
-            );
-          } catch (err) {
-            this.logger.warn({ targetDevice, err: String(err) }, 'proxy-manager: failed to apply proxy to active device');
-          }
-        }
-      }
-      this.saveState();
-    } else {
-      // In private_parallel mode (private proxy without connection limits): restore on all online devices
-      let restored = 0;
-      for (const [deviceId, proxy] of this.proxyMap.entries()) {
-        if (!onlineSerials.has(deviceId)) {
-          this.logger.info({ deviceId }, 'proxy-manager: device offline, proxy will be applied upon reconnect');
-          continue;
-        }
-        try {
-          await this.applyDeviceProxy(deviceId, proxy);
-          restored++;
-        } catch (err) {
-          this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to restore proxy for device');
-        }
-      }
-      this.logger.info(
-        { restored, totalConfigured: this.proxyMap.size, online: onlineSerials.size },
-        'proxy-manager: private parallel proxy restoration complete'
+    for (const id of this.devices.keys()) {
+      await this.ensureListener(id).catch((err) =>
+        this.logger.warn({ deviceId: id, err: String(err) }, 'proxy-manager: gateway start failed'),
       );
     }
-  }
 
-  /**
-   * Reapply saved proxies to all currently connected devices in the rack.
-   */
-  async reapplyAll(): Promise<{ total: number; restored: number; offline: number }> {
-    const devices = await this.adb.listDevices().catch(() => []);
-    const onlineSerials = new Set(
-      devices.filter((d) => d.state === 'device').map((d) => d.serial)
-    );
-
-    let restored = 0;
-    let offline = 0;
-
-    for (const [deviceId, proxy] of this.proxyMap.entries()) {
-      if (onlineSerials.has(deviceId)) {
-        try {
-          await this.applyDeviceProxy(deviceId, proxy);
-          restored++;
-        } catch (err) {
-          this.logger.warn({ deviceId, err: String(err) }, 'proxy-manager: failed to reapply proxy');
-        }
-      } else {
-        offline++;
+    if (this.devices.size > 0) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const online = (await this.adb.listDevices()).filter((d) => d.state === 'device');
+        if (online.length > 0) break;
+        this.logger.info('proxy-manager: waiting for ADB USB device enumeration (2s)...');
+        await delay(2000);
       }
+      const res = await this.reapplyAll();
+      this.logger.info({ mode: this.mode, activeDeviceId: this.activeDeviceId, ...res }, 'proxy-manager: proxies restored');
     }
 
-    this.logger.info({ restored, offline, total: this.proxyMap.size }, 'proxy-manager: reapplyAll finished');
-    return { total: this.proxyMap.size, restored, offline };
+    this.startWatchdog();
   }
 
-  /**
-   * Check if device has superuser (Root) rights via Magisk `su`.
-   */
-  async isDeviceRooted(deviceId: string): Promise<boolean> {
+  startWatchdog(): void {
+    if (this.watchdogTimer || config.PROXY_WATCHDOG_INTERVAL_MS <= 0) return;
+    this.watchdogTimer = setInterval(() => {
+      this.watchdogTick().catch((err) => this.logger.warn({ err: String(err) }, 'proxy-manager: watchdog tick failed'));
+    }, config.PROXY_WATCHDOG_INTERVAL_MS);
+    this.watchdogTimer.unref();
+  }
+
+  private async watchdogTick(): Promise<void> {
+    if (this.watchdogRunning || this.devices.size === 0) return;
+    this.watchdogRunning = true;
     try {
-      const res = await this.adb.shell(deviceId, 'su -c id 2>/dev/null || true');
-      return res.includes('uid=0(root)');
+      const online = new Set((await this.adb.listDevices()).filter((d) => d.state === 'device').map((d) => d.serial));
+      for (const deviceId of this.devices.keys()) {
+        if (!online.has(deviceId)) continue;
+        const rt = this.runtime(deviceId);
+        if (rt.nextRetryAt && Date.now() < rt.nextRetryAt) continue;
+        if (await this.isWiringHealthy(deviceId)) continue;
+        this.logger.warn({ deviceId }, 'proxy-manager: phone lost its proxy wiring (reboot/USB re-plug?) — re-applying');
+        await this.applyDevice(deviceId).catch(() => {});
+      }
+    } finally {
+      this.watchdogRunning = false;
+    }
+  }
+
+  /** Cheap check without `su`: reverse mapping, system proxy setting, sing-box process. */
+  private async isWiringHealthy(deviceId: string): Promise<boolean> {
+    const listener = this.listeners.get(deviceId);
+    const rt = this.runtime(deviceId);
+    if (!listener || !rt.method) return false;
+    try {
+      const reverse = await this.adb.exec(['-s', deviceId, 'reverse', '--list'], 10_000);
+      if (!reverse.includes(`tcp:${config.PROXY_DEVICE_PORT} tcp:${listener.port}`)) return false;
+      const out = await this.adb.shell(
+        deviceId,
+        `settings get global http_proxy; ${rt.method === 'transparent' ? 'pidof sing-box >/dev/null || echo KMM_NO_SINGBOX' : 'true'}`,
+        10_000,
+      );
+      if (!out.includes(`127.0.0.1:${config.PROXY_DEVICE_PORT}`)) return false;
+      return !out.includes('KMM_NO_SINGBOX');
     } catch {
       return false;
     }
   }
 
-  /**
-   * Ensure native sing-box binary for Android ARM64 exists in bin/ directory.
-   * Automatically downloads and extracts from GitHub if not already present.
-   */
-  private async ensureSingBoxBinary(): Promise<string> {
-    const binDir = path.resolve(config.SCRIPTS_DIR, '..', 'bin');
-    const binPath = path.join(binDir, 'sing-box');
-    if (fs.existsSync(binPath)) {
-      return binPath;
-    }
-
-    if (!fs.existsSync(binDir)) {
-      fs.mkdirSync(binDir, { recursive: true });
-    }
-
-    this.logger.info('proxy-manager: downloading native sing-box engine for Android ARM64...');
-    const tarPath = path.join(binDir, 'sing-box.tar.gz');
-    const url = 'https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz';
-
-    const { execSync } = await import('node:child_process');
-    try {
-      execSync(`curl.exe -L -s -o "${tarPath}" "${url}"`, { stdio: 'ignore' });
-      execSync(`tar -xzf "${tarPath}" -C "${binDir}" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box`, { stdio: 'ignore' });
-      if (fs.existsSync(tarPath)) {
-        fs.unlinkSync(tarPath);
-      }
-    } catch (err) {
-      this.logger.error({ err }, 'proxy-manager: failed to auto-download sing-box binary');
-      throw new Error(`Не удалось скачать бинарник sing-box: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    if (!fs.existsSync(binPath)) {
-      throw new Error(`Бинарник sing-box не найден по пути ${binPath}`);
-    }
-
-    return binPath;
-  }
-
-  /**
-   * Apply hardware-level transparent proxy using native sing-box and iptables on a rooted board.
-   * Completely transparent to all Android apps (Chrome, Instagram, TikTok) without VPN conflicts!
-   */
-  private async applyRootTransparentProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<void> {
-    const binPath = await this.ensureSingBoxBinary();
-
-    // 1. Check if binary exists on device
-    const checkBin = await this.adb.shell(deviceId, 'ls -l /data/local/tmp/sing-box 2>/dev/null || true');
-    if (!checkBin.includes('sing-box') || checkBin.includes('No such file')) {
-      this.logger.info({ deviceId }, 'proxy-manager: pushing native sing-box binary to rooted device');
-      await this.adb.exec(['-s', deviceId, 'push', binPath, '/data/local/tmp/sing-box']);
-      await this.adb.shell(deviceId, 'su -c "chmod 755 /data/local/tmp/sing-box"');
-    }
-
-    // 2. Prepare singbox config
-    const isSocks = proxy.type === 'socks5';
-    const singboxConfig = {
-      log: {
-        level: 'warn',
-      },
-      inbounds: [
-        {
-          type: 'redirect',
-          tag: 'redirect-in',
-          listen: '127.0.0.1',
-          listen_port: 12345,
-        },
-      ],
-      outbounds: [
-        isSocks
-          ? {
-              type: 'socks',
-              tag: 'proxy-out',
-              server: proxy.host,
-              server_port: proxy.port,
-              username: proxy.username,
-              password: proxy.password,
-              version: '5',
-            }
-          : {
-              type: 'http',
-              tag: 'proxy-out',
-              server: proxy.host,
-              server_port: proxy.port,
-              username: proxy.username,
-              password: proxy.password,
-            },
-      ],
-      route: {
-        rules: [
-          {
-            inbound: 'redirect-in',
-            outbound: 'proxy-out',
-          },
-        ],
-      },
-    };
-
-    const b64 = Buffer.from(JSON.stringify(singboxConfig, null, 2)).toString('base64');
-    await this.adb.shell(deviceId, `su -c "echo '${b64}' | base64 -d > /data/local/tmp/singbox.json"`);
-
-    // 3. Stop old sing-box and clean old iptables rules
-    await this.clearRootTransparentProxy(deviceId);
-
-    // 4. Start sing-box daemon in background with root
-    await this.adb.shell(
-      deviceId,
-      'su -c "nohup /data/local/tmp/sing-box run -c /data/local/tmp/singbox.json >/dev/null 2>&1 &"'
-    );
-
-    // Give daemon 400ms to bind to 127.0.0.1:12345
-    await new Promise((r) => setTimeout(r, 400));
-
-    // 5. Apply iptables redirect rules
-    const iptablesCmd = [
-      'iptables -t nat -N SINGBOX 2>/dev/null || iptables -t nat -F SINGBOX',
-      'iptables -t nat -A SINGBOX -d 0.0.0.0/8 -j RETURN',
-      'iptables -t nat -A SINGBOX -d 10.0.0.0/8 -j RETURN',
-      'iptables -t nat -A SINGBOX -d 127.0.0.0/8 -j RETURN',
-      'iptables -t nat -A SINGBOX -d 169.254.0.0/16 -j RETURN',
-      'iptables -t nat -A SINGBOX -d 172.16.0.0/12 -j RETURN',
-      'iptables -t nat -A SINGBOX -d 192.168.0.0/16 -j RETURN',
-      `iptables -t nat -A SINGBOX -d ${proxy.host} -j RETURN`,
-      'iptables -t nat -A SINGBOX -p tcp -j REDIRECT --to-ports 12345',
-      'iptables -t nat -D OUTPUT -p tcp -j SINGBOX 2>/dev/null || true',
-      'iptables -t nat -A OUTPUT -p tcp -j SINGBOX',
-    ].join(' && ');
-
-    await this.adb.shell(deviceId, `su -c "${iptablesCmd}"`);
-
-    // 6. Clear Android userspace global proxy so it doesn't conflict
-    const cleanGlobalCmd = [
-      'settings put global http_proxy :0',
-      'settings delete global http_proxy',
-      'settings delete global global_http_proxy_host',
-      'settings delete global global_http_proxy_port',
-      'settings delete global global_http_proxy_exclusion_list',
-      'ndc resolver flushdefaultif 2>/dev/null || true',
-    ].join(' && ');
-    await this.adb.shell(deviceId, cleanGlobalCmd).catch(() => {});
-
-    this.logger.info(
-      { deviceId, proxyHost: proxy.host, port: proxy.port, method: 'native_root_singbox' },
-      'proxy-manager: native root transparent proxy applied successfully'
-    );
-  }
-
-  /**
-   * Stop native sing-box daemon and flush iptables redirect rules on device.
-   */
-  private async clearRootTransparentProxy(deviceId: string): Promise<void> {
-    const clearCmd = [
-      'iptables -t nat -D OUTPUT -p tcp -j SINGBOX 2>/dev/null || true',
-      'iptables -t nat -F SINGBOX 2>/dev/null || true',
-      'iptables -t nat -X SINGBOX 2>/dev/null || true',
-      'pkill -9 -f /data/local/tmp/sing-box 2>/dev/null || killall -9 sing-box 2>/dev/null || true',
-    ].join(' && ');
-
-    await this.adb.shell(deviceId, `su -c "${clearCmd}"`).catch(() => {});
-  }
-
-  /**
-   * Apply proxy configuration to an active device.
-   * If the board is rooted (Magisk su), uses native sing-box + iptables transparent redirect.
-   * If non-rooted, falls back to local HTTP forwarder + adb reverse.
-   */
-  async applyDeviceProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<void> {
-    const isRoot = await this.isDeviceRooted(deviceId);
-    if (isRoot) {
-      await this.applyRootTransparentProxy(deviceId, proxy);
-      return;
-    }
-
-    const oldKey = this.deviceForwarderKey.get(deviceId);
-
-    if (proxy.username && proxy.password) {
-      // Android does not support proxy credentials natively in settings put global http_proxy.
-      // Route through local forwarder on Farm PC via ADB reverse.
-      const fwd = await this.getOrCreateForwarder(proxy);
-      const newKey = this.getForwarderKey(proxy);
-      this.deviceForwarderKey.set(deviceId, newKey);
-
-      // Map device 127.0.0.1:8888 -> Farm PC local forwarder port
-      await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-      await this.adb.exec(['-s', deviceId, 'reverse', 'tcp:8888', `tcp:${fwd.boundPort}`]);
-
-      const exclusionList = 'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn';
-      const cmd = [
-        'settings put global http_proxy 127.0.0.1:8888',
-        'settings put global global_http_proxy_host 127.0.0.1',
-        'settings put global global_http_proxy_port 8888',
-        `settings put global global_http_proxy_exclusion_list "${exclusionList}"`,
-        'ndc resolver flushdefaultif 2>/dev/null || true',
-      ].join(' && ');
-
-      await this.adb.shell(deviceId, cmd);
-      this.logger.info({ deviceId, port: fwd.boundPort }, 'proxy-manager: forwarder and reverse tunnel applied');
-    } else {
-      // Open or IP-whitelisted proxy
-      await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-      this.deviceForwarderKey.delete(deviceId);
-
-      const exclusionList = 'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn';
-      const cmd = [
-        `settings put global http_proxy ${proxy.host}:${proxy.port}`,
-        `settings put global global_http_proxy_host ${proxy.host}`,
-        `settings put global global_http_proxy_port ${proxy.port}`,
-        `settings put global global_http_proxy_exclusion_list "${exclusionList}"`,
-        'ndc resolver flushdefaultif 2>/dev/null || true',
-      ].join(' && ');
-
-      await this.adb.shell(deviceId, cmd);
-    }
-
-    if (oldKey && oldKey !== this.deviceForwarderKey.get(deviceId)) {
-      await this.releaseForwarder(oldKey);
-    }
-  }
-
-  private getForwarderKey(proxy: DeviceProxyConfig): string {
-    return `${proxy.type || 'http'}://${proxy.username || ''}:${proxy.password || ''}@${proxy.host}:${proxy.port}`;
-  }
-
-  private async getOrCreateForwarder(proxy: DeviceProxyConfig): Promise<LocalProxyForwarder> {
-    const key = this.getForwarderKey(proxy);
-    const existing = this.forwarders.get(key);
-    if (existing && existing.boundPort > 0) {
-      return existing;
-    }
-
-    const pending = this.forwarderPromises.get(key);
-    if (pending) {
-      return pending;
-    }
-
-    const promise = (async () => {
-      const fwd = new LocalProxyForwarder(
-        {
-          host: proxy.host,
-          port: proxy.port,
-          username: proxy.username,
-          password: proxy.password,
-          type: proxy.type,
-        },
-        this.logger
-      );
-      await fwd.start();
-      this.forwarders.set(key, fwd);
-      return fwd;
-    })().finally(() => {
-      this.forwarderPromises.delete(key);
-    });
-
-    this.forwarderPromises.set(key, promise);
-    return promise;
-  }
-
-  private async releaseForwarder(key: string): Promise<void> {
-    // Check if any active device still uses this forwarder key
-    for (const assignedKey of this.deviceForwarderKey.values()) {
-      if (assignedKey === key) return;
-    }
-    const fwd = this.forwarders.get(key);
-    if (fwd) {
-      await fwd.stop();
-      this.forwarders.delete(key);
-    }
-  }
-
-  /** Clear global HTTP proxy settings, root transparent proxy, and reverse port on device via ADB */
-  private async clearDeviceProxySettings(deviceId: string): Promise<void> {
-    await this.clearRootTransparentProxy(deviceId);
-    await this.adb.exec(['-s', deviceId, 'reverse', '--remove', 'tcp:8888']).catch(() => {});
-    const cmd = [
-      'settings put global http_proxy :0',
-      'settings delete global http_proxy',
-      'settings delete global global_http_proxy_host',
-      'settings delete global global_http_proxy_port',
-      'settings delete global global_http_proxy_exclusion_list',
-      'ndc resolver flushdefaultif 2>/dev/null || true',
-    ].join(' && ');
-    await this.adb.shell(deviceId, cmd).catch(() => {});
-  }
+  // ── State ──────────────────────────────────────────────────────────────────
 
   private loadState(): void {
+    const file = config.PROXY_STATE_FILE;
     try {
-      if (fs.existsSync(this.stateFilePath)) {
-        const raw = fs.readFileSync(this.stateFilePath, 'utf-8').replace(/^\uFEFF/, '').trim();
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        if (typeof data === 'object' && data !== null) {
-          if (data._mode === 'shared_sequential' || data._mode === 'private_parallel') {
-            this.mode = data._mode;
-          }
-          if (typeof data._activeDeviceId === 'string') {
-            this.activeDeviceId = data._activeDeviceId;
-          }
-          if (typeof data._sharedProxy === 'object' && data._sharedProxy !== null) {
-            this.sharedProxy = data._sharedProxy as DeviceProxyConfig;
-          }
+      if (!fs.existsSync(file)) return;
+      const raw = fs.readFileSync(file, 'utf-8').replace(/^﻿/, '').trim();
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (!data || typeof data !== 'object') return;
 
-          for (const [deviceId, cfg] of Object.entries(data)) {
-            if (deviceId.startsWith('_')) continue;
-            this.proxyMap.set(deviceId, cfg as DeviceProxyConfig);
-            if (!this.sharedProxy) {
-              this.sharedProxy = cfg as DeviceProxyConfig;
-            }
-          }
-
-          if (this.mode === 'shared_sequential' && !this.activeDeviceId && this.proxyMap.size > 0) {
-            this.activeDeviceId = Array.from(this.proxyMap.keys())[0];
-          }
+      if (data.version === 2) {
+        const s = data as PersistedStateV2;
+        if (s.mode === 'shared_sequential' || s.mode === 'private_parallel') this.mode = s.mode;
+        if (s.inactivePolicy === 'direct' || s.inactivePolicy === 'block') this.inactivePolicy = s.inactivePolicy;
+        this.activeDeviceId = typeof s.activeDeviceId === 'string' ? s.activeDeviceId : null;
+        this.sharedProxy = s.sharedProxy ?? null;
+        for (const [id, entry] of Object.entries(s.devices ?? {})) {
+          if (entry?.proxy?.host && entry.proxy.port) this.devices.set(id, entry);
         }
+      } else {
+        // v1: { _mode, _activeDeviceId, _sharedProxy, [deviceId]: proxy }
+        if (data._mode === 'shared_sequential' || data._mode === 'private_parallel') this.mode = data._mode;
+        if (typeof data._activeDeviceId === 'string') this.activeDeviceId = data._activeDeviceId;
+        if (data._sharedProxy && typeof data._sharedProxy === 'object') this.sharedProxy = data._sharedProxy;
+        for (const [id, cfg] of Object.entries(data)) {
+          if (id.startsWith('_')) continue;
+          const proxy = cfg as DeviceProxyConfig;
+          if (proxy?.host && proxy.port) this.devices.set(id, { proxy });
+        }
+        this.logger.info({ devices: this.devices.size }, 'proxy-manager: migrated proxy state file to v2');
+      }
+      if (!this.sharedProxy && this.devices.size > 0) {
+        this.sharedProxy = this.devices.values().next().value!.proxy;
       }
     } catch (err) {
-      this.logger.warn({ err }, 'proxy-manager: failed to load state file, starting fresh');
+      this.logger.warn({ err: String(err), file }, 'proxy-manager: failed to load state file, starting fresh');
     }
   }
 
   private saveState(): void {
+    const state: PersistedStateV2 = {
+      version: 2,
+      mode: this.mode,
+      inactivePolicy: this.inactivePolicy,
+      activeDeviceId: this.activeDeviceId,
+      sharedProxy: this.sharedProxy,
+      devices: Object.fromEntries(this.devices),
+    };
+    const file = config.PROXY_STATE_FILE;
     try {
-      const obj: Record<string, any> = {
-        _mode: this.mode,
-        _activeDeviceId: this.activeDeviceId,
-      };
-      if (this.sharedProxy) {
-        obj._sharedProxy = this.sharedProxy;
-      }
-      for (const [id, cfg] of this.proxyMap.entries()) {
-        obj[id] = cfg;
-      }
-      fs.writeFileSync(this.stateFilePath, JSON.stringify(obj, null, 2), 'utf-8');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf-8');
+      fs.renameSync(tmp, file);
     } catch (err) {
-      this.logger.error({ err }, 'proxy-manager: failed to save state file');
+      this.logger.error({ err: String(err), file }, 'proxy-manager: failed to save state file');
     }
   }
 
-  /** Get current operating mode and active device */
-  getMode(): { mode: ProxyMode; activeDeviceId: string | null; hasSharedProxy: boolean } {
+  private runtime(deviceId: string): DeviceRuntime {
+    let rt = this.runtimes.get(deviceId);
+    if (!rt) {
+      rt = { method: null };
+      this.runtimes.set(deviceId, rt);
+    }
+    return rt;
+  }
+
+  /** Serialise ADB-side operations per phone (watchdog vs API calls). */
+  private withDeviceLock<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(deviceId) ?? Promise.resolve();
+    const run = prev.catch(() => {}).then(fn);
+    const tail = run.catch(() => {});
+    this.locks.set(deviceId, tail);
+    tail.then(() => {
+      if (this.locks.get(deviceId) === tail) this.locks.delete(deviceId);
+    });
+    return run;
+  }
+
+  // ── Routing ────────────────────────────────────────────────────────────────
+
+  private getUpstream(proxy: DeviceProxyConfig): UpstreamProxy {
+    const key = upstreamKey(proxy);
+    let up = this.upstreams.get(key);
+    if (!up) {
+      up = new UpstreamProxy(
+        { host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, type: proxy.type },
+        this.logger,
+        { maxConnections: config.PROXY_MAX_CONNECTIONS },
+      );
+      this.upstreams.set(key, up);
+    }
+    return up;
+  }
+
+  private pruneUpstreams(): void {
+    const used = new Set([...this.devices.values()].map((e) => upstreamKey(e.proxy)));
+    for (const [key, up] of this.upstreams) {
+      if (!used.has(key) && up.activeConnections === 0) this.upstreams.delete(key);
+    }
+  }
+
+  private routeFor(deviceId: string): RouteDecision {
+    const entry = this.devices.get(deviceId);
+    if (!entry) return { kind: 'block', reason: 'Для этой платы прокси не настроен' };
+    if (this.mode === 'private_parallel' || this.activeDeviceId === deviceId) {
+      return { kind: 'proxy', upstream: this.getUpstream(entry.proxy) };
+    }
+    if (this.inactivePolicy === 'block') {
+      return {
+        kind: 'block',
+        reason: `Режим Shared: общий прокси сейчас у платы ${this.activeDeviceId ?? '—'}, трафик этой платы заблокирован`,
+      };
+    }
+    return { kind: 'direct' };
+  }
+
+  routeKind(deviceId: string): DeviceRoute {
+    if (!this.devices.has(deviceId)) return 'none';
+    return this.routeFor(deviceId).kind;
+  }
+
+  private async ensureListener(deviceId: string): Promise<DeviceProxyListener> {
+    const existing = this.listeners.get(deviceId);
+    if (existing) return existing;
+    const pending = this.listenerStarts.get(deviceId);
+    if (pending) return pending;
+
+    const start = (async () => {
+      const entry = this.devices.get(deviceId);
+      const listener = new DeviceProxyListener(deviceId, () => this.routeFor(deviceId), this.logger, {
+        bindHost: config.PROXY_BIND_HOST,
+        idleTimeoutMs: config.PROXY_IDLE_TIMEOUT_MS,
+      });
+      const port = await listener.start(entry?.listenPort ?? this.allocatePort());
+      this.listeners.set(deviceId, listener);
+      if (entry && entry.listenPort !== port) {
+        entry.listenPort = port;
+        this.saveState();
+      }
+      return listener;
+    })().finally(() => this.listenerStarts.delete(deviceId));
+    this.listenerStarts.set(deviceId, start);
+    return start;
+  }
+
+  private allocatePort(): number {
+    const used = new Set<number>();
+    for (const e of this.devices.values()) if (e.listenPort) used.add(e.listenPort);
+    for (const l of this.listeners.values()) used.add(l.port);
+    let port = config.PROXY_BASE_PORT;
+    while (used.has(port)) port++;
+    return port;
+  }
+
+  /** Wire the phone to its gateway: adb reverse + system proxy (+ transparent redirect if rooted). */
+  private applyDevice(deviceId: string): Promise<void> {
+    const rt = this.runtime(deviceId);
+    return this.withDeviceLock(deviceId, async () => {
+      if (!this.devices.has(deviceId)) return;
+      const listener = await this.ensureListener(deviceId);
+      const devicePort = config.PROXY_DEVICE_PORT;
+
+      await this.adb.exec(['-s', deviceId, 'reverse', `tcp:${devicePort}`, `tcp:${listener.port}`], 15_000);
+
+      let method: CaptureMethod = 'system_proxy';
+      if (config.PROXY_ROOT_MODE !== 'off' && (await this.root.isRooted(deviceId))) {
+        try {
+          await this.root.start(deviceId, devicePort);
+          method = 'transparent';
+          rt.transparentError = undefined;
+        } catch (err) {
+          rt.transparentError = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            { deviceId, err: rt.transparentError },
+            'proxy-manager: transparent mode failed on rooted board — falling back to system proxy',
+          );
+          await this.root.stop(deviceId);
+        }
+      }
+
+      await this.adb.shell(
+        deviceId,
+        [
+          `settings put global global_http_proxy_exclusion_list "${config.PROXY_BYPASS_LIST}"`,
+          `settings put global http_proxy 127.0.0.1:${devicePort}`,
+          `settings put global global_http_proxy_host 127.0.0.1`,
+          `settings put global global_http_proxy_port ${devicePort}`,
+        ].join(' && '),
+        15_000,
+      );
+
+      rt.method = method;
+      rt.appliedAt = Date.now();
+      rt.applyError = undefined;
+      rt.nextRetryAt = undefined;
+      this.logger.info({ deviceId, gatewayPort: listener.port, method }, 'proxy-manager: phone wired to proxy gateway');
+    }).catch((err) => {
+      rt.applyError = err instanceof Error ? err.message : String(err);
+      rt.nextRetryAt = Date.now() + 60_000;
+      this.logger.warn({ deviceId, err: rt.applyError }, 'proxy-manager: failed to wire phone to gateway');
+      throw err;
+    });
+  }
+
+  /** Remove every trace of our proxy from the phone. */
+  private unwireDevice(deviceId: string): Promise<void> {
+    return this.withDeviceLock(deviceId, async () => {
+      await this.adb.exec(['-s', deviceId, 'reverse', '--remove', `tcp:${config.PROXY_DEVICE_PORT}`], 10_000).catch(() => {});
+      if (this.root.knownRooted(deviceId) ?? this.runtime(deviceId).method === 'transparent') {
+        await this.root.stop(deviceId);
+      }
+      await this.adb
+        .shell(
+          deviceId,
+          [
+            'settings put global http_proxy :0',
+            'settings delete global http_proxy',
+            'settings delete global global_http_proxy_host',
+            'settings delete global global_http_proxy_port',
+            'settings delete global global_http_proxy_exclusion_list',
+          ].join('; '),
+          15_000,
+        )
+        .catch(() => {});
+      const rt = this.runtime(deviceId);
+      rt.method = null;
+      rt.appliedAt = undefined;
+    });
+  }
+
+  private setActive(deviceId: string | null): void {
+    const previous = this.activeDeviceId;
+    this.activeDeviceId = deviceId;
+    if (previous === deviceId) return;
+    // Open tunnels were routed by the old decision — cut them so the switch is immediate and leak-free.
+    if (previous) this.listeners.get(previous)?.dropConnections();
+    if (deviceId) this.listeners.get(deviceId)?.dropConnections();
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  getMode(): {
+    mode: ProxyMode;
+    inactivePolicy: InactivePolicy;
+    activeDeviceId: string | null;
+    hasSharedProxy: boolean;
+    busyDeviceId: string | null;
+  } {
     return {
       mode: this.mode,
+      inactivePolicy: this.inactivePolicy,
       activeDeviceId: this.activeDeviceId,
-      hasSharedProxy: Boolean(this.sharedProxy || this.proxyMap.size > 0),
+      hasSharedProxy: this.hasAnyProxy(),
+      busyDeviceId: this.lease?.deviceId ?? null,
     };
   }
 
-  /**
-   * Toggle proxy allocation mode:
-   * - 'shared_sequential': 1 active device at a time (protects from 50 TCP connection limits)
-   * - 'private_parallel': all 20 devices concurrently (for private proxies)
-   */
-  async setMode(newMode: ProxyMode): Promise<{ ok: boolean; mode: ProxyMode }> {
-    if (this.mode === newMode) return { ok: true, mode: this.mode };
-    this.mode = newMode;
-    this.saveState();
-
-    this.logger.info({ mode: this.mode }, 'proxy-manager: proxy mode updated');
-
-    if (this.mode === 'shared_sequential') {
-      // Switching to shared sequential: keep only active device, clear all others
-      const devices = await this.adb.listDevices().catch(() => []);
-      const online = devices.filter((d) => d.state === 'device');
-      const active = (this.activeDeviceId && online.some((d) => d.serial === this.activeDeviceId))
-        ? this.activeDeviceId
-        : (online[0]?.serial ?? null);
-
-      this.activeDeviceId = active;
-
-      for (const dev of online) {
-        if (dev.serial !== active) {
-          await this.clearDeviceProxySettings(dev.serial);
-        }
-      }
-
-      if (active) {
-        const proxy = this.proxyMap.get(active) || this.sharedProxy;
-        if (proxy) {
-          await this.applyDeviceProxy(active, proxy);
-        }
-      }
-      this.saveState();
-    } else {
-      // Switching to private parallel mode (bought private proxy without connection limit):
-      // Apply proxy to all online devices in rack!
-      await this.reapplyAll();
-    }
-
-    return { ok: true, mode: this.mode };
+  hasAnyProxy(): boolean {
+    return Boolean(this.sharedProxy || this.devices.size > 0);
   }
 
-  /**
-   * Transfer the shared proxy to a specific target device.
-   * In shared_sequential mode, removes proxy from previous device and applies to new target device.
-   */
-  async switchActiveDevice(targetDeviceId: string): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
-    const previousDeviceId = this.activeDeviceId ?? undefined;
-    this.logger.info({ previousDeviceId, targetDeviceId }, 'proxy-manager: switching active proxy device');
+  getProxy(deviceId: string): DeviceProxyConfig | undefined {
+    return this.devices.get(deviceId)?.proxy;
+  }
 
-    const proxy = this.proxyMap.get(targetDeviceId) || this.sharedProxy || (previousDeviceId ? this.proxyMap.get(previousDeviceId) : undefined);
-    if (!proxy) {
-      throw new Error('Нет сохранённой конфигурации прокси для передачи');
+  getAllProxies(): Record<string, MaskedProxyConfig> {
+    const out: Record<string, MaskedProxyConfig> = {};
+    for (const [id, e] of this.devices) out[id] = maskProxy(e.proxy);
+    return out;
+  }
+
+  getStatus(): {
+    mode: ProxyMode;
+    inactivePolicy: InactivePolicy;
+    activeDeviceId: string | null;
+    busyDeviceId: string | null;
+    hostIp: string | null;
+    devices: Record<string, DeviceProxyStatus>;
+    upstreams: Array<{ upstream: string; protocol: UpstreamProtocol | null; activeConnections: number; queued: number; lastError?: string }>;
+  } {
+    const devices: Record<string, DeviceProxyStatus> = {};
+    for (const id of new Set([...this.devices.keys(), ...this.runtimes.keys()])) {
+      devices[id] = this.getDeviceStatus(id);
     }
-
-    this.sharedProxy = proxy;
-
-    // 1. Remove proxy from previous device if different
-    if (previousDeviceId && previousDeviceId !== targetDeviceId) {
-      await this.clearDeviceProxySettings(previousDeviceId);
-    }
-
-    // 2. Apply proxy to target device
-    await this.applyDeviceProxy(targetDeviceId, proxy);
-    this.proxyMap.set(targetDeviceId, proxy);
-    this.activeDeviceId = targetDeviceId;
-    this.saveState();
-
     return {
-      ok: true,
-      activeDeviceId: targetDeviceId,
-      previousDeviceId,
+      mode: this.mode,
+      inactivePolicy: this.inactivePolicy,
+      activeDeviceId: this.activeDeviceId,
+      busyDeviceId: this.lease?.deviceId ?? null,
+      hostIp: this.hostPublicIp,
+      devices,
+      upstreams: [...this.upstreams.values()].map((u) => ({
+        upstream: u.label,
+        protocol: u.detectedProtocol,
+        activeConnections: u.activeConnections,
+        queued: u.queuedConnections,
+        lastError: u.lastError,
+      })),
     };
   }
 
-  /** Resolve public IP of the host PC running device-agent (used for leak detection). */
+  getDeviceStatus(deviceId: string): DeviceProxyStatus {
+    const entry = this.devices.get(deviceId);
+    const rt = this.runtimes.get(deviceId);
+    const listener = this.listeners.get(deviceId);
+    return {
+      deviceId,
+      configured: Boolean(entry),
+      route: this.routeKind(deviceId),
+      method: rt?.method ?? null,
+      proxy: entry ? maskProxy(entry.proxy) : undefined,
+      protocol: entry ? this.upstreams.get(upstreamKey(entry.proxy))?.detectedProtocol ?? null : undefined,
+      gatewayPort: listener?.port,
+      gateway: listener?.stats,
+      appliedAt: rt?.appliedAt ? new Date(rt.appliedAt).toISOString() : undefined,
+      applyError: rt?.applyError,
+      transparentError: rt?.transparentError,
+    };
+  }
+
+  /**
+   * Fill in what the client may omit when editing: the UI never receives passwords, so an
+   * empty password for the same host/port/user means "keep the stored one".
+   */
+  private normalize(deviceId: string | null, input: DeviceProxyConfig): DeviceProxyConfig {
+    const proxy: DeviceProxyConfig = {
+      host: input.host.trim(),
+      port: input.port,
+      username: input.username?.trim() || undefined,
+      password: input.password || undefined,
+      type: input.type,
+      rotateUrl: input.rotateUrl?.trim() || undefined,
+    };
+    if (proxy.username && !proxy.password) {
+      const candidates = [deviceId ? this.devices.get(deviceId)?.proxy : undefined, this.sharedProxy ?? undefined, ...[...this.devices.values()].map((e) => e.proxy)];
+      const match = candidates.find((c) => sameEndpoint(c, proxy) && c?.password);
+      if (match) proxy.password = match.password;
+    }
+    return proxy;
+  }
+
+  /** Check a proxy from the PC (HTTPS to an IP-echo service) without touching any phone. */
+  async testProxy(input: DeviceProxyConfig): Promise<UpstreamTestResult & { upstream: string }> {
+    const proxy = this.normalize(null, input);
+    const up = this.getUpstream(proxy);
+    const res = await up.test();
+    this.pruneUpstreams();
+    return { ...res, upstream: up.label };
+  }
+
+  /**
+   * Assign a proxy to one phone. The proxy is verified from the PC first, so a wrong
+   * password / dead proxy is reported clearly and the phone keeps its working network.
+   */
+  async setProxy(
+    deviceId: string,
+    input: DeviceProxyConfig,
+    opts: { activate?: boolean; skipTest?: boolean } = {},
+  ): Promise<{ check: DeviceIpCheckResult; upstream?: UpstreamTestResult }> {
+    const proxy = this.normalize(deviceId, input);
+    this.logger.info(
+      { deviceId, upstream: `${proxy.host}:${proxy.port}`, hasAuth: Boolean(proxy.username) },
+      'proxy-manager: assigning proxy to phone',
+    );
+
+    let upstream: UpstreamTestResult | undefined;
+    if (!opts.skipTest) {
+      upstream = await this.getUpstream(proxy).test();
+      if (!upstream.ok) {
+        this.pruneUpstreams();
+        throw new ProxyError(`Прокси не работает: ${upstream.error}`, upstream.code ?? 'unreachable');
+      }
+    }
+
+    const previous = this.devices.get(deviceId);
+    this.devices.set(deviceId, { proxy, listenPort: previous?.listenPort });
+    this.sharedProxy = proxy;
+    if (this.mode === 'shared_sequential' && opts.activate !== false && !this.isLeasedByOther(deviceId)) {
+      this.setActive(deviceId);
+    }
+    this.saveState();
+    this.listeners.get(deviceId)?.dropConnections();
+    this.pruneUpstreams();
+
+    try {
+      await this.applyDevice(deviceId);
+    } catch (err) {
+      return {
+        upstream,
+        check: {
+          ok: false,
+          leakDetected: false,
+          exposesHostIp: false,
+          route: this.routeKind(deviceId),
+          error: `Прокси сохранён, но применить на плате не удалось (будет повторено автоматически): ${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
+    await delay(1000);
+    return { upstream, check: await this.checkDeviceIp(deviceId) };
+  }
+
+  /** Assign many proxies at once. Each distinct proxy is tested once; failing ones don't touch phones. */
+  async batchSetProxy(assignments: Array<{ deviceId: string; proxy: DeviceProxyConfig }>): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    failed: number;
+    results: Array<{ deviceId: string; ok: boolean; error?: string; upstream?: { ip?: string; protocol?: UpstreamProtocol } }>;
+  }> {
+    const normalized = assignments.map((a) => ({ deviceId: a.deviceId, proxy: this.normalize(a.deviceId, a.proxy) }));
+    const tests = new Map<string, UpstreamTestResult>();
+    await Promise.all(
+      [...new Map(normalized.map((a) => [upstreamKey(a.proxy), a.proxy])).entries()].map(async ([key, proxy]) => {
+        tests.set(key, await this.getUpstream(proxy).test());
+      }),
+    );
+
+    const results: Array<{ deviceId: string; ok: boolean; error?: string; upstream?: { ip?: string; protocol?: UpstreamProtocol } }> = [];
+    const toApply: string[] = [];
+    for (const { deviceId, proxy } of normalized) {
+      const test = tests.get(upstreamKey(proxy))!;
+      if (!test.ok) {
+        results.push({ deviceId, ok: false, error: `Прокси ${proxy.host}:${proxy.port} не работает: ${test.error}` });
+        continue;
+      }
+      const previous = this.devices.get(deviceId);
+      this.devices.set(deviceId, { proxy, listenPort: previous?.listenPort });
+      this.listeners.get(deviceId)?.dropConnections();
+      this.sharedProxy = proxy;
+      toApply.push(deviceId);
+    }
+    if (this.mode === 'shared_sequential' && toApply.length > 0 && !toApply.includes(this.activeDeviceId ?? '') && !this.lease) {
+      this.setActive(toApply[0]);
+    }
+    this.saveState();
+    this.pruneUpstreams();
+
+    // 4 phones at a time keeps the Windows ADB server responsive.
+    for (let i = 0; i < toApply.length; i += 4) {
+      const chunk = toApply.slice(i, i + 4);
+      const settled = await Promise.allSettled(chunk.map((id) => this.applyDevice(id)));
+      settled.forEach((r, j) => {
+        const deviceId = chunk[j];
+        const test = tests.get(upstreamKey(this.devices.get(deviceId)!.proxy));
+        results.push(
+          r.status === 'fulfilled'
+            ? { deviceId, ok: true, upstream: { ip: test?.ip, protocol: test?.protocol } }
+            : {
+                deviceId,
+                ok: false,
+                error: `Прокси сохранён, но не применён на плате (повторим автоматически): ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+              },
+        );
+      });
+    }
+
+    const successful = results.filter((r) => r.ok).length;
+    return { ok: successful > 0, total: assignments.length, successful, failed: assignments.length - successful, results };
+  }
+
+  async clearProxy(deviceId: string): Promise<{ ok: boolean }> {
+    this.logger.info({ deviceId }, 'proxy-manager: clearing proxy on phone');
+    this.devices.delete(deviceId);
+    if (this.activeDeviceId === deviceId) this.setActive(null);
+    this.saveState();
+    const listener = this.listeners.get(deviceId);
+    this.listeners.delete(deviceId);
+    await listener?.stop();
+    await this.unwireDevice(deviceId);
+    this.runtimes.delete(deviceId);
+    this.pruneUpstreams();
+    return { ok: true };
+  }
+
+  /** Re-wire every configured phone that is online (e.g. after an ADB server restart). */
+  async reapplyAll(): Promise<{ total: number; restored: number; offline: number; failed: number }> {
+    const online = new Set((await this.adb.listDevices()).filter((d) => d.state === 'device').map((d) => d.serial));
+    const ids = [...this.devices.keys()];
+    const targets = ids.filter((id) => online.has(id));
+    let restored = 0;
+    for (let i = 0; i < targets.length; i += 4) {
+      const settled = await Promise.allSettled(targets.slice(i, i + 4).map((id) => this.applyDevice(id)));
+      restored += settled.filter((r) => r.status === 'fulfilled').length;
+    }
+    if (this.mode === 'shared_sequential' && (!this.activeDeviceId || !this.devices.has(this.activeDeviceId))) {
+      this.setActive(targets[0] ?? ids[0] ?? null);
+      this.saveState();
+    }
+    return { total: ids.length, restored, offline: ids.length - targets.length, failed: targets.length - restored };
+  }
+
+  /**
+   * Switch modes. Phones are wired identically in both modes, so this only changes how the
+   * gateways route — open connections are cut so the new rule applies immediately.
+   */
+  async setMode(mode: ProxyMode, inactivePolicy?: InactivePolicy): Promise<ReturnType<ProxyManager['getMode']> & { ok: boolean }> {
+    this.mode = mode;
+    if (inactivePolicy) this.inactivePolicy = inactivePolicy;
+    if (mode === 'shared_sequential' && (!this.activeDeviceId || !this.devices.has(this.activeDeviceId))) {
+      const online = new Set((await this.adb.listDevices()).filter((d) => d.state === 'device').map((d) => d.serial));
+      const ids = [...this.devices.keys()];
+      this.activeDeviceId = ids.find((id) => online.has(id)) ?? ids[0] ?? null;
+    }
+    for (const l of this.listeners.values()) l.dropConnections();
+    this.saveState();
+    this.logger.info({ mode: this.mode, inactivePolicy: this.inactivePolicy, activeDeviceId: this.activeDeviceId }, 'proxy-manager: mode updated');
+    return { ok: true, ...this.getMode() };
+  }
+
+  private isLeasedByOther(deviceId: string): boolean {
+    return Boolean(this.lease && this.lease.deviceId !== deviceId);
+  }
+
+  /**
+   * Give the shared proxy to `targetDeviceId` (shared_sequential). A phone without its own
+   * proxy config gets the shared one. Refuses while another phone runs a task unless `force`.
+   */
+  async switchActiveDevice(
+    targetDeviceId: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    if (!opts.force && this.isLeasedByOther(targetDeviceId)) {
+      throw new Error(`Общий прокси сейчас занят задачей на плате ${this.lease!.deviceId} — дождитесь её завершения`);
+    }
+    const previousDeviceId = this.activeDeviceId ?? undefined;
+    if (!this.devices.has(targetDeviceId)) {
+      const proxy = this.sharedProxy ?? (previousDeviceId ? this.devices.get(previousDeviceId)?.proxy : undefined);
+      if (!proxy) throw new Error('Нет сохранённой конфигурации прокси для передачи');
+      this.devices.set(targetDeviceId, { proxy });
+      await this.applyDevice(targetDeviceId);
+    }
+    this.setActive(targetDeviceId);
+    this.saveState();
+    this.logger.info({ previousDeviceId, targetDeviceId }, 'proxy-manager: shared proxy moved to phone');
+    return { ok: true, activeDeviceId: targetDeviceId, previousDeviceId };
+  }
+
+  /**
+   * Reserve the network for a task on `deviceId`. In shared_sequential mode this waits until
+   * no other phone is running a task, then moves the shared proxy here. Always call the
+   * returned release function (try/finally).
+   */
+  async acquireTaskLease(deviceId: string, waitMs = 240_000): Promise<() => void> {
+    if (this.mode !== 'shared_sequential' || !this.hasAnyProxy()) return () => {};
+    const deadline = Date.now() + waitMs;
+    while (this.lease && this.lease.deviceId !== deviceId) {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        throw new Error(`Общий прокси занят задачей на плате ${this.lease.deviceId} — превышено время ожидания очереди`);
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(left, 5000));
+        this.leaseWaiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    if (this.lease) this.lease.count++;
+    else this.lease = { deviceId, count: 1 };
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (!this.lease || this.lease.deviceId !== deviceId) return;
+      if (--this.lease.count <= 0) {
+        this.lease = null;
+        this.leaseWaiters.splice(0).forEach((wake) => wake());
+      }
+    };
+    try {
+      if (this.activeDeviceId !== deviceId) await this.switchActiveDevice(deviceId, { force: true });
+    } catch (err) {
+      release();
+      throw err;
+    }
+    return release;
+  }
+
+  /**
+   * Pre-flight network guard used before touching social / marketplace apps.
+   * Blocks when the phone should be proxied but isn't, or when it would expose the farm's
+   * home IP while proxies are in use on this farm.
+   */
+  async preflight(deviceId: string): Promise<{ ok: boolean; detail?: string; ipCheck?: DeviceIpCheckResult }> {
+    const ipCheck = await this.checkDeviceIp(deviceId);
+    const usingProxies = this.hasAnyProxy();
+    if (!ipCheck.ok) {
+      if (!usingProxies) return { ok: true, ipCheck };
+      return { ok: false, ipCheck, detail: `Не удалось подтвердить прокси на плате: ${ipCheck.error}` };
+    }
+    if (ipCheck.leakDetected) {
+      return { ok: false, ipCheck, detail: `Обнаружена утечка: плата выходит в интернет с IP фермы (${ipCheck.ip}), а не через прокси` };
+    }
+    if (ipCheck.exposesHostIp && usingProxies) {
+      return {
+        ok: false,
+        ipCheck,
+        detail: `Плата выходит в интернет с домашнего IP фермы (${ipCheck.ip}) — назначьте ей прокси или включите режим Private`,
+      };
+    }
+    return { ok: true, ipCheck };
+  }
+
+  // ── IP checks ──────────────────────────────────────────────────────────────
+
+  /** Resolve public IP of the farm PC (used for leak detection). */
   async refreshHostIp(): Promise<string | null> {
     const now = Date.now();
-    if (this.hostPublicIp && now - this.lastHostIpCheck < 600_000) {
-      return this.hostPublicIp;
-    }
+    if (this.hostPublicIp && now - this.lastHostIpCheck < 600_000) return this.hostPublicIp;
     try {
-      const res = await axios.get('https://api.ipify.org?format=json', { timeout: 8000 });
+      // proxy:false — axios would otherwise honour HTTP(S)_PROXY env vars and report the wrong "home" IP.
+      const res = await axios.get('https://api.ipify.org?format=json', { timeout: 8000, proxy: false });
       if (res.data?.ip) {
-        this.hostPublicIp = res.data.ip.trim();
+        this.hostPublicIp = String(res.data.ip).trim();
         this.lastHostIpCheck = now;
-        this.logger.info({ hostPublicIp: this.hostPublicIp }, 'proxy-manager: host public IP updated');
       }
     } catch (err) {
       this.logger.warn({ err: String(err) }, 'proxy-manager: could not resolve host public IP');
@@ -621,167 +856,169 @@ export class ProxyManager {
   }
 
   /**
-   * Set global HTTP proxy on device via ADB and persist configuration.
-   * If proxy has credentials, a LocalProxyForwarder is spawned and bridged via `adb reverse tcp:8888`.
+   * Shell snippet that fetches `http://host/path` on the phone — with curl when the ROM ships
+   * it, otherwise with toybox nc — and always exits 0 so the output reaches us.
    */
-  async setProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<DeviceIpCheckResult> {
-    this.logger.info(
-      { deviceId, host: proxy.host, port: proxy.port, hasAuth: Boolean(proxy.username && proxy.password) },
-      'proxy-manager: applying proxy to device'
-    );
-
-    try {
-      this.sharedProxy = proxy;
-
-      if (this.mode === 'shared_sequential') {
-        // In shared sequential mode: set this as active device and clear proxy on all other devices
-        this.activeDeviceId = deviceId;
-        const devices = await this.adb.listDevices().catch(() => []);
-        for (const d of devices) {
-          if (d.serial !== deviceId && d.state === 'device') {
-            await this.clearDeviceProxySettings(d.serial);
-          }
-        }
-      }
-
-      await this.applyDeviceProxy(deviceId, proxy);
-      this.proxyMap.set(deviceId, proxy);
-      this.saveState();
-    } catch (err) {
-      this.logger.error({ deviceId, err }, 'proxy-manager: failed to set proxy settings via ADB');
-      throw new Error(`Failed to set proxy via ADB: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // Give network stack 2 seconds to apply
-    await new Promise((r) => setTimeout(r, 2000));
-
-    // Verify live IP from device
-    return this.checkDeviceIp(deviceId);
+  private deviceFetchCmd(host: string, pathname: string, viaGateway: boolean, timeoutSec: number): string {
+    const port = config.PROXY_DEVICE_PORT;
+    const url = `http://${host}${pathname}`;
+    const curl = viaGateway
+      ? `curl -s -S -m ${timeoutSec} -x http://127.0.0.1:${port} ${url}`
+      : `curl -s -S -m ${timeoutSec} ${url}`;
+    const request = viaGateway ? `GET ${url} HTTP/1.0\\r\\nHost: ${host}\\r\\n\\r\\n` : `GET ${pathname} HTTP/1.0\\r\\nHost: ${host}\\r\\n\\r\\n`;
+    const nc = viaGateway
+      ? `(printf '${request}'; sleep ${Math.min(timeoutSec, 6)}) | toybox nc 127.0.0.1 ${port}`
+      : `(printf '${request}'; sleep ${Math.min(timeoutSec, 6)}) | toybox nc ${host} 80`;
+    return `{ if command -v curl >/dev/null 2>&1; then ${curl}; else ${nc}; fi; } 2>&1; true`;
   }
 
-  /** Clear proxy settings on device. */
-  async clearProxy(deviceId: string): Promise<{ ok: boolean }> {
-    this.logger.info({ deviceId }, 'proxy-manager: clearing proxy on device');
+  private static responseBody(output: string): string {
+    const text = output.trim();
+    const sep = text.search(/\r?\n\r?\n/);
+    return /^HTTP\/\d/.test(text) && sep !== -1 ? text.slice(sep).trim() : text;
+  }
 
-    const oldKey = this.deviceForwarderKey.get(deviceId);
-    this.deviceForwarderKey.delete(deviceId);
-
-    if (oldKey) {
-      await this.releaseForwarder(oldKey);
-    }
-
+  /** Phone → adb reverse → gateway leg, plus the system proxy setting. */
+  private async probeGateway(deviceId: string): Promise<{ ok: boolean; detail: string; systemProxyOk: boolean }> {
+    const port = config.PROXY_DEVICE_PORT;
     try {
-      await this.clearDeviceProxySettings(deviceId);
-      this.proxyMap.delete(deviceId);
-      if (this.activeDeviceId === deviceId) {
-        this.activeDeviceId = null;
-      }
-      this.saveState();
-      return { ok: true };
+      const out = await this.adb.shell(
+        deviceId,
+        `echo "__PROXY=$(settings get global http_proxy)"; ` +
+          `{ if command -v curl >/dev/null 2>&1; then curl -s -S -m 5 http://127.0.0.1:${port}/__kmm/ping; ` +
+          `else (printf 'GET /__kmm/ping HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n'; sleep 2) | toybox nc 127.0.0.1 ${port}; fi; } 2>&1; true`,
+        20_000,
+      );
+      const systemProxyOk = out.includes(`__PROXY=127.0.0.1:${port}`);
+      if (out.includes('KMM_GATEWAY_OK')) return { ok: true, detail: 'ok', systemProxyOk };
+      return { ok: false, systemProxyOk, detail: out.replace(/__PROXY=\S*/, '').trim().slice(0, 200) || 'нет ответа' };
     } catch (err) {
-      this.logger.error({ deviceId, err }, 'proxy-manager: failed to clear proxy settings');
-      throw new Error(`Failed to clear proxy via ADB: ${err instanceof Error ? err.message : String(err)}`);
+      return { ok: false, systemProxyOk: false, detail: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  /** Run a check on the device itself to test what IP it exits with to the internet. */
+  /** Ask the phone itself which IP it exits with, through the same path its apps use. */
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    await this.refreshHostIp();
+    const hostIp = await this.refreshHostIp();
+    const configured = this.devices.has(deviceId);
+    const base = (): Omit<DeviceIpCheckResult, 'ok'> => ({
+      leakDetected: false,
+      exposesHostIp: false,
+      hostIp: hostIp ?? undefined,
+      route: this.routeKind(deviceId),
+      method: this.runtimes.get(deviceId)?.method ?? undefined,
+    });
 
-    const cfg = this.proxyMap.get(deviceId);
-    let cmd = '';
-
-    const isRoot = await this.isDeviceRooted(deviceId);
-    if (isRoot) {
-      // With root transparent proxy (iptables + sing-box), traffic is intercepted automatically
-      cmd = [
-        'su -c "curl -k -s -S --max-time 15 https://api.ipify.org"',
-        'su -c "curl -k -s -S --max-time 15 http://api.ipify.org"',
-        'curl -k -s -S --max-time 15 https://api.ipify.org',
-        'curl -k -s -S --max-time 15 http://api.ipify.org',
-        'toybox wget -q -O - http://api.ipify.org',
-      ].join(' || ');
-    } else if (cfg && cfg.username && cfg.password) {
-      // Forwarder is running on 127.0.0.1:8888 via ADB reverse tunnel
-      // Check HTTPS first (CONNECT tunnel supports both HTTP and SOCKS5), then HTTP, then toybox wget
-      cmd = [
-        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 15 https://api.ipify.org',
-        'curl -k -s -S -x http://127.0.0.1:8888 --max-time 15 http://api.ipify.org',
-        'http_proxy=http://127.0.0.1:8888 toybox wget -q -O - http://api.ipify.org',
-      ].join(' || ');
-    } else if (cfg && cfg.host && cfg.port) {
-      const proto = cfg.type === 'socks5' ? 'socks5://' : 'http://';
-      const proxyOpt = `-x ${proto}${cfg.host}:${cfg.port}`;
-      cmd = [
-        `curl -k -s -S ${proxyOpt} --max-time 15 https://api.ipify.org`,
-        `curl -k -s -S ${proxyOpt} --max-time 15 http://api.ipify.org`,
-        `http_proxy=http://${cfg.host}:${cfg.port} toybox wget -q -O - http://api.ipify.org`,
-      ].join(' || ');
-    } else {
-      cmd = 'curl -k -s -S --max-time 10 https://api.ipify.org || curl -k -s -S --max-time 10 http://api.ipify.org || wget -qO- --timeout=10 http://api.ipify.org';
-    }
-
-    try {
-      const text = await this.adb.shell(deviceId, cmd);
-      this.logger.debug({ deviceId, text }, 'proxy-manager: adb response for ip check');
-
-      // Extract IPv4 or IPv6
-      const ipMatch = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/) || text.match(/[0-9a-fA-F:]{7,39}/);
-      if (!ipMatch) {
+    if (configured) {
+      let probe = await this.probeGateway(deviceId);
+      if (!probe.ok || !probe.systemProxyOk) {
+        // Self-heal once (lost adb reverse after reboot/re-plug, proxy setting reset, ...).
+        await this.applyDevice(deviceId).catch(() => {});
+        probe = await this.probeGateway(deviceId);
+      }
+      if (!probe.ok) {
+        const rt = this.runtimes.get(deviceId);
         return {
+          ...base(),
           ok: false,
-          error: `Прокси не отвечает или отклонил подключение: ${text.slice(0, 200)}`,
-          leakDetected: false,
-          hostIp: this.hostPublicIp ?? undefined,
+          error:
+            `Плата не достаёт до шлюза агента (127.0.0.1:${config.PROXY_DEVICE_PORT} через adb reverse): ${probe.detail}` +
+            (rt?.applyError ? `. Последняя ошибка настройки: ${rt.applyError}` : ''),
         };
       }
-
-      const deviceIp = ipMatch[0].trim();
-      const leakDetected = Boolean(this.hostPublicIp && deviceIp === this.hostPublicIp);
-
-      if (leakDetected) {
-        this.logger.warn({ deviceId, deviceIp, hostIp: this.hostPublicIp }, 'proxy-manager: IP LEAK DETECTED! Device is using host direct IP!');
+      if (this.routeKind(deviceId) === 'block') {
+        return { ...base(), ok: false, error: 'Режим Shared: плата ждёт общий прокси, её трафик заблокирован' };
       }
+    }
 
-      // Fetch geo data via IP-API from host
-      let geo: { country?: string; city?: string; isp?: string } = {};
+    const viaGateway = configured && this.runtimes.get(deviceId)?.method !== 'transparent';
+    const endpoints = [
+      { host: 'api.ipify.org', path: '/' },
+      { host: 'ifconfig.me', path: '/ip' },
+    ];
+    let ip: string | undefined;
+    let lastOutput = '';
+    for (const ep of endpoints) {
       try {
-        const geoRes = await axios.get(`http://ip-api.com/json/${deviceIp}?fields=status,country,city,isp`, { timeout: 5000 });
-        if (geoRes.data?.status === 'success') {
-          geo = {
-            country: geoRes.data.country,
-            city: geoRes.data.city,
-            isp: geoRes.data.isp,
-          };
-        }
-      } catch {
-        // non-fatal
+        const out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, viaGateway, 10), 30_000);
+        const body = ProxyManager.responseBody(out);
+        ip = extractIp(body);
+        if (ip) break;
+        lastOutput = body;
+      } catch (err) {
+        lastOutput = err instanceof Error ? err.message : String(err);
       }
+    }
 
+    if (!ip) {
+      const gatewayError = configured ? this.listeners.get(deviceId)?.stats.lastError : undefined;
+      const output = lastOutput.trim().slice(0, 300);
       return {
-        ok: true,
-        ip: deviceIp,
-        country: geo.country,
-        city: geo.city,
-        isp: geo.isp,
-        leakDetected,
-        hostIp: this.hostPublicIp ?? undefined,
-      };
-    } catch (err) {
-      return {
+        ...base(),
         ok: false,
-        error: `ADB check failed: ${err instanceof Error ? err.message : String(err)}`,
-        leakDetected: false,
-        hostIp: this.hostPublicIp ?? undefined,
+        error: gatewayError
+          ? `Прокси не пропускает трафик: ${gatewayError}`
+          : `Не удалось получить IP с платы: ${output || 'пустой ответ'}`,
       };
     }
+
+    const exposesHostIp = Boolean(hostIp && ip === hostIp);
+    const route = this.routeKind(deviceId);
+    const leakDetected = exposesHostIp && route === 'proxy';
+    if (leakDetected) {
+      this.logger.warn({ deviceId, ip, hostIp }, 'proxy-manager: IP LEAK — phone must be proxied but exits via the farm IP');
+    }
+
+    return { ...base(), ok: true, ip, ...(await this.geo(ip)), exposesHostIp, leakDetected };
   }
 
-  /** Trigger IP rotation webhook for mobile/residential proxy and verify new exit IP. */
+  async batchCheckDeviceIp(deviceIds: string[], concurrency = 5): Promise<Array<{ deviceId: string } & DeviceIpCheckResult>> {
+    const results: Array<{ deviceId: string } & DeviceIpCheckResult> = [];
+    for (let i = 0; i < deviceIds.length; i += concurrency) {
+      const chunk = deviceIds.slice(i, i + concurrency);
+      const settled = await Promise.allSettled(chunk.map((id) => this.checkDeviceIp(id)));
+      settled.forEach((r, j) => {
+        const deviceId = chunk[j];
+        results.push(
+          r.status === 'fulfilled'
+            ? { deviceId, ...r.value }
+            : {
+                deviceId,
+                ok: false,
+                leakDetected: false,
+                exposesHostIp: false,
+                route: this.routeKind(deviceId),
+                error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+              },
+        );
+      });
+    }
+    return results;
+  }
+
+  private async geo(ip: string): Promise<{ country?: string; city?: string; isp?: string }> {
+    const cached = this.geoCache.get(ip);
+    if (cached) return cached;
+    try {
+      const res = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city,isp`, { timeout: 5000 });
+      if (res.data?.status === 'success') {
+        const geo = { country: res.data.country, city: res.data.city, isp: res.data.isp };
+        this.geoCache.set(ip, geo);
+        return geo;
+      }
+    } catch {
+      // non-fatal
+    }
+    return {};
+  }
+
+  // ── Rotation & network ─────────────────────────────────────────────────────
+
+  /** Call the provider's rotation webhook, then re-check the phone's exit IP. */
   async rotateProxyIp(
     deviceId: string,
     rotateUrlOverride?: string,
-    cooldownMs = 4000
+    cooldownMs = 4000,
   ): Promise<{
     ok: boolean;
     deviceId: string;
@@ -791,178 +1028,67 @@ export class ProxyManager {
     check: DeviceIpCheckResult;
     error?: string;
   }> {
-    const cfg = this.proxyMap.get(deviceId);
-    const url = rotateUrlOverride || cfg?.rotateUrl;
+    const entry = this.devices.get(deviceId);
+    const url = rotateUrlOverride || entry?.proxy.rotateUrl;
     if (!url) {
-      // Для Shared-прокси с ротацией по таймеру провайдера URL-вебхук отсутствует.
-      this.logger.info({ deviceId }, 'proxy-manager: no rotateUrl configured (Shared/timer rotation) - checking current IP');
       const check = await this.checkDeviceIp(deviceId);
       return {
         ok: check.ok,
         deviceId,
         rotateUrl: 'timer-rotation',
-        statusCode: 200,
-        rotateResponse: 'Авторотация по таймеру провайдера (Shared-режим)',
+        rotateResponse: 'Ссылка ротации не задана — IP меняется по таймеру провайдера',
         check,
       };
     }
 
-    this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');
+    if (entry && rotateUrlOverride && entry.proxy.rotateUrl !== rotateUrlOverride) {
+      entry.proxy.rotateUrl = rotateUrlOverride;
+      this.saveState();
+    }
 
+    this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');
     let statusCode: number | undefined;
     let rotateResponse = '';
-
     try {
-      const res = await axios.get(url, {
-        timeout: 15_000,
-        headers: { 'User-Agent': 'KMMZavod-ProxyManager/1.0' },
-      });
+      const res = await axios.get(url, { timeout: 15_000, headers: { 'User-Agent': 'KMMZavod-ProxyManager/2.0' } });
       statusCode = res.status;
       rotateResponse = typeof res.data === 'string' ? res.data.slice(0, 500) : JSON.stringify(res.data).slice(0, 500);
     } catch (err) {
-      this.logger.error({ deviceId, err }, 'proxy-manager: failed to call rotateUrl');
-      throw new Error(`Ошибка вызова ротации по ссылке: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`Ошибка вызова ссылки ротации: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Cooldown to give mobile carrier / modem time to re-establish connection
-    if (cooldownMs > 0) {
-      await new Promise((r) => setTimeout(r, cooldownMs));
-    }
-
-    // Re-check exit IP
+    if (cooldownMs > 0) await delay(cooldownMs);
+    // Connections opened before the rotation still ride the old IP.
+    this.listeners.get(deviceId)?.dropConnections();
     const check = await this.checkDeviceIp(deviceId);
-    return {
-      ok: check.ok,
-      deviceId,
-      rotateUrl: url,
-      statusCode,
-      rotateResponse,
-      check,
-    };
+    return { ok: check.ok, deviceId, rotateUrl: url, statusCode, rotateResponse, check, error: check.error };
   }
 
-  /**
-   * Restart network interface (Ethernet eth0 or Wi-Fi wlan0) and flush DNS/route cache.
-   * Tailored for single-cable Ethernet motherboard phone farms without SIM cards.
-   */
+  /** Bounce eth0 / Wi-Fi and flush DNS & route caches (SIM-less Ethernet boards). */
   async restartNetworkInterface(
     deviceId: string,
-    mode: 'ethernet' | 'wifi' | 'all' = 'ethernet'
-  ): Promise<{
-    ok: boolean;
-    deviceId: string;
-    mode: string;
-    log: string;
-  }> {
-    this.logger.info({ deviceId, mode }, 'proxy-manager: restarting network interface and flushing caches');
-
-    const commands: string[] = [];
-
-    // 1. Flush DNS resolver and route caches
-    commands.push('ndc resolver flushdefaultif 2>/dev/null || true');
-    commands.push('ip route flush cache 2>/dev/null || true');
-
-    // 2. Ethernet bounce (single cable farm architecture)
+    mode: 'ethernet' | 'wifi' | 'all' = 'ethernet',
+  ): Promise<{ ok: boolean; deviceId: string; mode: string; log: string }> {
+    this.logger.info({ deviceId, mode }, 'proxy-manager: restarting network interface');
+    const commands = ['ndc resolver flushdefaultif 2>/dev/null || true', 'ip route flush cache 2>/dev/null || true'];
     if (mode === 'ethernet' || mode === 'all') {
-      commands.push('ip link set eth0 down 2>/dev/null || ifconfig eth0 down 2>/dev/null || true');
-      commands.push('sleep 1');
-      commands.push('ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true');
+      commands.push(
+        'ip link set eth0 down 2>/dev/null || ifconfig eth0 down 2>/dev/null || true',
+        'sleep 1',
+        'ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true',
+      );
     }
-
-    // 3. Wi-Fi bounce
     if (mode === 'wifi' || mode === 'all') {
-      commands.push('svc wifi disable 2>/dev/null || true');
-      commands.push('sleep 1');
-      commands.push('svc wifi enable 2>/dev/null || true');
+      commands.push('svc wifi disable 2>/dev/null || true', 'sleep 1', 'svc wifi enable 2>/dev/null || true');
     }
 
-    const script = commands.join(' && ');
     let output = '';
     try {
-      output = await this.adb.shell(deviceId, script);
+      output = await this.adb.shell(deviceId, commands.join(' && '));
     } catch (err) {
-      this.logger.error({ deviceId, err }, 'proxy-manager: network restart command failed');
       throw new Error(`Ошибка перезапуска сети: ${err instanceof Error ? err.message : String(err)}`);
     }
-
-    // Allow 2s for interface re-negotiation / DHCP renewal
-    await new Promise((r) => setTimeout(r, 2000));
-
-    return {
-      ok: true,
-      deviceId,
-      mode,
-      log: output || 'Сетевые интерфейсы перезапущены, DNS и маршруты сброшены',
-    };
-  }
-
-  /** Batch set proxy across multiple devices in parallel (chunked for ADB daemon stability) */
-  async batchSetProxy(
-    assignments: Array<{ deviceId: string; proxy: DeviceProxyConfig }>
-  ): Promise<{
-    ok: boolean;
-    total: number;
-    successful: number;
-    failed: number;
-    results: Array<{
-      deviceId: string;
-      ok: boolean;
-      check?: DeviceIpCheckResult;
-      error?: string;
-    }>;
-  }> {
-    const formatted: Array<{
-      deviceId: string;
-      ok: boolean;
-      check?: DeviceIpCheckResult;
-      error?: string;
-    }> = [];
-
-    // Process in batches of 4 boards to prevent Windows ADB server daemon socket contention
-    const chunkSize = 4;
-    for (let i = 0; i < assignments.length; i += chunkSize) {
-      const chunk = assignments.slice(i, i + chunkSize);
-      const chunkResults = await Promise.allSettled(
-        chunk.map(async ({ deviceId, proxy }) => {
-          const check = await this.setProxy(deviceId, proxy);
-          return { deviceId, ok: true, check };
-        })
-      );
-
-      for (let j = 0; j < chunkResults.length; j++) {
-        const r = chunkResults[j];
-        const devId = chunk[j].deviceId;
-        if (r.status === 'fulfilled') {
-          formatted.push(r.value);
-        } else {
-          formatted.push({
-            deviceId: devId,
-            ok: false,
-            error: r.reason instanceof Error ? r.reason.message : String(r.reason),
-          });
-        }
-      }
-    }
-
-    const successful = formatted.filter((f) => f.ok).length;
-    return {
-      ok: successful > 0 || assignments.length === 0,
-      total: assignments.length,
-      successful,
-      failed: assignments.length - successful,
-      results: formatted,
-    };
-  }
-
-  getProxy(deviceId: string): DeviceProxyConfig | undefined {
-    return this.proxyMap.get(deviceId);
-  }
-
-  getAllProxies(): Record<string, DeviceProxyConfig> {
-    const res: Record<string, DeviceProxyConfig> = {};
-    for (const [k, v] of this.proxyMap.entries()) {
-      res[k] = v;
-    }
-    return res;
+    await delay(2000);
+    return { ok: true, deviceId, mode, log: output || 'Сетевые интерфейсы перезапущены, DNS и маршруты сброшены' };
   }
 }

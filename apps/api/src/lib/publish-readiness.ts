@@ -43,9 +43,11 @@ export function computeReadiness(a: ReadinessInput): Readiness {
     if (a.expiresAt && a.expiresAt.getTime() < Date.now()) blockers.push('Токен истёк');
   }
 
-  // Device accounts post from the phone's own network (SIM/home wifi) — our
-  // per-account proxy is irrelevant there, so skip the "no proxy" warning.
-  if (!a.hasProxy && a.authMethod !== 'device') warnings.push('Без прокси (риск бана)');
+  // Device accounts are linked to the proxy applied on their phone (farm → Proxy). Without one
+  // the phone posts from the farm's own network — allowed (SIM phones), but worth flagging.
+  if (!a.hasProxy) {
+    warnings.push(a.authMethod === 'device' ? 'На телефоне нет прокси — публикация с IP фермы' : 'Без прокси (риск бана)');
+  }
   if (a.authMethod === 'private' && a.warmupStatus === 'cold' && !a.enforceWarmup) {
     warnings.push('Не прогрет (постинг разрешён)');
   }

@@ -612,15 +612,16 @@ export const accountFarmApi = {
   // Physical phone farm devices (motherboard rack)
   listDevices: () => apiFetch<{ ok: boolean; total: number; devices: FarmDevice[]; error?: string }>('/api/v1/farm/devices'),
 
-  setDeviceProxy: (deviceId: string, body: {
-    proxyId?: string;
-    host?: string;
-    port?: number;
-    username?: string;
-    password?: string;
-    type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
-    rotateUrl?: string;
-  }) => apiFetch<{ ok: boolean; check?: DeviceIpCheck }>(`/api/v1/farm/devices/${deviceId}/proxy`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Agent verifies the proxy from the farm PC first; a dead / wrong-password proxy is rejected with a clear error. */
+  setDeviceProxy: (deviceId: string, body: Partial<DeviceProxyInput> & { proxyId?: string; activate?: boolean }) =>
+    apiFetch<{ ok: boolean; check?: DeviceIpCheck; upstream?: ProxyTestResult; proxyId?: string; linkedAccounts?: number }>(
+      `/api/v1/farm/devices/${deviceId}/proxy`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** Check a proxy from the farm PC without touching any phone. */
+  testFarmProxy: (body: Partial<DeviceProxyInput> & { proxyId?: string }) =>
+    apiFetch<ProxyTestResult>('/api/v1/farm/devices/proxy/test', { method: 'POST', body: JSON.stringify(body) }),
 
   clearDeviceProxy: (deviceId: string) =>
     apiFetch<{ ok: boolean }>(`/api/v1/farm/devices/${deviceId}/clear-proxy`, { method: 'POST' }),
@@ -674,8 +675,8 @@ export const accountFarmApi = {
       results: Array<{
         deviceId: string;
         ok: boolean;
-        check?: DeviceIpCheck;
         error?: string;
+        upstream?: { ip?: string; protocol?: 'http' | 'socks5' };
       }>;
     }>('/api/v1/farm/devices/proxy/batch-set', { method: 'POST', body: JSON.stringify({ assignments }) }),
 
@@ -686,24 +687,18 @@ export const accountFarmApi = {
       results: Array<{ deviceId: string } & DeviceIpCheck>;
     }>('/api/v1/farm/devices/proxy/batch-check-ip', { method: 'POST', body: JSON.stringify({ deviceIds }) }),
 
-  getProxyMode: () =>
-    apiFetch<{
-      ok: boolean;
-      mode: 'shared_sequential' | 'private_parallel';
-      activeDeviceId: string | null;
-      hasSharedProxy: boolean;
-    }>('/api/v1/farm/devices/proxy/mode'),
+  getProxyMode: () => apiFetch<ProxyModeState>('/api/v1/farm/devices/proxy/mode'),
 
-  setProxyMode: (mode: 'shared_sequential' | 'private_parallel') =>
-    apiFetch<{ ok: boolean; mode: 'shared_sequential' | 'private_parallel' }>('/api/v1/farm/devices/proxy/mode', {
+  setProxyMode: (mode: 'shared_sequential' | 'private_parallel', inactivePolicy?: 'direct' | 'block') =>
+    apiFetch<ProxyModeState>('/api/v1/farm/devices/proxy/mode', {
       method: 'POST',
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode, inactivePolicy }),
     }),
 
-  switchActiveProxyDevice: (deviceId: string) =>
+  switchActiveProxyDevice: (deviceId: string, force?: boolean) =>
     apiFetch<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }>(
       '/api/v1/farm/devices/proxy/switch-active',
-      { method: 'POST', body: JSON.stringify({ deviceId }) }
+      { method: 'POST', body: JSON.stringify({ deviceId, force }) }
     ),
 
   viewTarget: (deviceId: string, body: ViewTargetParams) =>
@@ -1084,12 +1079,58 @@ export interface FarmDevice {
     warmupStatus: string;
     warmupCount: number;
   } | null;
+  /** Proxy applied on the phone (password is never sent to the browser — see hasPassword). */
   proxy?: {
     host: string;
     port: number;
     type?: string;
+    username?: string;
+    hasPassword?: boolean;
     rotateUrl?: string;
   } | null;
+  /** Live routing state from the farm gateway. */
+  proxyStatus?: {
+    route: DeviceRoute;
+    method: 'transparent' | 'system_proxy' | null;
+    applyError?: string;
+    transparentError?: string;
+    gateway?: { activeConnections: number; lastError?: string };
+  } | null;
+  /** Proxy the assigned account is linked to in the DB. */
+  accountProxy?: { id: string; host: string; port: number; type: string } | null;
+}
+
+/** proxy = via its proxy · direct = farm's own IP (shared mode, inactive) · block = no traffic · none = not configured */
+export type DeviceRoute = 'proxy' | 'direct' | 'block' | 'none';
+
+export interface DeviceProxyInput {
+  host: string;
+  port: number;
+  username?: string;
+  /** Empty = keep the password already stored on the farm for the same host/port/user. */
+  password?: string;
+  /** Optional hint — the farm auto-detects HTTP vs SOCKS5. */
+  type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  rotateUrl?: string;
+}
+
+export interface ProxyTestResult {
+  ok: boolean;
+  upstream?: string;
+  protocol?: 'http' | 'socks5';
+  ip?: string;
+  latencyMs?: number;
+  error?: string;
+  code?: string;
+}
+
+export interface ProxyModeState {
+  ok: boolean;
+  mode: 'shared_sequential' | 'private_parallel';
+  inactivePolicy: 'direct' | 'block';
+  activeDeviceId: string | null;
+  busyDeviceId?: string | null;
+  hasSharedProxy: boolean;
 }
 
 export interface DeviceIpCheck {
@@ -1098,8 +1139,13 @@ export interface DeviceIpCheck {
   country?: string;
   city?: string;
   isp?: string;
+  /** Must be proxied but exits via the farm's own IP. */
   leakDetected: boolean;
+  /** Exits via the farm's own IP (expected for route direct/none). */
+  exposesHostIp?: boolean;
   hostIp?: string;
+  route?: DeviceRoute;
+  method?: 'transparent' | 'system_proxy';
   error?: string;
 }
 
@@ -2018,3 +2064,162 @@ export const notificationsApi = {
     apiFetch<{ success: boolean }>('/api/v1/notifications/read-all', { method: 'POST' }),
 };
 
+
+// ── Autopilot (новая фабрика: монтаж → уникализация → ферма телефонов) ─────────
+
+export type AutopilotStatus = 'draft' | 'active' | 'paused' | 'error';
+export type AutopilotBatchStatus =
+  | 'pending' | 'scripting' | 'analyzing' | 'rendering' | 'uniquifying' | 'ready' | 'failed';
+
+export interface AutopilotInput {
+  name: string;
+  projectId: string;
+  montageMode: 'single' | 'multi';
+  sourcesPerMontage: number;
+  sourceStrategy: 'fresh_first' | 'pool' | 'fresh_only';
+  targetSeconds: number;
+  aspect: '9:16' | '1:1' | '4:5' | '16:9';
+  subtitleStyle: string;
+  smartCrop: boolean;
+  bgmKeys: string[];
+  productInfo?: string | null;
+  scriptStyles: string[];
+  ctaType: 'article' | 'direct' | 'auto';
+  directWord?: string | null;
+  voiceIds: string[];
+  voiceSpeed: number;
+  uniquifyMode: 'preserve_context';
+  stealthLevel: 'standard' | 'maximum';
+  variantsPerMontage?: number | null;
+  accountGroupId?: string | null;
+  socialAccountIds: string[];
+  platforms: string[];
+  publishTimes: string[];
+  timezone: string;
+  jitterMinutes: number;
+  staggerMinutes: number;
+  minHealth: number;
+  captionTemplate?: string | null;
+  hashtags: string[];
+  bufferWindows: number;
+  maxParallelBatches: number;
+}
+
+export interface Autopilot extends Omit<AutopilotInput, 'voiceSpeed'> {
+  id: string;
+  tenantId: string;
+  status: AutopilotStatus;
+  voiceSpeed: number | string;
+  nextWindowAt: string | null;
+  lastWindowAt: string | null;
+  lastTickAt: string | null;
+  consecutiveFailures: number;
+  lastError: string | null;
+  montagesProduced: number;
+  variantsProduced: number;
+  postsScheduled: number;
+  createdAt: string;
+  updatedAt: string;
+  project?: { id?: string; name: string };
+  inFlight?: number;
+  readyVariants?: number;
+}
+
+export interface AutopilotAccount {
+  id: string;
+  platform: string;
+  accountName: string;
+  deviceId: string | null;
+  group: string | null;
+  ok: boolean;
+  blockers: string[];
+}
+
+export interface AutopilotBatch {
+  id: string;
+  status: AutopilotBatchStatus;
+  sourceVideoIds: string[];
+  script: string | null;
+  scriptStyle: string | null;
+  caption: string | null;
+  voiceId: string | null;
+  voiceDuration: string | number | null;
+  variantCount: number;
+  editProjectId: string | null;
+  uniquifyJobId: string | null;
+  error: string | null;
+  stageStartedAt: string;
+  createdAt: string;
+  completedAt: string | null;
+  uniquify: { id: string; variantCount: number; completedCount: number; failedCount: number } | null;
+  thumbnailUrl: string | null;
+}
+
+export interface AutopilotRun {
+  id: string;
+  kind: 'produce' | 'advance' | 'distribute' | 'error' | 'info';
+  message: string | null;
+  summary: Record<string, unknown>;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface AutopilotPost {
+  id: string;
+  status: string;
+  scheduledAt: string | null;
+  publishedAt: string | null;
+  error: string | null;
+  createdAt: string;
+  socialAccount: { accountName: string; platform: string; deviceId: string | null };
+  publishJob: { status: string; externalPostId: string | null; error: string | null } | null;
+  uniqueVariant: { id: string; variantIndex: number; thumbnailKey: string | null; uniquifyJobId: string };
+  thumbnailUrl: string | null;
+}
+
+export interface AutopilotDetail {
+  autopilot: Autopilot & { project: { id: string; name: string } };
+  batches: AutopilotBatch[];
+  runs: AutopilotRun[];
+  accounts: AutopilotAccount[];
+  sources: { total: number; fresh: number };
+  readyVariants: number;
+  posts: AutopilotPost[];
+  aiKeys: { openrouter: boolean; fishAudio: boolean };
+}
+
+export interface AutopilotMeta {
+  projects: { id: string; name: string; description: string | null; sourceCount: number }[];
+  groups: { id: string; name: string }[];
+  voices: FishAudioVoice[];
+  aiKeys: { openrouter: boolean; fishAudio: boolean };
+}
+
+export interface AutopilotPreview {
+  accounts: AutopilotAccount[];
+  eligible: number;
+  sources: { total: number; fresh: number };
+  postsPerDay: number;
+  windowError: string | null;
+  warnings: string[];
+}
+
+export const autopilotApi = {
+  meta: () => apiFetch<AutopilotMeta>('/api/v1/autopilots/meta'),
+  preview: (body: Partial<AutopilotInput>) =>
+    apiFetch<AutopilotPreview>('/api/v1/autopilots/preview', { method: 'POST', body: JSON.stringify(body) }),
+  list: () => apiFetch<{ autopilots: Autopilot[] }>('/api/v1/autopilots').then((r) => r.autopilots),
+  get: (id: string) => apiFetch<AutopilotDetail>(`/api/v1/autopilots/${id}`),
+  create: (body: AutopilotInput) =>
+    apiFetch<{ autopilot: Autopilot; warnings: string[] }>('/api/v1/autopilots', { method: 'POST', body: JSON.stringify(body) }),
+  update: (id: string, body: Partial<AutopilotInput>) =>
+    apiFetch<{ autopilot: Autopilot; warnings: string[] }>(`/api/v1/autopilots/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  activate: (id: string) =>
+    apiFetch<{ autopilot: Autopilot; warnings: string[] }>(`/api/v1/autopilots/${id}/activate`, { method: 'POST' }),
+  pause: (id: string) => apiFetch<{ autopilot: Autopilot }>(`/api/v1/autopilots/${id}/pause`, { method: 'POST' }),
+  produceNow: (id: string) =>
+    apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${id}/produce-now`, { method: 'POST' }),
+  publishNow: (id: string) =>
+    apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${id}/publish-now`, { method: 'POST' }),
+  remove: (id: string) => apiFetch<void>(`/api/v1/autopilots/${id}`, { method: 'DELETE' }),
+};

@@ -3,14 +3,23 @@ import { config } from '../config';
 
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
 
+export type ProxyType = 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+
 export interface DeviceProxyConfig {
   host: string;
   port: number;
   username?: string;
   password?: string;
-  type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  type?: ProxyType;
   rotateUrl?: string;
 }
+
+/** Proxy config as returned by the agent — passwords never leave the farm PC. */
+export interface MaskedDeviceProxyConfig extends Omit<DeviceProxyConfig, 'password'> {
+  hasPassword?: boolean;
+}
+
+export type DeviceRoute = 'proxy' | 'direct' | 'block' | 'none';
 
 export interface DeviceIpCheckResult {
   ok: boolean;
@@ -18,9 +27,33 @@ export interface DeviceIpCheckResult {
   country?: string;
   city?: string;
   isp?: string;
+  /** Must be proxied but exits via the farm PC's own IP. */
   leakDetected: boolean;
+  /** Exits via the farm PC's own IP (expected when route is direct/none). */
+  exposesHostIp?: boolean;
   hostIp?: string;
+  route?: DeviceRoute;
+  method?: 'transparent' | 'system_proxy';
   error?: string;
+}
+
+export interface UpstreamTestResult {
+  ok: boolean;
+  upstream?: string;
+  protocol?: 'http' | 'socks5';
+  ip?: string;
+  latencyMs: number;
+  error?: string;
+  code?: string;
+}
+
+export interface ProxyModeState {
+  ok: boolean;
+  mode: 'shared_sequential' | 'private_parallel';
+  inactivePolicy: 'direct' | 'block';
+  activeDeviceId: string | null;
+  busyDeviceId?: string | null;
+  hasSharedProxy: boolean;
 }
 
 export interface ViewTargetOptions {
@@ -71,54 +104,88 @@ export interface WbWarmupResult {
 export function describeDeviceAgentError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const code = err.code;
-    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+    if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+      return `device-agent (${BASE}) не ответил вовремя — операция на плате может ещё выполняться. Обновите статус через несколько секунд.`;
+    }
+    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'EHOSTUNREACH' || code === 'ECONNRESET') {
       return `device-agent недоступен по адресу ${BASE} (${code}). ` +
         `Убедитесь, что AmneziaWG туннель поднят, в iptables на сервере включен MASQUERADE для awg0, и device-agent запущен на ПК с фермой телефонов.`;
     }
     const status = err.response?.status;
-    const data = err.response?.data as { detail?: string; error?: unknown } | string | undefined;
-    const body = typeof data === 'string' ? data : (data?.detail ?? data?.error ?? err.message);
-    return `HTTP ${status ?? '?'}: ${JSON.stringify(body).slice(0, 800)}`;
+    const data = err.response?.data as { detail?: string; error?: unknown; message?: string } | string | undefined;
+    const body = typeof data === 'string' ? data : (data?.detail ?? data?.error ?? data?.message ?? err.message);
+    const text = typeof body === 'string' ? body : JSON.stringify(body);
+    return status && status >= 500 ? `device-agent: ${text.slice(0, 800)}` : text.slice(0, 800);
   }
   return err instanceof Error ? err.message : String(err);
 }
 
+/** HTTP status to relay to the browser: agent validation/proxy errors stay 4xx, transport errors become 502. */
+export function deviceAgentErrorStatus(err: unknown): number {
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    if (status && status >= 400 && status < 500) return status;
+    if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') return 504;
+  }
+  return 502;
+}
+
 export const deviceAgentClient = {
-  async listDevices(): Promise<{ ok: boolean; raw?: unknown; proxies?: Record<string, DeviceProxyConfig>; error?: string }> {
+  async listDevices(): Promise<{
+    ok: boolean;
+    raw?: unknown;
+    proxies?: Record<string, MaskedDeviceProxyConfig>;
+    proxyStatus?: Record<string, { route: DeviceRoute; method: string | null; applyError?: string; transparentError?: string; gateway?: { activeConnections: number; lastError?: string } }>;
+    proxyMode?: Omit<ProxyModeState, 'ok'>;
+    error?: string;
+  }> {
     const res = await axios.get(`${BASE}/devices`, { timeout: 8_000 });
     return res.data;
   },
 
-  async setProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<{ ok: boolean; check?: DeviceIpCheckResult; error?: string }> {
-    const res = await axios.post(`${BASE}/proxy/set`, {
-      deviceId,
-      ...proxy,
-    }, { timeout: 25_000 });
+  /** Verifies the proxy from the farm PC first, then wires the phone and checks its exit IP. */
+  async setProxy(
+    deviceId: string,
+    proxy: DeviceProxyConfig,
+    opts: { activate?: boolean; skipTest?: boolean } = {},
+  ): Promise<{ ok: boolean; check?: DeviceIpCheckResult; upstream?: UpstreamTestResult; error?: string }> {
+    const res = await axios.post(`${BASE}/proxy/set`, { deviceId, ...proxy, ...opts }, { timeout: 120_000 });
+    return res.data;
+  },
+
+  /** Check a proxy from the farm PC without touching any phone. */
+  async testProxy(proxy: DeviceProxyConfig): Promise<UpstreamTestResult> {
+    const res = await axios.post(`${BASE}/proxy/test`, proxy, { timeout: 60_000 });
+    return res.data;
+  },
+
+  async getProxyStatus(): Promise<Record<string, unknown>> {
+    const res = await axios.get(`${BASE}/proxy/status`, { timeout: 10_000 });
     return res.data;
   },
 
   async clearProxy(deviceId: string): Promise<{ ok: boolean; error?: string }> {
-    const res = await axios.post(`${BASE}/proxy/clear`, { deviceId }, { timeout: 10_000 });
+    const res = await axios.post(`${BASE}/proxy/clear`, { deviceId }, { timeout: 60_000 });
     return res.data;
   },
 
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 20_000 });
+    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 90_000 });
     return res.data;
   },
 
-  async getProxyMode(): Promise<{ ok: boolean; mode: 'shared_sequential' | 'private_parallel'; activeDeviceId: string | null; hasSharedProxy: boolean }> {
+  async getProxyMode(): Promise<ProxyModeState> {
     const res = await axios.get(`${BASE}/proxy/mode`, { timeout: 8_000 });
     return res.data;
   },
 
-  async setProxyMode(mode: 'shared_sequential' | 'private_parallel'): Promise<{ ok: boolean; mode: string }> {
-    const res = await axios.post(`${BASE}/proxy/mode`, { mode }, { timeout: 15_000 });
+  async setProxyMode(mode: 'shared_sequential' | 'private_parallel', inactivePolicy?: 'direct' | 'block'): Promise<ProxyModeState> {
+    const res = await axios.post(`${BASE}/proxy/mode`, { mode, inactivePolicy }, { timeout: 30_000 });
     return res.data;
   },
 
-  async switchActiveProxyDevice(deviceId: string): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
-    const res = await axios.post(`${BASE}/proxy/switch-active`, { deviceId }, { timeout: 15_000 });
+  async switchActiveProxyDevice(deviceId: string, force?: boolean): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    const res = await axios.post(`${BASE}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 });
     return res.data;
   },
 
@@ -131,7 +198,7 @@ export const deviceAgentClient = {
     check: DeviceIpCheckResult;
     error?: string;
   }> {
-    const res = await axios.post(`${BASE}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 35_000 });
+    const res = await axios.post(`${BASE}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 });
     return res.data;
   },
 
@@ -155,15 +222,7 @@ export const deviceAgentClient = {
     return res.data;
   },
 
-  async batchSetProxy(assignments: Array<{
-    deviceId: string;
-    host: string;
-    port: number;
-    username?: string;
-    password?: string;
-    type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
-    rotateUrl?: string;
-  }>): Promise<{
+  async batchSetProxy(assignments: Array<{ deviceId: string } & DeviceProxyConfig>): Promise<{
     ok: boolean;
     total: number;
     successful: number;
@@ -171,39 +230,26 @@ export const deviceAgentClient = {
     results: Array<{
       deviceId: string;
       ok: boolean;
-      check?: DeviceIpCheckResult;
       error?: string;
+      upstream?: { ip?: string; protocol?: 'http' | 'socks5' };
     }>;
   }> {
-    const res = await axios.post(`${BASE}/proxy/batch-set`, { assignments }, { timeout: 60_000 });
+    const res = await axios.post(`${BASE}/proxy/batch-set`, { assignments }, { timeout: 600_000 });
     return res.data;
   },
 
   async batchCheckDeviceIp(deviceIds: string[]): Promise<Array<{ deviceId: string } & DeviceIpCheckResult>> {
-    const results = await Promise.allSettled(
-      deviceIds.map(async (id) => {
-        const check = await this.checkDeviceIp(id);
-        return { deviceId: id, ...check };
-      })
-    );
-    return results.map((r, i) => {
-      if (r.status === 'fulfilled') return r.value;
-      return {
-        deviceId: deviceIds[i],
-        ok: false,
-        leakDetected: false,
-        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
-      };
-    });
+    const res = await axios.post(`${BASE}/proxy/batch-check`, { deviceIds }, { timeout: 600_000 });
+    return res.data.results;
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {
-    const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 360_000 });
+    const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 660_000 });
     return res.data;
   },
 
   async wbWarmup(opts: WbWarmupOptions): Promise<WbWarmupResult> {
-    const res = await axios.post(`${BASE}/wb/warmup`, opts, { timeout: 360_000 });
+    const res = await axios.post(`${BASE}/wb/warmup`, opts, { timeout: 660_000 });
     return res.data;
   },
 

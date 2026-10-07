@@ -218,7 +218,20 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         let subtitles: Array<{ start_sec: number; end_sec: number; text: string }> = [];
         let ttsCost = 0;
 
-        if (isPreserveContext) {
+        // Captions supplied by the caller (autopilot writes them with the script)
+        // skip the extra GPT round-trip.
+        const presetCaptions = Array.isArray(config.captions)
+          ? (config.captions as Array<{ caption?: unknown; hashtags?: unknown }>)
+              .filter((c) => typeof c?.caption === 'string' && (c.caption as string).trim())
+              .map((c) => ({
+                caption: String(c.caption).trim(),
+                hashtags: Array.isArray(c.hashtags) ? (c.hashtags as unknown[]).map(String) : [],
+              }))
+          : [];
+
+        if (isPreserveContext && presetCaptions.length > 0) {
+          captions = presetCaptions;
+        } else if (isPreserveContext) {
           // ── Preserve-Context mode: original voiceover and audio stay 100% intact!
           // We generate unique social captions/hashtags per variant, but do NOT replace voice!
           try {
@@ -372,7 +385,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           'Uniquify-analyze: complete, montage render jobs enqueued',
         );
 
-        await db.notification.create({
+        if (!config.autopilotBatchId) await db.notification.create({
           data: {
             tenantId,
             type: 'system',

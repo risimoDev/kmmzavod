@@ -7,6 +7,7 @@
 import axios from 'axios';
 import { config } from '../config';
 import type { MinioStorageClient } from '@kmmzavod/storage';
+import { mp3DurationSec } from '../lib/mp3';
 import { logger } from '../logger';
 
 const BASE_URL = (config.FISH_AUDIO_BASE_URL || 'https://api.fish.audio/v1').replace(/\/+$/, '');
@@ -100,7 +101,7 @@ export class FishAudioService {
     destinationKey: string;
     apiKey?: string;
     allowMock?: boolean;
-  }): Promise<{ storageKey: string; cost: number }> {
+  }): Promise<{ storageKey: string; cost: number; durationSec: number }> {
     const effectiveKey = (opts.apiKey || API_KEY || '').trim();
     const isMock = !effectiveKey || effectiveKey.startsWith('mock_');
     const voiceId = opts.voiceId || DEFAULT_FISH_VOICE_ID;
@@ -199,6 +200,7 @@ export class FishAudioService {
     return {
       storageKey: key,
       cost: 0, // s2.1-pro-free is free
+      durationSec: mp3DurationSec(audioBuffer),
     };
   }
 }

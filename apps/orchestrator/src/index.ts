@@ -30,6 +30,9 @@ import type {
   DistributeJobPayload,
   ShadowBanCheckPayload,
   AccountWarmupPayload,
+  EditorAnalyzeJobPayload,
+  EditorRenderJobPayload,
+  AutopilotProducePayload,
 } from '@kmmzavod/queue';
 
 import { createGptScriptWorker } from './workers/gpt-script.worker';
@@ -48,6 +51,7 @@ import { createEditorRenderWorker } from './workers/editor-render.worker';
 import { createDistributeWorker } from './workers/distribute.worker';
 import { createShadowBanWorker } from './workers/shadow-ban.worker';
 import { createAccountWarmupWorker } from './workers/account-warmup.worker';
+import { createAutopilotProduceWorker } from './workers/autopilot-produce.worker';
 import { startPipeline } from './pipeline/coordinator';
 import { loadProxyConfig } from './lib/proxy';
 
@@ -111,6 +115,9 @@ async function main() {
   const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection });
   const shadowBanCheckQueue = new Queue<ShadowBanCheckPayload>(QUEUES['shadow-ban-check'].name, { connection });
   const accountWarmupQueue = new Queue<AccountWarmupPayload>(QUEUES['account-warmup'].name, { connection });
+  const editorAnalyzeQueue = new Queue<EditorAnalyzeJobPayload>(QUEUES['editor-analyze'].name, { connection });
+  const editorRenderQueue = new Queue<EditorRenderJobPayload>(QUEUES['editor-render'].name, { connection });
+  const autopilotProduceQueue = new Queue<AutopilotProducePayload>(QUEUES['autopilot-produce'].name, { connection });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -183,6 +190,12 @@ async function main() {
     pipelineQueue,
     warmupQueue: accountWarmupQueue,
     distributeQueue,
+    autopilot: {
+      produceQueue: autopilotProduceQueue,
+      editorRenderQueue,
+      uniquifyAnalyzeQueue,
+      distributeQueue,
+    },
     connection,
   });
 
@@ -210,6 +223,9 @@ async function main() {
   // ── Smart editor workers (intelligent cutting / montage) ───────────────────
   const editorAnalyzeWorker = createEditorAnalyzeWorker({ db, storage, connection });
   const editorRenderWorker = createEditorRenderWorker({ db, storage, connection });
+
+  // ── Autopilot: script + voiceover + montage project per batch ──────────────
+  const autopilotProduceWorker = createAutopilotProduceWorker({ db, storage, editorAnalyzeQueue, connection });
 
   const distributeWorker = createDistributeWorker({
     db,
@@ -378,6 +394,7 @@ async function main() {
     uniquifyStateWorker,
     editorAnalyzeWorker,
     editorRenderWorker,
+    autopilotProduceWorker,
     distributeWorker,
     shadowBanWorker,
     accountWarmupWorker,
@@ -476,6 +493,9 @@ async function main() {
       distributeQueue.close(),
       shadowBanCheckQueue.close(),
       accountWarmupQueue.close(),
+      editorAnalyzeQueue.close(),
+      editorRenderQueue.close(),
+      autopilotProduceQueue.close(),
     ]);
     await db.$disconnect();
     try { await connection.del(HEARTBEAT_KEY); } catch {}

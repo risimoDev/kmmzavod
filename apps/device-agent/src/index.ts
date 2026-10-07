@@ -1,10 +1,10 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import pino from 'pino';
 import { z } from 'zod';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { publishToDevice } from './publish';
-import { ProxyManager } from './proxy-manager';
+import { ProxyError, ProxyManager } from './proxy-manager';
 import { runViewTarget } from './view-target';
 import { runWbWarmup } from './wb-warmup';
 import { AutoHealManager } from './auto-heal';
@@ -40,12 +40,13 @@ app.get('/health', async () => ({
 app.get('/devices', async (_req, reply) => {
   try {
     const rawDevices = await adb.listDevices();
-    const proxies = proxyManager.getAllProxies();
-
     return {
       ok: true,
       raw: rawDevices,
-      proxies,
+      // Passwords never leave the agent; `hasPassword` tells the UI one is stored.
+      proxies: proxyManager.getAllProxies(),
+      proxyStatus: proxyManager.getStatus().devices,
+      proxyMode: proxyManager.getMode(),
     };
   } catch (err) {
     reply.code(502);
@@ -55,14 +56,32 @@ app.get('/devices', async (_req, reply) => {
 
 // ── Proxy endpoints ──────────────────────────────────────────────────────────
 
-const SetProxyBody = z.object({
-  deviceId: z.string().min(1),
-  host: z.string().min(1),
+const ProxyFields = {
+  host: z.string().trim().min(1),
   port: z.number().int().min(1).max(65535),
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
   rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
+};
+
+/** ProxyError = bad proxy / bad input (400); anything else = agent/ADB failure (502). */
+function sendError(reply: FastifyReply, err: unknown) {
+  if (err instanceof ProxyError) {
+    reply.code(400);
+    return { ok: false, error: err.message, code: err.code };
+  }
+  reply.code(502);
+  return { ok: false, error: err instanceof Error ? err.message : String(err) };
+}
+
+const SetProxyBody = z.object({
+  deviceId: z.string().min(1),
+  ...ProxyFields,
+  // shared_sequential: also hand the shared proxy to this phone (default true)
+  activate: z.boolean().optional(),
+  // skip the pre-flight check of the proxy from the PC
+  skipTest: z.boolean().optional(),
 });
 
 app.post('/proxy/set', async (req, reply) => {
@@ -71,16 +90,32 @@ app.post('/proxy/set', async (req, reply) => {
     reply.code(400);
     return { ok: false, error: parsed.error.flatten() };
   }
-
+  const { deviceId, activate, skipTest, ...proxy } = parsed.data;
   try {
-    const check = await proxyManager.setProxy(parsed.data.deviceId, parsed.data);
-    return { ok: true, check };
+    const res = await proxyManager.setProxy(deviceId, proxy, { activate, skipTest });
+    return { ok: true, ...res };
   } catch (err) {
-    logger.error({ err }, 'device-agent: setProxy failed');
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    logger.error({ err: String(err), deviceId }, 'device-agent: setProxy failed');
+    return sendError(reply, err);
   }
 });
+
+const TestProxyBody = z.object(ProxyFields);
+
+app.post('/proxy/test', async (req, reply) => {
+  const parsed = TestProxyBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  try {
+    return await proxyManager.testProxy(parsed.data);
+  } catch (err) {
+    return sendError(reply, err);
+  }
+});
+
+app.get('/proxy/status', async () => ({ ok: true, ...proxyManager.getStatus() }));
 
 const ClearProxyBody = z.object({
   deviceId: z.string().min(1),
@@ -92,13 +127,10 @@ app.post('/proxy/clear', async (req, reply) => {
     reply.code(400);
     return { ok: false, error: parsed.error.flatten() };
   }
-
   try {
-    const res = await proxyManager.clearProxy(parsed.data.deviceId);
-    return res;
+    return await proxyManager.clearProxy(parsed.data.deviceId);
   } catch (err) {
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return sendError(reply, err);
   }
 });
 
@@ -112,14 +144,26 @@ app.post('/proxy/check', async (req, reply) => {
     reply.code(400);
     return { ok: false, error: parsed.error.flatten() };
   }
-
   try {
-    const check = await proxyManager.checkDeviceIp(parsed.data.deviceId);
-    return check;
+    return await proxyManager.checkDeviceIp(parsed.data.deviceId);
   } catch (err) {
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return sendError(reply, err);
   }
+});
+
+const BatchCheckBody = z.object({
+  deviceIds: z.array(z.string().min(1)).min(1),
+  concurrency: z.number().int().min(1).max(10).optional(),
+});
+
+app.post('/proxy/batch-check', async (req, reply) => {
+  const parsed = BatchCheckBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  const results = await proxyManager.batchCheckDeviceIp(parsed.data.deviceIds, parsed.data.concurrency);
+  return { ok: true, count: results.length, results };
 });
 
 const RotateIpBody = z.object({
@@ -136,12 +180,10 @@ app.post('/proxy/rotate-ip', async (req, reply) => {
   }
 
   try {
-    const res = await proxyManager.rotateProxyIp(parsed.data.deviceId, parsed.data.rotateUrl, parsed.data.cooldownMs);
-    return res;
+    return await proxyManager.rotateProxyIp(parsed.data.deviceId, parsed.data.rotateUrl, parsed.data.cooldownMs);
   } catch (err) {
-    logger.error({ err }, 'device-agent: /proxy/rotate-ip failed');
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    logger.error({ err: String(err) }, 'device-agent: /proxy/rotate-ip failed');
+    return sendError(reply, err);
   }
 });
 
@@ -161,6 +203,7 @@ app.get('/proxy/mode', async () => {
 
 const SetProxyModeBody = z.object({
   mode: z.enum(['shared_sequential', 'private_parallel']),
+  inactivePolicy: z.enum(['direct', 'block']).optional(),
 });
 
 app.post('/proxy/mode', async (req, reply) => {
@@ -169,12 +212,12 @@ app.post('/proxy/mode', async (req, reply) => {
     reply.code(400);
     return { ok: false, error: parsed.error.flatten() };
   }
-  const res = await proxyManager.setMode(parsed.data.mode);
-  return res;
+  return proxyManager.setMode(parsed.data.mode, parsed.data.inactivePolicy);
 });
 
 const SwitchActiveProxyBody = z.object({
   deviceId: z.string().min(1),
+  force: z.boolean().optional(),
 });
 
 app.post('/proxy/switch-active', async (req, reply) => {
@@ -184,11 +227,10 @@ app.post('/proxy/switch-active', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   try {
-    const res = await proxyManager.switchActiveDevice(parsed.data.deviceId);
-    return res;
+    return await proxyManager.switchActiveDevice(parsed.data.deviceId, { force: parsed.data.force });
   } catch (err) {
-    logger.error({ err, deviceId: parsed.data.deviceId }, 'device-agent: /proxy/switch-active failed');
-    reply.code(502);
+    logger.error({ err: String(err), deviceId: parsed.data.deviceId }, 'device-agent: /proxy/switch-active failed');
+    reply.code(409);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 });
@@ -238,15 +280,7 @@ app.post('/network/restart-interface', async (req, reply) => {
 });
 
 const BatchSetProxyBody = z.object({
-  assignments: z.array(z.object({
-    deviceId: z.string().min(1),
-    host: z.string().min(1),
-    port: z.number().int().min(1).max(65535),
-    username: z.string().optional(),
-    password: z.string().optional(),
-    type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-    rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
-  })).min(1),
+  assignments: z.array(z.object({ deviceId: z.string().min(1), ...ProxyFields })).min(1),
 });
 
 app.post('/proxy/batch-set', async (req, reply) => {
@@ -257,23 +291,12 @@ app.post('/proxy/batch-set', async (req, reply) => {
   }
 
   try {
-    const assignments = parsed.data.assignments.map((a) => ({
-      deviceId: a.deviceId,
-      proxy: {
-        host: a.host,
-        port: a.port,
-        username: a.username,
-        password: a.password,
-        type: a.type,
-        rotateUrl: a.rotateUrl,
-      },
-    }));
-    const res = await proxyManager.batchSetProxy(assignments);
-    return res;
+    return await proxyManager.batchSetProxy(
+      parsed.data.assignments.map(({ deviceId, ...proxy }) => ({ deviceId, proxy })),
+    );
   } catch (err) {
-    logger.error({ err }, 'device-agent: /proxy/batch-set failed');
-    reply.code(502);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    logger.error({ err: String(err) }, 'device-agent: /proxy/batch-set failed');
+    return sendError(reply, err);
   }
 });
 
@@ -296,7 +319,9 @@ app.post('/view-target', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
 
+  let release: (() => void) | undefined;
   try {
+    release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await runViewTarget(parsed.data, adb, proxyManager, logger);
     if (!result.ok) reply.code(502);
     return result;
@@ -304,6 +329,8 @@ app.post('/view-target', async (req, reply) => {
     logger.error({ err }, 'device-agent: view-target failed');
     reply.code(502);
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
   }
 });
 
@@ -326,7 +353,9 @@ app.post('/wb/warmup', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
 
+  let release: (() => void) | undefined;
   try {
+    release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await runWbWarmup(parsed.data, adb, proxyManager, logger);
     if (!result.ok) reply.code(502);
     return result;
@@ -334,16 +363,22 @@ app.post('/wb/warmup', async (req, reply) => {
     logger.error({ err }, 'device-agent: wb-warmup failed');
     reply.code(502);
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
   }
 });
 
 // ── Publish Video (Instagram & TikTok) ──────────────────────────────────────
+
+const PUBLISH_PROXY_HOLD_MS = 120_000;
 
 const PublishBody = z.object({
   deviceId: z.string().min(1),
   platform: z.enum(['instagram', 'tiktok', 'youtube_shorts']),
   videoUrl: z.string().url(),
   caption: z.string().default(''),
+  // Verify the phone leaves via its proxy before opening the app (only enforced when the farm uses proxies).
+  checkIpFirst: z.boolean().default(true),
 });
 
 app.post('/publish', async (req, reply) => {
@@ -353,14 +388,33 @@ app.post('/publish', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
 
+  const { checkIpFirst, ...publishReq } = parsed.data;
+  let release: (() => void) | undefined;
   try {
-    const result = await publishToDevice(parsed.data, adb, logger);
+    // shared_sequential: wait for the shared proxy and move it to this phone for the whole upload
+    release = await proxyManager.acquireTaskLease(publishReq.deviceId);
+    if (checkIpFirst) {
+      const guard = await proxyManager.preflight(publishReq.deviceId);
+      if (!guard.ok) {
+        reply.code(502);
+        return { ok: false, detail: `${guard.detail}. Публикация отменена для защиты аккаунта.`, ipCheck: guard.ipCheck };
+      }
+    }
+    const result = await publishToDevice(publishReq, adb, logger);
+    if (result.ok && release) {
+      // The app keeps uploading after the share intent returns — keep the shared proxy on this phone a while.
+      const hold = release;
+      release = undefined;
+      setTimeout(hold, PUBLISH_PROXY_HOLD_MS).unref();
+    }
     if (!result.ok) reply.code(502);
     return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: publish failed');
     reply.code(502);
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
   }
 });
 

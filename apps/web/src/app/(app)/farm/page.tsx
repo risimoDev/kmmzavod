@@ -24,6 +24,7 @@ import {
   type PublishDiagnostics,
   type FarmDevice,
   type DeviceIpCheck,
+  type ProxyTestResult,
   type BoardHealthInfo,
   type WbWarmupResponse,
   type FarmScriptPreset,
@@ -382,6 +383,15 @@ function GroupsTab() {
   );
 }
 
+// ── Proxy routing badges ─────────────────────────────────────────────────────
+
+const ROUTE_BADGE: Record<'proxy' | 'direct' | 'block' | 'none', { label: string; className: string }> = {
+  proxy: { label: 'через прокси', className: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  direct: { label: 'IP фермы', className: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  block: { label: 'заблокирован', className: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
+  none: { label: 'нет прокси', className: 'bg-surface-3 text-text-tertiary border-border' },
+};
+
 // ── Proxy parser helper ───────────────────────────────────────────────────────
 
 function parseSingleProxyString(rawLine: string): {
@@ -401,23 +411,50 @@ function parseSingleProxyString(rawLine: string): {
     const parts = line.split('|');
     mainPart = parts[0].trim();
     rotUrl = parts[1].trim();
+  } else {
+    // "host:port:user:pass https://provider/rotate?key=..." — rotation link after a space
+    const m = line.match(/^(\S+)\s+(https?:\/\/\S+)$/);
+    if (m) {
+      mainPart = m[1];
+      rotUrl = m[2];
+    }
   }
 
-  // URL format: http://user:pass@host:port or socks5://user:pass@host:port
-  if (mainPart.startsWith('http://') || mainPart.startsWith('https://') || mainPart.startsWith('socks5://')) {
+  // URL format: http://user:pass@host:port, socks5://..., socks5h://..., socks://...
+  const scheme = mainPart.match(/^(https?|socks5h?|socks):\/\//i)?.[1].toLowerCase();
+  if (scheme) {
     try {
-      const u = new URL(mainPart);
-      const proto = u.protocol.replace(':', '');
+      const u = new URL(mainPart.replace(/^[a-z0-9]+:\/\//i, 'http://'));
+      const isSocks = scheme.startsWith('socks');
       return {
         host: u.hostname,
-        port: Number(u.port) || (proto === 'socks5' ? 1080 : 8080),
+        port: Number(u.port) || (isSocks ? 1080 : 8080),
         username: u.username ? decodeURIComponent(u.username) : undefined,
         password: u.password ? decodeURIComponent(u.password) : undefined,
-        type: proto === 'socks5' ? 'socks5' : 'http',
+        type: isSocks ? 'socks5' : 'http',
         rotateUrl: rotUrl,
       };
     } catch {
       // fallback to tokens
+    }
+  }
+
+  // "user:pass@host:port" and "host:port@user:pass" (common provider export formats)
+  const at = mainPart.lastIndexOf('@');
+  if (at > 0) {
+    const left = mainPart.slice(0, at).split(':');
+    const right = mainPart.slice(at + 1).split(':');
+    const looksLikeHost = (p: string[]) => /^\d+$/.test(p[1] ?? '') && /[.\-]|^localhost$/i.test(p[0] ?? '');
+    const [hostPart, authPart] = looksLikeHost(right) ? [right, left] : looksLikeHost(left) ? [left, right] : [right, left];
+    const port = Number(hostPart[1]);
+    if (hostPart[0] && port) {
+      return {
+        host: hostPart[0].trim(),
+        port,
+        username: authPart[0]?.trim() || undefined,
+        password: authPart.slice(1).join(':').trim() || undefined,
+        rotateUrl: rotUrl,
+      };
     }
   }
 
@@ -430,7 +467,8 @@ function parseSingleProxyString(rawLine: string): {
 
     let username: string | undefined;
     let password: string | undefined;
-    let type: 'http' | 'socks5' | 'mobile' | 'residential' = 'http';
+    // No explicit type → leave undefined: the farm auto-detects HTTP vs SOCKS5.
+    let type: 'http' | 'socks5' | 'mobile' | 'residential' | undefined;
     let potentialUrl = rotUrl;
 
     if (tokens.length >= 6) {
@@ -1177,12 +1215,16 @@ function DevicesTab() {
   const [selectedProxyId, setSelectedProxyId] = useState<string>('');
   const [customHost, setCustomHost] = useState('');
   const [customPort, setCustomPort] = useState<number>(8080);
-  const [customType, setCustomType] = useState<'http' | 'socks5' | 'mobile'>('http');
+  // 'auto' = let the farm detect HTTP vs SOCKS5 (recommended)
+  const [customType, setCustomType] = useState<'auto' | 'http' | 'socks5' | 'mobile' | 'residential'>('auto');
   const [customUsername, setCustomUsername] = useState('');
   const [customPassword, setCustomPassword] = useState('');
   const [customRotateUrl, setCustomRotateUrl] = useState('');
   const [customFastLine, setCustomFastLine] = useState('');
   const [proxySaving, setProxySaving] = useState(false);
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
+  const [proxyModalError, setProxyModalError] = useState<string | null>(null);
 
   // Assign account modal form
   const [assignAccountId, setAssignAccountId] = useState<string>('');
@@ -1308,7 +1350,8 @@ function DevicesTab() {
   const [restartTargetDeviceIds, setRestartTargetDeviceIds] = useState<string[]>([]);
   const [restartLogs, setRestartLogs] = useState<Array<{ deviceId: string; mode: string; ok: boolean; log: string }>>([]);
   const [batchProxyText, setBatchProxyText] = useState('');
-  const [batchProxyType, setBatchProxyType] = useState<'http' | 'socks5' | 'mobile' | 'residential'>('socks5');
+  // 'auto' = farm detects HTTP vs SOCKS5 per proxy
+  const [batchProxyType, setBatchProxyType] = useState<'auto' | 'http' | 'socks5' | 'mobile' | 'residential'>('auto');
   const [batchProxyDistributionMode, setBatchProxyDistributionMode] = useState<'shared_cycle' | 'one_to_one'>('shared_cycle');
   const [batchProxyTargets, setBatchProxyTargets] = useState<string[]>([]);
   const [batchProxyApplying, setBatchProxyApplying] = useState(false);
@@ -1319,6 +1362,9 @@ function DevicesTab() {
   // Proxy Mode: shared sequential vs private parallel
   const [proxyMode, setProxyMode] = useState<'shared_sequential' | 'private_parallel'>('shared_sequential');
   const [activeProxyDeviceId, setActiveProxyDeviceId] = useState<string | null>(null);
+  // Shared mode: what phones without the shared proxy do — farm IP ('direct') or no internet ('block')
+  const [inactivePolicy, setInactivePolicy] = useState<'direct' | 'block'>('direct');
+  const [busyProxyDeviceId, setBusyProxyDeviceId] = useState<string | null>(null);
   const [switchingProxyId, setSwitchingProxyId] = useState<string | null>(null);
   const [togglingProxyMode, setTogglingProxyMode] = useState(false);
 
@@ -1338,6 +1384,8 @@ function DevicesTab() {
       if (modeRes.status === 'fulfilled' && modeRes.value?.ok) {
         setProxyMode(modeRes.value.mode);
         setActiveProxyDeviceId(modeRes.value.activeDeviceId);
+        setInactivePolicy(modeRes.value.inactivePolicy ?? 'direct');
+        setBusyProxyDeviceId(modeRes.value.busyDeviceId ?? null);
       }
 
       if (devRes.status === 'fulfilled') {
@@ -1431,23 +1479,51 @@ function DevicesTab() {
   const handleOpenProxyModal = (device: FarmDevice) => {
     setSelectedDevice(device);
     setSelectedProxyId('');
+    // The password never comes back from the farm: leaving it empty keeps the stored one.
+    setCustomPassword('');
     if (device.proxy) {
       setCustomHost(device.proxy.host || '');
       setCustomPort(device.proxy.port || 8080);
-      setCustomType((device.proxy.type as any) || 'http');
-      setCustomUsername((device.proxy as any).username || '');
-      setCustomPassword((device.proxy as any).password || '');
+      setCustomType((device.proxy.type as any) || 'auto');
+      setCustomUsername(device.proxy.username || '');
       setCustomRotateUrl(device.proxy.rotateUrl || '');
     } else {
       setCustomHost('');
       setCustomPort(8080);
-      setCustomType('http');
+      setCustomType('auto');
       setCustomUsername('');
-      setCustomPassword('');
       setCustomRotateUrl('');
     }
     setCustomFastLine('');
+    setProxyTestResult(null);
+    setProxyModalError(null);
     setProxyModalOpen(true);
+  };
+
+  /** Current modal input as an API payload (pool record or manual fields). */
+  const proxyModalPayload = () =>
+    selectedProxyId
+      ? { proxyId: selectedProxyId, rotateUrl: customRotateUrl.trim() || undefined }
+      : {
+          host: customHost.trim(),
+          port: Number(customPort),
+          type: customType === 'auto' ? undefined : customType,
+          username: customUsername.trim() || undefined,
+          password: customPassword || undefined,
+          rotateUrl: customRotateUrl.trim() || undefined,
+        };
+
+  const handleTestProxy = async () => {
+    setProxyTesting(true);
+    setProxyTestResult(null);
+    setProxyModalError(null);
+    try {
+      setProxyTestResult(await accountFarmApi.testFarmProxy(proxyModalPayload()));
+    } catch (err: any) {
+      setProxyModalError(err.message);
+    } finally {
+      setProxyTesting(false);
+    }
   };
 
   const handleFastLinePaste = (val: string) => {
@@ -1456,35 +1532,37 @@ function DevicesTab() {
     if (parsed) {
       setCustomHost(parsed.host);
       setCustomPort(parsed.port);
-      if (parsed.username) setCustomUsername(parsed.username);
-      if (parsed.password) setCustomPassword(parsed.password);
-      if (parsed.type) setCustomType(parsed.type as any);
-      if (parsed.rotateUrl) setCustomRotateUrl(parsed.rotateUrl);
+      setCustomUsername(parsed.username ?? '');
+      setCustomPassword(parsed.password ?? '');
+      setCustomType(parsed.type ?? 'auto');
+      // A rotation link belongs to one specific proxy — don't carry the old one over.
+      setCustomRotateUrl(parsed.rotateUrl ?? '');
       setSelectedProxyId('');
+      setProxyTestResult(null);
     }
   };
 
   const handleSaveProxy = async () => {
     if (!selectedDevice) return;
+    if (!selectedProxyId && (!customHost.trim() || !customPort)) return;
+    const deviceId = selectedDevice.deviceId;
     setProxySaving(true);
+    setProxyModalError(null);
     try {
-      if (selectedProxyId) {
-        await accountFarmApi.setDeviceProxy(selectedDevice.deviceId, { proxyId: selectedProxyId });
-      } else if (customHost.trim() && customPort) {
-        await accountFarmApi.setDeviceProxy(selectedDevice.deviceId, {
-          host: customHost.trim(),
-          port: Number(customPort),
-          type: customType,
-          username: customUsername.trim() || undefined,
-          password: customPassword.trim() || undefined,
-          rotateUrl: customRotateUrl.trim() || undefined,
-        });
+      // The farm tests the proxy first, wires the phone, then checks the phone's real exit IP.
+      const res = await accountFarmApi.setDeviceProxy(deviceId, proxyModalPayload());
+      if (res.upstream) setProxyTestResult(res.upstream);
+      if (res.check) setIpResults((prev) => ({ ...prev, [deviceId]: res.check! }));
+      if (res.check && !res.check.ok) {
+        setProxyModalError(res.check.error || 'Прокси применён, но проверка IP на плате не прошла');
+      } else if (res.check?.leakDetected) {
+        setProxyModalError(`Утечка: плата выходит с IP фермы (${res.check.ip})`);
+      } else {
+        setProxyModalOpen(false);
       }
-      setProxyModalOpen(false);
-      await handleCheckIp(selectedDevice.deviceId);
       loadData();
     } catch (err: any) {
-      alert(`Ошибка сохранения прокси: ${err.message}`);
+      setProxyModalError(err.message);
     } finally {
       setProxySaving(false);
     }
@@ -2387,13 +2465,14 @@ function DevicesTab() {
   };
 
   // ── Network Management & Proxy Hub Handlers ────────────────────────────────
-  const handleToggleProxyMode = async () => {
-    const nextMode = proxyMode === 'shared_sequential' ? 'private_parallel' : 'shared_sequential';
+  const applyProxyMode = async (mode: 'shared_sequential' | 'private_parallel', policy: 'direct' | 'block') => {
     setTogglingProxyMode(true);
     try {
-      const res = await accountFarmApi.setProxyMode(nextMode);
+      const res = await accountFarmApi.setProxyMode(mode, policy);
       if (res.ok) {
         setProxyMode(res.mode);
+        setInactivePolicy(res.inactivePolicy);
+        setActiveProxyDeviceId(res.activeDeviceId);
         await loadData();
       }
     } catch (err: any) {
@@ -2403,15 +2482,23 @@ function DevicesTab() {
     }
   };
 
-  const handleSwitchActiveProxy = async (deviceId: string) => {
+  const handleToggleProxyMode = () =>
+    applyProxyMode(proxyMode === 'shared_sequential' ? 'private_parallel' : 'shared_sequential', inactivePolicy);
+
+  const handleSwitchActiveProxy = async (deviceId: string, force = false) => {
     setSwitchingProxyId(deviceId);
     try {
-      const res = await accountFarmApi.switchActiveProxyDevice(deviceId);
+      const res = await accountFarmApi.switchActiveProxyDevice(deviceId, force);
       if (res.ok) {
         setActiveProxyDeviceId(res.activeDeviceId);
         await loadData();
       }
     } catch (err: any) {
+      // Another phone is mid-task (publish / warmup) on the shared proxy
+      if (!force && /занят/.test(err.message) && confirm(`${err.message}\n\nЗабрать прокси принудительно? Задача на другой плате может провалиться.`)) {
+        setSwitchingProxyId(null);
+        return handleSwitchActiveProxy(deviceId, true);
+      }
       alert(`Не удалось переключить прокси на плату: ${err.message}`);
     } finally {
       setSwitchingProxyId(null);
@@ -2545,7 +2632,7 @@ function DevicesTab() {
               port: p.port,
               username: p.username,
               password: p.password,
-              type: (p.type || batchProxyType) as any,
+              type: (p.type || (batchProxyType === 'auto' ? undefined : batchProxyType)) as any,
               rotateUrl: p.rotateUrl,
             };
           })
@@ -2555,7 +2642,7 @@ function DevicesTab() {
             port: parsed[idx].port,
             username: parsed[idx].username,
             password: parsed[idx].password,
-            type: (parsed[idx].type || batchProxyType) as any,
+            type: (parsed[idx].type || (batchProxyType === 'auto' ? undefined : batchProxyType)) as any,
             rotateUrl: parsed[idx].rotateUrl,
           }));
 
@@ -2572,11 +2659,16 @@ function DevicesTab() {
     );
     try {
       const res = await accountFarmApi.batchSetDeviceProxies(assignments);
+      const failures = res.results.filter((r) => !r.ok);
+      const failureText = failures.length
+        ? `\nНе применено (${failures.length}):\n` + failures.slice(0, 8).map((f) => `• ${f.deviceId}: ${f.error}`).join('\n')
+        : '';
       if (res.ok) {
-        setNetworkFeedbackMsg(`Прокси успешно применены к ${res.successful} платам! Запускается перепроверка IP...`);
+        setNetworkFeedbackMsg(`Прокси применены к ${res.successful} из ${res.total} плат. Перепроверка IP...${failureText}`);
+        const applied = new Set(res.results.filter((r) => r.ok).map((r) => r.deviceId));
         setDevices((prev) =>
           prev.map((d) => {
-            const match = assignments.find((a) => a.deviceId === d.deviceId);
+            const match = applied.has(d.deviceId) ? assignments.find((a) => a.deviceId === d.deviceId) : undefined;
             if (match) {
               return {
                 ...d,
@@ -2592,8 +2684,9 @@ function DevicesTab() {
           })
         );
         await handleBatchCheckIps();
+        loadData();
       } else {
-        alert(`Ошибка пакетного применения: ${res.failed} плат завершились с ошибкой`);
+        setNetworkFeedbackMsg(`Ни один прокси не применён.${failureText}`);
       }
     } catch (err: any) {
       alert(`Ошибка применения прокси: ${err.message}`);
@@ -2773,16 +2866,33 @@ function DevicesTab() {
             <div className="text-[11px] text-text-secondary mt-0.5">
               {proxyMode === 'shared_sequential' ? (
                 <>
-                  Сейчас прокси активен на: <strong className="font-mono text-cyan-300">{activeProxyDeviceId || '—'}</strong>. Остальные платы работают через прямой интернет. Нажмите <code className="bg-surface-3 px-1 rounded text-cyan-400">⚡ Взять прокси</code> на любой плате для мгновенной передачи.
+                  Сейчас прокси активен на: <strong className="font-mono text-cyan-300">{activeProxyDeviceId || '—'}</strong>
+                  {busyProxyDeviceId && <> (занят задачей)</>}.{' '}
+                  {inactivePolicy === 'block'
+                    ? 'Остальные платы без интернета до получения прокси.'
+                    : 'Остальные платы выходят с IP фермы.'}{' '}
+                  Публикация и прогрев забирают прокси автоматически; вручную — <code className="bg-surface-3 px-1 rounded text-cyan-400">⚡ Взять прокси</code>.
                 </>
               ) : (
-                "Все платы стойки используют приватный прокси одновременно без ограничений."
+                "Каждая плата с назначенным прокси работает через него одновременно с остальными."
               )}
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {proxyMode === 'shared_sequential' && (
+            <select
+              value={inactivePolicy}
+              disabled={togglingProxyMode}
+              onChange={(e) => applyProxyMode('shared_sequential', e.target.value as 'direct' | 'block')}
+              className="bg-surface-2 border border-border rounded-lg px-2 py-1.5 text-text-primary text-xs"
+              title="Что делают платы, у которых сейчас нет общего прокси"
+            >
+              <option value="direct">Остальные: IP фермы</option>
+              <option value="block">Остальные: без интернета (анти-утечка)</option>
+            </select>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -2896,6 +3006,46 @@ function DevicesTab() {
                     )}
                   </div>
 
+                  {device.proxyStatus && device.proxy && (
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-text-tertiary text-[11px]">Трафик:</span>
+                      <span className="flex items-center gap-1">
+                        <span className={cn(
+                          "px-1.5 py-0.5 rounded text-[10px] font-semibold border",
+                          ROUTE_BADGE[device.proxyStatus.route].className,
+                        )}>
+                          {ROUTE_BADGE[device.proxyStatus.route].label}
+                        </span>
+                        {device.proxyStatus.method && (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[10px] border border-border text-text-tertiary"
+                            title={device.proxyStatus.method === 'transparent'
+                              ? 'Root: весь TCP-трафик перехватывается (sing-box + iptables)'
+                              : 'Системный прокси Android: только приложения, уважающие прокси'}
+                          >
+                            {device.proxyStatus.method === 'transparent' ? 'root·весь трафик' : 'системный'}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  )}
+
+                  {device.proxyStatus?.applyError && (
+                    <p className="text-[10px] text-rose-400" title={device.proxyStatus.applyError}>
+                      ⚠️ Не удалось применить на плате (повтор автоматически): {device.proxyStatus.applyError.slice(0, 90)}
+                    </p>
+                  )}
+                  {device.proxyStatus?.transparentError && (
+                    <p className="text-[10px] text-amber-400/90" title={device.proxyStatus.transparentError}>
+                      Root-режим недоступен, используется системный прокси
+                    </p>
+                  )}
+                  {!device.proxy && device.accountProxy && (
+                    <p className="text-[10px] text-amber-400/90">
+                      Аккаунт привязан к {device.accountProxy.host}:{device.accountProxy.port}, но на плате прокси не применён
+                    </p>
+                  )}
+
                   {/* In Shared mode: show whether this board holds the active proxy or offer one-click transfer */}
                   {proxyMode === 'shared_sequential' && (
                     <div className="flex items-center justify-between pt-0.5">
@@ -2926,11 +3076,15 @@ function DevicesTab() {
                             <span className="text-text-primary">{check.ip}</span>
                             {check.country && <span className="text-text-secondary">[{check.country}]</span>}
                           </div>
-                          {check.leakDetected && (
+                          {check.leakDetected ? (
                             <p className="text-[10px] text-rose-400 font-bold animate-pulse">
                               ⚠️ УТЕЧКА: IP совпадает с домашним!
                             </p>
-                          )}
+                          ) : check.exposesHostIp ? (
+                            <p className="text-[10px] text-amber-400">
+                              Домашний IP фермы {check.route === 'direct' ? '(плата ждёт общий прокси)' : '(прокси не назначен)'}
+                            </p>
+                          ) : null}
                         </div>
                       ) : (
                         <span className="text-rose-400 text-[10px] truncate block">
@@ -3297,14 +3451,15 @@ function DevicesTab() {
         >
           <div className="space-y-4 text-xs">
             <p className="text-text-secondary">
-              Укажите параметры мобильного или резидентского прокси (с авторизацией или без). Поддерживаются HTTP, SOCKS5 и мобильные 4G/LTE.
+              Укажите мобильный или резидентский прокси (с авторизацией или без). Протокол HTTP / SOCKS5 определяется автоматически.
+              Перед применением ферма проверяет прокси со своего ПК — неработающий прокси не сломает интернет на плате.
             </p>
 
             {/* Fast paste bar */}
             <div className="space-y-1.5 p-2.5 rounded-lg bg-surface-2 border border-border">
               <label className="text-text-primary font-medium text-[11px] flex items-center justify-between">
                 <span>⚡ Быстрая вставка строки прокси:</span>
-                <span className="text-[10px] text-text-tertiary">host:port:user:pass или http://...</span>
+                <span className="text-[10px] text-text-tertiary">host:port:user:pass · user:pass@host:port · socks5://…</span>
               </label>
               <Input
                 placeholder="185.x.x.x:8080:login:password или socks5://user:pass@host:port"
@@ -3330,7 +3485,8 @@ function DevicesTab() {
                   <option value="">-- Ввести вручную / из строки выше --</option>
                   {proxies.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.type.toUpperCase()} - {p.host}:{p.port} ({p.country || 'Global'})
+                      {p.type.toUpperCase()} - {p.host}:{p.port}{p.username ? ` (${p.username})` : ''} · {p.country || 'Global'}
+                      {p.isActive ? '' : ' · ⚠ неактивен'}
                     </option>
                   ))}
                 </select>
@@ -3372,7 +3528,11 @@ function DevicesTab() {
                     <label className="text-text-secondary">Пароль (если есть):</label>
                     <Input
                       type="password"
-                      placeholder="••••••••"
+                      placeholder={
+                        selectedDevice.proxy?.hasPassword && customHost === selectedDevice.proxy.host
+                          ? 'сохранён — оставьте пустым'
+                          : '••••••••'
+                      }
                       value={customPassword}
                       onChange={(e) => setCustomPassword(e.target.value)}
                     />
@@ -3387,9 +3547,11 @@ function DevicesTab() {
                       onChange={(e) => setCustomType(e.target.value as any)}
                       className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
                     >
+                      <option value="auto">Авто (HTTP / SOCKS5) — рекомендуется</option>
                       <option value="http">HTTP / HTTPS</option>
                       <option value="socks5">SOCKS5</option>
-                      <option value="mobile">Мобильный 4G / LTE</option>
+                      <option value="mobile">Мобильный 4G / LTE (авто-протокол)</option>
+                      <option value="residential">Резидентский (авто-протокол)</option>
                     </select>
                   </div>
                   <div className="space-y-1">
@@ -3404,8 +3566,40 @@ function DevicesTab() {
               </div>
             )}
 
-            {selectedDevice.proxy && (
-              <div className="pt-2">
+            {proxyTestResult && (
+              <div className={cn(
+                "rounded-lg p-2.5 border text-[11px]",
+                proxyTestResult.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"
+              )}>
+                {proxyTestResult.ok ? (
+                  <>
+                    ✓ Прокси работает: выходной IP <strong className="font-mono">{proxyTestResult.ip}</strong>
+                    {proxyTestResult.protocol && <> · протокол <strong>{proxyTestResult.protocol.toUpperCase()}</strong></>}
+                    {proxyTestResult.latencyMs !== undefined && <> · {proxyTestResult.latencyMs} мс</>}
+                  </>
+                ) : (
+                  <>✕ {proxyTestResult.error || 'Прокси не отвечает'}</>
+                )}
+              </div>
+            )}
+
+            {proxyModalError && (
+              <div className="rounded-lg p-2.5 border bg-rose-500/10 border-rose-500/30 text-rose-300 text-[11px] whitespace-pre-wrap">
+                {proxyModalError}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 pt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                loading={proxyTesting}
+                disabled={!selectedProxyId && (!customHost.trim() || !customPort)}
+                onClick={handleTestProxy}
+              >
+                🧪 Проверить прокси (без применения)
+              </Button>
+              {selectedDevice.proxy && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -3414,8 +3608,8 @@ function DevicesTab() {
                 >
                   Сбросить текущий прокси платы
                 </Button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           <ModalActions
@@ -5894,7 +6088,7 @@ function DevicesTab() {
             {/* Feedback alert */}
             {networkFeedbackMsg && (
               <div className="p-3 rounded-lg bg-surface-2 border border-brand-500/40 text-brand-300 flex items-center justify-between">
-                <span>{networkFeedbackMsg}</span>
+                <span className="whitespace-pre-wrap">{networkFeedbackMsg}</span>
                 <button
                   onClick={() => setNetworkFeedbackMsg(null)}
                   className="text-text-tertiary hover:text-text-primary px-1 font-bold"
@@ -5964,7 +6158,7 @@ function DevicesTab() {
                     <p className="text-xl font-bold text-emerald-400">
                       {devices.filter((d) => {
                         const c = ipResults[d.deviceId];
-                        return c && c.ok && !c.leakDetected && Boolean(d.proxy);
+                        return c && c.ok && !c.leakDetected && !c.exposesHostIp && c.route !== 'direct' && Boolean(d.proxy);
                       }).length}
                     </p>
                   </div>
@@ -6068,12 +6262,18 @@ function DevicesTab() {
                                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-semibold animate-pulse">
                                   🚨 УТЕЧКА (IP хоста!)
                                 </span>
-                              ) : check?.ok && device.proxy ? (
+                              ) : check?.ok && device.proxy && check.route !== 'direct' && !check.exposesHostIp ? (
                                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 text-[10px]">
                                   🛡️ Защищен
                                 </span>
                               ) : check?.ok ? (
-                                <span className="text-text-tertiary text-[10px]">Прямой доступ</span>
+                                <span className="text-amber-300/90 text-[10px]">
+                                  {check.route === 'direct' ? 'IP фермы (ждёт общий прокси)' : 'Прямой доступ'}
+                                </span>
+                              ) : check ? (
+                                <span className="text-rose-300 text-[10px]" title={check.error}>
+                                  {check.route === 'block' ? 'Заблокирован (Shared)' : 'Ошибка'}
+                                </span>
                               ) : (
                                 <span className="text-text-tertiary text-[10px]">—</span>
                               )}
@@ -6377,10 +6577,11 @@ function DevicesTab() {
                       onChange={(e) => setBatchProxyType(e.target.value as any)}
                       className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-text-primary text-xs"
                     >
-                      <option value="socks5">SOCKS5 (рекомендуется для ProxyDroid/Android)</option>
+                      <option value="auto">Авто: HTTP / SOCKS5 определяется для каждого прокси (рекомендуется)</option>
+                      <option value="socks5">SOCKS5</option>
                       <option value="http">HTTP / HTTPS</option>
-                      <option value="mobile">Мобильный 4G / LTE</option>
-                      <option value="residential">Резидентский</option>
+                      <option value="mobile">Мобильный 4G / LTE (авто-протокол)</option>
+                      <option value="residential">Резидентский (авто-протокол)</option>
                     </select>
                   </div>
                 </div>

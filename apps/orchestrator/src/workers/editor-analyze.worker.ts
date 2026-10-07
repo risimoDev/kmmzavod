@@ -109,7 +109,9 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
 
         logger.info({ projectId, clips: result.clips.length }, 'Editor-analyze: complete (ready for review)');
 
-        await db.notification.create({
+        // Autopilot projects are auto-confirmed by the loop — no "please review" ping.
+        const isAutopilot = Boolean((project.config as Record<string, unknown> | null)?.autopilotBatchId);
+        if (!isAutopilot) await db.notification.create({
           data: {
             tenantId,
             type: 'system',
