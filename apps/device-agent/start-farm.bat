@@ -113,6 +113,18 @@ if errorlevel 1 (
     echo [OK] Интерфейс AmneziaWG активен.
 )
 
+:: 4a. Relay мобильных прокси через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
+if not defined DEVICE_AGENT_UPSTREAM_VIA (
+    curl.exe -s -m 4 -o nul http://10.66.66.1:3129/health
+    if not errorlevel 1 (
+        set "DEVICE_AGENT_UPSTREAM_VIA=http://10.66.66.1:3129"
+        echo [OK] Прокси плат будут подключаться через сервер: http://10.66.66.1:3129
+    ) else (
+        echo [ВНИМАНИЕ] Relay прокси на сервере 10.66.66.1:3129 недоступен - прокси подключаются напрямую.
+        echo            Если провайдер блокирует Instagram/TikTok, запустите farm-proxy-relay на сервере.
+    )
+)
+
 :: 4b. Проверка правила Брандмауэра Windows для порта 8300 (AmneziaWG -> device-agent)
 netsh advfirewall firewall show rule name="DeviceAgent 8300" >nul 2>nul
 if errorlevel 1 (

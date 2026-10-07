@@ -134,6 +134,7 @@ export class ProxyManager {
   private runtimes = new Map<string, DeviceRuntime>();
   private listeners = new Map<string, DeviceProxyListener>();
   private listenerStarts = new Map<string, Promise<DeviceProxyListener>>();
+  private reservedPorts = new Set<number>();
   private upstreams = new Map<string, UpstreamProxy>();
   private locks = new Map<string, Promise<unknown>>();
   private readonly root: RootTransparentProxy;
@@ -196,9 +197,12 @@ export class ProxyManager {
       const online = new Set((await this.adb.listDevices()).filter((d) => d.state === 'device').map((d) => d.serial));
       for (const deviceId of this.devices.keys()) {
         if (!online.has(deviceId)) continue;
+        // Skip phones that are being wired right now (batch apply, API call) — not "lost wiring".
+        if (this.locks.has(deviceId) || this.listenerStarts.has(deviceId)) continue;
         const rt = this.runtime(deviceId);
         if (rt.nextRetryAt && Date.now() < rt.nextRetryAt) continue;
         if (await this.isWiringHealthy(deviceId)) continue;
+        if (this.locks.has(deviceId)) continue;
         this.logger.warn({ deviceId }, 'proxy-manager: phone lost its proxy wiring (reboot/USB re-plug?) — re-applying');
         await this.applyDevice(deviceId).catch(() => {});
       }
@@ -245,7 +249,10 @@ export class ProxyManager {
         this.activeDeviceId = typeof s.activeDeviceId === 'string' ? s.activeDeviceId : null;
         this.sharedProxy = s.sharedProxy ?? null;
         for (const [id, entry] of Object.entries(s.devices ?? {})) {
-          if (entry?.proxy?.host && entry.proxy.port) this.devices.set(id, entry);
+          if (!entry?.proxy?.host || !entry.proxy.port) continue;
+          // Ports outside our range were random fallbacks — re-allocate (init re-wires every phone anyway).
+          const inRange = entry.listenPort && entry.listenPort >= config.PROXY_BASE_PORT && entry.listenPort < config.PROXY_BASE_PORT + 1000;
+          this.devices.set(id, inRange ? entry : { proxy: entry.proxy });
         }
       } else {
         // v1: { _mode, _activeDeviceId, _sharedProxy, [deviceId]: proxy }
@@ -317,7 +324,7 @@ export class ProxyManager {
       up = new UpstreamProxy(
         { host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, type: proxy.type },
         this.logger,
-        { maxConnections: config.PROXY_MAX_CONNECTIONS },
+        { maxConnections: config.PROXY_MAX_CONNECTIONS, via: config.PROXY_UPSTREAM_VIA || undefined },
       );
       this.upstreams.set(key, up);
     }
@@ -357,15 +364,21 @@ export class ProxyManager {
     const pending = this.listenerStarts.get(deviceId);
     if (pending) return pending;
 
+    // Reserve the port synchronously: several phones are wired in parallel and must not race for one port.
+    const entry = this.devices.get(deviceId);
+    const hadPort = entry?.listenPort !== undefined;
+    const preferredPort = entry?.listenPort ?? this.allocatePort();
+    if (entry) entry.listenPort = preferredPort;
+    else this.reservedPorts.add(preferredPort);
+
     const start = (async () => {
-      const entry = this.devices.get(deviceId);
       const listener = new DeviceProxyListener(deviceId, () => this.routeFor(deviceId), this.logger, {
         bindHost: config.PROXY_BIND_HOST,
         idleTimeoutMs: config.PROXY_IDLE_TIMEOUT_MS,
       });
-      const port = await listener.start(entry?.listenPort ?? this.allocatePort());
+      const port = await listener.start(preferredPort).finally(() => this.reservedPorts.delete(preferredPort));
       this.listeners.set(deviceId, listener);
-      if (entry && entry.listenPort !== port) {
+      if (entry && (!hadPort || entry.listenPort !== port)) {
         entry.listenPort = port;
         this.saveState();
       }
@@ -376,7 +389,7 @@ export class ProxyManager {
   }
 
   private allocatePort(): number {
-    const used = new Set<number>();
+    const used = new Set<number>(this.reservedPorts);
     for (const e of this.devices.values()) if (e.listenPort) used.add(e.listenPort);
     for (const l of this.listeners.values()) used.add(l.port);
     let port = config.PROXY_BASE_PORT;

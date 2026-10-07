@@ -83,10 +83,29 @@ curl -X POST http://10.13.13.2:8300/wb/warmup -H "Content-Type: application/json
 - Если агент остановлен, платы с прокси остаются без интернета (fail-closed: лучше так, чем утечка домашнего IP).
   Снять прокси с платы: «Сбросить текущий прокси платы».
 
+### Если провайдер фермы блокирует Instagram / Facebook / TikTok (РКН, DPI)
+
+Признаки в логе агента: `ответил: HTTP/1.1 307 Temporary Redirect` (заглушка вида `forbidden.yota.ru`) или
+`Connection was reset` на TLS. Соединение «ПК фермы → мобильный прокси» не шифровано, и DPI провайдера видит,
+куда идёт трафик. Решение — вести этот участок через сервер (NL) по туннелю AmneziaWG:
+
+```
+телефон → шлюз на ПК фермы → [AmneziaWG, зашифровано] → farm-proxy-relay на сервере → мобильный прокси → сайт
+```
+
+1. На сервере: `docker compose up -d farm-proxy-relay` (слушает только `10.66.66.1:3129` внутри туннеля).
+   Если включён ufw: `sudo ufw allow in on awg0 to any port 3129 proto tcp`.
+   Проверка с ПК фермы: `curl.exe http://10.66.66.1:3129/health`.
+2. На ПК фермы перезапустите `start-farm.bat` — он сам найдёт relay и включит `DEVICE_AGENT_UPSTREAM_VIA`
+   (или задайте `DEVICE_AGENT_UPSTREAM_VIA=http://10.66.66.1:3129` в `.env` вручную).
+
+Сайты по-прежнему видят IP мобильного прокси, а не сервера.
+
 Диагностика: `curl http://<IP_AWG>:8300/proxy/status` — маршрут, способ перехвата, ошибки и активные соединения по каждой плате.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
+| `DEVICE_AGENT_UPSTREAM_VIA` | авто (`start-farm.bat`) | relay на сервере для подключения к прокси |
 | `DEVICE_AGENT_PROXY_BASE_PORT` | `18800` | первый порт шлюзов плат на ПК |
 | `DEVICE_AGENT_PROXY_MAX_CONNECTIONS` | `45` | одновременных соединений на один прокси |
 | `DEVICE_AGENT_PROXY_ROOT_MODE` | `auto` | `off` — не использовать sing-box даже на root |

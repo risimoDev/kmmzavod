@@ -189,9 +189,11 @@ export class RootTransparentProxy {
     await this.ensureRemoteBinary(deviceId);
     await this.pushText(deviceId, singBoxConfig(gatewayPort), REMOTE_CFG);
     await this.pushText(deviceId, controlScript(), REMOTE_SCRIPT);
-    const out = await this.adb.shell(deviceId, `su -c 'sh ${REMOTE_SCRIPT} start' 2>&1`, 40_000);
+    // `; echo` keeps the exit code 0 so the script's own error text (KMM_FAIL ...) reaches us.
+    const out = await this.adb.shell(deviceId, `su -c 'sh ${REMOTE_SCRIPT} start' 2>&1; echo "KMM_EXIT=$?"`, 40_000);
     if (!out.includes('KMM_OK')) {
-      throw new Error(`sing-box не запустился: ${out.trim().slice(-400) || 'нет вывода'}`);
+      const reason = out.replace(/KMM_EXIT=\d+\s*$/, '').trim();
+      throw new Error(`sing-box не запустился: ${reason.slice(-400) || `нет вывода (${out.trim()}) — разрешён ли root для Shell в Magisk?`}`);
     }
     this.logger.info({ deviceId, gatewayPort }, 'root-proxy: transparent redirect active');
   }

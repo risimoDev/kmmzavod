@@ -223,6 +223,86 @@ export interface UpstreamOptions {
   maxConnections: number;
   connectTimeoutMs?: number;
   queueTimeoutMs?: number;
+  /**
+   * Reach the upstream proxy through this HTTP CONNECT relay (`http://host:port`), e.g. the
+   * production server over AmneziaWG, so the farm ISP's DPI can't see/block the destinations.
+   */
+  via?: string;
+}
+
+/**
+ * Open a TCP connection to `host:port`, optionally through an HTTP CONNECT relay.
+ * Resolves with the connected socket (relay handshake already done).
+ */
+function openTcp(host: string, port: number, via: { host: string; port: number } | undefined, timeoutMs: number): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(via ? { host: via.host, port: via.port } : { host, port });
+    sock.setNoDelay(true);
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.removeListener('error', onError);
+      sock.removeListener('close', onClose);
+      if (err) {
+        sock.on('error', noop);
+        sock.destroy();
+        reject(err);
+      } else {
+        resolve(sock);
+      }
+    };
+    const timer = setTimeout(
+      () =>
+        finish(
+          via
+            ? new ProxyError(`Relay ${via.host}:${via.port} не ответил (туннель AmneziaWG поднят?)`, 'timeout')
+            : new ProxyError(`Прокси ${host}:${port} не отвечает (таймаут подключения)`, 'timeout'),
+        ),
+      timeoutMs,
+    );
+    const onError = (err: Error) =>
+      finish(
+        new ProxyError(
+          via
+            ? `Нет соединения с relay ${via.host}:${via.port}: ${err.message}`
+            : `Нет соединения с прокси ${host}:${port}: ${err.message}`,
+          'unreachable',
+        ),
+      );
+    const onClose = () => finish(new ProxyError(`Relay закрыл соединение к ${host}:${port}`, 'unreachable'));
+    sock.on('error', onError);
+    sock.on('close', onClose);
+    sock.once('connect', () => {
+      if (!via) return finish();
+      sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+      let buf = Buffer.alloc(0);
+      const onData = (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        const end = buf.indexOf('\r\n\r\n');
+        if (end === -1) return;
+        sock.removeListener('data', onData);
+        const firstLine = buf.subarray(0, end).toString('latin1').split('\r\n')[0];
+        if (!/^HTTP\/\d(?:\.\d)?\s+200/.test(firstLine)) {
+          const body = buf.subarray(end + 4).toString('utf-8').trim();
+          finish(new ProxyError(`Relay не смог подключиться к прокси ${host}:${port}: ${body || firstLine}`, 'unreachable'));
+          return;
+        }
+        sock.pause();
+        const rest = buf.subarray(end + 4);
+        if (rest.length) sock.unshift(rest);
+        finish();
+      };
+      sock.on('data', onData);
+    });
+  });
+}
+
+function parseVia(via?: string): { host: string; port: number } | undefined {
+  if (!via) return undefined;
+  const u = new URL(via.includes('://') ? via : `http://${via}`);
+  return { host: u.hostname, port: Number(u.port) || 3129 };
 }
 
 const IP_ECHO_ENDPOINTS = [
@@ -238,6 +318,7 @@ export class UpstreamProxy {
   private readonly limiter: ConnectionLimiter;
   private readonly connectTimeoutMs: number;
   private readonly queueTimeoutMs: number;
+  private readonly via?: { host: string; port: number };
   lastError?: string;
   lastErrorAt?: number;
 
@@ -250,10 +331,11 @@ export class UpstreamProxy {
     this.limiter = new ConnectionLimiter(opts.maxConnections);
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 12_000;
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 20_000;
+    this.via = parseVia(opts.via);
   }
 
   get label(): string {
-    return `${this.config.host}:${this.config.port}`;
+    return `${this.config.host}:${this.config.port}${this.via ? ` (через relay ${this.via.host})` : ''}`;
   }
 
   get detectedProtocol(): UpstreamProtocol | null {
@@ -272,6 +354,14 @@ export class UpstreamProxy {
     if (!this.config.username) return undefined;
     const creds = Buffer.from(`${this.config.username}:${this.config.password ?? ''}`).toString('base64');
     return `Basic ${creds}`;
+  }
+
+  /** Raw TCP connection to the proxy itself (through the relay if configured), for absolute-URI HTTP. */
+  connectRaw(): Promise<net.Socket> {
+    return openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs).then((sock) => {
+      sock.on('error', noop);
+      return sock;
+    });
   }
 
   /** Reserve a slot for a plain-HTTP request forwarded in absolute-URI form. */
@@ -299,43 +389,30 @@ export class UpstreamProxy {
    * Sends a SOCKS5 greeting: a SOCKS5 server answers `05 xx`, an HTTP proxy answers
    * `HTTP/1.x 400`. Silence or a closed socket falls back to the declared type.
    */
-  private probe(): Promise<UpstreamProtocol> {
+  private async probe(): Promise<UpstreamProtocol> {
     const fallback = declaredProtocol(this.config.type) ?? 'http';
-    return new Promise((resolve, reject) => {
+    const sock = await openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs);
+    return new Promise((resolve) => {
       let settled = false;
-      const sock = net.connect({ host: this.config.host, port: this.config.port });
-      const finish = (proto: UpstreamProtocol | ProxyError, detail: string) => {
+      const finish = (proto: UpstreamProtocol, detail: string) => {
         if (settled) return;
         settled = true;
-        clearTimeout(connectTimer);
         clearTimeout(replyTimer);
+        sock.on('error', noop);
         sock.destroy();
-        if (proto instanceof ProxyError) {
-          reject(proto);
-          return;
-        }
         this.logger.info({ upstream: this.label, protocol: proto, detail }, 'proxy: upstream protocol detected');
         resolve(proto);
       };
-      let replyTimer: NodeJS.Timeout | undefined;
-      const connectTimer = setTimeout(
-        () => finish(new ProxyError(`Прокси ${this.label} не отвечает (таймаут подключения)`, 'timeout'), 'connect timeout'),
-        this.connectTimeoutMs,
-      );
-      sock.on('error', (err) =>
-        finish(new ProxyError(`Нет соединения с прокси ${this.label}: ${err.message}`, 'unreachable'), err.message),
-      );
-      sock.once('connect', () => {
-        clearTimeout(connectTimer);
-        sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
-        replyTimer = setTimeout(() => finish(fallback, 'no reply to SOCKS5 greeting'), 3_000);
-      });
+      const replyTimer = setTimeout(() => finish(fallback, 'no reply to SOCKS5 greeting'), 3_000);
+      sock.on('error', () => finish(fallback, 'error after greeting'));
       sock.once('data', (chunk: Buffer) => {
         if (chunk[0] === 0x05) finish('socks5', `reply 0x${chunk.subarray(0, 2).toString('hex')}`);
         else if (chunk.toString('latin1', 0, 5) === 'HTTP/') finish('http', chunk.toString('latin1', 0, 20).trim());
         else finish(fallback, `unrecognised reply 0x${chunk.subarray(0, 4).toString('hex')}`);
       });
       sock.once('close', () => finish(fallback, 'closed without reply'));
+      sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+      sock.resume();
     });
   }
 
@@ -371,9 +448,9 @@ export class UpstreamProxy {
     }
   }
 
-  private dial(): { sock: net.Socket; fail: (e: ProxyError) => void; done: (rest: Buffer) => void; promise: Promise<net.Socket> } {
-    const sock = net.connect({ host: this.config.host, port: this.config.port });
-    sock.setNoDelay(true);
+  /** Connected socket to the upstream (through the relay if configured) + handshake helpers. */
+  private async dial(): Promise<{ sock: net.Socket; fail: (e: ProxyError) => void; done: (rest: Buffer) => void; promise: Promise<net.Socket> }> {
+    const sock = await openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs);
     let resolveFn!: (s: net.Socket) => void;
     let rejectFn!: (e: ProxyError) => void;
     const promise = new Promise<net.Socket>((res, rej) => {
@@ -416,8 +493,8 @@ export class UpstreamProxy {
     return { sock, fail, done, promise };
   }
 
-  private httpConnect(host: string, port: number): Promise<net.Socket> {
-    const { sock, fail, done, promise } = this.dial();
+  private async httpConnect(host: string, port: number): Promise<net.Socket> {
+    const { sock, fail, done, promise } = await this.dial();
     const target = net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`;
     const auth = this.authHeader();
     const request =
@@ -427,7 +504,6 @@ export class UpstreamProxy {
       `Proxy-Connection: Keep-Alive\r\n\r\n`;
 
     let buf = Buffer.alloc(0);
-    sock.once('connect', () => sock.write(request));
     sock.on('data', (chunk: Buffer) => {
       buf = Buffer.concat([buf, chunk]);
       let end = buf.indexOf('\r\n\r\n');
@@ -450,16 +526,17 @@ export class UpstreamProxy {
       if (status >= 200 && status < 300) done(buf.subarray(end + delimLen));
       else fail(httpStatusError(status, firstLine, target, this.label));
     });
+    sock.write(request);
+    sock.resume();
     return promise;
   }
 
-  private socks5Connect(host: string, port: number): Promise<net.Socket> {
-    const { sock, fail, done, promise } = this.dial();
+  private async socks5Connect(host: string, port: number): Promise<net.Socket> {
+    const { sock, fail, done, promise } = await this.dial();
     const connectRequest = Buffer.concat([Buffer.from([0x05, 0x01, 0x00]), socksAddress(host, port)]);
     let stage: 'greeting' | 'auth' | 'connect' = 'greeting';
     let buf = Buffer.alloc(0);
 
-    sock.once('connect', () => sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02])));
     sock.on('data', (chunk: Buffer) => {
       buf = Buffer.concat([buf, chunk]);
       for (;;) {
@@ -519,6 +596,8 @@ export class UpstreamProxy {
         return;
       }
     });
+    sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+    sock.resume();
     return promise;
   }
 
@@ -905,14 +984,17 @@ export class DeviceProxyListener {
         const release = await route.upstream.acquireSlot();
         releases.push(release);
         const auth = route.upstream.authHeader();
+        const proxySock = await route.upstream.connectRaw();
+        releases.push(() => proxySock.destroy());
         upstreamReq = http.request({
-          host: route.upstream.config.host,
-          port: route.upstream.config.port,
           method: req.method,
           path: url.href,
           headers: auth ? { ...headers, 'proxy-authorization': auth } : headers,
-          agent: false,
-        });
+          createConnection: () => {
+            setImmediate(() => proxySock.resume());
+            return proxySock;
+          },
+        } as any);
       } else {
         const sock = await this.open(route, host, port);
         releases.push(() => sock.destroy());

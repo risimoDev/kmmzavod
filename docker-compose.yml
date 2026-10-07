@@ -346,6 +346,26 @@ services:
       - api
       - web
 
+  # Relay for the phone farm's mobile proxies (see infra/proxy-relay/relay.mjs): the farm PC
+  # dials its proxies through this server over AmneziaWG, so the farm ISP's DPI can't see or
+  # block Instagram/Facebook/TikTok. Host networking: binds only the tunnel IP 10.66.66.1:3129
+  # (never public); restarts until awg0 is up.
+  farm-proxy-relay:
+    image: node:22-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./infra/proxy-relay/relay.mjs:/app/relay.mjs:ro
+    command: ["node", "/app/relay.mjs"]
+    environment:
+      RELAY_LISTEN: ${FARM_RELAY_LISTEN:-10.66.66.1:3129}
+      RELAY_ALLOW: ${FARM_RELAY_ALLOW:-10.66.66.0/24,10.13.13.0/24}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres_data:
   redis_data:

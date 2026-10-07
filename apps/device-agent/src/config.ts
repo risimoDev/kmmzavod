@@ -67,6 +67,10 @@ export const config = {
   // Max concurrent connections per upstream proxy (shared mobile proxies often cap at 50). 0 = unlimited.
   PROXY_MAX_CONNECTIONS: Number(env('DEVICE_AGENT_PROXY_MAX_CONNECTIONS', '45')),
   PROXY_IDLE_TIMEOUT_MS: Number(env('DEVICE_AGENT_PROXY_IDLE_TIMEOUT_MS', '180000')),
+  // Dial every upstream proxy through this HTTP CONNECT relay (infra/proxy-relay on the server,
+  // reached over AmneziaWG), e.g. http://10.66.66.1:3129. Needed when the farm ISP's DPI blocks
+  // Instagram/Facebook/TikTok inside plain proxy connections. Empty = connect to proxies directly.
+  PROXY_UPSTREAM_VIA: env('DEVICE_AGENT_UPSTREAM_VIA', ''),
   // 'auto' = transparent sing-box+iptables on rooted boards, 'off' = system HTTP proxy only.
   PROXY_ROOT_MODE: env('DEVICE_AGENT_PROXY_ROOT_MODE', 'auto') === 'off' ? 'off' as const : 'auto' as const,
   // How often the watchdog re-checks that every phone is still wired to its gateway.

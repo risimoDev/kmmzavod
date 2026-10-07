@@ -109,6 +109,17 @@ if ($ipconfig -match "10\.66\.66\.2" -or $ipconfig -match "10\.13\.13\.2") {
     Write-Host "Убедитесь, что клиент AmneziaWG запущен и подключен." -ForegroundColor Yellow
 }
 
+# 4a. Relay мобильных прокси через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
+if (-not $env:DEVICE_AGENT_UPSTREAM_VIA) {
+    & curl.exe -s -m 4 -o NUL http://10.66.66.1:3129/health
+    if ($LASTEXITCODE -eq 0) {
+        $env:DEVICE_AGENT_UPSTREAM_VIA = "http://10.66.66.1:3129"
+        Write-Host "[OK] Прокси плат будут подключаться через сервер: $env:DEVICE_AGENT_UPSTREAM_VIA" -ForegroundColor Green
+    } else {
+        Write-Host "[ВНИМАНИЕ] Relay прокси на сервере 10.66.66.1:3129 недоступен - прокси подключаются напрямую." -ForegroundColor Yellow
+    }
+}
+
 # 5. Определение пакетного менеджера (pnpm / npm)
 $pkgManager = if (Get-Command pnpm -ErrorAction SilentlyContinue) { "pnpm" } else { "npm" }
 
