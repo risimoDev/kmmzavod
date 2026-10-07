@@ -10,7 +10,8 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { FISH_AUDIO_VOICES } from '../services/fish-audio';
+import { FISH_VOICES } from '@kmmzavod/ai';
+import { aiStatus } from '../lib/ai';
 import { config } from '../config';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
@@ -24,6 +25,7 @@ const Shape = z.object({
   montageMode: z.enum(['single', 'multi']).default('multi'),
   sourcesPerMontage: z.number().int().min(2).max(10).default(3),
   sourceStrategy: z.enum(['fresh_first', 'pool', 'fresh_only']).default('fresh_first'),
+  pace: z.enum(['calm', 'normal', 'fast']).default('normal'),
   targetSeconds: z.number().int().min(10).max(90).default(30),
   aspect: z.enum(['9:16', '1:1', '4:5', '16:9']).default('9:16'),
   subtitleStyle: z.string().max(40).default('tiktok'),
@@ -159,19 +161,10 @@ async function readyVariants(autopilotId: string): Promise<number> {
   });
 }
 
+/** «openrouter» = any LLM provider (OpenRouter or GPTunnel) is configured. */
 async function aiKeyStatus() {
-  const rows = await db.adminSetting.findMany({
-    where: { key: { in: ['OPENROUTER_API_KEY', 'FISH_AUDIO_API_KEY'] } },
-    select: { key: true, value: true },
-  });
-  const has = (k: string, env?: string) => {
-    const v = rows.find((r) => r.key === k)?.value;
-    return (typeof v === 'string' && v.trim().length > 0) || Boolean(env && env.trim() && !env.startsWith('mock_'));
-  };
-  return {
-    openrouter: has('OPENROUTER_API_KEY', config.OPENROUTER_API_KEY),
-    fishAudio: has('FISH_AUDIO_API_KEY', config.FISH_AUDIO_API_KEY),
-  };
+  const st = await aiStatus();
+  return { openrouter: st.llmProviders.length > 0, fishAudio: st.fishAudio, llmProviders: st.llmProviders };
 }
 
 export async function autopilotRoutes(app: FastifyInstance) {
@@ -211,7 +204,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     return {
       projects: projects.map((p) => ({ ...p, sourceCount: counts.find((c) => c.projectId === p.id)?._count._all ?? 0 })),
       groups,
-      voices: FISH_AUDIO_VOICES,
+      voices: FISH_VOICES,
       aiKeys: await aiKeyStatus(),
     };
   });

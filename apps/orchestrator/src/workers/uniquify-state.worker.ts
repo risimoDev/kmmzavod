@@ -9,6 +9,53 @@ import { Worker, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type UniquifyStateJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
+import { distance, isWeak, uniquenessScore, type Dist, type Signature } from '../lib/uniqueness';
+
+/**
+ * After a job finishes: for every completed copy find its nearest sibling
+ * (visual + aligned audio distance), compute a 0..100 score, and flag weak
+ * copies (≈ re-encode of the source, or ≈ duplicate of another copy). Weak
+ * copies are skipped by the autopilot when publishing.
+ */
+export async function scoreUniquifyJob(db: PrismaClient, uniquifyJobId: string): Promise<{ weak: number; avg: number | null }> {
+  const rows = await db.uniqueVariant.findMany({
+    where: { uniquifyJobId, status: 'completed' },
+    select: { id: true, transforms: true },
+  });
+  const sigs = rows.map((r) => ((r.transforms ?? {}) as { signature?: Signature }).signature ?? null);
+  let weak = 0;
+  const scores: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const t = (rows[i].transforms ?? {}) as Record<string, any>;
+    const vsSource: Dist | null = t.uniqueness?.vs_source ?? null;
+    let nearest: Dist | null = null;
+    let nearestId: string | null = null;
+    if (sigs[i]) {
+      for (let j = 0; j < rows.length; j++) {
+        if (i === j || !sigs[j]) continue;
+        const d = distance(sigs[i]!, sigs[j]!);
+        const key = (x: Dist | null) => (x ? (x.visual ?? 1) + (x.audio ?? 1) : Infinity);
+        if (!nearest || key(d) < key(nearest)) { nearest = d; nearestId = rows[j].id; }
+      }
+    }
+    // Score vs the source when known (preserve mode), else vs the nearest sibling (remix).
+    const score = uniquenessScore(vsSource ?? nearest);
+    const reason = isWeak(vsSource, nearest);
+    if (reason) weak++;
+    if (score !== null) scores.push(score);
+    await db.uniqueVariant.update({
+      where: { id: rows[i].id },
+      data: {
+        transforms: {
+          ...t,
+          uniqueness: { ...(t.uniqueness ?? {}), nearest_sibling: nearest, nearest_id: nearestId, score, ok: !reason, reason },
+        } as object,
+      },
+    });
+  }
+  const avg = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+  return { weak, avg };
+}
 
 interface Deps {
   db: PrismaClient;
@@ -34,7 +81,7 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
       // old status-equality guard (which ALWAYS tripped, because the render
       // worker sets variant.status='completed' BEFORE emitting this event, so the
       // job counters never advanced and the job hung on `generating`).
-      await db.$transaction(async (tx) => {
+      const finishedNow = await db.$transaction(async (tx) => {
         const [completedCount, failedCount] = await Promise.all([
           tx.uniqueVariant.count({ where: { uniquifyJobId, status: 'completed' } }),
           tx.uniqueVariant.count({ where: { uniquifyJobId, status: 'failed' } }),
@@ -91,7 +138,17 @@ export function createUniquifyStateWorker(deps: Deps): Worker {
             },
           }).catch(() => {});
         }
+        return finished && data.status === 'completed';
       });
+
+      if (finishedNow) {
+        try {
+          const { weak, avg } = await scoreUniquifyJob(db, uniquifyJobId);
+          logger.info({ uniquifyJobId, weak, avgScore: avg }, 'Uniquify-state: uniqueness scored');
+        } catch (err: any) {
+          logger.warn({ uniquifyJobId, err: err?.message }, 'Uniquify-state: uniqueness scoring failed');
+        }
+      }
     },
     {
       connection,

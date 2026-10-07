@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { relativeTime, cn } from "@/lib/utils";
+import { PRODUCTS, PACES, productIcon, productLabel } from "@/components/editor/products";
 import {
   editorApi,
   projectsApi,
@@ -26,14 +27,11 @@ import {
   type EditGeometry,
   type EditAspect,
   type EditAudioMode,
+  type EditProduct,
+  type EditPace,
   type Project,
   type SourceVideo,
 } from "@/lib/api";
-
-const MODES: { value: EditMode; label: string; hint: string; icon: string }[] = [
-  { value: "smart_montage", label: "Интеллектуальный монтаж", icon: "🎬", hint: "Готовое видео: субтитры по речи, переходы, smart-crop" },
-  { value: "uniquify_source", label: "Нарезка под уникализацию", icon: "✂️", hint: "Сырьё для системы уникализации (без субтитров)" },
-];
 
 const GEOMETRIES: { value: EditGeometry; label: string; hint: string; icon: string }[] = [
   { value: "highlights", label: "Длинное → шортсы", icon: "🎯", hint: "ИИ найдёт N лучших моментов в 1 длинном видео" },
@@ -74,8 +72,6 @@ const PRESETS: { label: string; icon: string; hint: string; patch: PresetPatch }
     patch: { name: "Микс Монтаж", mode: "smart_montage", geometry: "mix", aspect: "9:16", subtitleStyle: "tiktok", audioMode: "keep", targetClipSeconds: 30 } },
   { label: "Кинематографичный ролик", icon: "🎬", hint: "Элегантный стиль, нижняя треть кадра, 40с",
     patch: { name: "Кинематографичный", mode: "smart_montage", geometry: "highlights", aspect: "9:16", subtitleStyle: "cinematic", audioMode: "keep", targetClipCount: 2, targetClipSeconds: 40 } },
-  { label: "Сырьё для уникализации", icon: "🏭", hint: "Нарезка без субтитров → в конвейер фермы",
-    patch: { name: "Уникализация", mode: "uniquify_source", geometry: "mix", aspect: "9:16", subtitleStyle: "none", audioMode: "keep", targetClipSeconds: 30 } },
 ];
 
 function Slider({ label, value, min, max, unit, onChange }: {
@@ -140,13 +136,17 @@ function EditorProjectsContent() {
   const [creating, setCreating] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [activePreset, setActivePreset] = useState<string | null>(null);
+  const [product, setProduct] = useState<EditProduct>("uniquify_multi");
+  const [variantCount, setVariantCount] = useState(3);
+  const [pace, setPace] = useState<EditPace>("normal");
+  const isUniquify = product !== "smart_montage";
 
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<EditMode>("smart_montage");
-  const [geometry, setGeometry] = useState<EditGeometry>("highlights");
+  const [mode, setMode] = useState<EditMode>("uniquify_source");
+  const [geometry, setGeometry] = useState<EditGeometry>("mix");
   const [aspect, setAspect] = useState<EditAspect>("9:16");
   const [audioMode, setAudioMode] = useState<EditAudioMode>("keep");
-  const [subtitleStyle, setSubtitleStyle] = useState("tiktok");
+  const [subtitleStyle, setSubtitleStyle] = useState("none");
   const [smartCrop, setSmartCrop] = useState(true);
   const [useVision, setUseVision] = useState(false);
   const [targetClipCount, setTargetClipCount] = useState(5);
@@ -213,9 +213,26 @@ function EditorProjectsContent() {
 
   const toggleSourceVideo = (id: string) => {
     setSelectedSourceVideoIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      prev.includes(id)
+        ? prev.filter((x) => x !== id)
+        : product === "uniquify_one" ? [id] : [...prev, id]
     );
   };
+
+  function chooseProduct(next: EditProduct) {
+    setProduct(next);
+    if (next === "smart_montage") {
+      setMode("smart_montage");
+      setVariantCount(1);
+      if (subtitleStyle === "none") setSubtitleStyle("tiktok");
+    } else {
+      setMode("uniquify_source");
+      setGeometry("mix");
+      setVariantCount((v) => (v < 2 ? 3 : v));
+      setSubtitleStyle("none");
+      if (next === "uniquify_one") setSelectedSourceVideoIds((ids) => ids.slice(0, 1));
+    }
+  }
 
   async function create() {
     if (!name.trim()) return;
@@ -223,6 +240,9 @@ function EditorProjectsContent() {
     try {
       const p = await editorApi.createProject({
         name: name.trim(),
+        product,
+        variantCount: isUniquify || geometry === "mix" ? variantCount : 1,
+        pace,
         mode,
         geometry,
         aspect,
@@ -271,10 +291,32 @@ function EditorProjectsContent() {
         {showCreate && (
           <Card className="shadow-elevation-2">
             <CardContent className="p-5 space-y-5">
-              {/* Шаг 1 — пресет */}
+              {/* Шаг 1 — что делаем */}
               <div className="space-y-2">
                 <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wide">
-                  1 · Быстрый старт (пресеты)
+                  1 · Что делаем
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {PRODUCTS.map((pr) => (
+                    <button key={pr.value} type="button" onClick={() => chooseProduct(pr.value)}
+                      className={cn(
+                        "text-left rounded-xl border p-3.5 transition-all hover:shadow-elevation-1",
+                        product === pr.value
+                          ? "border-brand-500/60 bg-brand-500/10 shadow-brand-glow-sm"
+                          : "border-border bg-surface-2 hover:border-brand-500/30"
+                      )}>
+                      <div className="text-2xl">{pr.icon}</div>
+                      <div className="mt-1 text-sm font-semibold text-text-primary">{pr.label}</div>
+                      <div className="text-xs text-text-secondary">{pr.hint}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {!isUniquify && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wide">
+                  Быстрый старт (пресеты)
                 </p>
                 <div className="grid gap-2 sm:grid-cols-3">
                   {PRESETS.map((p) => (
@@ -293,6 +335,7 @@ function EditorProjectsContent() {
                   ))}
                 </div>
               </div>
+              )}
 
               {/* Шаг 2 — привязка к проекту и исходные видео */}
               <div className="space-y-3">
@@ -333,6 +376,7 @@ function EditorProjectsContent() {
                     <div className="flex items-center justify-between text-xs">
                       <span className="font-medium text-text-primary">
                         Исходные видео из проекта ({selectedSourceVideoIds.length} выбрано)
+                        {product === "uniquify_one" && <span className="ml-1.5 text-2xs text-text-tertiary">· выберите одно</span>}
                       </span>
                       {availableSourceVideos.length > 0 && (
                         <button
@@ -398,35 +442,60 @@ function EditorProjectsContent() {
                 )}
               </div>
 
-              {/* Шаг 3 — что делаем */}
+              {/* Шаг 3 — сборка */}
               <div className="space-y-2">
                 <p className="text-xs font-semibold text-text-tertiary uppercase tracking-wide">
-                  3 · Режим монтажа и геометрия
+                  3 · Сборка
                 </p>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {[
-                    { items: MODES, value: mode, set: (v: string) => setMode(v as EditMode) },
-                    { items: GEOMETRIES, value: geometry, set: (v: string) => setGeometry(v as EditGeometry) },
-                  ].map(({ items, value, set }, col) => (
-                    <div key={col} className="space-y-1.5">
-                      {items.map((m) => (
-                        <button key={m.value} type="button" onClick={() => set(m.value)}
-                          className={cn(
-                            "w-full text-left rounded-lg border p-2.5 text-sm transition-all flex gap-2.5 items-start",
-                            value === m.value
-                              ? "border-brand-500/60 bg-brand-500/10"
-                              : "border-border hover:border-brand-500/30"
-                          )}>
-                          <span className="text-lg leading-none mt-0.5">{m.icon}</span>
-                          <span>
-                            <span className="block font-medium text-text-primary">{m.label}</span>
-                            <span className="block text-xs text-text-secondary">{m.hint}</span>
-                          </span>
-                        </button>
-                      ))}
+                {!isUniquify && (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {GEOMETRIES.map((m) => (
+                      <button key={m.value} type="button" onClick={() => setGeometry(m.value)}
+                        className={cn(
+                          "w-full text-left rounded-lg border p-2.5 text-sm transition-all flex gap-2.5 items-start",
+                          geometry === m.value
+                            ? "border-brand-500/60 bg-brand-500/10"
+                            : "border-border hover:border-brand-500/30"
+                        )}>
+                        <span className="text-lg leading-none mt-0.5">{m.icon}</span>
+                        <span>
+                          <span className="block font-medium text-text-primary">{m.label}</span>
+                          <span className="block text-xs text-text-secondary">{m.hint}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {(isUniquify || geometry === "mix") && (
+                  <div className="grid gap-x-8 gap-y-3 sm:grid-cols-2 max-w-2xl">
+                    <Slider label={isUniquify ? "Разных вариантов монтажа" : "Вариантов микса"}
+                      value={variantCount} min={1} max={10} unit="" onChange={setVariantCount} />
+                    <div className="space-y-1">
+                      <span className="text-xs text-text-secondary">Темп нарезки</span>
+                      <div className="flex gap-1.5">
+                        {PACES.map((pc) => (
+                          <button key={pc.value} type="button" onClick={() => setPace(pc.value)}
+                            className={cn(
+                              "flex-1 rounded-lg px-2 py-1.5 text-xs transition-all",
+                              pace === pc.value
+                                ? "bg-brand-500/15 text-brand-400 ring-1 ring-brand-500/30 font-medium"
+                                : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                            )}>
+                            {pc.label}<span className="block text-2xs text-text-tertiary">{pc.hint}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
+                {isUniquify && (
+                  <p className="text-xs text-text-tertiary">
+                    {product === "uniquify_one"
+                      ? "Из одного видео соберётся несколько разных перемонтажей: разные фрагменты, длины кадров и порядок. С оригинальным звуком режем строго по фразам."
+                      : "Каждый вариант — свой микс лучших кадров из всех видео; варианты почти не повторяют друг друга."}
+                    {" "}Готовые варианты одной кнопкой отправляются в уникализацию.
+                  </p>
+                )}
               </div>
 
               {/* Шаг 4 — формат и стиль */}
@@ -518,12 +587,12 @@ function EditorProjectsContent() {
                 <CardContent className="p-4 space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <h4 className="font-medium truncate text-text-primary">
-                      {p.mode === "smart_montage" ? "🎬" : "✂️"} {p.name}
+                      {productIcon(p)} {p.name}
                     </h4>
                     <StatusBadge status={p.status} />
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    <Badge variant="outline">{p.geometry === "highlights" ? "хайлайты" : "микс"}</Badge>
+                    <Badge variant="outline">{productLabel(p)}</Badge>
                     <Badge variant="outline">{p.aspect}</Badge>
                     {p.subtitleStyle !== "none" && <Badge variant="brand">субтитры</Badge>}
                   </div>

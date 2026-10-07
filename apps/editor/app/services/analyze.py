@@ -86,10 +86,16 @@ def _face_and_motion(
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             return 0.0, 0.0, [], []
-        cascade_path = os.path.join(
-            cv2.data.haarcascades, "haarcascade_frontalface_default.xml"
-        )
-        face_cascade = cv2.CascadeClassifier(cascade_path)
+        # Face detection is a bonus: a cv2 build without Haar cascades must not
+        # take motion analysis (the main visual signal) down with it.
+        face_cascade = None
+        try:
+            face_cascade = cv2.CascadeClassifier(os.path.join(
+                cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+            if face_cascade.empty():
+                face_cascade = None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Face detector unavailable (%s) — motion only", e)
         step = max(0.5, 1.0 / max(settings.analysis_sample_fps, 0.5))
         t, frames, face_hits = 0.0, 0, 0
         prev = None
@@ -110,7 +116,7 @@ def _face_and_motion(
                 # Raw absdiff means are small (~0..0.2); ×5 spreads them over 0..1.
                 motion_series.append((round(t, 2), round(min(1.0, m * 5.0), 3)))
             prev = small
-            if not face_cascade.empty():
+            if face_cascade is not None:
                 faces = face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(60, 60))
                 face_series.append((round(t, 2), 1.0 if len(faces) > 0 else 0.0))
                 if len(faces) > 0:

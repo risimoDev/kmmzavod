@@ -16,6 +16,9 @@ export type EditGeometry = 'highlights' | 'mix';
 export type EditMode = 'uniquify_source' | 'smart_montage';
 export type EditAudioMode = 'keep' | 'replace';
 export type EditAspect = '9:16' | '1:1' | '16:9' | '4:5';
+export type EditPace = 'calm' | 'normal' | 'fast';
+/** Must match apps/editor ANALYSIS_VERSION — older cached analyses are recomputed. */
+export const EDITOR_ANALYSIS_VERSION = 2;
 
 export interface EdlSegment {
   src_idx: number;
@@ -40,6 +43,13 @@ export interface EdlClip {
   thumb_b64?: string | null;
   /** Output-timeline subtitles (proposed at analyze, user-editable, burned at render). */
   subtitles?: SubtitleLine[] | null;
+  /** xfade transitions (voiceover mix) vs hard cuts; null = legacy EDL. */
+  transitions?: boolean | null;
+  /** Caveat for the storyboard (e.g. not enough footage). */
+  warning?: string;
+  /** Per-clip AI voiceover (presigned) + its script for subtitle spelling. */
+  voiceover_url?: string | null;
+  voiceover_text?: string;
 }
 
 export interface SourceAnalysis {
@@ -54,6 +64,9 @@ export interface SourceAnalysis {
   transcript: unknown[];
   face_ratio: number;
   motion_score: number;
+  analysis_version?: number;
+  transcribed?: boolean;
+  transcript_error?: string | null;
 }
 
 export interface AnalyzeResult {
@@ -131,6 +144,15 @@ export const editorService = {
     useVision: boolean;
     targetClipCount: number;
     targetClipSeconds: number;
+    audioMode?: EditAudioMode;
+    seed?: number | null;
+    variantCount?: number;
+    pace?: EditPace;
+    hookFirst?: boolean;
+    /** Per source (aligned to sourceUrls): already-used [start, end] ranges. */
+    excludeRanges?: [number, number][][];
+    /** Per source: reusable previous analysis (null = analyse). */
+    cachedAnalyses?: (SourceAnalysis | null)[];
   }): Promise<AnalyzeResult> {
     const res = await axios.post(`${BASE}/analyze`, {
       project_id: opts.projectId,
@@ -141,6 +163,13 @@ export const editorService = {
       use_vision: opts.useVision,
       target_clip_count: opts.targetClipCount,
       target_clip_seconds: opts.targetClipSeconds,
+      audio_mode: opts.audioMode ?? 'keep',
+      seed: opts.seed ?? null,
+      variant_count: opts.variantCount ?? 1,
+      pace: opts.pace ?? 'normal',
+      hook_first: opts.hookFirst ?? true,
+      exclude_ranges: opts.excludeRanges ?? [],
+      cached_analyses: opts.cachedAnalyses ?? [],
     }, { timeout: 1_800_000 }); // analysis (Whisper on long sources) can be slow
     return {
       projectId: res.data.project_id,
@@ -163,6 +192,9 @@ export const editorService = {
     subtitleStyle: string;
     voiceoverUrl?: string | null;
     bgmUrl?: string | null;
+    geometry?: EditGeometry;
+    seed?: number;
+    voiceoverText?: string;
   }): Promise<RenderResult> {
     const res = await axios.post(`${BASE}/render`, {
       project_id: opts.projectId,
@@ -178,6 +210,9 @@ export const editorService = {
       subtitle_style: opts.subtitleStyle,
       voiceover_url: opts.voiceoverUrl ?? null,
       bgm_url: opts.bgmUrl ?? null,
+      geometry: opts.geometry ?? null,
+      seed: opts.seed ?? 0,
+      voiceover_text: opts.voiceoverText ?? '',
     }, { timeout: 3_600_000 }); // full render of multiple clips
     return {
       projectId: res.data.project_id,

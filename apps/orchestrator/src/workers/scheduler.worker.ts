@@ -21,6 +21,7 @@ import {
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { runAutopilotsTick, type AutopilotLoopDeps } from '../autopilot/loop';
+import { scoreUniquifyJob } from './uniquify-state.worker';
 
 const logger = rootLogger.child({ worker: 'scheduler' });
 
@@ -302,6 +303,7 @@ async function reconcileStuckUniquifyJobs(db: PrismaClient): Promise<void> {
         },
       });
       logger.info({ uniquifyJobId: job.id, completed, failed }, 'Scheduler: reconciled stuck uniquify job');
+      if (!allFailed) await scoreUniquifyJob(db, job.id).catch(() => {});
     }
   }
 }

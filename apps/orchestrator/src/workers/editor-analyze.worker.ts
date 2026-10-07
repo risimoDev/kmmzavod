@@ -9,10 +9,52 @@
 
 import { Worker, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type EditorAnalyzeJobPayload } from '@kmmzavod/queue';
-import type { PrismaClient } from '@kmmzavod/db';
+import { Prisma, type PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
 import { logger } from '../logger';
-import { editorService, describeEditorError, type EditMode, type EditGeometry } from '../services/editor';
+import {
+  editorService, describeEditorError, EDITOR_ANALYSIS_VERSION,
+  type EditMode, type EditGeometry, type EditAudioMode, type EditPace, type SourceAnalysis,
+} from '../services/editor';
+
+/** Montage options kept in EditProject.config (set by the UI / autopilot). */
+export function readEditOptions(config: Record<string, unknown>) {
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  const pace = ['calm', 'normal', 'fast'].includes(config.pace as string) ? (config.pace as EditPace) : 'normal';
+  const excl = (config.excludeRanges && typeof config.excludeRanges === 'object'
+    ? config.excludeRanges : {}) as Record<string, [number, number][]>;
+  return {
+    seed: Math.trunc(num(config.seed, 0)),
+    variantCount: Math.max(1, Math.min(10, Math.trunc(num(config.variantCount, 1)))),
+    pace,
+    hookFirst: config.hookFirst !== false,
+    excludeByKey: excl,
+  };
+}
+
+/**
+ * Reuse earlier analyses of the same files (pool footage is analysed once, not
+ * on every montage): latest EditSource row per storageKey with a current
+ * analysis_version. The editor itself decides whether the cached transcript is
+ * sufficient for this project's audio mode.
+ */
+async function findCachedAnalyses(db: PrismaClient, keys: string[]): Promise<(SourceAnalysis | null)[]> {
+  const rows = await db.editSource.findMany({
+    where: { storageKey: { in: keys.filter(Boolean) }, analysis: { not: Prisma.DbNull } },
+    select: { storageKey: true, analysis: true },
+    orderBy: { updatedAt: 'desc' },
+    take: 500,
+  });
+  return keys.map((key) => {
+    // Prefer a transcribed analysis (it serves both audio modes).
+    const cands = rows
+      .filter((r) => r.storageKey === key)
+      .map((r) => r.analysis as unknown as SourceAnalysis | null)
+      .filter((a): a is SourceAnalysis =>
+        Boolean(a && a.analysis_version === EDITOR_ANALYSIS_VERSION && a.duration_sec > 0));
+    return cands.find((a) => a.transcribed) ?? cands[0] ?? null;
+  });
+}
 
 interface Deps {
   db: PrismaClient;
@@ -44,6 +86,8 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
           sources.map((s) => storage.presignedUrl(s.storageKey, 3600)),
         );
 
+        const opts = readEditOptions((project.config ?? {}) as Record<string, unknown>);
+        const cachedAnalyses = await findCachedAnalyses(db, sources.map((s) => s.storageKey));
         const result = await editorService.analyze({
           projectId,
           tenantId,
@@ -53,6 +97,13 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
           useVision: project.useVision,
           targetClipCount: project.targetClipCount,
           targetClipSeconds: Number(project.targetClipSeconds),
+          audioMode: project.audioMode as EditAudioMode,
+          seed: opts.seed,
+          variantCount: opts.variantCount,
+          pace: opts.pace,
+          hookFirst: opts.hookFirst,
+          excludeRanges: sources.map((s) => opts.excludeByKey[s.storageKey] ?? []),
+          cachedAnalyses,
         });
 
         // Upload storyboard thumbnails (editor returns them as base64) and strip

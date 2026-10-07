@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { relativeTime, accountUrl, postUrl, cn } from "@/lib/utils";
+import { UniquenessBadge, UniquenessDetails, UniquenessSummary } from "@/components/uniquify/Uniqueness";
 import {
   uniquifyApi,
   socialAccountsApi,
@@ -294,7 +295,10 @@ function JobDetailContent({ jobId }: { jobId: string }) {
             {/* Variants */}
             <section>
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-text-primary">Уникальные варианты ({variants.length})</h2>
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold text-text-primary">Уникальные варианты ({variants.length})</h2>
+                  <UniquenessSummary variants={variants} />
+                </div>
                 {job.status === "completed" && (
                   <Button variant="outline" size="sm" onClick={openDistributeModal}>
                     <DistributeIcon /> Распределить по сетке аккаунтов
@@ -786,7 +790,9 @@ function VariantCard({
           {variant.subtitleStyle && variant.subtitleStyle !== "none" && (
             <Badge variant="outline" className="text-2xs">{variant.subtitleStyle}</Badge>
           )}
+          <span className="ml-auto"><UniquenessBadge variant={variant} /></span>
         </div>
+        <UniquenessDetails variant={variant} />
         {variant.downloadUrl && (
           <div className="flex gap-2">
             <Button

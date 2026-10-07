@@ -24,12 +24,19 @@ import {
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
 import { GptunnelService } from '../services/gptunnel';
+import type { MinioStorageClient } from '@kmmzavod/storage';
+import {
+  writeScript, writeCaptions, fallbackCaptions, fishTts, paceFor, voiceGender, voiceById,
+  LlmUnavailableError, type ScriptStyle, type CtaType,
+} from '@kmmzavod/ai';
+import { getLlm, getFishConfig, getPaceTable, recordPace } from '../lib/ai';
 
 interface Deps {
   db: PrismaClient;
   videoProcessorUrl: string;
   uniquifyRenderQueue: Queue<UniquifyRenderJobPayload>;
   gptunnelService: GptunnelService;
+  storage: MinioStorageClient;
   connection: ConnectionOptions;
 }
 
@@ -115,7 +122,7 @@ function dimsForAspect(aspect: string | undefined): { width: number; height: num
 }
 
 export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
-  const { db, videoProcessorUrl, uniquifyRenderQueue, gptunnelService, connection } = deps;
+  const { db, videoProcessorUrl, uniquifyRenderQueue, gptunnelService, storage, connection } = deps;
 
   return new Worker<UniquifyAnalyzeJobPayload>(
     QUEUES['uniquify-analyze'].name,
@@ -234,21 +241,21 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         } else if (isPreserveContext) {
           // ── Preserve-Context mode: original voiceover and audio stay 100% intact!
           // We generate unique social captions/hashtags per variant, but do NOT replace voice!
+          // One distinct caption per copy (shared AI layer: OpenRouter → GPTunnel).
+          const brief = {
+            product: sourceVideo.title ?? 'Видео',
+            productInfo: (config.productInfo as string) ?? sourceVideo.description ?? undefined,
+            cta: { type: ((config.ctaType as CtaType) ?? 'article'), word: config.directWord as string | undefined },
+            transcript: Array.isArray(sourceVideo.transcript)
+              ? (sourceVideo.transcript as any[]).map((x) => x?.text ?? '').join(' ')
+              : undefined,
+            count: variantCount,
+          };
           try {
-            ({ captions } = await gptunnelService.generateScript({
-              title: sourceVideo.title ?? 'video',
-              description: sourceVideo.description ?? '',
-              productInfo: (config.productInfo as string) ?? undefined,
-              language,
-              variantCount,
-              targetSeconds,
-            }));
+            ({ captions } = await writeCaptions(await getLlm(), brief));
           } catch (e) {
-            logger.warn({ err: describeAxios(e) }, 'GPT caption generation fallback');
-            captions = Array.from({ length: variantCount }, (_, i) => ({
-              caption: `${sourceVideo.title ?? 'Видео'} (Вариант ${i + 1})`,
-              hashtags: ['#viral', '#reels', '#shorts', '#trending'],
-            }));
+            logger.warn({ err: (e as Error).message }, 'Uniquify: AI captions unavailable, using varied local captions');
+            captions = fallbackCaptions(brief);
           }
 
           if (enableSubtitles && sourceVideo.transcript) {
@@ -256,32 +263,47 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           }
         } else {
           // ── Remix-Montage mode: full script + shared TTS voiceover
+          // Fish Audio voices (catalogue / explicit provider) → Fish TTS with
+          // gender-aware, pace-calibrated script; otherwise legacy GPTunnel TTS.
+          const useFish = config.ttsProvider === 'fish' || Boolean(voiceById(voiceId));
+          const speed = typeof config.voiceSpeed === 'number' ? config.voiceSpeed : 1;
           try {
-            ({ script, captions } = await gptunnelService.generateScript({
-              title: sourceVideo.title ?? 'video',
-              description: sourceVideo.description ?? '',
-              productInfo: (config.productInfo as string) ?? undefined,
-              language,
-              variantCount,
-              targetSeconds,
-            }));
+            const res = await writeScript(await getLlm(), {
+              product: sourceVideo.title ?? 'Видео',
+              productInfo: (config.productInfo as string) ?? sourceVideo.description ?? undefined,
+              style: ((config.scriptStyle as ScriptStyle) ?? 'blogger'),
+              seconds: targetSeconds,
+              wps: useFish ? paceFor(await getPaceTable(), voiceId, speed) : 2.6,
+              narrator: useFish ? voiceGender(voiceId) : 'unknown',
+              cta: { type: ((config.ctaType as CtaType) ?? 'article'), word: config.directWord as string | undefined },
+              captionsCount: variantCount,
+              allowTemplate: false,
+            });
+            script = res.script;
+            captions = res.captions;
           } catch (e) {
-            throw new Error(`gpt-script: ${describeAxios(e)}`);
+            throw new Error(e instanceof LlmUnavailableError ? e.message : `script: ${(e as Error).message}`);
           }
 
-          let tts: { storageKey: string; cost: number };
-          try {
-            tts = await gptunnelService.ttsCreate({
-              text: script,
-              voiceId,
-              tenantId,
-              uniquifyJobId,
-            });
-          } catch (e) {
-            throw new Error(`tts (voiceId=${voiceId}): ${describeAxios(e)}`);
+          if (useFish) {
+            try {
+              const tts = await fishTts(await getFishConfig(), { text: script, voiceId, speed });
+              voiceoverKey = `tenants/${tenantId}/uniquify/${uniquifyJobId}/voiceover.mp3`;
+              await storage.uploadBuffer(voiceoverKey, tts.audio, { contentType: 'audio/mpeg' });
+              await recordPace(voiceId, speed, tts.words, tts.durationSec);
+            } catch (e) {
+              throw new Error(`tts Fish (voiceId=${voiceId}): ${(e as Error).message}`);
+            }
+          } else {
+            let tts: { storageKey: string; cost: number };
+            try {
+              tts = await gptunnelService.ttsCreate({ text: script, voiceId, tenantId, uniquifyJobId });
+            } catch (e) {
+              throw new Error(`tts (voiceId=${voiceId}): ${describeAxios(e)}`);
+            }
+            voiceoverKey = tts.storageKey;
+            ttsCost = tts.cost ?? 0;
           }
-          voiceoverKey = tts.storageKey;
-          ttsCost = tts.cost ?? 0;
 
           if (enableSubtitles) {
             let voiceDuration = 0;
@@ -372,6 +394,8 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
               fps,
               beatSync,
               stealth_level: (config.stealthLevel as string) || (config.stealth_level as string) || 'maximum',
+              allowMirror: config.allowMirror === true,
+              frameLayout: ['on', 'off', 'auto'].includes(config.frameLayout as string) ? config.frameLayout : 'auto',
               sceneBreaks: sceneBreaksBySource,
             } as any,
             opts: QUEUES['uniquify-render'].defaultJobOptions as any,

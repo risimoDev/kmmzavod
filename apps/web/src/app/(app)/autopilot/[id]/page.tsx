@@ -333,6 +333,7 @@ function toInput(ap: AutopilotDetail["autopilot"]): Partial<AutopilotInput> {
     montageMode: ap.montageMode,
     sourcesPerMontage: ap.sourcesPerMontage,
     sourceStrategy: ap.sourceStrategy,
+    pace: ap.pace ?? "normal",
     targetSeconds: ap.targetSeconds,
     aspect: ap.aspect,
     subtitleStyle: ap.subtitleStyle,

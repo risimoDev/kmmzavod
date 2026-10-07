@@ -868,6 +868,8 @@ model SocialAccount {
   // Shadow-ban detection
   shadowBanDetected  Boolean        @default(false) @map("shadow_ban_detected")
   shadowBanCheckedAt DateTime?      @map("shadow_ban_checked_at")
+  followers          Int?
+  statsAt            DateTime?      @map("stats_at")
   lastError          String?        @map("last_error")
   // ── Core fields ────────────────────────────────────────────────────
   isActive           Boolean        @default(true) @map("is_active")
@@ -879,6 +881,7 @@ model SocialAccount {
   proxy           Proxy?           @relation(fields: [proxyId], references: [id])
   publishJobs     PublishJob[]
   distributeItems DistributeItem[]
+  postMetrics     PostMetric[]
 
   @@unique([tenantId, platform, accountName])
   @@index([tenantId])
@@ -917,6 +920,15 @@ model PublishJob {
   publishedAt     DateTime?      @map("published_at")
   externalPostId  String?        @map("external_post_id")
   error           String?
+  // ── Метрики поста (последний снимок) + подтверждение публикации ──────────
+  views           Int?
+  likes           Int?
+  comments        Int?
+  metricsAt       DateTime?      @map("metrics_at")
+  // Пост найден на профиле (сопоставлен с плиткой сетки) — публикация подтверждена.
+  verifiedAt      DateTime?      @map("verified_at")
+  // ln((views+10)/(медиана аккаунта+10)) — успех поста относительно самого аккаунта.
+  perfScore       Float?         @map("perf_score")
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
 
@@ -925,6 +937,7 @@ model PublishJob {
   socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id])
   uniqueVariant   UniqueVariant?   @relation(fields: [uniqueVariantId], references: [id])
   distributeItems DistributeItem[]
+  metrics         PostMetric[]
 
   @@index([videoId])
   @@index([tenantId, status])
@@ -1492,6 +1505,7 @@ model Autopilot {
   montageMode         String           @default("multi") @map("montage_mode") // single (из одного видео) | multi (из нескольких)
   sourcesPerMontage   Int              @default(3) @map("sources_per_montage")
   sourceStrategy      String           @default("fresh_first") @map("source_strategy") // fresh_first | pool | fresh_only
+  pace                String           @default("normal") // calm | normal | fast — ритм нарезки
   targetSeconds       Int              @default(30) @map("target_seconds")
   aspect              String           @default("9:16")
   subtitleStyle       String           @default("tiktok") @map("subtitle_style")
@@ -1521,6 +1535,9 @@ model Autopilot {
   hashtags            String[]         @default([])
   bufferWindows       Int              @default(2) @map("buffer_windows") // держать готовых копий на N окон вперёд
   maxParallelBatches  Int              @default(2) @map("max_parallel_batches")
+  // ── Обучение на метриках ──────────────────────────────────────────────
+  learning            Boolean          @default(true) // выбирать подачу/голос/исходники по результатам постов
+  exploration         Float            @default(0.2) // доля «исследования» новых вариантов (0..1)
   // ── Состояние ──────────────────────────────────────────────────────────
   nextWindowAt        DateTime?        @map("next_window_at")
   lastWindowAt        DateTime?        @map("last_window_at")
@@ -1587,4 +1604,30 @@ model AutopilotRun {
 
   @@index([autopilotId, createdAt(sort: Desc)])
   @@map("autopilot_runs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST METRICS — временной ряд метрик постов (снимки профиля с телефона,
+// ручной ввод, API). Последний снимок денормализован в PublishJob.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PostMetric {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  publishJobId    String?  @map("publish_job_id") @db.Uuid
+  socialAccountId String   @map("social_account_id") @db.Uuid
+  collectedAt     DateTime @default(now()) @map("collected_at")
+  views           Int?
+  likes           Int?
+  comments        Int?
+  source          String // device | manual | api
+  position        Int? // индекс плитки в сетке профиля (device)
+  raw             Json     @default("{}")
+
+  publishJob    PublishJob?   @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@index([publishJobId, collectedAt])
+  @@index([socialAccountId, collectedAt])
+  @@map("post_metrics")
 }

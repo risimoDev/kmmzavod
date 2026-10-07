@@ -17,6 +17,7 @@ media-core in Phase 3b. Pipeline per clip:
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ from app.config import settings
 from app.models import AudioMode, EditMode
 from app.services import ffmpeg as fx
 from app.services.subtitle import SubLine, SubWord, generate_ass
+from app.services.script_align import align_to_script, lines_from_script
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,19 @@ def _run(cmd: list[str], label: str) -> None:
 
 def _even(n: int) -> int:
     return n - (n % 2)
+
+
+@functools.lru_cache(maxsize=64)
+def _probe_source(path: str) -> fx.ProbeInfo:
+    """Sources are immutable during a render — probe each once, not per segment."""
+    return fx.probe(path)
+
+
+# Voiceover montages end this long after the last word (music/fade room).
+VOICE_TAIL_SEC = 0.8
+# Up to this slow-down the picture is stretched to cover a longer voiceover;
+# beyond it the montage is looped instead (stretching more looks broken).
+MAX_STRETCH = 1.25
 
 
 @dataclass
@@ -134,8 +149,7 @@ def _prepare_segment(src_path: str, start: float, end: float, out_path: str,
     vf = _reframe_vf(out_w, out_h, track) + f",fps={fps}"
     dur = max(0.1, end - start)
 
-    probe = fx.probe(src_path)
-    has_audio = probe.has_audio and keep_audio
+    has_audio = _probe_source(src_path).has_audio and keep_audio
 
     cmd = [
         fx._bin("ffmpeg"), "-y",
@@ -268,6 +282,34 @@ def _build_voiceover_bed(video_path: str, voiceover_path: str, bgm_path: str | N
     _run(cmd, "voiceover_bed")
 
 
+def _fit_to_voice(video_path: str, voice_path: str, out_path: str, threads: int) -> str:
+    """Make the (video-only) montage exactly as long as the voiceover + tail:
+    stretch slightly or loop when it is short, trim when it runs on in silence.
+    Returns the path to use next (the input itself when no change is needed)."""
+    vdur = fx.probe(video_path).duration
+    adur = fx.probe(voice_path).duration
+    if vdur <= 0 or adur <= 0:
+        return video_path
+    target = adur + VOICE_TAIL_SEC
+    if abs(vdur - target) <= 0.25 or (vdur > target and vdur - target <= 1.5):
+        return video_path
+    enc = ["-c:v", "libx264", "-preset", settings.ffmpeg_interim_preset, "-crf", "18",
+           "-pix_fmt", "yuv420p", "-an", "-threads", str(threads)]
+    if vdur > target:
+        logger.info("Fit: trimming montage %.2fs → %.2fs (voice %.2fs)", vdur, target, adur)
+        _run([fx._bin("ffmpeg"), "-y", "-i", video_path, "-t", f"{target:.3f}", *enc, out_path], "fit_trim")
+    elif target / vdur <= MAX_STRETCH:
+        factor = target / vdur
+        logger.info("Fit: stretching montage ×%.3f (%.2fs → %.2fs)", factor, vdur, target)
+        _run([fx._bin("ffmpeg"), "-y", "-i", video_path, "-vf", f"setpts={factor:.5f}*PTS",
+              "-t", f"{target:.3f}", *enc, out_path], "fit_stretch")
+    else:
+        logger.warning("Fit: montage %.2fs much shorter than voice %.2fs — looping", vdur, adur)
+        _run([fx._bin("ffmpeg"), "-y", "-stream_loop", "-1", "-i", video_path,
+              "-t", f"{target:.3f}", *enc, out_path], "fit_loop")
+    return out_path
+
+
 def _lines_from_clip(clip) -> list[SubLine]:
     """Build subtitle lines from the clip's (possibly user-edited) EDL subtitles.
     Lines without word timings (typed by the user) get evenly-spread word timings
@@ -343,7 +385,9 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
                 mode: EditMode, audio_mode: AudioMode, out_w: int, out_h: int, fps: int,
                 smart_crop: bool, subtitle_style: str,
                 voiceover_path: str | None = None, bgm_path: str | None = None,
-                crf: int | None = None, threads: int | None = None) -> RenderResult:
+                crf: int | None = None, threads: int | None = None,
+                seed: int = 0, geometry: str | None = None,
+                voiceover_text: str = "") -> RenderResult:
     """Render one EDL clip (dict-like with .segments) to ``output_path``."""
     threads = threads if threads is not None else settings.ffmpeg_threads
     crf = crf if crf is not None else settings.ffmpeg_crf
@@ -359,19 +403,23 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
                          keep_audio, smart_crop, 1)
         seg_paths.append(out)
 
-    # 2. Concat. Highlights and speech cuts use clean hard cuts to preserve natural speech
-    # and keep subtitles perfectly synced without acrossfade audio blur.
-    # Mix montages use transitions.
+    # 2. Concat. The EDL says whether to use transitions (voiceover mixes) or
+    # clean hard cuts (speech: keeps words intact and subtitles in sync).
+    # Legacy EDLs without the flag: infer from geometry (never from the title).
     assembled = os.path.join(work_dir, "assembled.mp4")
-    seed = abs(hash((clip.title, len(clip.segments)))) % 100000
-    is_mix = getattr(clip, "geometry", None) == "mix" or (len(clip.segments) > 2 and clip.title == "Mix")
-    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads, seed=seed, transitions=is_mix)
+    transitions = getattr(clip, "transitions", None)
+    if transitions is None:
+        transitions = geometry == "mix" and audio_mode == AudioMode.REPLACE and len(clip.segments) > 1
+    _concat(seg_paths, assembled, with_audio=keep_audio, threads=threads, seed=seed,
+            transitions=bool(transitions))
 
-    # 3. Audio bed for replace mode.
+    # 3. Audio bed for replace mode — picture first fitted to the voiceover so
+    #    the CTA is never cut and the video doesn't run on in silence.
     pre_final = assembled
     if audio_mode == AudioMode.REPLACE and voiceover_path:
+        fitted = _fit_to_voice(assembled, voiceover_path, os.path.join(work_dir, "fitted.mp4"), threads)
         pre_final = os.path.join(work_dir, "with_voice.mp4")
-        _build_voiceover_bed(assembled, voiceover_path, bgm_path, pre_final, threads)
+        _build_voiceover_bed(fitted, voiceover_path, bgm_path, pre_final, threads)
     elif keep_audio and bgm_path:
         # BGM under the original audio, side-chain-ducked by the speech so the
         # music breathes: quiet under voice, fuller in the gaps.
@@ -395,7 +443,15 @@ def render_clip(clip, locals_by_idx: list[str], work_dir: str, output_path: str,
     ass_path: str | None = None
     if subtitle_style and subtitle_style != "none":
         if audio_mode == AudioMode.REPLACE and voiceover_path:
-            lines = _transcribe_for_subs(pre_final) or _lines_from_clip(clip)
+            heard = _transcribe_for_subs(pre_final)
+            if heard and voiceover_text.strip():
+                lines = align_to_script(heard, voiceover_text)       # script spelling, Whisper timing
+            elif heard:
+                lines = heard
+            elif voiceover_text.strip():
+                lines = lines_from_script(voiceover_text, fx.probe(voiceover_path).duration)
+            else:
+                lines = _lines_from_clip(clip)
         else:
             lines = _lines_from_clip(clip) or _transcribe_for_subs(pre_final)
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { FISH_VOICES } from '@kmmzavod/ai';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
@@ -54,6 +55,16 @@ const CreateUniquifyJobBody = z.object({
     aspectRatio: z.enum(['9:16', '1:1', '16:9', '4:5']).default('9:16'),
     fps: z.number().int().min(24).max(60).default(30),
     beatSync: z.boolean().default(true),
+    // Uniqueness levers. Mirroring flips on-screen text/logos → opt-in only.
+    allowMirror: z.boolean().default(false),
+    // Video scaled into a blurred copy of itself: off | on | auto (sometimes, maximum).
+    frameLayout: z.enum(['off', 'on', 'auto']).default('auto'),
+    // Remix voiceover: Fish Audio (catalogue voices) or legacy GPTunnel TTS.
+    ttsProvider: z.enum(['fish', 'gptunnel']).optional(),
+    voiceSpeed: z.number().min(0.5).max(2).optional(),
+    scriptStyle: z.enum(['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal']).optional(),
+    ctaType: z.enum(['article', 'direct', 'auto', 'none']).optional(),
+    directWord: z.string().max(50).optional(),
   }).default({}),
 });
 
@@ -92,6 +103,17 @@ const DistributeBody = z.object({
 });
 
 // ── Routes ───────────────────────────────────────────────────────────────────
+
+function stripSignature(t: unknown): unknown {
+  if (!t || typeof t !== 'object') return t;
+  const { signature: _sig, ...rest } = t as Record<string, unknown>;
+  return rest;
+}
+
+/** Fish Audio catalogue voices (preferred for remix voiceovers: gender-aware scripts). */
+function fishItems() {
+  return FISH_VOICES.map((v) => ({ id: v.id, name: `${v.name} · Fish`, provider: 'fish', gender: v.gender }));
+}
 
 export async function uniquifyRoutes(app: FastifyInstance) {
   // All routes require authentication
@@ -333,7 +355,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
         if (res.ok) {
           const data = (await res.json()) as Array<{ id: string; name: string }>;
           if (Array.isArray(data) && data.length > 0) {
-            return reply.send({ items: data.map((v) => ({ id: v.id, name: v.name })) });
+            return reply.send({ items: [...fishItems(), ...data.map((v) => ({ id: v.id, name: v.name, provider: 'gptunnel' }))] });
           }
         } else {
           logger.warn({ status: res.status }, 'GPTunnel /tts/voices returned non-OK, using fallback');
@@ -342,7 +364,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     } catch (err) {
       logger.warn({ err }, 'GPTunnel /tts/voices fetch failed, using fallback');
     }
-    return reply.send({ items: FALLBACK_VOICES });
+    return reply.send({ items: [...fishItems(), ...FALLBACK_VOICES.map((v: any) => ({ ...v, provider: 'gptunnel' }))] });
   });
 
   // ── Background-music library (per tenant) ─────────────────────────────────
@@ -732,6 +754,8 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const enriched = await Promise.all(
       items.map(async (v) => ({
         ...v,
+        // Signatures are large and internal; the UI gets recipe + uniqueness only.
+        transforms: stripSignature(v.transforms),
         downloadUrl: v.outputKey
           ? await app.storage.presignedUrl(v.outputKey, 3600).catch(() => null)
           : null,

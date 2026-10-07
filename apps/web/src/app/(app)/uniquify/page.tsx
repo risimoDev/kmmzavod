@@ -434,6 +434,8 @@ function CreateJobModal({
   const [enableBgm, setEnableBgm] = useState(true);
   const [beatSync, setBeatSync] = useState(true);
   const [stealthLevel, setStealthLevel] = useState<"maximum" | "standard">("maximum");
+  const [allowMirror, setAllowMirror] = useState(false);
+  const [frameLayout, setFrameLayout] = useState<"auto" | "on" | "off">("auto");
 
   const [tracks, setTracks] = useState<BgmTrack[]>([]);
   const [selectedTracks, setSelectedTracks] = useState<string[]>([]);
@@ -484,6 +486,10 @@ function CreateJobModal({
           enableBgm,
           beatSync: mode === 'preserve_context' ? false : beatSync,
           bgmTrackKeys: enableBgm ? selectedTracks : [],
+          allowMirror,
+          frameLayout,
+          ...(mode === 'remix_montage' && voices.find((v) => v.id === voiceId)?.provider === 'fish'
+            ? { ttsProvider: 'fish' as const } : {}),
         },
       });
       onCreated();
@@ -578,7 +584,8 @@ function CreateJobModal({
                     <span className="text-3xs px-1 rounded bg-emerald-500/20 text-emerald-300">Хит</span>
                   </div>
                   <p className="text-3xs text-text-tertiary leading-snug">
-                    Динамический Ken Burns зум, акустический рандомизатор частот, EXIF камеры iPhone 15 Pro, микро-зерно.
+                    Смещённый кадр 4–10%, поворот до 1.4°, оттенок и цвет, зерно, скорость ±5%, обрезка начала,
+                    сдвиг тона звука, своя кодировка и устройство в метаданных у каждой копии.
                   </p>
                 </div>
 
@@ -595,11 +602,30 @@ function CreateJobModal({
                     <span>⚡ Быстрый</span>
                   </div>
                   <p className="text-3xs text-text-tertiary leading-snug">
-                    Статический микро-зум, базовая цветокоррекция, очистка метаданных.
+                    Лёгкий сдвиг кадра и цвета, скорость ±3%, EQ звука без сдвига тона, своя кодировка и метаданные.
+                    Почти незаметно глазу, но слабее для антидублей.
                   </p>
                 </div>
               </div>
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Field label="Рамка с размытым фоном">
+                <select value={frameLayout} onChange={(e) => setFrameLayout(e.target.value as any)}
+                  className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary">
+                  <option value="auto">Иногда (≈30% копий, только Ultra)</option>
+                  <option value="on">Во всех копиях</option>
+                  <option value="off">Никогда</option>
+                </select>
+              </Field>
+              <div className="pt-5">
+                <Checkbox checked={allowMirror} onChange={setAllowMirror}
+                  label="Разрешить зеркалирование (перевернёт надписи и логотипы)" />
+              </div>
+            </div>
+            <p className="text-3xs text-text-tertiary">
+              После рендера каждая копия измеряется: насколько её картинка и звук отличаются от исходника и от других
+              копий. Слабые копии помечаются и не публикуются автопилотом.
+            </p>
           </div>
         ) : (
           <Field label="Что за товар (для написания сценария и озвучки)">
@@ -658,12 +684,17 @@ function CreateJobModal({
               onChange={(e) => setVoiceId(e.target.value)}
               className="w-full h-9 rounded-lg bg-surface-2 ring-1 ring-border px-2 text-xs text-text-primary"
             >
-              <option value="">По умолчанию (ALEX)</option>
-              {voices.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                </option>
-              ))}
+              <option value="">По умолчанию (ALEX, GPTunnel)</option>
+              <optgroup label="Fish Audio — сценарий под род и темп голоса">
+                {voices.filter((v) => v.provider === "fish").map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </optgroup>
+              <optgroup label="GPTunnel">
+                {voices.filter((v) => v.provider !== "fish").map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </optgroup>
             </select>
           </Field>
         )}

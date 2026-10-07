@@ -16,8 +16,11 @@ import {
   EmptyState,
 } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
+import { PACES, PRODUCTS, montageOptions, productOf } from "@/components/editor/products";
+import { AiStudio } from "@/components/editor/AiStudio";
 import {
   editorApi,
+  type EditPace,
   type EditProjectDetail,
   type EditClip,
   type EditOutput,
@@ -443,203 +446,14 @@ export default function EditorProjectDetailPage() {
   const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // AI Studio (OpenRouter + Fish Audio)
+  // AI-студия (компонент AiStudio) и сейф-зоны
   const [showAiStudio, setShowAiStudio] = useState(false);
-  const [aiTopic, setAiTopic] = useState("");
-  const [aiProductInfo, setAiProductInfo] = useState("");
-  const [aiStyle, setAiStyle] = useState("blogger");
-  const [ctaType, setCtaType] = useState<"article" | "direct">("article");
-  const [directWord, setDirectWord] = useState("ХОЧУ");
-  const [aiSeconds, setAiSeconds] = useState(30);
-  const [aiScript, setAiScript] = useState("");
-  const [aiHook, setAiHook] = useState("");
-  const [aiGenerating, setAiGenerating] = useState(false);
-  const [voices, setVoices] = useState<FishAudioVoice[]>([]);
-  const [selectedVoiceId, setSelectedVoiceId] = useState("e04b4c73046f491c89366fbca39d48dd");
-  const [customVoiceId, setCustomVoiceId] = useState("");
-  const [voiceSpeed, setVoiceSpeed] = useState(1.0);
-  const [synthesizing, setSynthesizing] = useState(false);
-  const [voiceoverAudioUrl, setVoiceoverAudioUrl] = useState<string | null>(null);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [showSafeZones, setShowSafeZones] = useState(false);
-  const [fishApiKey, setFishApiKey] = useState("");
-  const [openRouterApiKey, setOpenRouterApiKey] = useState("");
-  const [showKeyConfig, setShowKeyConfig] = useState(false);
   const [geometryNotice, setGeometryNotice] = useState(false);
-  const scriptTextareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setFishApiKey(localStorage.getItem("fish_audio_api_key") || "");
-      setOpenRouterApiKey(localStorage.getItem("openrouter_api_key") || "");
-    }
-  }, []);
-
-  const saveFishApiKey = (key: string) => {
-    setFishApiKey(key);
-    if (typeof window !== "undefined") {
-      if (key.trim()) localStorage.setItem("fish_audio_api_key", key.trim());
-      else localStorage.removeItem("fish_audio_api_key");
-    }
-  };
-
-  const saveOpenRouterApiKey = (key: string) => {
-    setOpenRouterApiKey(key);
-    if (typeof window !== "undefined") {
-      if (key.trim()) localStorage.setItem("openrouter_api_key", key.trim());
-      else localStorage.removeItem("openrouter_api_key");
-    }
-  };
-
-  function insertEmotionTag(tag: string) {
-    const el = scriptTextareaRef.current;
-    const insertion = `[${tag}] `;
-    if (!el) {
-      setAiScript((prev) => (prev ? `${prev} ${insertion}` : insertion));
-      return;
-    }
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const text = el.value;
-    const updated = text.substring(0, start) + insertion + text.substring(end);
-    setAiScript(updated);
-    setTimeout(() => {
-      el.focus();
-      el.setSelectionRange(start + insertion.length, start + insertion.length);
-    }, 10);
-  }
-
-  useEffect(() => {
-    editorApi.getVoices({ apiKey: fishApiKey || undefined }).then((res) => {
-      if (res.voices?.length) {
-        setVoices(res.voices);
-      }
-    }).catch(() => {});
-  }, [fishApiKey]);
-
-  useEffect(() => {
-    if (project) {
-      if (project.name && !aiTopic) {
-        setAiTopic(project.name);
-      }
-      if (project.config) {
-        const cfg = project.config as Record<string, any>;
-        if (cfg.productInfo && !aiProductInfo) setAiProductInfo(cfg.productInfo);
-        if (cfg.generatedScript && !aiScript) setAiScript(cfg.generatedScript);
-        if (cfg.scriptHook && !aiHook) setAiHook(cfg.scriptHook);
-        if (cfg.ctaType === 'article' || cfg.ctaType === 'direct') setCtaType(cfg.ctaType);
-        if (cfg.directWord) setDirectWord(cfg.directWord);
-        const vId = cfg.voiceId || (project as any).voiceId;
-        if (vId) {
-          setSelectedVoiceId(vId);
-          const isPreset = voices.some((v) => v.id === vId);
-          if (!isPreset && vId !== "e04b4c73046f491c89366fbca39d48dd") {
-            setCustomVoiceId(vId);
-          }
-        }
-        if (cfg.voiceSpeed) setVoiceSpeed(cfg.voiceSpeed);
-      }
-    }
-    // Auto-sync aiSeconds with total included clips duration
-    if (project?.clips && project.clips.length > 0) {
-      const includedClips = project.clips.filter((c: any) => c.included);
-      const totalDur = includedClips.reduce((sum: number, c: any) => sum + (Number(c.durationSec) || 0), 0);
-      if (totalDur > 0) {
-        setAiSeconds(Math.round(totalDur));
-      }
-    }
-  }, [project, voices]);
-
-  async function handleSelectVoice(vId: string) {
-    setSelectedVoiceId(vId);
-    setCustomVoiceId("");
-    if (id) {
-      await editorApi.patchProject(id, { voiceId: vId } as any).catch(() => {});
-    }
-  }
-
-  async function handleCustomVoiceChange(val: string) {
-    setCustomVoiceId(val);
-    const effective = val.trim() || selectedVoiceId;
-    if (id && val.trim()) {
-      await editorApi.patchProject(id, { voiceId: effective } as any).catch(() => {});
-    }
-  }
-
-  async function handleGenerateScript() {
-    const effectiveTopic = aiTopic.trim() || project?.name || "Видеоролик";
-    setAiGenerating(true);
-    try {
-      const res = await editorApi.generateScript(id, {
-        topic: effectiveTopic,
-        projectName: project?.name,
-        productInfo: aiProductInfo.trim() || undefined,
-        style: aiStyle,
-        ctaType,
-        directWord: ctaType === "direct" ? (directWord.trim() || "ХОЧУ") : undefined,
-        targetSeconds: aiSeconds,
-        mode: 'generate',
-        useSourceTranscript: true,
-        apiKey: openRouterApiKey.trim() || undefined,
-      });
-      setAiScript(res.script);
-      setAiHook(res.hook);
-    } catch (e: any) {
-      alert(e.message || "Ошибка генерации сценария");
-    } finally {
-      setAiGenerating(false);
-    }
-  }
-
-  async function handleFitScript() {
-    if (!aiScript.trim()) {
-      return handleGenerateScript();
-    }
-    setAiGenerating(true);
-    try {
-      const res = await editorApi.generateScript(id, {
-        topic: aiTopic.trim() || project?.name || "Видеоролик",
-        projectName: project?.name,
-        productInfo: aiProductInfo.trim() || undefined,
-        currentScript: aiScript,
-        mode: 'fit',
-        style: aiStyle,
-        ctaType,
-        directWord: ctaType === "direct" ? (directWord.trim() || "ХОЧУ") : undefined,
-        targetSeconds: aiSeconds,
-        useSourceTranscript: true,
-        apiKey: openRouterApiKey.trim() || undefined,
-      });
-      setAiScript(res.script);
-      if (res.hook) setAiHook(res.hook);
-    } catch (e: any) {
-      alert(e.message || "Ошибка адаптации текста под хронометраж");
-    } finally {
-      setAiGenerating(false);
-    }
-  }
-
-  async function handleGenerateVoice() {
-    if (!aiScript.trim()) return;
-    setSynthesizing(true);
-    setVoiceError(null);
-    try {
-      const effectiveVoiceId = customVoiceId.trim() || selectedVoiceId;
-      const res = await editorApi.generateVoice(id, {
-        text: aiScript,
-        voiceId: effectiveVoiceId,
-        speed: voiceSpeed,
-        apiKey: fishApiKey.trim() || undefined,
-      });
-      setVoiceoverAudioUrl(res.audioUrl);
-      await load();
-    } catch (e: any) {
-      setVoiceError(e.message || "Ошибка генерации голоса Fish Audio");
-    } finally {
-      setSynthesizing(false);
-    }
-  }
-
+  const [uniqCopies, setUniqCopies] = useState(5);
+  const [uniqStealth, setUniqStealth] = useState<"standard" | "maximum">("maximum");
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<{ ok: boolean; text: string; jobIds: string[] } | null>(null);
   async function changeGeometry(geometry: "highlights" | "mix") {
     if (!project) return;
     setProject({ ...project, geometry });
@@ -652,6 +466,42 @@ export default function EditorProjectDetailPage() {
     setProject({ ...project, targetClipCount });
     setGeometryNotice(true);
     await editorApi.patchProject(id, { targetClipCount }).catch(() => {});
+  }
+
+  async function changeVariantCount(variantCount: number) {
+    if (!project) return;
+    setProject({ ...project, config: { ...(project.config ?? {}), variantCount } });
+    setGeometryNotice(true);
+    await editorApi.patchProject(id, { variantCount }).catch(() => {});
+  }
+
+  async function changePace(pace: EditPace) {
+    if (!project) return;
+    setProject({ ...project, config: { ...(project.config ?? {}), pace } });
+    setGeometryNotice(true);
+    await editorApi.patchProject(id, { pace }).catch(() => {});
+  }
+
+  /** New seed → a different storyboard from the same footage (analysis is cached). */
+  async function reroll() {
+    if (project && project.clips.some((c) => c.outputKey) &&
+        !confirm("Новые варианты заменят текущую раскадровку. Готовые ролики останутся в проекте. Продолжить?")) return;
+    setBusy(true);
+    setGeometryNotice(false);
+    try { await editorApi.analyze(id, { reroll: true }); await load(); } finally { setBusy(false); }
+  }
+
+  async function sendToUniquify() {
+    setSending(true);
+    setSendResult(null);
+    try {
+      const r = await editorApi.sendToUniquify(id, { variantCount: uniqCopies, stealthLevel: uniqStealth });
+      setSendResult({ ok: true, text: `Запущено: ${r.jobs.length} × ${uniqCopies} = ${r.totalVariants} уникальных копий`, jobIds: r.jobs.map((j) => j.uniquifyJobId) });
+    } catch (e: any) {
+      setSendResult({ ok: false, text: e?.message ?? "Ошибка", jobIds: [] });
+    } finally {
+      setSending(false);
+    }
   }
 
   async function changeSubtitleStyle(style: string) {
@@ -814,12 +664,17 @@ export default function EditorProjectDetailPage() {
   const isWorking = project.status === "analyzing" || project.status === "rendering";
   const aspectCss = project.aspect.replace(":", "/");
   const showStoryboard = project.clips.length > 0 && project.status !== "analyzing";
+  const product = productOf(project);
+  const isUniquify = product !== "smart_montage";
+  const opts = montageOptions(project);
+  const showVariants = isUniquify || project.geometry === "mix";
+  const prevJobIds = sendResult?.jobIds.length ? sendResult.jobIds : opts.uniquifyJobIds;
 
   return (
     <div className="flex flex-col h-full">
       <TopBar
         title={project.name}
-        subtitle={project.mode === "smart_montage" ? "Интеллектуальный монтаж" : "Нарезка под уникализацию"}
+        subtitle={PRODUCTS.find((x) => x.value === product)?.label ?? "Монтаж"}
         actions={
           <Button variant="ghost" size="sm" onClick={() => router.push("/editor")}>
             ← К проектам
@@ -846,6 +701,7 @@ export default function EditorProjectDetailPage() {
         {/* Панель сборки: Режим (Хайлайты / Микс) и число клипов */}
         <div className="flex items-center justify-between flex-wrap gap-2.5 rounded-xl border border-border bg-surface-1 p-3">
           <div className="flex items-center gap-3 flex-wrap">
+            {!isUniquify && (
             <div className="flex items-center gap-1.5">
               <span className="text-2xs font-semibold uppercase text-text-tertiary">Режим сборки:</span>
               <button
@@ -870,9 +726,44 @@ export default function EditorProjectDetailPage() {
                     : "bg-surface-2 text-text-secondary hover:text-text-primary"
                 )}
               >
-                <span>🎛️ Микс (1 ролик)</span>
+                <span>🎛️ Микс</span>
               </button>
             </div>
+            )}
+
+            {showVariants && (
+              <div className={cn("flex items-center gap-1.5", !isUniquify && "pl-2 border-l border-border")}>
+                <span className="text-2xs font-semibold uppercase text-text-tertiary">Вариантов:</span>
+                {[1, 2, 3, 4, 5, 6, 8, 10].map((num) => (
+                  <button key={num} type="button" onClick={() => changeVariantCount(num)}
+                    className={cn(
+                      "w-6 h-6 rounded flex items-center justify-center text-xs font-mono transition-all",
+                      opts.variantCount === num
+                        ? "bg-brand-500 text-white font-bold"
+                        : "bg-surface-2 text-text-secondary hover:bg-surface-3"
+                    )}>
+                    {num}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {showVariants && (
+              <div className="flex items-center gap-1.5 pl-2 border-l border-border">
+                <span className="text-2xs font-semibold uppercase text-text-tertiary">Темп:</span>
+                {PACES.map((pc) => (
+                  <button key={pc.value} type="button" onClick={() => changePace(pc.value)} title={pc.hint}
+                    className={cn(
+                      "px-2 py-1 rounded-lg text-xs transition-all",
+                      opts.pace === pc.value
+                        ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-semibold"
+                        : "bg-surface-2 text-text-secondary hover:text-text-primary"
+                    )}>
+                    {pc.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {project.geometry === "highlights" && (
               <div className="flex items-center gap-1.5 pl-2 border-l border-border">
@@ -896,6 +787,12 @@ export default function EditorProjectDetailPage() {
             )}
           </div>
 
+          {!geometryNotice && showVariants && project.clips.length > 0 && (
+            <Button size="xs" variant="secondary" onClick={reroll} loading={busy || project.status === "analyzing"}
+              disabled={isWorking} title="Новая комбинация фрагментов из тех же исходников (анализ кэширован — это быстро)">
+              🎲 Другие варианты
+            </Button>
+          )}
           {geometryNotice && (
             <div className="flex items-center gap-2 animate-fade-in">
               <span className="text-2xs text-warning">Параметры изменены.</span>
@@ -956,418 +853,12 @@ export default function EditorProjectDetailPage() {
               onClick={() => setShowAiStudio(!showAiStudio)}
               className="gap-1.5"
             >
-              <span>✨ AI Студия: Сценарий & Озвучка</span>
+              <span>✨ AI-студия: сценарий и озвучка</span>
             </Button>
           </div>
         </div>
 
-        {/* AI Студия: OpenRouter Free Cascade + Fish Audio s2.1-pro-free */}
-        {showAiStudio && (
-          <Card className="border-brand-500/40 bg-gradient-to-br from-surface-1 via-surface-2/70 to-surface-1 shadow-elevation-2 animate-fade-in">
-            <CardContent className="p-5 space-y-4">
-              <div className="flex items-center justify-between border-b border-border/60 pb-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">🎙️</span>
-                  <div>
-                    <h3 className="font-semibold text-text-primary text-base">
-                      AI Студия: Генерация сценария и озвучки
-                    </h3>
-                    <p className="text-xs text-text-secondary">
-                      Сценарий через OpenRouter (каскад бесплатных моделей) → Озвучка через Fish Audio (s2.1-pro-free) → точные субтитры по голосу
-                    </p>
-                  </div>
-                </div>
-                <Button size="xs" variant="ghost" onClick={() => setShowAiStudio(false)}>
-                  ✕ Закрыть
-                </Button>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-3">
-                {/* 1. Тема и стиль сценария */}
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase text-text-tertiary">
-                      1. Сценарий (OpenRouter)
-                    </span>
-                    <span className="text-3xs font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
-                      Free Cascade
-                    </span>
-                  </div>
-
-                  <div>
-                    <label className="text-3xs text-text-tertiary mb-1 block">Товар / тема ролика:</label>
-                    <input
-                      value={aiTopic}
-                      onChange={(e) => setAiTopic(e.target.value)}
-                      placeholder="Например: Беспроводная плойка для волос..."
-                      className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-3xs text-text-tertiary">Фишки / особенности / польза:</label>
-                      <span className="text-3xs text-text-tertiary">автосохранение</span>
-                    </div>
-                    <textarea
-                      rows={2}
-                      value={aiProductInfo}
-                      onChange={(e) => setAiProductInfo(e.target.value)}
-                      onBlur={() => {
-                        if (id && aiProductInfo.trim()) {
-                          editorApi.patchProject(id, { productInfo: aiProductInfo.trim() } as any).catch(() => {});
-                        }
-                      }}
-                      placeholder="Например: локоны за 5 секунд, керамика не портит волосы, держит укладку весь день..."
-                      className="w-full bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none leading-relaxed"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-3xs text-text-tertiary block font-medium">Формат / Подача товара:</label>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {[
-                        { id: "blogger", label: "🛍️ Блогер / Находка", desc: "Распаковка, восторг, живой UGC" },
-                        { id: "story", label: "💡 Боль → Решение", desc: "Проблема с товаром До/После" },
-                        { id: "review", label: "🔍 Тест девайса", desc: "Честный краш-тест и разбор" },
-                        { id: "hype", label: "⚡ Вирусный POV", desc: "Шок-эффект, динамика, крючок" },
-                      ].map((st) => (
-                        <button
-                          key={st.id}
-                          type="button"
-                          onClick={() => setAiStyle(st.id)}
-                          className={cn(
-                            "px-2 py-1.5 rounded text-left transition-all",
-                            aiStyle === st.id
-                              ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40 font-medium"
-                              : "bg-surface-3 text-text-secondary hover:text-text-primary"
-                          )}
-                        >
-                          <div className="text-2xs font-medium">{st.label}</div>
-                          <div className="text-3xs text-text-tertiary">{st.desc}</div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* CTA Selector: Артикул vs Слово в Директ */}
-                  <div className="space-y-1.5 rounded-lg bg-surface-2/60 p-2 border border-border/60">
-                    <div className="flex items-center justify-between">
-                      <label className="text-3xs text-text-tertiary font-semibold uppercase">Призыв к действию (CTA):</label>
-                      <span className="text-3xs text-text-tertiary">в конце ролика</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCtaType("article");
-                          if (id) editorApi.patchProject(id, { ctaType: "article" } as any).catch(() => {});
-                        }}
-                        className={cn(
-                          "px-2 py-1 rounded text-2xs font-medium transition-all text-center",
-                          ctaType === "article"
-                            ? "bg-brand-500/25 text-brand-300 ring-1 ring-brand-500/50"
-                            : "bg-surface-3 text-text-secondary hover:text-text-primary"
-                        )}
-                      >
-                        📦 Артикул (WB/Ozon)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCtaType("direct");
-                          if (id) editorApi.patchProject(id, { ctaType: "direct" } as any).catch(() => {});
-                        }}
-                        className={cn(
-                          "px-2 py-1 rounded text-2xs font-medium transition-all text-center",
-                          ctaType === "direct"
-                            ? "bg-brand-500/25 text-brand-300 ring-1 ring-brand-500/50"
-                            : "bg-surface-3 text-text-secondary hover:text-text-primary"
-                        )}
-                      >
-                        📩 Слово в Директ
-                      </button>
-                    </div>
-
-                    {ctaType === "article" ? (
-                      <p className="text-3xs text-text-tertiary leading-snug">
-                        AI нативно упомянет артикул: <i>«артикул оставил в описании / комментариях / закрепе»</i>
-                      </p>
-                    ) : (
-                      <div className="space-y-1 pt-1 animate-fade-in">
-                        <div className="flex items-center justify-between text-3xs text-text-tertiary">
-                          <span>Кодовое слово для Direct:</span>
-                          <span className="font-mono text-brand-400">«Пиши {directWord || '...'}»</span>
-                        </div>
-                        <input
-                          value={directWord}
-                          onChange={(e) => {
-                            const val = e.target.value.toUpperCase();
-                            setDirectWord(val);
-                          }}
-                          onBlur={() => {
-                            if (id) editorApi.patchProject(id, { directWord } as any).catch(() => {});
-                          }}
-                          placeholder="ПЛОЙКА, ХОЧУ, ССЫЛКА..."
-                          className="w-full bg-surface-1 border border-border rounded px-2 py-1 text-2xs font-mono text-text-primary uppercase tracking-wide focus:outline-none focus:ring-1 focus:ring-brand-500"
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-text-secondary">Длительность:</span>
-                    <span className="font-mono text-brand-400 font-semibold">{aiSeconds} сек</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={15}
-                    max={60}
-                    step={5}
-                    value={aiSeconds}
-                    onChange={(e) => setAiSeconds(Number(e.target.value))}
-                    className="w-full accent-brand-500"
-                  />
-
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    className="w-full"
-                    loading={aiGenerating}
-                    disabled={!aiTopic.trim() && !project?.name}
-                    onClick={handleGenerateScript}
-                  >
-                    ⚡ Сгенерировать сценарий
-                  </Button>
-                </div>
-
-                {/* 2. Текст сценария (редактируемый) + Эмоции Fish Audio */}
-                {/* 2. Текст сценария & Озвучка */}
-                <div className="space-y-2">
-                  {(() => {
-                    const cleanText = aiScript.replace(/\[[a-zA-Z_\s-]+\]/g, '').trim();
-                    const scriptWords = cleanText ? cleanText.split(/\s+/).filter(Boolean).length : 0;
-                    const estSpeechSec = Math.round(scriptWords / 2.05);
-                    const diffSec = estSpeechSec - aiSeconds;
-                    const isSynced = Math.abs(diffSec) <= 2;
-                    return (
-                      <>
-                        <div className="flex items-center justify-between text-2xs">
-                          <span className="font-semibold uppercase text-text-tertiary">
-                            2. Текст для диктора
-                          </span>
-                          <div className="flex items-center gap-1.5 font-mono">
-                            <span className="text-text-secondary">{scriptWords} слов</span>
-                            <span className="text-text-tertiary">·</span>
-                            <span
-                              className={cn(
-                                "px-1.5 py-0.5 rounded text-3xs font-semibold",
-                                scriptWords === 0
-                                  ? "text-text-tertiary bg-surface-2"
-                                  : isSynced
-                                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                                  : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                              )}
-                              title="Расчётная длительность озвучки относительно хронометража ролика"
-                            >
-                              ~{estSpeechSec}с / ролик {aiSeconds}с
-                              {scriptWords > 0 && !isSynced && ` (${diffSec > 0 ? `+${diffSec}` : diffSec}с)`}
-                            </span>
-                          </div>
-                        </div>
-
-                        {scriptWords > 0 && !isSynced && (
-                          <div className="flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-3xs text-amber-300 animate-fade-in">
-                            <span>
-                              {diffSec < 0
-                                ? `⚠️ Текст короче видео на ${Math.abs(diffSec)} сек (в конце останется тишина).`
-                                : `⚠️ Текст длиннее видео на ${diffSec} сек (голос может обрезаться).`}
-                            </span>
-                            <button
-                              type="button"
-                              disabled={aiGenerating}
-                              onClick={handleFitScript}
-                              className="underline hover:text-amber-200 font-semibold ml-2 shrink-0 disabled:opacity-50"
-                            >
-                              {aiGenerating ? "Подгонка..." : `Подогнать под ${aiSeconds}с`}
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    );
-                  })()}
-
-                  {aiHook && (
-                    <div className="rounded-md bg-brand-500/10 border border-brand-500/30 p-2 text-2xs text-brand-300">
-                      <span className="font-bold">Хук (0-3с): </span>{aiHook}
-                    </div>
-                  )}
-
-                  {/* Быстрые теги эмоций Fish Audio */}
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-3xs font-semibold uppercase text-text-tertiary">Эмоции Fish Audio:</span>
-                      {aiScript.trim() && (
-                        <button
-                          type="button"
-                          disabled={aiGenerating}
-                          onClick={handleFitScript}
-                          className="text-3xs font-semibold px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 border border-brand-500/40 hover:bg-brand-500/30 transition-all disabled:opacity-50"
-                          title={`Дополнить и улучшить текст ровно под ${aiSeconds} секунд`}
-                        >
-                          {aiGenerating ? "✨ Подгоняем..." : `✨ Подогнать под ${aiSeconds}с`}
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {[
-                        { tag: "excited", label: "🔥 Драйв", title: "Энергично, воодушевленно" },
-                        { tag: "confident", label: "💼 Уверенно", title: "Авторитетный эксперт" },
-                        { tag: "whispering", label: "🤫 Шёпотом", title: "Интрига, по секрету" },
-                        { tag: "laughing", label: "😂 Смех", title: "С лёгким смехом/юмором" },
-                        { tag: "surprised", label: "😲 Шок", title: "Удивление, сенсация" },
-                        { tag: "gasp", label: "😱 Вздох шока", title: "Резкий вдох от неожиданности" },
-                        { tag: "urgent", label: "⚡ Срочно", title: "Призыв к действию / CTA" },
-                        { tag: "curious", label: "🧐 Интрига", title: "С любопытством" },
-                        { tag: "calm", label: "😌 Спокойно", title: "Размеренно" },
-                        { tag: "sigh", label: "😮‍💨 Вздох", title: "Со вздохом" },
-                      ].map((em) => (
-                        <button
-                          key={em.tag}
-                          type="button"
-                          onClick={() => insertEmotionTag(em.tag)}
-                          title={em.title}
-                          className="px-1.5 py-0.5 rounded bg-surface-3 hover:bg-surface-4 text-3xs font-medium text-text-secondary hover:text-brand-300 transition-all border border-border"
-                        >
-                          {em.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <textarea
-                    ref={scriptTextareaRef}
-                    rows={6}
-                    value={aiScript}
-                    onChange={(e) => setAiScript(e.target.value)}
-                    placeholder="Здесь появится готовый текст для озвучки с тегами [excited], [confident]... Или напишите свой."
-                    className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs text-text-primary font-sans leading-relaxed resize-none focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  />
-
-                  <p className="text-3xs text-text-tertiary">
-                    Теги в скобках управляют эмоциями диктора и автоматически вырезаются из видео-субтитров.
-                  </p>
-                </div>
-
-                {/* 3. Голос Fish Audio & Синтез */}
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase text-text-tertiary">
-                      3. Диктор (Fish Audio)
-                    </span>
-                    <span className="text-3xs font-mono px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400">
-                      s2.1-pro-free
-                    </span>
-                  </div>
-
-                  {/* Статус API-ключа Fish Audio */}
-                  <div className="rounded-lg bg-surface-2/80 p-2.5 border border-border space-y-1.5">
-                    <div className="flex items-center justify-between text-2xs">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        <span className="text-text-primary font-medium">Fish Audio API: подключен (.env)</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowKeyConfig(!showKeyConfig)}
-                        className="text-text-tertiary hover:text-text-secondary text-3xs underline"
-                      >
-                        {showKeyConfig ? "скрыть" : (fishApiKey ? "свой ключ (активен)" : "свой ключ")}
-                      </button>
-                    </div>
-                    {showKeyConfig && (
-                      <div className="space-y-1 pt-1 border-t border-border/50 animate-fade-in">
-                        <input
-                          type="password"
-                          value={fishApiKey}
-                          onChange={(e) => saveFishApiKey(e.target.value)}
-                          placeholder="Опционально: свой ключ (по умолчанию берётся из .env сервера)"
-                          className="w-full bg-surface-1 border border-border rounded px-2 py-1 text-2xs text-text-primary"
-                        />
-                        <p className="text-3xs text-text-tertiary">
-                          Если оставить пустым — используется системный ключ из .env сервера.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {voiceError && (
-                    <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5 text-2xs text-danger space-y-1 animate-fade-in">
-                      <p className="font-semibold">⚠️ {voiceError}</p>
-                    </div>
-                  )}
-
-                  <select
-                    value={selectedVoiceId}
-                    onChange={(e) => handleSelectVoice(e.target.value)}
-                    className="w-full bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  >
-                    {voices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} ({v.gender === "female" ? "жен." : "муж."})
-                      </option>
-                    ))}
-                  </select>
-
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-3xs text-text-tertiary">
-                      <span>Или свой Voice ID:</span>
-                      {customVoiceId.trim() && <span className="text-emerald-400 font-medium">✓ сохранен в БД</span>}
-                    </div>
-                    <input
-                      value={customVoiceId}
-                      onChange={(e) => handleCustomVoiceChange(e.target.value)}
-                      placeholder="Опционально: ID голоса из fish.audio (сохраняется в проект)"
-                      className="w-full bg-surface-2 border border-border rounded px-2 py-1 text-2xs text-text-primary placeholder:text-text-tertiary"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-text-secondary">Скорость речи:</span>
-                    <span className="font-mono text-brand-400 font-semibold">{voiceSpeed.toFixed(1)}x</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.8}
-                    max={1.3}
-                    step={0.05}
-                    value={voiceSpeed}
-                    onChange={(e) => setVoiceSpeed(Number(e.target.value))}
-                    className="w-full accent-brand-500"
-                  />
-
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    className="w-full"
-                    loading={synthesizing}
-                    disabled={!aiScript.trim()}
-                    onClick={handleGenerateVoice}
-                  >
-                    🎙️ Озвучить через Fish Audio
-                  </Button>
-
-                  {voiceoverAudioUrl && (
-                    <div className="space-y-1 pt-1 animate-fade-in">
-                      <p className="text-3xs text-emerald-400 font-medium">✓ Озвучка готова и привязана:</p>
-                      <audio controls src={voiceoverAudioUrl} className="w-full h-8 rounded" />
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        {showAiStudio && <AiStudio project={project} onChanged={load} />}
 
         {project.status === "failed" && project.error && (
           <Card className="border-danger/40 bg-danger/5">
@@ -1411,6 +902,12 @@ export default function EditorProjectDetailPage() {
               </Button>
             </div>
 
+            {product === "uniquify_one" && project.sources.length > 1 && (
+              <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
+                Режим «из одного видео», а загружено {project.sources.length} — они будут смешаны как в режиме «из нескольких».
+                Для перемонтажа одного ролика оставьте один источник.
+              </p>
+            )}
             <input ref={fileRef} type="file" accept="video/*" multiple hidden
               onChange={(e) => onUpload(e.target.files)} />
             <div
@@ -1612,6 +1109,22 @@ export default function EditorProjectDetailPage() {
                             «{c.transcriptSnippet}»
                           </p>
                         )}
+                        {c.edl?.voiceover && (
+                          <p className="text-2xs text-brand-400 px-1 -mx-1" title={c.edl.voiceover.text}>
+                            🎙 AI-озвучка {Number(c.edl.voiceover.durationSec).toFixed(1)}с
+                          </p>
+                        )}
+                        {c.edl?.warning && (
+                          <p className="text-2xs text-warning leading-snug px-1 -mx-1" title={c.edl.warning}>
+                            ⚠ {c.edl.warning}
+                          </p>
+                        )}
+                        {(c.edl?.segments?.length ?? 0) > 1 && (
+                          <p className="text-2xs text-text-tertiary px-1 -mx-1">
+                            {c.edl!.segments!.length} кадров · {new Set(c.edl!.segments!.map((x) => x.src_idx)).size} исх.
+                            {c.edl?.transitions ? " · с переходами" : ""}
+                          </p>
+                        )}
                         <div className="flex items-center justify-between text-2xs text-text-tertiary">
                           <span className="font-mono">
                             score {Number(c.score).toFixed(2)}
@@ -1685,11 +1198,50 @@ export default function EditorProjectDetailPage() {
                   <Button size="sm" variant="secondary" onClick={() => router.push("/projects")}>
                     📁 К проектам
                   </Button>
-                  <Button size="sm" variant="primary" onClick={() => router.push("/uniquify")}>
-                    ⚡ В уникализацию
-                  </Button>
+
                 </div>
               </div>
+              {outputs.some((o) => o.sourceVideoId) && (
+                <div className={cn(
+                  "rounded-xl border p-3 space-y-2.5",
+                  isUniquify ? "border-brand-500/40 bg-brand-500/5" : "border-border bg-surface-2/40"
+                )}>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                    <span className="text-sm font-medium text-text-primary">⚡ Отправить в уникализацию</span>
+                    <label className="flex items-center gap-2 text-xs text-text-secondary">
+                      копий из каждого ролика
+                      <input type="range" min={1} max={30} value={uniqCopies}
+                        onChange={(e) => setUniqCopies(Number(e.target.value))} className="w-32 accent-brand-500" />
+                      <span className="w-6 font-mono text-brand-400">{uniqCopies}</span>
+                    </label>
+                    <div className="flex gap-1">
+                      {(["maximum", "standard"] as const).map((lvl) => (
+                        <button key={lvl} type="button" onClick={() => setUniqStealth(lvl)}
+                          className={cn("px-2 py-1 rounded-lg text-xs",
+                            uniqStealth === lvl ? "bg-brand-500/20 text-brand-400 ring-1 ring-brand-500/40" : "bg-surface-2 text-text-secondary")}>
+                          {lvl === "maximum" ? "Максимальная" : "Стандартная"}
+                        </button>
+                      ))}
+                    </div>
+                    <Button size="sm" variant="primary" loading={sending} onClick={sendToUniquify}>
+                      Уникализировать {outputs.filter((o) => o.sourceVideoId).length} × {uniqCopies}
+                    </Button>
+                  </div>
+                  {sendResult && (
+                    <p className={cn("text-xs", sendResult.ok ? "text-success" : "text-danger")}>{sendResult.text}</p>
+                  )}
+                  {prevJobIds.length > 0 && (
+                    <div className="flex flex-wrap gap-2 text-2xs">
+                      <span className="text-text-tertiary">Задачи уникализации:</span>
+                      {prevJobIds.map((jid, i) => (
+                        <button key={jid} type="button" onClick={() => router.push(`/uniquify/jobs/${jid}`)}
+                          className="text-brand-400 hover:underline">#{i + 1} ↗</button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {outputs.length === 0 ? (
                 <EmptyState title="Нет выходов" description="Клипы ещё обрабатываются или рендер не дал результатов." />
               ) : (

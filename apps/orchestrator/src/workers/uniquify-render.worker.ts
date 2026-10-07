@@ -72,6 +72,10 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         where: { id: uniquifyJobId },
         select: { status: true, voiceoverKey: true, transcript: true },
       });
+      const variantRow = await db.uniqueVariant.findUnique({
+        where: { id: variantId },
+        select: { transforms: true },
+      });
       if (uniquifyJob.status === 'cancelled') {
         logger.info({ uniquifyJobId, variantId }, 'Uniquify-render: job cancelled, aborting');
         return;
@@ -92,6 +96,9 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           height: number;
           phash: string | null;
           segment_count: number;
+          recipe?: Record<string, unknown> | null;
+          signature?: { visual?: string; audio?: string } | null;
+          uniqueness?: Record<string, unknown> | null;
         }>(`${videoProcessorUrl}/uniquify/render`, {
           variant_id: variantId,
           uniquify_job_id: uniquifyJobId,
@@ -111,6 +118,8 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           voiceover_volume: voiceoverVolume,
           beat_sync: beatSync,
           stealth_level: (job.data as any).stealthLevel ?? (job.data as any).stealth_level ?? 'maximum',
+          allow_mirror: (job.data as any).allowMirror === true,
+          frame_layout: (job.data as any).frameLayout ?? 'auto',
           scene_breaks: sceneBreaks ?? [],
         }, { timeout: 900_000 });
 
@@ -129,6 +138,14 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
             width: result.width,
             height: result.height,
             pHash: result.phash ?? null,
+            // Full per-variant recipe + fingerprint + distance from the source;
+            // sibling distances are added by the state worker when the job ends.
+            transforms: {
+              ...((variantRow?.transforms ?? {}) as object),
+              ...(result.recipe ? { recipe: result.recipe } : {}),
+              ...(result.signature ? { signature: result.signature } : {}),
+              ...(result.uniqueness ? { uniqueness: result.uniqueness } : {}),
+            } as object,
           },
         });
 

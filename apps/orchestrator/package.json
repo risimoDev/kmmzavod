@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@kmmzavod/ai": "workspace:*",
     "@kmmzavod/db": "workspace:*",
     "@kmmzavod/queue": "workspace:*",
     "@kmmzavod/storage": "workspace:*",

@@ -106,6 +106,10 @@ class RenderRequest(BaseModel):
     voiceover_volume: float = 1.0
     beat_sync: bool = True
     stealth_level: str = "maximum"  # "standard" | "maximum"
+    # Mirroring flips on-screen text/logos → opt-in only.
+    allow_mirror: bool = False
+    # "Blurred frame" layout: off | on | auto (sometimes, maximum level only).
+    frame_layout: str = "auto"
     # Scene-break timestamps per source clip (aligned to source_storage_keys),
     # so the montage cuts on real scene boundaries.
     scene_breaks: list[list[float]] = Field(default_factory=list)
@@ -120,6 +124,11 @@ class RenderResponse(BaseModel):
     height: int
     phash: str | None = None
     segment_count: int = 0
+    # Every per-variant lever (reproducibility + UI), the file's fingerprint and
+    # its measured distance from the source.
+    recipe: dict[str, Any] | None = None
+    signature: dict[str, str] | None = None
+    uniqueness: dict[str, Any] | None = None
 
 
 # ── Router ────────────────────────────────────────────────────────────────────
@@ -219,6 +228,8 @@ def create_router() -> APIRouter:
                         bgm_path=bgm_path,
                         bgm_volume=req.bgm_volume,
                         stealth_level=req.stealth_level,
+                        allow_mirror=req.allow_mirror,
+                        frame_layout=req.frame_layout,
                     )
             else:
                 # Download the shared voiceover for remix montage
@@ -242,6 +253,7 @@ def create_router() -> APIRouter:
                         voiceover_volume=req.voiceover_volume,
                         beat_sync=req.beat_sync,
                         scene_breaks_by_source=req.scene_breaks,
+                        allow_mirror=req.allow_mirror,
                     )
 
             # Upload output + thumbnail.
@@ -260,6 +272,9 @@ def create_router() -> APIRouter:
                 height=result.height,
                 phash=result.phash,
                 segment_count=result.segment_count,
+                recipe=result.recipe,
+                signature=result.signature,
+                uniqueness=result.uniqueness,
             )
         except Exception as e:
             logger.exception("Render failed for variant %s", req.variant_id)

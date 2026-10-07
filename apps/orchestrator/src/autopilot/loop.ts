@@ -48,6 +48,8 @@ const STAGE_TIMEOUT_MIN: Record<string, number> = {
 };
 /** A window missed by more than this (orchestrator was down) is skipped, not back-filled. */
 const MAX_WINDOW_LATENESS_MIN = 90;
+/** Copies the state worker flagged as weak (≈ source re-encode / ≈ sibling) are never published. */
+const NOT_WEAK = { NOT: { transforms: { path: ['uniqueness', 'ok'], equals: false } } } as const;
 const IN_PROGRESS = ['pending', 'scripting', 'analyzing', 'rendering', 'uniquifying'] as const;
 const ITEM_INFLIGHT = ['pending', 'scheduled', 'publishing'] as const;
 const ITEM_COUNTED = ['pending', 'scheduled', 'publishing', 'published'] as const;
@@ -297,7 +299,7 @@ export async function countReadyVariants(db: PrismaClient, autopilotId: string):
   const jobIds = await readyJobIds(db, autopilotId);
   if (jobIds.length === 0) return 0;
   return db.uniqueVariant.count({
-    where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} } },
+    where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} }, ...NOT_WEAK },
   });
 }
 
@@ -433,7 +435,7 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
   const jobIds = await readyJobIds(db, ap.id);
   const variants = jobIds.length
     ? await db.uniqueVariant.findMany({
-        where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} } },
+        where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} }, ...NOT_WEAK },
         select: { id: true, uniquifyJobId: true },
         orderBy: [{ createdAt: 'asc' }, { variantIndex: 'asc' }],
       })

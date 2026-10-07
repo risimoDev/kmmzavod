@@ -39,6 +39,7 @@ from typing import Any
 from app.config import settings
 from app.models import SubtitleEntry, SubtitleStyle
 from app.services import ffmpeg as fx
+from app.services import uniqueness as uq
 from app.services.subtitle import generate_ass_file
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,10 @@ class MontageResult:
     height: int
     phash: str | None
     segment_count: int
+    # Uniqueness bookkeeping (see services/uniqueness.py).
+    recipe: dict[str, Any] | None = None
+    signature: dict[str, str] | None = None
+    uniqueness: dict[str, Any] | None = None
 
 
 # ── Plan generation (deterministic per seed) ──────────────────────────────────
@@ -132,6 +137,7 @@ def build_plan(
     target_duration: float,
     seed: int,
     beats: list[float] | None = None,
+    allow_mirror: bool = False,
 ) -> MontagePlan:
     """
     Build a deterministic edit-decision-list that fills ``target_duration``.
@@ -145,7 +151,8 @@ def build_plan(
     # Consistent per-variant colour grade + mirror (applied to every segment so
     # the whole video looks intentionally graded rather than randomly flickering).
     style = VariantStyle(
-        flip=rng.random() < 0.5,
+        # Mirroring flips on-screen text/logos — only when explicitly allowed.
+        flip=allow_mirror and rng.random() < 0.5,
         brightness=round(rng.uniform(-0.04, 0.04), 3),
         contrast=round(rng.uniform(0.95, 1.06), 3),
         saturation=round(rng.uniform(0.92, 1.12), 3),
@@ -160,6 +167,8 @@ def build_plan(
     last_pick: tuple[int, int] | None = None  # (src_idx, span_idx) to avoid repeats
     guard = 0
 
+    # Hard cap: even the shortest beats can't need more than this many cuts.
+    max_segments = int(goal / (MIN_BEAT_SEC * 0.5)) + 4
     while accumulated < goal and guard < 2000:
         guard += 1
         src_idx = rng.randrange(len(sources))
@@ -211,6 +220,12 @@ def build_plan(
             transition_dur=tdur,
         )
         segments.append(seg)
+        # On-screen time this segment adds (its transition overlaps the previous one).
+        # This increment was missing: the loop ran to the 2000-iteration guard and
+        # produced thousands of segments per variant (hours of encoding, full disk).
+        accumulated += seg.screen_dur - seg.transition_dur
+        if len(segments) >= max_segments:
+            break
     # Safeguard: if guard loop couldn't accumulate segments, add at least one default segment
     if not segments and sources:
         src0 = sources[0]
@@ -407,6 +422,7 @@ def _final_mux(
     voiceover_volume: float,
     crf: int,
     threads: int,
+    recipe: "uq.Recipe | None" = None,
 ) -> None:
     """
     Single final pass: burn subtitles + build the audio bed.
@@ -462,15 +478,22 @@ def _final_mux(
         "-filter_complex", ";".join(fc_parts),
         "-map", "[vout]", "-map", "[aout]",
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-preset", settings.ffmpeg_final_preset, "-crf", str(crf),
-        "-profile:v", "high", "-level:v", "4.1",
-        "-maxrate", settings.ffmpeg_max_bitrate, "-bufsize", settings.ffmpeg_bufsize,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", settings.ffmpeg_audio_bitrate, "-ar", "44100", "-ac", "2",
-        "-movflags", "+faststart",
-        "-threads", str(threads),
-        output_path,
     ]
+    if recipe is not None:
+        # Per-variant encoder settings + clean container (no x264 SEI / Lavf tags).
+        cmd += [*uq.encoder_args(recipe, threads), "-maxrate", settings.ffmpeg_max_bitrate,
+                "-bufsize", settings.ffmpeg_bufsize, *uq.hygiene_args(recipe)]
+    else:
+        cmd += [
+            "-c:v", "libx264", "-preset", settings.ffmpeg_final_preset, "-crf", str(crf),
+            "-profile:v", "high", "-level:v", "4.1",
+            "-maxrate", settings.ffmpeg_max_bitrate, "-bufsize", settings.ffmpeg_bufsize,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", settings.ffmpeg_audio_bitrate, "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            "-threads", str(threads),
+        ]
+    cmd.append(output_path)
     fx._run(cmd, "montage_final_mux")
 
 
@@ -495,6 +518,8 @@ async def render_montage(
     threads: int | None = None,
     beat_sync: bool = True,
     scene_breaks_by_source: list[list[float]] | None = None,
+    allow_mirror: bool = False,
+    measure: bool = True,
 ) -> MontageResult:
     """
     Render one unique montage variant.
@@ -535,7 +560,8 @@ async def render_montage(
             logger.warning("Beat detection failed, using free timing: %s", e)
 
     # 3. Deterministic edit-decision-list.
-    plan = build_plan(sources, target_duration, seed, beats=beats)
+    plan = build_plan(sources, target_duration, seed, beats=beats, allow_mirror=allow_mirror)
+    rec = uq.make_recipe(seed, "standard")
     logger.info(
         "Montage seed=%d: %d segments, target=%.1fs, sources=%d, flip=%s",
         seed, len(plan.segments), target_duration, len(sources), plan.style.flip,
@@ -584,7 +610,7 @@ async def render_montage(
     await asyncio.to_thread(
         _final_mux,
         concat_path, voiceover_path, bgm_path, ass_path, output_path,
-        target_duration, width, height, fps, bgm_volume, voiceover_volume, crf, threads,
+        target_duration, width, height, fps, bgm_volume, voiceover_volume, crf, threads, rec,
     )
 
     # 8. Thumbnail + perceptual hash.
@@ -607,6 +633,9 @@ async def render_montage(
         height=height,
         phash=phash,
         segment_count=len(plan.segments),
+        recipe={"montage_segments": len(plan.segments), "mirror": plan.style.flip,
+                **{k: v for k, v in rec.as_dict().items() if k in ("crf", "preset", "gop", "bframes", "audio_bitrate", "sample_rate", "make", "model", "creation_time")}},
+        signature=(await asyncio.to_thread(uq.signature, output_path)) if measure else None,
     )
 
 
@@ -643,76 +672,42 @@ async def render_preserve_context(
     stealth_level: str = "maximum",
     crf: int = 22,
     threads: int = 2,
+    allow_mirror: bool = False,
+    frame_layout: str = "auto",
+    measure: bool = True,
 ) -> MontageResult:
     """
-    Next-Gen context-preserving video uniquification (Ultra Stealth).
-    Maintains 100% of the narrative flow, scene sequencing, cuts, and original
-    speech/audio. Applies multi-vector, undetectable perturbations to defeat
-    social media duplicate detection (Meta / TikTok / YouTube Content ID):
-      - Dynamic Ken Burns Organic Motion: continuous smooth temporal micro-push/pull
-        (completely breaks frame-to-frame temporal pHash trajectories)
-      - Faint organic vignette & spatio-temporal luma/chroma noise mask
-      - Subtle gamma/contrast/saturation color grading (+/- 2%)
-      - Acoustic Anti-Fingerprint: pitch-preserved micro-tempo drift, vocal presence boost,
-        plus inaudible sub-bass (24Hz) and ultrasonic (18.5kHz) micro-randomization
-      - Realistic Apple iPhone 15 Pro camera EXIF / QuickTime container atoms spoofing
+    Context-preserving uniquification: the story, cuts, speech and on-screen
+    content stay intact; every copy differs in framing, colour, motion, timing,
+    sound (pitch/EQ), encoding and container — see services/uniqueness.py.
+
+    The output is measured against the source (visual + audio signature
+    distance) so weak copies can be detected instead of assumed unique.
     """
-    rng = random.Random(seed)
+    rec = uq.make_recipe(seed, stealth_level, allow_mirror=allow_mirror, frame_layout=frame_layout)
     src_probe = fx.probe(source_path)
-    dur = max(1.0, float(src_probe.duration or 30.0))
+    src_dur = max(1.0, float(src_probe.duration or 30.0))
+    # Never trim a short clip into nothing.
+    head = min(rec.trim_head, src_dur * 0.05)
+    tail = min(rec.trim_tail, src_dur * 0.05)
+    in_dur = max(0.5, src_dur - head - tail)
+    out_dur = round(in_dur / rec.speed, 3)
+    width, height = _even(width), _even(height)
 
-    gamma = round(rng.uniform(0.98, 1.02), 3)
-    contrast = round(rng.uniform(0.98, 1.02), 3)
-    saturation = round(rng.uniform(0.97, 1.03), 3)
-    tempo = round(rng.uniform(0.985, 1.015), 4)
-    out_dur = round(dur / tempo, 3)
+    graph = uq.video_filter(rec, width, height, fps, in_dur)
+    vlabel = "[vout]"
 
-    # 1. Video filter chain
-    vf_parts = [
-        f"scale={width}:{height}:force_original_aspect_ratio=increase",
-        f"crop={width}:{height}",
-    ]
-
-    if stealth_level == "maximum":
-        # Dynamic Ken Burns Organic Motion: smooth progressive zoom over clip duration
-        z_start = round(1.012 + rng.uniform(0.002, 0.008), 4)
-        z_end = round(z_start + rng.uniform(0.016, 0.028), 4)
-        vf_parts.append(
-            f"scale=w='iw*({z_start:.4f}+({z_end - z_start:.4f})*t/{dur:.3f})':"
-            f"h='ih*({z_start:.4f}+({z_end - z_start:.4f})*t/{dur:.3f})':eval=frame"
-        )
-        vf_parts.append(f"crop={width}:{height}")
-        vf_parts.append(f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}")
-        # Multi-plane high frequency noise (breaks SSIM / pHash without visible blur)
-        vf_parts.append("noise=alls=3:allf=t+u")
-        # Subtle lens vignette (breaks border detection)
-        vf_parts.append("vignette=PI/6.5")
-    else:
-        # Standard static micro-zoom
-        zoom = round(1.0 + rng.uniform(0.015, 0.035), 4)
-        vf_parts.append(f"scale=iw*{zoom}:ih*{zoom}")
-        vf_parts.append(f"crop={width}:{height}")
-        vf_parts.append(f"eq=gamma={gamma}:contrast={contrast}:saturation={saturation}")
-        vf_parts.append("noise=alls=2:allf=t")
-
-    # Keep video speed synchronized with audio tempo so lipsync is 100% preserved
-    if abs(tempo - 1.0) > 0.001:
-        vf_parts.append(f"setpts=PTS/{tempo:.5f}")
-
-    vf_parts.append(f"fps={fps}")
-    vf_parts.append("format=yuv420p")
-
-    # Optional subtitles
+    # Subtitles are burned last (on the final geometry, never warped by the crop).
     if subtitles and subtitle_style and subtitle_style != "none":
         ass_path = os.path.join(work_dir, "subs.ass")
         entries = [
             SubtitleEntry(
-                start_sec=float(s.get("start_sec", s.get("start", 0))),
-                end_sec=float(s.get("end_sec", s.get("end", 0))),
+                start_sec=max(0.0, (float(s.get("start_sec", s.get("start", 0))) - head) / rec.speed),
+                end_sec=max(0.0, (float(s.get("end_sec", s.get("end", 0))) - head) / rec.speed),
                 text=str(s.get("text", "")).strip(),
             )
             for s in subtitles
-            if str(s.get("text", "")).strip() and float(s.get("end_sec", s.get("end", 0))) > 0
+            if str(s.get("text", "")).strip() and float(s.get("end_sec", s.get("end", 0))) > head
         ]
         if entries:
             try:
@@ -720,95 +715,36 @@ async def render_preserve_context(
             except ValueError:
                 style_enum = SubtitleStyle.TIKTOK
             await asyncio.to_thread(generate_ass_file, entries, ass_path, width, height, style_enum)
-            safe_ass = fx._safe_filter_path(ass_path)
-            vf_parts.append(f"ass='{safe_ass}'")
+            graph += f";[vout]ass='{fx._safe_filter_path(ass_path)}'[vsub]"
+            vlabel = "[vsub]"
 
-    video_filter = ",".join(vf_parts)
-
-    # 2. Audio filter chain: acoustic anti-fingerprinting
-    # First resample to 44.1kHz stereo to guarantee 18.5kHz equalizer stays below Nyquist limit
-    has_audio = src_probe.has_audio
-    cmd = [
-        fx._bin("ffmpeg"), "-threads", str(threads), "-y",
-        "-i", source_path,
-    ]
-
-    audio_stealth_filters = (
-        f"aformat=sample_rates=44100:channel_layouts=stereo,"
-        f"atempo={tempo},"
-        f"equalizer=f=2500:width_type=o:width=1:g=1.5,"
-        f"equalizer=f=200:width_type=o:width=1:g=1.0,"
-        f"equalizer=f=24:width_type=q:width=2:g=-1.5,"
-        f"equalizer=f=18500:width_type=q:width=3:g=1.2"
-    )
-
+    afilter = uq.audio_filter(rec)
+    cmd = [fx._bin("ffmpeg"), "-y", "-ss", f"{head:.3f}", "-t", f"{in_dur:.3f}", "-i", source_path]
     if bgm_path and os.path.exists(bgm_path):
         cmd += ["-stream_loop", "-1", "-i", bgm_path]
-        if has_audio:
-            filter_complex = (
-                f"[0:v]{video_filter}[vout];"
-                f"[0:a]{audio_stealth_filters}[voice];"
-                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={bgm_volume}[bgm];"
-                f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-            )
+        if src_probe.has_audio:
+            graph += (f";[0:a]{afilter}[voice];"
+                      f"[1:a]aformat=sample_rates={rec.sample_rate}:channel_layouts=stereo,volume={bgm_volume}[bgm];"
+                      f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]")
         else:
-            filter_complex = (
-                f"[0:v]{video_filter}[vout];"
-                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=duration={out_dur:.3f},volume={bgm_volume}[aout]"
-            )
-        cmd += [
-            "-filter_complex", filter_complex,
-            "-map", "[vout]", "-map", "[aout]",
-            "-t", f"{out_dur:.3f}",
-        ]
+            graph += (f";[1:a]aformat=sample_rates={rec.sample_rate}:channel_layouts=stereo,"
+                      f"atrim=duration={out_dur:.3f},volume={bgm_volume}[aout]")
+    elif src_probe.has_audio:
+        graph += f";[0:a]{afilter}[aout]"
     else:
-        if has_audio:
-            filter_complex = (
-                f"[0:v]{video_filter}[vout];"
-                f"[0:a]{audio_stealth_filters}[aout]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[vout]", "-map", "[aout]",
-                "-t", f"{out_dur:.3f}",
-            ]
-        else:
-            filter_complex = (
-                f"[0:v]{video_filter}[vout];"
-                f"aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration={out_dur:.3f}[aout]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[vout]", "-map", "[aout]",
-                "-t", f"{out_dur:.3f}",
-            ]
-
-    # Mobile Camera EXIF & atoms spoofing (iPhone 15 Pro)
-    days_ago = seed % 5
-    hours_ago = (seed * 3) % 24
-    mins_ago = (seed * 7) % 60
-    secs_ago = (seed * 11) % 60
-    dt = datetime.now(timezone.utc) - timedelta(days=days_ago, hours=hours_ago, minutes=mins_ago, seconds=secs_ago)
-    creation_ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        graph += f";aevalsrc=0:channel_layout=stereo:sample_rate={rec.sample_rate}:duration={out_dur:.3f}[aout]"
 
     cmd += [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
-        "-map_metadata", "-1",
-        "-metadata", "make=Apple",
-        "-metadata", "model=iPhone 15 Pro",
-        "-metadata", "encoder=Apple QuickTime 17.5.1",
-        "-metadata", "handler_name=Core Media Video",
-        "-metadata", f"creation_time={creation_ts}",
-        "-metadata", f"comment=variant_{seed}",
-        "-movflags", "+faststart",
+        "-filter_complex", graph,
+        "-map", vlabel, "-map", "[aout]",
+        "-t", f"{out_dur:.3f}",
+        *uq.encoder_args(rec, threads),
+        *uq.hygiene_args(rec),
         output_path,
     ]
-
     await asyncio.to_thread(fx._run, cmd, "preserve_context_render")
 
-    # Thumbnail + perceptual hash
+    # Thumbnail + perceptual hash (first-frame aHash kept for back-compat dedup).
     thumb_path = output_path.rsplit(".", 1)[0] + "_thumb.jpg"
     try:
         await asyncio.to_thread(fx.extract_thumbnail, output_path, thumb_path, 0.2)
@@ -816,9 +752,18 @@ async def render_preserve_context(
         thumb_path = None
     phash = _compute_phash(thumb_path) if thumb_path else None
 
+    sig: dict[str, str] | None = None
+    uniq: dict[str, Any] | None = None
+    if measure:
+        sig, src_sig = await asyncio.gather(
+            asyncio.to_thread(uq.signature, output_path),
+            asyncio.to_thread(uq.signature, source_path),
+        )
+        d = uq.distance(sig, src_sig)
+        uniq = {"vs_source": d}
+
     stat = os.stat(output_path)
     out_probe = fx.probe(output_path)
-
     return MontageResult(
         output_path=output_path,
         thumbnail_path=thumb_path,
@@ -828,5 +773,7 @@ async def render_preserve_context(
         height=height,
         phash=phash,
         segment_count=1,
+        recipe=rec.as_dict(),
+        signature=sig,
+        uniqueness=uniq,
     )
-

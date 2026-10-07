@@ -10,10 +10,12 @@ COPY package.json pnpm-lock.yaml .npmrc* ./
 COPY packages/queue/package.json ./packages/queue/
 COPY packages/storage/package.json ./packages/storage/
 COPY packages/db/package.json ./packages/db/
+COPY packages/ai/package.json ./packages/ai/
 COPY packages/db/prisma/schema.prisma ./packages/db/prisma/
 COPY packages/queue/tsconfig.json ./packages/queue/
 COPY packages/storage/tsconfig.json ./packages/storage/
 COPY packages/db/tsconfig.json ./packages/db/
+COPY packages/ai/tsconfig.json ./packages/ai/
 COPY apps/api/package.json ./apps/api/
 COPY apps/orchestrator/package.json ./apps/orchestrator/
 COPY apps/web/package.json ./apps/web/
@@ -31,6 +33,7 @@ RUN pnpm --filter @kmmzavod/db exec prisma generate
 RUN pnpm --filter @kmmzavod/queue run build
 RUN pnpm --filter @kmmzavod/storage run build
 RUN pnpm --filter @kmmzavod/db run build
+RUN pnpm --filter @kmmzavod/ai run build
 RUN pnpm --filter @kmmzavod/api build
 
 # ── Продакшн образ ────────────────────────────────────────────────────────────
@@ -52,6 +55,8 @@ COPY --from=builder /app/packages/storage/package.json  ./node_modules/@kmmzavod
 COPY --from=builder /app/packages/storage/dist          ./node_modules/@kmmzavod/storage/dist
 COPY --from=builder /app/packages/db/package.json       ./node_modules/@kmmzavod/db/package.json
 COPY --from=builder /app/packages/db/dist               ./node_modules/@kmmzavod/db/dist
+COPY --from=builder /app/packages/ai/package.json       ./node_modules/@kmmzavod/ai/package.json
+COPY --from=builder /app/packages/ai/dist               ./node_modules/@kmmzavod/ai/dist
 
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/

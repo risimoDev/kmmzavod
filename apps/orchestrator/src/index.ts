@@ -205,6 +205,7 @@ async function main() {
     videoProcessorUrl: config.VIDEO_PROCESSOR_URL,
     uniquifyRenderQueue,
     gptunnelService,
+    storage,
     connection,
   });
 

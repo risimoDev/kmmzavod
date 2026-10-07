@@ -35,6 +35,18 @@ class AudioMode(str, Enum):
     REPLACE = "replace"                   # replace with shared TTS voiceover + BGM
 
 
+class Pace(str, Enum):
+    """Cut rhythm of a mix montage (on-screen chunk length range)."""
+    CALM = "calm"                         # 2.4–5.0 s per shot
+    NORMAL = "normal"                     # 1.6–3.6 s
+    FAST = "fast"                         # 1.0–2.4 s
+
+
+# Bump when SourceAnalysis semantics change: cached analyses with an older
+# version are recomputed instead of reused.
+ANALYSIS_VERSION = 2
+
+
 class AspectRatio(str, Enum):
     VERTICAL = "9:16"
     SQUARE = "1:1"
@@ -104,6 +116,11 @@ class SourceAnalysis(BaseModel):
     # above stay as whole-source aggregates (and as fallback for old analyses).
     motion_series: list[tuple[float, float]] = []
     face_series: list[tuple[float, float]] = []
+    # Cache bookkeeping: analyses are reused across projects by storage key.
+    analysis_version: int = ANALYSIS_VERSION
+    # False when Whisper was deliberately skipped (voiceover projects don't need
+    # source speech) — a later keep-audio project must re-run the transcript.
+    transcribed: bool = False
 
 
 # ── Edit Decision List ────────────────────────────────────────────────────────
@@ -144,6 +161,17 @@ class EdlClip(BaseModel):
     thumb_b64: str | None = None
     # Output-timeline subtitles (editable in the storyboard).
     subtitles: list[SubtitleLine] | None = None
+    # Join segments with xfade transitions (mix with replaced audio) or hard cuts
+    # (speech-preserving). Persisted in the EDL so the render never has to guess
+    # from the title. None = legacy EDL → render infers.
+    transitions: bool | None = None
+    # Human-readable caveat shown in the storyboard (e.g. not enough footage).
+    warning: str = ""
+    # Per-clip AI voiceover (AI studio «озвучка на клип»). Overrides the project
+    # voiceover; the clip then renders with replaced audio. The script text makes
+    # subtitles spell exactly what was written (timings still from Whisper).
+    voiceover_url: str | None = None
+    voiceover_text: str = ""
 
 
 # ── Requests / Responses ──────────────────────────────────────────────────────
@@ -161,6 +189,24 @@ class AnalyzeRequest(BaseModel):
     target_clip_count: int = Field(default=5, ge=1, le=30)
     # Target length of each output clip (seconds).
     target_clip_seconds: float = Field(default=30.0, gt=2, le=180)
+    # Audio plan of the project: with `replace` the source speech is discarded,
+    # so selection scores visuals and Whisper over sources is skipped.
+    audio_mode: AudioMode = AudioMode.KEEP
+    # Variety controls. Same seed + same sources ⇒ same storyboard; a new seed
+    # gives a genuinely different montage of comparable quality.
+    seed: int | None = None
+    # Mix geometry: how many distinct montages to propose from the same sources.
+    variant_count: int = Field(default=1, ge=1, le=10)
+    pace: Pace = Pace.NORMAL
+    # Mix + replace: open with the strongest shot (retention hook).
+    hook_first: bool = True
+    # Per source (aligned to source_urls): [start, end] ranges already used by
+    # earlier montages — deprioritised (not banned) so new montages look new.
+    exclude_ranges: list[list[tuple[float, float]]] = Field(default_factory=list)
+    # Per source: a previously computed SourceAnalysis to reuse (None = analyse).
+    cached_analyses: list[SourceAnalysis | None] = Field(default_factory=list)
+    # Force/skip Whisper over sources. None = auto (only when audio is kept).
+    need_transcript: bool | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -184,6 +230,10 @@ class RenderRequest(BaseModel):
     # Optional shared voiceover + BGM keys for audio_mode=replace.
     voiceover_url: str | None = None
     bgm_url: str | None = None
+    geometry: Geometry | None = None
+    seed: int = 0
+    # Script of the project-level voiceover (subtitle spelling).
+    voiceover_text: str = ""
 
 
 class RenderedClip(BaseModel):

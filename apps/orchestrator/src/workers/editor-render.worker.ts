@@ -15,7 +15,7 @@ import type { MinioStorageClient } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import {
   editorService, describeEditorError,
-  type EditMode, type EditAudioMode, type EditAspect, type EdlClip,
+  type EditMode, type EditAudioMode, type EditAspect, type EditGeometry, type EdlClip,
 } from '../services/editor';
 
 interface Deps {
@@ -52,8 +52,12 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         const voiceoverUrl = voiceoverKey ? await storage.presignedUrl(voiceoverKey, 3600) : null;
         const bgmUrl = bgmKey ? await storage.presignedUrl(bgmKey, 3600) : null;
 
-        const clips: EdlClip[] = clipRows.map((row, i) => {
-          const edl = (row.edl ?? {}) as Partial<EdlClip>;
+        const clips: EdlClip[] = await Promise.all(clipRows.map(async (row, i) => {
+          const edl = (row.edl ?? {}) as Partial<EdlClip> & {
+            voiceover?: { key?: string; text?: string } | null;
+          };
+          // Per-clip voiceover from the AI studio (stored in the EDL).
+          const clipVoiceKey = typeof edl.voiceover?.key === 'string' ? edl.voiceover.key : null;
           let segments = Array.isArray(edl.segments)
             ? edl.segments.filter((s) => s && typeof s.src_idx === 'number' && Number(s.end) > Number(s.start))
             : [];
@@ -68,8 +72,11 @@ export function createEditorRenderWorker(deps: Deps): Worker {
             segments,
             transcript_snippet: edl.transcript_snippet ?? row.transcriptSnippet ?? '',
             subtitles: Array.isArray(edl.subtitles) ? edl.subtitles : null,
+            transitions: typeof edl.transitions === 'boolean' ? edl.transitions : null,
+            voiceover_url: clipVoiceKey ? await storage.presignedUrl(clipVoiceKey, 3600) : null,
+            voiceover_text: clipVoiceKey ? String(edl.voiceover?.text ?? '') : '',
           };
-        });
+        }));
 
         const result = await editorService.render({
           projectId,
@@ -85,6 +92,9 @@ export function createEditorRenderWorker(deps: Deps): Worker {
           subtitleStyle: project.subtitleStyle,
           voiceoverUrl,
           bgmUrl,
+          geometry: project.geometry as EditGeometry,
+          seed: typeof config.seed === 'number' ? Math.trunc(config.seed) : 0,
+          voiceoverText: typeof config.voiceoverText === 'string' ? config.voiceoverText : '',
         });
 
         const workspaceProjectId = typeof config.workspaceProjectId === 'string' ? config.workspaceProjectId : null;

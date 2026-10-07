@@ -10,6 +10,7 @@ import { runWbWarmup } from './wb-warmup';
 import { AutoHealManager } from './auto-heal';
 import { ApkManager } from './apk-manager';
 import { ScriptEngine } from './script-engine';
+import { collectProfileStats } from './profile-stats';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const adb = new AdbClient(logger, config.ADB_PATH);
@@ -411,6 +412,35 @@ app.post('/publish', async (req, reply) => {
     return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: publish failed');
+    reply.code(502);
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
+  }
+});
+
+// ── Profile stats snapshot (views per post + followers) ────────────────────
+
+const ProfileStatsBody = z.object({
+  deviceId: z.string().min(1),
+  platform: z.enum(['instagram', 'tiktok']),
+  username: z.string().min(1).max(100),
+});
+
+app.post('/stats/profile', async (req, reply) => {
+  const parsed = ProfileStatsBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  let release: (() => void) | undefined;
+  try {
+    // Reading the profile is network traffic of this account → same proxy lease as publishing.
+    release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
+    const result = await collectProfileStats(parsed.data, adb, logger);
+    if (!result.ok) reply.code(502);
+    return result;
+  } catch (err) {
     reply.code(502);
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {

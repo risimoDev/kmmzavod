@@ -1388,6 +1388,8 @@ export interface BgmTrack {
 export interface TtsVoice {
   id: string;
   name: string;
+  provider?: 'fish' | 'gptunnel';
+  gender?: string;
 }
 
 export interface UniqueVariant {
@@ -1404,8 +1406,28 @@ export interface UniqueVariant {
   subtitleStyle: string | null;
   generatedCaption?: string | null;
   generatedHashtags?: string[];
+  transforms?: VariantTransforms | null;
   error: string | null;
   createdAt: string;
+}
+
+export interface UniquenessDist { visual: number | null; audio: number | null }
+
+/** Per-variant recipe + measured uniqueness (video-processor uniqueness.py). */
+export interface VariantTransforms {
+  seed?: number;
+  recipe?: {
+    level?: string; zoom?: number; rotate_deg?: number; mirror?: boolean; hue_deg?: number;
+    speed?: number; trim_head?: number; pitch_semitones?: number; frame_layout?: boolean;
+    crf?: number; gop?: number; make?: string; model?: string; montage_segments?: number;
+  };
+  uniqueness?: {
+    vs_source?: UniquenessDist | null;
+    nearest_sibling?: UniquenessDist | null;
+    score?: number | null;
+    ok?: boolean;
+    reason?: string | null;
+  };
 }
 
 export interface DistributeJob {
@@ -1640,6 +1662,9 @@ export const uniquifyApi = {
       aspectRatio?: "9:16" | "1:1" | "16:9" | "4:5";
       fps?: number;
       beatSync?: boolean;
+      allowMirror?: boolean;
+      frameLayout?: "auto" | "on" | "off";
+      ttsProvider?: "fish" | "gptunnel";
     };
   }) =>
     apiFetch<UniquifyJob>('/api/v1/uniquify/uniquify-jobs', { method: 'POST', body: JSON.stringify(body) }),
@@ -1806,6 +1831,10 @@ export type EditAudioMode = 'keep' | 'replace';
 export type EditProjectStatus =
   | 'draft' | 'analyzing' | 'ready' | 'rendering' | 'completed' | 'failed';
 
+/** What the user is making in the editor (drives mode/geometry server-side). */
+export type EditProduct = 'uniquify_one' | 'uniquify_multi' | 'smart_montage';
+export type EditPace = 'calm' | 'normal' | 'fast';
+
 export interface EditProject {
   id: string;
   name: string;
@@ -1864,12 +1893,52 @@ export interface EditClip {
   edl?: {
     segments?: { src_idx: number; start: number; end: number; score: number }[];
     subtitles?: EdlSubtitleLine[];
+    transitions?: boolean | null;
+    warning?: string;
+    script?: ClipScriptRecord;
+    voiceover?: ClipVoiceRecord;
   };
+  voiceoverUrl?: string | null;
 }
 
 export interface EditProjectDetail extends EditProject {
   sources: EditSource[];
   clips: EditClip[];
+  /** Presigned project-level AI voiceover. */
+  voiceoverUrl?: string | null;
+}
+
+export interface AiStatus {
+  llmProviders: string[];
+  openrouter: boolean;
+  gptunnel: boolean;
+  fishAudio: boolean;
+  openrouterModels: string[];
+  fishModels: string[];
+}
+
+export interface ClipScriptRecord {
+  text: string; hook: string; title: string;
+  captions: { caption: string; hashtags: string[] }[];
+  style: string; provider: string; model: string; at: string;
+}
+
+export interface ClipVoiceRecord {
+  key: string; text: string; voiceId: string; speed: number; durationSec: number; model: string; at: string;
+}
+
+export interface GeneratedVoiceResult {
+  storageKey: string;
+  audioUrl: string;
+  durationSec: number;
+  targetSeconds: number;
+  diffSec: number;
+  words: number;
+  wps: number;
+  model: string;
+  clipId: string | null;
+  cleanText: string;
+  status: string;
 }
 
 export interface EditOutput {
@@ -1885,7 +1954,7 @@ export interface EditOutput {
 export interface FishAudioVoice {
   id: string;
   name: string;
-  gender: 'male' | 'female';
+  gender: 'male' | 'female' | 'unknown';
   category: string;
   description: string;
   previewText: string;
@@ -1905,7 +1974,15 @@ export interface GeneratedScriptResult {
   script: string;
   title: string;
   captions: Array<{ caption: string; hashtags: string[] }>;
-  modelUsed: string;
+  words: number;
+  targetWords: number;
+  estSeconds: number;
+  targetSeconds: number;
+  wps: number;
+  provider: string;
+  model: string;
+  notes: string[];
+  clipId: string | null;
 }
 
 export const editorApi = {
@@ -1913,39 +1990,50 @@ export const editorApi = {
 
   getProject: (id: string) => apiFetch<EditProjectDetail>(`/api/v1/editor/projects/${id}`),
 
-  createProject: (body: Partial<EditProject> & { name: string }) =>
+  createProject: (body: Partial<EditProject> & {
+    name: string; product?: EditProduct; variantCount?: number; pace?: EditPace; hookFirst?: boolean;
+  }) =>
     apiFetch<EditProject>('/api/v1/editor/projects', {
       method: 'POST', body: JSON.stringify(body),
     }),
 
-  patchProject: (id: string, body: Partial<EditProject>) =>
+  patchProject: (id: string, body: Partial<EditProject> & {
+    variantCount?: number; pace?: EditPace; hookFirst?: boolean;
+  }) =>
     apiFetch<EditProject>(`/api/v1/editor/projects/${id}`, {
       method: 'PATCH', body: JSON.stringify(body),
     }),
 
-  getVoices: (params?: { apiKey?: string; query?: string; language?: string }) => {
-    const q = new URLSearchParams();
-    if (params?.apiKey) q.set('apiKey', params.apiKey);
-    if (params?.query) q.set('query', params.query);
-    if (params?.language) q.set('language', params.language);
-    const qs = q.toString();
-    return apiFetch<{ voices: FishAudioVoice[]; configured?: boolean }>(`/api/v1/editor/voices${qs ? `?${qs}` : ''}`);
+  getVoices: (params?: { query?: string }) => {
+    const qs = params?.query ? `?query=${encodeURIComponent(params.query)}` : '';
+    return apiFetch<{ voices: FishAudioVoice[]; community: FishAudioVoice[]; configured: boolean }>(`/api/v1/editor/voices${qs}`);
   },
 
   getPresets: () => apiFetch<{ subtitleStyles: SubtitlePreset[] }>('/api/v1/editor/presets'),
 
+  aiStatus: () => apiFetch<AiStatus>('/api/v1/editor/ai/status'),
+
+  voicePreview: (voiceId: string, speed = 1) =>
+    apiFetch<{ audioUrl: string }>('/api/v1/editor/ai/voice-preview', {
+      method: 'POST', body: JSON.stringify({ voiceId, speed }),
+    }),
+
   generateScript: (id: string, body: {
-    topic?: string;
-    projectName?: string;
-    productInfo?: string;
-    currentScript?: string;
-    mode?: 'generate' | 'expand' | 'fit';
+    clipId?: string;
     style?: string;
-    ctaType?: 'article' | 'direct' | 'auto';
-    directWord?: string;
     targetSeconds?: number;
+    productName?: string;
+    productInfo?: string;
+    audience?: string;
+    ctaType?: 'article' | 'direct' | 'auto' | 'none';
+    directWord?: string;
+    mode?: 'generate' | 'fit' | 'rewrite';
+    currentScript?: string;
+    measuredSeconds?: number;
+    voiceId?: string;
+    speed?: number;
+    captionsCount?: number;
     useSourceTranscript?: boolean;
-    apiKey?: string;
   }) =>
     apiFetch<GeneratedScriptResult>(`/api/v1/editor/projects/${id}/generate-script`, {
       method: 'POST', body: JSON.stringify(body),
@@ -1956,11 +2044,17 @@ export const editorApi = {
     voiceId?: string;
     speed?: number;
     volume?: number;
-    apiKey?: string;
+    clipId?: string;
   }) =>
-    apiFetch<{ storageKey: string; audioUrl: string; status: string; cleanText?: string }>(`/api/v1/editor/projects/${id}/generate-voice`, {
+    apiFetch<GeneratedVoiceResult>(`/api/v1/editor/projects/${id}/generate-voice`, {
       method: 'POST', body: JSON.stringify(body),
     }),
+
+  deleteClipVoice: (id: string, clipId: string) =>
+    apiFetch<{ ok: boolean }>(`/api/v1/editor/projects/${id}/clips/${clipId}/voiceover`, { method: 'DELETE' }),
+
+  deleteProjectVoice: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/v1/editor/projects/${id}/voiceover`, { method: 'DELETE' }),
 
   uploadSource: async (projectId: string, file: File) => {
     const form = new FormData();
@@ -1983,8 +2077,18 @@ export const editorApi = {
       body: JSON.stringify({ sourceVideoIds }),
     }),
 
-  analyze: (id: string) =>
-    apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/analyze`, { method: 'POST' }),
+  analyze: (id: string, opts: { reroll?: boolean } = {}) =>
+    apiFetch<{ status: string }>(`/api/v1/editor/projects/${id}/analyze`, {
+      method: 'POST', body: JSON.stringify(opts),
+    }),
+
+  /** One UniquifyJob per rendered master; returns the created job ids. */
+  sendToUniquify: (id: string, body: {
+    variantCount: number; stealthLevel?: 'standard' | 'maximum'; clipIds?: string[];
+  }) =>
+    apiFetch<{ jobs: { clipId: string; uniquifyJobId: string; title: string }[]; totalVariants: number }>(
+      `/api/v1/editor/projects/${id}/send-to-uniquify`, { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   updateClip: (id: string, clipId: string, body: {
     included?: boolean; title?: string; order?: number;
@@ -2077,6 +2181,7 @@ export interface AutopilotInput {
   montageMode: 'single' | 'multi';
   sourcesPerMontage: number;
   sourceStrategy: 'fresh_first' | 'pool' | 'fresh_only';
+  pace: 'calm' | 'normal' | 'fast';
   targetSeconds: number;
   aspect: '9:16' | '1:1' | '4:5' | '16:9';
   subtitleStyle: string;

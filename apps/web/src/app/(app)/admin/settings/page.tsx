@@ -21,7 +21,7 @@ const SETTING_GROUPS: Record<string, string[]> = {
   "Прокси":             ["AI_PROXY_URL"],
   "Лимиты генерации": ["MAX_CONCURRENT_JOBS", "MAX_SCENES_PER_VIDEO", "MAX_VIDEOS_PER_TENANT_DAY", "JOB_TIMEOUT_SECONDS"],
   "Кредиты & Биллинг": ["CREDIT_COST_PER_SEC_AVATAR", "CREDIT_COST_PER_SEC_CLIP", "CREDIT_COST_PER_IMAGE", "STARTER_CREDITS", "PRO_CREDITS"],
-  "Провайдеры AI":     ["OPENROUTER_API_KEY", "FISH_AUDIO_API_KEY", "IMAGE_GEN_PROVIDER", "HEYGEN_DEFAULT_VOICE", "KLING_DEFAULT_ASPECT", "GPT_MODEL"],
+  "Провайдеры AI":     ["OPENROUTER_API_KEY", "OPENROUTER_MODELS", "GPTUNNEL_API_KEY", "GPTUNNEL_TEXT_MODEL", "FISH_AUDIO_API_KEY", "FISH_AUDIO_MODELS", "IMAGE_GEN_PROVIDER", "HEYGEN_DEFAULT_VOICE", "KLING_DEFAULT_ASPECT", "GPT_MODEL"],
   "Промпты":           ["GPT_SYSTEM_PROMPT", "DEFAULT_SCRIPT_TEMPLATE", "AVATAR_STYLE_PROMPT"],
   "Системные":         [],
 };
@@ -36,6 +36,11 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
   GPT_MODEL: "Модель GPT для сценариев",
   OPENROUTER_API_KEY: "Ключ OpenRouter для AI-сценариев (используется Автопилотом и AI-студией без участия браузера)",
   FISH_AUDIO_API_KEY: "Ключ Fish Audio для озвучки (используется Автопилотом и AI-студией без участия браузера)",
+  OPENROUTER_MODELS: "Модели OpenRouter через запятую, по приоритету (пусто = gemini-2.0-flash, gpt-4o-mini, бесплатные)",
+  GPTUNNEL_API_KEY: "Ключ GPTunnel — резервный провайдер сценариев, если OpenRouter недоступен",
+  GPTUNNEL_TEXT_MODEL: "Модель GPTunnel для сценариев (по умолчанию gpt-4o-mini)",
+  FISH_AUDIO_MODELS: "Модели Fish Audio через запятую (по умолчанию s2.1-pro-free, s2.1-pro)",
+  VOICE_PACE: "Темп речи голосов (слов/сек) — калибруется автоматически по каждой озвучке",
 };
 
 export default function AdminSettingsPage() {

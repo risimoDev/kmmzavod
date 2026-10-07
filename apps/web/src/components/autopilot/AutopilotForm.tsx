@@ -62,6 +62,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotInput = {
   montageMode: "multi",
   sourcesPerMontage: 3,
   sourceStrategy: "fresh_first",
+  pace: "normal",
   targetSeconds: 30,
   aspect: "9:16",
   subtitleStyle: "tiktok",
@@ -308,6 +309,14 @@ export function AutopilotForm({
               <Pill active={v.sourceStrategy === "fresh_first"} onClick={() => set("sourceStrategy", "fresh_first")}>Сначала свежие, потом весь пул</Pill>
               <Pill active={v.sourceStrategy === "pool"} onClick={() => set("sourceStrategy", "pool")}>Весь пул равномерно</Pill>
               <Pill active={v.sourceStrategy === "fresh_only"} onClick={() => set("sourceStrategy", "fresh_only")}>Только новые загрузки</Pill>
+            </div>
+          </Field>
+
+          <Field label="Темп нарезки" hint="длина одного кадра">
+            <div className="flex flex-wrap gap-2">
+              <Pill active={v.pace === "calm"} onClick={() => set("pace", "calm")}>Спокойный · 2.5–5с</Pill>
+              <Pill active={v.pace === "normal"} onClick={() => set("pace", "normal")}>Обычный · 1.6–3.6с</Pill>
+              <Pill active={v.pace === "fast"} onClick={() => set("pace", "fast")}>Динамичный · 1–2.4с</Pill>
             </div>
           </Field>
 

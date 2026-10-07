@@ -15,7 +15,7 @@ import tempfile
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.models import AnalyzeRequest, AnalyzeResponse, EdlClip, Geometry
+from app.models import ANALYSIS_VERSION, AnalyzeRequest, AnalyzeResponse, AudioMode, EdlClip, Geometry, SourceAnalysis
 from app.services import enrich
 from app.services import ffmpeg as fx
 from app.services import select as selector
@@ -92,6 +92,17 @@ def _attach_thumbs(clips: list[EdlClip], locals_by_idx: list[str]) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _cache_usable(cached: SourceAnalysis | None, need_transcript: bool) -> bool:
+    """A cached analysis is reused when it is current and has the transcript
+    this project needs (voiceover projects don't need one)."""
+    return (
+        cached is not None
+        and cached.analysis_version == ANALYSIS_VERSION
+        and cached.duration_sec > 0
+        and (cached.transcribed or not need_transcript)
+    )
+
+
 def create_router() -> APIRouter:
     router = APIRouter(prefix="", tags=["analyze"])
 
@@ -100,43 +111,72 @@ def create_router() -> APIRouter:
         if len(req.source_urls) > settings.max_source_videos:
             raise HTTPException(400, f"too many sources (max {settings.max_source_videos})")
 
-        sources = []
+        is_mix = req.geometry in (Geometry.MIX, "mix")
+        keep_audio = AudioMode(req.audio_mode) == AudioMode.KEEP
+        # Source speech only matters when it is heard: voiceover projects skip
+        # Whisper over the sources entirely (the biggest analysis cost).
+        need_transcript = req.need_transcript if req.need_transcript is not None else keep_audio
+
+        sources: list[SourceAnalysis] = []
         locals_by_idx: list[str] = []   # resolved local path per source index
         temps: list[str] = []
+        reused = 0
         try:
-            for url in req.source_urls:
+            for i, url in enumerate(req.source_urls):
                 local, is_temp = await storage.resolve_source(url)
                 if is_temp:
                     temps.append(local)
                 locals_by_idx.append(local)
-                analysis = await analyze_source(local, storage_key=url)
+                cached = req.cached_analyses[i] if i < len(req.cached_analyses) else None
+                if _cache_usable(cached, need_transcript):
+                    analysis = cached
+                    reused += 1
+                else:
+                    analysis = await analyze_source(local, storage_key=url,
+                                                    with_transcript=need_transcript)
+                    err = analysis.transcript_error or ""
+                    # Whisper genuinely ran (even if it heard no speech) ⇒ reusable
+                    # for keep-audio projects later; a broken STT must be retried.
+                    analysis.transcribed = need_transcript and not err.startswith(
+                        ("Whisper unavailable", "Transcription failed"))
                 if analysis.duration_sec > settings.max_source_duration_sec:
                     raise HTTPException(
                         400, f"source too long: {analysis.duration_sec}s "
                              f"(max {settings.max_source_duration_sec})")
                 sources.append(analysis)
+            if reused:
+                logger.info("Analyze %s: reused %d/%d cached source analyses",
+                            req.project_id, reused, len(sources))
 
-            effective_target = max(req.target_clip_count, len(sources)) if req.geometry not in (Geometry.MIX, "mix") else 1
+            effective_target = 1 if is_mix else max(req.target_clip_count, len(sources))
+            exclude = [[(float(a), float(b)) for a, b in rng] for rng in req.exclude_ranges]
             clips = selector.build_clips(
                 sources, req.geometry,
                 target_count=effective_target,
                 target_seconds=req.target_clip_seconds,
+                variant_count=req.variant_count,
+                seed=req.seed,
+                pace=req.pace.value if hasattr(req.pace, "value") else str(req.pace),
+                keep_audio=keep_audio,
+                hook_first=req.hook_first,
+                exclude_ranges=exclude,
             )
-            clips = _dedupe_visual(clips, locals_by_idx)
-            # Phase 2: GPTunnel — full-transcript range proposal (highlights) or
-            # re-rank fallback, + optional vision on silent clips. Runs while temp
-            # sources still exist (vision samples keyframes from them).
-            clips = await enrich.enrich_clips(
-                clips, sources, use_vision=req.use_vision, locals_by_idx=locals_by_idx,
-                target_count=effective_target,
-                target_seconds=req.target_clip_seconds,
-            )
-            # Storyboard previews (midpoint frames) — after enrich so LLM-proposed
-            # ranges get thumbs too; while temp sources still exist.
+            if not is_mix:
+                clips = _dedupe_visual(clips, locals_by_idx)
+                # GPTunnel — full-transcript range proposal (highlights) or re-rank
+                # fallback, + optional vision on silent clips. Mix variants are
+                # assembled shot-by-shot and need no LLM (saves tokens + time).
+                clips = await enrich.enrich_clips(
+                    clips, sources, use_vision=req.use_vision, locals_by_idx=locals_by_idx,
+                    target_count=effective_target,
+                    target_seconds=req.target_clip_seconds,
+                )
+            # Storyboard previews (first-shot frames) while temp sources still exist.
             _attach_thumbs(clips, locals_by_idx)
             # Proposed subtitles on each clip's output timeline (user-editable).
             for c in clips:
-                c.subtitles = selector.map_clip_subtitles(c, sources)
+                c.subtitles = selector.map_clip_subtitles(
+                    c, sources, transition_sec=selector.TRANSITION_SEC if c.transitions else 0.0)
         finally:
             for t in temps:
                 try:

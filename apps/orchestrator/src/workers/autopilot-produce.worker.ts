@@ -16,9 +16,11 @@ import { QUEUES, type AutopilotProducePayload, type EditorAnalyzeJobPayload } fr
 import type { PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
 import { logger as rootLogger } from '../logger';
-import { OpenRouterService, type ScriptStyle } from '../services/openrouter';
-import { FishAudioService, DEFAULT_FISH_VOICE_ID } from '../services/fish-audio';
-import { getAiKey } from '../lib/ai-keys';
+import {
+  writeScript, fishTts, firstSentence, paceFor, voiceGender, DEFAULT_VOICE_ID, SCRIPT_STYLES,
+  type ScriptStyle, type CtaType,
+} from '@kmmzavod/ai';
+import { getLlm, getFishConfig, getPaceTable, recordPace } from '../lib/ai';
 import { journal, failBatch } from '../autopilot/journal';
 
 const logger = rootLogger.child({ worker: 'autopilot-produce' });
@@ -30,15 +32,54 @@ interface Deps {
   connection: ConnectionOptions;
 }
 
-const SCRIPT_STYLES: ScriptStyle[] = ['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal'];
+const STYLE_IDS = SCRIPT_STYLES.map((s) => s.id) as string[];
 
 /** The montage needs a little tail after the last word so the CTA isn't clipped. */
 const VOICE_TAIL_SEC = 0.8;
 
+/** Stable positive int seed from a UUID (same batch ⇒ same storyboard on retry). */
+function seedFromId(id: string): number {
+  return parseInt(id.replace(/-/g, '').slice(0, 8), 16) % 1_000_000_007;
+}
+
+/**
+ * Footage ranges used by this autopilot's recent montages, keyed by storage key,
+ * so the editor deprioritises them and every new video looks new.
+ */
+async function usedRangesByKey(db: PrismaClient, autopilotId: string, exceptBatchId: string) {
+  const prior = await db.autopilotBatch.findMany({
+    where: { autopilotId, id: { not: exceptBatchId }, editProjectId: { not: null }, status: { not: 'failed' } },
+    select: { editProjectId: true },
+    orderBy: { createdAt: 'desc' },
+    take: 30,
+  });
+  const projectIds = prior.map((p) => p.editProjectId!).filter(Boolean);
+  if (projectIds.length === 0) return {};
+  const [sources, clips] = await Promise.all([
+    db.editSource.findMany({ where: { projectId: { in: projectIds } }, select: { projectId: true, order: true, storageKey: true } }),
+    db.editClip.findMany({ where: { projectId: { in: projectIds }, included: true }, select: { projectId: true, edl: true } }),
+  ]);
+  // src_idx in an EDL = index into that project's sources sorted by `order`.
+  const keysByProject = new Map<string, string[]>();
+  for (const pid of projectIds) {
+    keysByProject.set(pid, sources.filter((s) => s.projectId === pid).sort((a, b) => a.order - b.order).map((s) => s.storageKey));
+  }
+  const out: Record<string, [number, number][]> = {};
+  for (const c of clips) {
+    const segs = ((c.edl ?? {}) as { segments?: { src_idx: number; start: number; end: number }[] }).segments ?? [];
+    const keys = keysByProject.get(c.projectId) ?? [];
+    for (const seg of segs) {
+      const key = keys[seg.src_idx];
+      if (!key) continue;
+      const list = (out[key] ??= []);
+      if (list.length < 200) list.push([Number(seg.start), Number(seg.end)]);
+    }
+  }
+  return out;
+}
+
 export function createAutopilotProduceWorker(deps: Deps): Worker {
   const { db, storage, editorAnalyzeQueue, connection } = deps;
-  const openRouter = new OpenRouterService();
-  const fish = new FishAudioService(storage);
 
   return new Worker<AutopilotProducePayload>(
     QUEUES['autopilot-produce'].name,
@@ -77,45 +118,51 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
           where: { autopilotId: ap.id, createdAt: { lt: batch.createdAt } },
         });
         const styles = (ap.scriptStyles.length ? ap.scriptStyles : ['blogger'])
-          .filter((s): s is ScriptStyle => (SCRIPT_STYLES as string[]).includes(s));
+          .filter((s): s is ScriptStyle => STYLE_IDS.includes(s));
         const style: ScriptStyle = styles.length ? styles[seq % styles.length] : 'blogger';
+        // Voice first: its gender drives grammar, its calibrated pace the length.
+        const voiceId = ap.voiceIds.length ? ap.voiceIds[seq % ap.voiceIds.length] : DEFAULT_VOICE_ID;
+        const speed = Number(ap.voiceSpeed) || 1.0;
+        const paceTable = await getPaceTable();
 
-        const openRouterKey = await getAiKey(db, 'OPENROUTER_API_KEY');
-        const script = await openRouter.generateScript({
-          topic: ap.project.name,
-          projectName: ap.project.name,
-          productInfo: ap.productInfo ?? ap.project.description ?? '',
-          style,
-          targetSeconds: ap.targetSeconds,
-          ctaType: (ap.ctaType as 'article' | 'direct' | 'auto') ?? 'article',
-          directWord: ap.directWord ?? undefined,
-          language: 'ru',
-          variantCount: Math.max(1, Math.min(batch.variantCount || 1, 30)),
-          apiKey: openRouterKey,
+        // Recent hooks of this autopilot — the next video must open differently.
+        const recent = await db.autopilotBatch.findMany({
+          where: { autopilotId: ap.id, id: { not: batchId }, script: { not: null } },
+          select: { script: true },
+          orderBy: { createdAt: 'desc' },
+          take: 12,
         });
-        if (!script.script?.trim()) throw new Error('Пустой сценарий от OpenRouter');
-        if (script.modelUsed.startsWith('mock')) {
-          await journal(db, ap, 'info',
-            'OpenRouter недоступен или ключ не задан — использован шаблонный сценарий. Задайте ключ в Админ → Настройки (OPENROUTER_API_KEY).',
-            { summary: { batchId, modelUsed: script.modelUsed } });
+
+        // No template fallback: without a working LLM the batch fails loudly
+        // instead of publishing a generic script to the farm.
+        const script = await writeScript(await getLlm(), {
+          product: ap.project.name,
+          productInfo: ap.productInfo ?? ap.project.description ?? undefined,
+          style,
+          seconds: ap.targetSeconds,
+          wps: paceFor(paceTable, voiceId, speed),
+          narrator: voiceGender(voiceId),
+          cta: { type: (ap.ctaType as CtaType) ?? 'article', word: ap.directWord ?? undefined },
+          avoidHooks: recent.map((r) => firstSentence(r.script!)),
+          captionsCount: Math.max(1, Math.min(batch.variantCount || 1, 30)),
+          allowTemplate: false,
+        });
+        if (script.notes.length) {
+          await journal(db, ap, 'info', `Сценарий: ${script.notes.join('; ')}`, { summary: { batchId, provider: script.provider, model: script.model } });
         }
 
         // ── 2. Voiceover ────────────────────────────────────────────────────
-        const voiceId = ap.voiceIds.length ? ap.voiceIds[seq % ap.voiceIds.length] : DEFAULT_FISH_VOICE_ID;
-        const fishKey = await getAiKey(db, 'FISH_AUDIO_API_KEY');
-        const tts = await fish.ttsCreate({
-          text: script.script,
-          voiceId,
-          speed: Number(ap.voiceSpeed) || 1.0,
-          tenantId: ap.tenantId,
-          destinationKey: `tenants/${ap.tenantId}/autopilot/${ap.id}/${batchId}/voiceover.mp3`,
-          apiKey: fishKey,
-        });
+        const tts = await fishTts(await getFishConfig(), { text: script.script, voiceId, speed });
+        const voiceoverKey = `tenants/${ap.tenantId}/autopilot/${ap.id}/${batchId}/voiceover.mp3`;
+        await storage.uploadBuffer(voiceoverKey, tts.audio, { contentType: 'audio/mpeg' });
+        await recordPace(voiceId, speed, tts.words, tts.durationSec);
         const voiceDuration = tts.durationSec > 0 ? tts.durationSec : ap.targetSeconds;
 
         // ── 3. Montage project ──────────────────────────────────────────────
         const bgmKey = ap.bgmKeys.length ? ap.bgmKeys[seq % ap.bgmKeys.length] : undefined;
-        const clipSeconds = Math.max(8, Math.ceil(voiceDuration + VOICE_TAIL_SEC));
+        // Exact length: the editor fills the montage to this and fits it to the voice.
+        const clipSeconds = Math.max(8, Math.round((voiceDuration + VOICE_TAIL_SEC) * 10) / 10);
+        const excludeRanges = await usedRangesByKey(db, ap.id, batchId);
         const project = await db.editProject.create({
           data: {
             tenantId: ap.tenantId,
@@ -133,7 +180,13 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
             config: {
               autopilotId: ap.id,
               autopilotBatchId: batchId,
-              voiceoverKey: tts.storageKey,
+              // Variety: a per-batch seed + fragments earlier montages used.
+              seed: seedFromId(batchId),
+              pace: ap.pace,
+              hookFirst: true,
+              variantCount: 1,
+              excludeRanges,
+              voiceoverKey: voiceoverKey,
               voiceId,
               voiceoverText: script.script,
               productInfo: ap.productInfo ?? undefined,
@@ -142,7 +195,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
               scriptHook: script.hook,
               scriptTitle: script.title,
               socialCaptions: script.captions,
-              aiModelUsed: script.modelUsed,
+              aiModelUsed: `${script.provider}/${script.model}`,
             } as object,
             sources: {
               create: ordered.map((s, order) => ({ storageKey: s.storageKey, order })),
@@ -160,7 +213,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
             scriptStyle: style,
             caption: script.captions?.[0]?.caption ?? script.title ?? null,
             voiceId,
-            voiceoverKey: tts.storageKey,
+            voiceoverKey: voiceoverKey,
             voiceDuration,
           },
         });

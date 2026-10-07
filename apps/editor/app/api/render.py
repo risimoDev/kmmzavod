@@ -61,9 +61,18 @@ def create_router() -> APIRouter:
             prefix = req.output_key_prefix.rstrip("/")
             for i, clip in enumerate(included):
                 out_path = os.path.join(work, f"clip_{i:03d}.mp4")
+                # Per-clip AI voiceover beats the project-level one.
+                clip_voice, clip_text = voiceover_path, req.voiceover_text
+                if clip.voiceover_url:
+                    clip_voice, t = await storage.resolve_source(clip.voiceover_url)
+                    if t:
+                        temps.append(clip_voice)
+                    clip_text = clip.voiceover_text or ""
                 res = await _to_thread_render(
                     clip, locals_by_idx, work, out_path, req,
-                    out_w, out_h, voiceover_path, bgm_path,
+                    out_w, out_h, clip_voice, bgm_path, seed=req.seed + i,
+                    voiceover_text=clip_text,
+                    audio_override=AudioMode.REPLACE if clip.voiceover_url else None,
                 )
                 key = f"{prefix}/clip_{i:03d}.mp4"
                 await storage.upload_file(key, res.output_path, "video/mp4")
@@ -91,14 +100,16 @@ def create_router() -> APIRouter:
 
 
 async def _to_thread_render(clip, locals_by_idx, work, out_path, req,
-                            out_w, out_h, voiceover_path, bgm_path):
+                            out_w, out_h, voiceover_path, bgm_path, seed: int = 0,
+                            voiceover_text: str = "", audio_override: AudioMode | None = None):
     """Run the (blocking, CPU-bound) render in a worker thread."""
     import asyncio
     return await asyncio.to_thread(
         renderer.render_clip, clip, locals_by_idx, work, out_path,
-        mode=EditMode(req.mode), audio_mode=AudioMode(req.audio_mode),
+        mode=EditMode(req.mode), audio_mode=audio_override or AudioMode(req.audio_mode),
         out_w=out_w, out_h=out_h, fps=req.fps, smart_crop=req.smart_crop,
         subtitle_style=(req.subtitle_style.value if hasattr(req.subtitle_style, "value")
                         else str(req.subtitle_style)),
-        voiceover_path=voiceover_path, bgm_path=bgm_path,
+        voiceover_path=voiceover_path, bgm_path=bgm_path, seed=seed, voiceover_text=voiceover_text,
+        geometry=(req.geometry.value if hasattr(req.geometry, "value") else req.geometry),
     )

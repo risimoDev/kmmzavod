@@ -14,12 +14,16 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { editorAnalyzeQueue, editorRenderQueue } from '../lib/queues';
+import { editorAnalyzeQueue, editorRenderQueue, uniquifyAnalyzeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
-import type { EditorAnalyzeJobPayload, EditorRenderJobPayload } from '@kmmzavod/queue';
-import { FishAudioService, FISH_AUDIO_VOICES } from '../services/fish-audio';
-import { OpenRouterService, stripEmotionTags } from '../services/openrouter';
+import type { EditorAnalyzeJobPayload, EditorRenderJobPayload, UniquifyAnalyzeJobPayload } from '@kmmzavod/queue';
+import {
+  writeScript, fishTts, fishSearchVoices, paceFor, voiceGender, voiceById, stripEmotionTags,
+  FISH_VOICES, DEFAULT_VOICE_ID, LlmUnavailableError, FishError,
+  type ScriptStyle, type VoiceInfo,
+} from '@kmmzavod/ai';
+import { getLlm, getFishConfig, getPaceTable, recordPace, aiStatus } from '../lib/ai';
 import { config } from '../config';
 
 const SUBTITLE_STYLES = [
@@ -34,8 +38,25 @@ const SUBTITLE_STYLES = [
   'minimal',
 ] as const;
 
+/**
+ * Editor products (what the user is making) → engine settings:
+ *   uniquify_one   — K distinct re-edits of ONE video, raw material for uniquify
+ *   uniquify_multi — K distinct mixes of SEVERAL videos, raw material for uniquify
+ *   smart_montage  — finished video (highlights or mix) with subtitles
+ */
+const PRODUCTS = ['uniquify_one', 'uniquify_multi', 'smart_montage'] as const;
+const PACES = ['calm', 'normal', 'fast'] as const;
+
+function randomSeed(): number {
+  return Math.floor(Math.random() * 1_000_000_000);
+}
+
 const createProjectSchema = z.object({
   name: z.string().min(1).max(200),
+  product: z.enum(PRODUCTS).optional(),
+  variantCount: z.number().int().min(1).max(10).optional(),
+  pace: z.enum(PACES).optional(),
+  hookFirst: z.boolean().optional(),
   mode: z.enum(['uniquify_source', 'smart_montage']).default('smart_montage'),
   geometry: z.enum(['highlights', 'mix']).default('highlights'),
   aspect: z.enum(['9:16', '1:1', '16:9', '4:5']).default('9:16'),
@@ -52,6 +73,9 @@ const createProjectSchema = z.object({
 
 const patchProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
+  variantCount: z.number().int().min(1).max(10).optional(),
+  pace: z.enum(PACES).optional(),
+  hookFirst: z.boolean().optional(),
   geometry: z.enum(['highlights', 'mix']).optional(),
   aspect: z.enum(['9:16', '1:1', '16:9', '4:5']).optional(),
   fps: z.number().int().min(15).max(60).optional(),
@@ -136,6 +160,37 @@ function mapSubtitles(segments: SegIn[], transcripts: TSeg[][], transitionSec: n
   return lines;
 }
 
+/** Output length of a storyboard clip (rendered duration, else EDL math). */
+function clipSeconds(clip: { durationSec: unknown; edl: unknown }): number {
+  const rendered = Number(clip.durationSec);
+  if (rendered > 0) return Math.round(rendered * 10) / 10;
+  const edl = (clip.edl ?? {}) as { segments?: { start: number; end: number }[]; transitions?: boolean };
+  const segs = edl.segments ?? [];
+  const sum = segs.reduce((t, s) => t + Math.max(0, Number(s.end) - Number(s.start)), 0)
+    - (edl.transitions ? 0.35 * Math.max(0, segs.length - 1) : 0);
+  return Math.max(5, Math.round(sum * 10) / 10);
+}
+
+/** Target length for a project-level script: average included clip, else the project target. */
+function projectSeconds(project: { clips: { included: boolean; durationSec: unknown; edl: unknown }[]; targetClipSeconds: unknown }): number {
+  const inc = project.clips.filter((c) => c.included);
+  if (inc.length) return Math.round(inc.reduce((t, c) => t + clipSeconds(c), 0) / inc.length);
+  return Math.round(Number(project.targetClipSeconds) || 30);
+}
+
+/** Map AI-layer failures to precise HTTP answers the studio can show as-is. */
+function sendAiError(reply: { code: (n: number) => { send: (b: unknown) => unknown } }, err: unknown) {
+  if (err instanceof LlmUnavailableError) {
+    return reply.code(503).send({ error: 'AiUnavailable', message: err.message });
+  }
+  if (err instanceof FishError) {
+    const code = err.kind === 'no_key' ? 400 : err.kind === 'voice_not_found' ? 422 : err.kind === 'quota' ? 402 : 502;
+    return reply.code(code).send({ error: 'FishAudio', kind: err.kind, message: err.message });
+  }
+  logger.error({ err: (err as Error)?.message }, 'AI studio error');
+  return reply.code(502).send({ error: 'AiError', message: (err as Error)?.message ?? 'Ошибка AI' });
+}
+
 export async function editorRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
 
@@ -145,13 +200,23 @@ export async function editorRoutes(app: FastifyInstance) {
     const body = createProjectSchema.parse(req.body);
 
         const wsProjectId = body.workspaceProjectId || ((body.config as any)?.workspaceProjectId as string | undefined);
+        // Uniquify products are always mixes of raw material (mode/geometry are
+        // implied by the product, not left to the client).
+        const isUniquifyProduct = body.product === 'uniquify_one' || body.product === 'uniquify_multi';
+        const montageOptions = {
+          ...(body.product ? { product: body.product } : {}),
+          variantCount: body.variantCount ?? (isUniquifyProduct ? 3 : 1),
+          pace: body.pace ?? 'normal',
+          hookFirst: body.hookFirst ?? true,
+          seed: randomSeed(),
+        };
         const project = await db.editProject.create({
           data: {
             tenantId,
             createdBy: userId,
             name: body.name,
-            mode: body.mode,
-            geometry: body.geometry,
+            mode: isUniquifyProduct ? 'uniquify_source' : body.mode,
+            geometry: isUniquifyProduct ? 'mix' : body.geometry,
             aspect: body.aspect,
             fps: body.fps,
             smartCrop: body.smartCrop,
@@ -160,7 +225,11 @@ export async function editorRoutes(app: FastifyInstance) {
             useVision: body.useVision,
             targetClipCount: body.targetClipCount,
             targetClipSeconds: body.targetClipSeconds,
-            config: ({ ...(body.config ?? {}), ...(wsProjectId ? { workspaceProjectId: wsProjectId } : {}) }) as object,
+            config: ({
+              ...(body.config ?? {}),
+              ...montageOptions,
+              ...(wsProjectId ? { workspaceProjectId: wsProjectId } : {}),
+            }) as object,
             status: 'draft',
           },
         });
@@ -177,6 +246,9 @@ export async function editorRoutes(app: FastifyInstance) {
     });
     return { projects };
   });
+
+  const presignVoice = async (key: unknown) =>
+    typeof key === 'string' && key ? app.storage.presignedUrl(key, 3600).catch(() => null) : null;
 
   // ── Get project (+ sources + storyboard) ────────────────────────────────────
   app.get('/projects/:id', async (req, reply) => {
@@ -211,10 +283,13 @@ export async function editorRoutes(app: FastifyInstance) {
           outputUrl: c.outputKey
             ? await app.storage.presignedUrl(c.outputKey, 3600).catch(() => null)
             : null,
+          // Per-clip AI voiceover (AI studio) — playable link for the storyboard/studio.
+          voiceoverUrl: await presignVoice((c.edl as any)?.voiceover?.key),
         })),
       ),
     ]);
-    return { ...project, sources, clips };
+    const cfg = (project.config as Record<string, unknown>) || {};
+    return { ...project, sources, clips, voiceoverUrl: await presignVoice(cfg.voiceoverKey) };
   });
 
   // ── Upload a source video ───────────────────────────────────────────────────
@@ -312,7 +387,18 @@ export async function editorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'BadRequest', message: 'Нет загруженных источников' });
     }
 
-    await db.editProject.update({ where: { id: projectId }, data: { status: 'analyzing', error: null } });
+    // «🎲 Другие варианты»: a fresh seed gives a different storyboard; cached
+    // source analyses make the re-roll take seconds, not minutes.
+    const { reroll } = z.object({ reroll: z.boolean().optional() }).parse(req.body ?? {});
+    const cfg = (project.config as Record<string, unknown>) || {};
+    await db.editProject.update({
+      where: { id: projectId },
+      data: {
+        status: 'analyzing',
+        error: null,
+        ...(reroll || typeof cfg.seed !== 'number' ? { config: { ...cfg, seed: randomSeed() } as object } : {}),
+      },
+    });
     await editorAnalyzeQueue.add(
       `editor-analyze-${projectId}`,
       { projectId, tenantId } satisfies EditorAnalyzeJobPayload,
@@ -354,7 +440,8 @@ export async function editorRoutes(app: FastifyInstance) {
       // Boundaries moved → refresh proposed subtitles + snippet from the transcript.
       const transcripts = sources.map((s) =>
         (((s.analysis ?? {}) as Record<string, unknown>).transcript ?? []) as TSeg[]);
-      const lines = mapSubtitles(body.segments, transcripts);
+      // Voiceover mixes join shots with 0.35s xfades (mirror of editor TRANSITION_SEC).
+      const lines = mapSubtitles(body.segments, transcripts, edl.transitions === true ? 0.35 : 0);
       edl.subtitles = lines;
       transcriptSnippet = lines.map((l) => l.text).join(' ').slice(0, 160);
       durationSec = Math.round(body.segments.reduce((a, s) => a + (s.end - s.start), 0) * 100) / 100;
@@ -632,6 +719,9 @@ export async function editorRoutes(app: FastifyInstance) {
           ...(body.productInfo !== undefined ? { productInfo: body.productInfo } : {}),
           ...(body.ctaType !== undefined ? { ctaType: body.ctaType } : {}),
           ...(body.directWord !== undefined ? { directWord: body.directWord } : {}),
+          ...(body.variantCount !== undefined ? { variantCount: body.variantCount } : {}),
+          ...(body.pace !== undefined ? { pace: body.pace } : {}),
+          ...(body.hookFirst !== undefined ? { hookFirst: body.hookFirst } : {}),
         } as object,
       },
     });
@@ -639,30 +729,6 @@ export async function editorRoutes(app: FastifyInstance) {
   });
 
   // ── Presets & Voices ────────────────────────────────────────────────────────
-  app.get('/voices', async (req) => {
-    const query = (req.query as any) || {};
-    const fishAudio = new FishAudioService(app.storage);
-    const voices = await fishAudio.searchPublicVoices({
-      apiKey: query.apiKey || (req.headers['x-fish-audio-key'] as string),
-      query: query.query,
-      language: query.language,
-    });
-    const configured = Boolean(config.FISH_AUDIO_API_KEY && !config.FISH_AUDIO_API_KEY.startsWith('mock_'));
-    return { voices, configured };
-  });
-
-  app.get('/projects/voices', async (req) => {
-    const query = (req.query as any) || {};
-    const fishAudio = new FishAudioService(app.storage);
-    const voices = await fishAudio.searchPublicVoices({
-      apiKey: query.apiKey || (req.headers['x-fish-audio-key'] as string),
-      query: query.query,
-      language: query.language,
-    });
-    const configured = Boolean(config.FISH_AUDIO_API_KEY && !config.FISH_AUDIO_API_KEY.startsWith('mock_'));
-    return { voices, configured };
-  });
-
   app.get('/presets', async () => {
     return {
       subtitleStyles: [
@@ -734,184 +800,292 @@ export async function editorRoutes(app: FastifyInstance) {
     };
   });
 
-  // ── AI Script Generation (OpenRouter Free Cascade) ──────────────────────────
+  // ── AI studio: provider status, voices, voice preview ──────────────────────
+  app.get('/ai/status', async () => aiStatus());
+
+  const listVoices = async (req: { query: unknown }) => {
+    const q = z.object({ query: z.string().max(100).optional() }).parse(req.query ?? {});
+    const fish = await getFishConfig();
+    const community = q.query && fish.apiKey
+      ? await fishSearchVoices(fish, { title: q.query, language: 'ru' }).catch(() => [] as VoiceInfo[])
+      : [];
+    return { voices: FISH_VOICES, community, configured: Boolean(fish.apiKey) };
+  };
+  app.get('/voices', listVoices);
+  app.get('/projects/voices', listVoices);
+
+  /** Short sample of a voice (cached in storage per voice+speed). */
+  app.post('/ai/voice-preview', async (req, reply) => {
+    const body = z.object({
+      voiceId: z.string().min(1).max(100),
+      speed: z.number().min(0.5).max(2).default(1),
+    }).parse(req.body ?? {});
+    const key = `ai/voice-previews/${body.voiceId.replace(/[^\w-]/g, '')}@${body.speed.toFixed(2)}.mp3`;
+    if (!(await app.storage.exists(key).catch(() => false))) {
+      const text = voiceById(body.voiceId)?.previewText
+        || 'Привет! Так звучит этот голос. Послушайте и выберите подходящий для ролика.';
+      try {
+        const tts = await fishTts(await getFishConfig(), { text, voiceId: body.voiceId, speed: body.speed });
+        await app.storage.uploadBuffer(key, tts.audio, { contentType: 'audio/mpeg' });
+      } catch (err) {
+        return sendAiError(reply, err);
+      }
+    }
+    return { audioUrl: await app.storage.presignedUrl(key, 3600) };
+  });
+
+  // ── AI script (per clip or per project) ─────────────────────────────────────
   app.post('/projects/:id/generate-script', async (req, reply) => {
     const { tenantId } = req.user;
     const { id } = req.params as { id: string };
+    const body = z.object({
+      clipId: z.string().uuid().optional(),
+      style: z.enum(['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal']).default('blogger'),
+      targetSeconds: z.number().min(5).max(180).optional(),
+      productName: z.string().max(200).optional(),
+      productInfo: z.string().max(3000).optional(),
+      audience: z.string().max(300).optional(),
+      ctaType: z.enum(['article', 'direct', 'auto', 'none']).default('article'),
+      directWord: z.string().max(50).optional(),
+      mode: z.enum(['generate', 'fit', 'rewrite']).default('generate'),
+      currentScript: z.string().max(5000).optional(),
+      measuredSeconds: z.number().positive().max(600).optional(),
+      voiceId: z.string().max(100).optional(),
+      speed: z.number().min(0.5).max(2).optional(),
+      captionsCount: z.number().int().min(1).max(30).default(3),
+      useSourceTranscript: z.boolean().default(true),
+    }).parse(req.body ?? {});
 
     const project = await db.editProject.findFirst({
       where: { id, tenantId },
       include: { sources: { orderBy: { order: 'asc' } }, clips: { orderBy: { order: 'asc' } } },
     });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
+    const clip = body.clipId ? project.clips.find((c) => c.id === body.clipId) : undefined;
+    if (body.clipId && !clip) return reply.code(404).send({ error: 'NotFound', message: 'Клип не найден' });
 
-    const schema = z.object({
-      topic: z.string().max(500).optional(),
-      projectName: z.string().max(200).optional(),
-      style: z.enum(['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal']).default('blogger'),
-      targetSeconds: z.number().min(5).max(180).optional(),
-      productInfo: z.string().max(3000).optional(),
-      currentScript: z.string().max(5000).optional(),
-      mode: z.enum(['generate', 'expand', 'fit']).default('generate'),
-      ctaType: z.enum(['article', 'direct', 'auto']).default('article'),
-      directWord: z.string().max(50).optional(),
-      useSourceTranscript: z.boolean().default(true),
-      apiKey: z.string().optional(),
-    });
-    const body = schema.parse(req.body);
+    const cfg = (project.config as Record<string, unknown>) || {};
+    const seconds = body.targetSeconds ?? (clip ? clipSeconds(clip) : projectSeconds(project));
+    const voiceId = body.voiceId ?? (typeof cfg.voiceId === 'string' ? cfg.voiceId : DEFAULT_VOICE_ID);
+    const speed = body.speed ?? (typeof cfg.voiceSpeed === 'number' ? cfg.voiceSpeed : 1);
+    const wps = paceFor(await getPaceTable(), voiceId, speed);
+    const history = Array.isArray(cfg.scriptHistory) ? (cfg.scriptHistory as string[]) : [];
 
-    const currentConfig = (project.config as Record<string, unknown>) || {};
-    const effectiveProjectName = body.projectName?.trim() || project.name || 'Видеоролик';
-    const effectiveTopic = body.topic?.trim() || effectiveProjectName;
-    const effectiveProductInfo = body.productInfo?.trim() || (currentConfig.productInfo as string) || '';
-
-    let effectiveSeconds = body.targetSeconds;
-    if (!effectiveSeconds || effectiveSeconds <= 0) {
-      const includedClips = project.clips.filter((c) => c.included);
-      const totalDur = includedClips.reduce((sum, c) => sum + Number(c.durationSec || 0), 0);
-      effectiveSeconds = totalDur > 0 ? Math.round(totalDur) : (Number(project.targetClipSeconds) || 30);
-    }
-
+    // What is actually said in the footage helps ground the script (keep-audio sources).
     let sourceTranscript = '';
     if (body.useSourceTranscript) {
-      // Gather any recognized transcript snippets from sources
-      const snippets = project.sources
+      sourceTranscript = (clip?.transcriptSnippet ?? '') || project.sources
         .map((s) => {
-          const a = (s.analysis as any) || {};
-          const t = a.transcript;
-          if (Array.isArray(t) && t.length > 0) {
-            return t.map((item: any) => item.text || '').join(' ');
-          }
-          return '';
+          const t = ((s.analysis as any) ?? {}).transcript;
+          return Array.isArray(t) ? t.map((x: any) => x?.text ?? '').join(' ') : '';
         })
-        .filter(Boolean);
-      sourceTranscript = snippets.join(' ').slice(0, 2000);
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 1500);
     }
 
-    const openRouter = new OpenRouterService();
-    const result = await openRouter.generateScript({
-      topic: effectiveTopic,
-      projectName: effectiveProjectName,
-      style: body.style,
-      targetSeconds: effectiveSeconds,
-      productInfo: effectiveProductInfo,
-      currentScript: body.currentScript,
-      mode: body.mode,
-      ctaType: body.ctaType,
-      directWord: body.directWord,
-      sourceTranscript,
-      language: 'ru',
-      variantCount: 3,
-      apiKey: body.apiKey || (req.headers['x-openrouter-key'] as string),
-    });
+    let result;
+    try {
+      result = await writeScript(await getLlm(), {
+        product: body.productName?.trim() || project.name,
+        productInfo: body.productInfo?.trim() || (typeof cfg.productInfo === 'string' ? cfg.productInfo : undefined),
+        audience: body.audience,
+        style: body.style as ScriptStyle,
+        seconds,
+        wps,
+        narrator: voiceGender(voiceId),
+        cta: { type: body.ctaType, word: body.directWord },
+        avoidHooks: history,
+        sourceTranscript: sourceTranscript || undefined,
+        captionsCount: body.captionsCount,
+        mode: body.mode,
+        currentScript: body.currentScript,
+        measuredSeconds: body.measuredSeconds,
+        allowTemplate: true, // manual studio: a template beats an error, and it is labelled
+      });
+    } catch (err) {
+      return sendAiError(reply, err);
+    }
 
-    // Save generated script into project config for convenience
+    const scriptRecord = {
+      text: result.script, hook: result.hook, title: result.title, captions: result.captions,
+      style: body.style, provider: result.provider, model: result.model, at: new Date().toISOString(),
+    };
+    if (clip) {
+      const edl = (clip.edl ?? {}) as Record<string, unknown>;
+      await db.editClip.update({ where: { id: clip.id }, data: { edl: { ...edl, script: scriptRecord } as object } });
+    }
     await db.editProject.update({
       where: { id },
       data: {
         config: {
-          ...currentConfig,
-          ...(effectiveProductInfo ? { productInfo: effectiveProductInfo } : {}),
+          ...cfg,
+          ...(body.productInfo?.trim() ? { productInfo: body.productInfo.trim() } : {}),
           ctaType: body.ctaType,
           ...(body.directWord ? { directWord: body.directWord } : {}),
-          generatedScript: result.script,
-          scriptHook: result.hook,
-          scriptTitle: result.title,
-          socialCaptions: result.captions,
-          aiModelUsed: result.modelUsed,
+          scriptStyle: body.style,
+          scriptHistory: [result.hook, ...history.filter((h) => h !== result.hook)].slice(0, 20),
+          ...(!clip ? {
+            generatedScript: result.script, scriptHook: result.hook, scriptTitle: result.title,
+            socialCaptions: result.captions, aiModelUsed: `${result.provider}/${result.model}`,
+          } : {}),
         } as object,
       },
     });
 
-    return result;
+    return { ...result, targetSeconds: seconds, wps, clipId: clip?.id ?? null };
   });
 
-  // ── Fish Audio Voice Synthesis (s2.1-pro-free) ──────────────────────────────
+  // ── AI voiceover (per clip or per project) ─────────────────────────────────
   app.post('/projects/:id/generate-voice', async (req, reply) => {
     const { tenantId } = req.user;
     const { id: projectId } = req.params as { id: string };
-
-    const project = await db.editProject.findFirst({
-      where: { id: projectId, tenantId },
-      include: { clips: { orderBy: { order: 'asc' } } },
-    });
-    if (!project) return reply.code(404).send({ error: 'NotFound' });
-
-    const schema = z.object({
-      text: z.string().min(1).max(3000),
-      voiceId: z.string().optional(),
-      speed: z.number().min(0.5).max(2.0).default(1.0),
+    const body = z.object({
+      text: z.string().min(1).max(5000),
+      voiceId: z.string().max(100).optional(),
+      speed: z.number().min(0.5).max(2).default(1),
       volume: z.number().min(-20).max(20).default(0),
-      apiKey: z.string().optional(),
-    });
-    const body = schema.parse(req.body);
+      clipId: z.string().uuid().optional(),
+    }).parse(req.body ?? {});
 
-    const fishAudio = new FishAudioService(app.storage);
-    const destinationKey = `tenants/${tenantId}/editor/${projectId}/voiceover.mp3`;
+    const project = await db.editProject.findFirst({ where: { id: projectId, tenantId }, include: { clips: true } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+    const clip = body.clipId ? project.clips.find((c) => c.id === body.clipId) : undefined;
+    if (body.clipId && !clip) return reply.code(404).send({ error: 'NotFound', message: 'Клип не найден' });
+    const voiceId = body.voiceId || DEFAULT_VOICE_ID;
 
+    let tts;
     try {
-      const { storageKey } = await fishAudio.ttsCreate({
-        text: body.text,
-        voiceId: body.voiceId,
-        speed: body.speed,
-        volume: body.volume,
-        tenantId,
-        destinationKey,
-        apiKey: body.apiKey || (req.headers['x-fish-audio-key'] as string),
-      });
+      tts = await fishTts(await getFishConfig(), { text: body.text, voiceId, speed: body.speed, volume: body.volume });
+    } catch (err) {
+      return sendAiError(reply, err);
+    }
+    const storageKey = `tenants/${tenantId}/editor/${projectId}/voice/${clip ? clip.id : 'project'}-${Date.now()}.mp3`;
+    await app.storage.uploadBuffer(storageKey, tts.audio, { contentType: 'audio/mpeg' });
+    await recordPace(voiceId, body.speed, tts.words, tts.durationSec);
 
-      const presignedAudioUrl = await app.storage.presignedUrl(storageKey, 3600);
-      const cleanSubText = stripEmotionTags(body.text);
-
-      // Update project: set audioMode = 'replace', save voiceoverKey in config
-      const currentConfig = (project.config as Record<string, unknown>) || {};
+    const record = {
+      key: storageKey, text: body.text, voiceId, speed: body.speed,
+      durationSec: tts.durationSec, model: tts.model, at: new Date().toISOString(),
+    };
+    const cfg = (project.config as Record<string, unknown>) || {};
+    if (clip) {
+      const edl = (clip.edl ?? {}) as Record<string, unknown>;
+      await db.editClip.update({ where: { id: clip.id }, data: { edl: { ...edl, voiceover: record } as object } });
+      await db.editProject.update({ where: { id: projectId }, data: { config: { ...cfg, voiceId, voiceSpeed: body.speed } as object } });
+    } else {
       await db.editProject.update({
         where: { id: projectId },
         data: {
           audioMode: 'replace',
           config: {
-            ...currentConfig,
-            voiceoverKey: storageKey,
-            voiceId: body.voiceId,
-            voiceSpeed: body.speed,
-            voiceVolume: body.volume,
-            voiceoverText: body.text,
-            voiceoverCleanText: cleanSubText,
+            ...cfg, voiceoverKey: storageKey, voiceId, voiceSpeed: body.speed, voiceVolume: body.volume,
+            voiceoverText: body.text, voiceoverCleanText: stripEmotionTags(body.text), voiceoverDuration: tts.durationSec,
           } as object,
         },
       });
-
-      // Also update transcript snippet of the first clip to reflect voiceover
-      if (project.clips.length > 0) {
-        const firstClip = project.clips[0];
-        const clipEdl = (firstClip.edl as any) || {};
-        await db.editClip.update({
-          where: { id: firstClip.id },
-          data: {
-            transcriptSnippet: cleanSubText.slice(0, 200),
-            edl: {
-              ...clipEdl,
-              transcript_snippet: cleanSubText.slice(0, 200),
-            },
-          },
-        });
-      }
-
-      return {
-        storageKey,
-        audioUrl: presignedAudioUrl,
-        voiceId: body.voiceId,
-        cleanText: cleanSubText,
-        status: 'ready',
-      };
-    } catch (err: any) {
-      const isMissingKey = err.message?.includes('FISH_AUDIO_API_KEY_MISSING');
-      logger.error({ err: err.message, projectId }, 'FishAudio TTS endpoint error');
-      return reply.code(isMissingKey ? 400 : 502).send({
-        error: isMissingKey ? 'FishAudioKeyMissing' : 'FishAudioError',
-        message: err.message || 'Ошибка генерации озвучки через Fish Audio',
-      });
     }
+
+    const target = clip ? clipSeconds(clip) : projectSeconds(project);
+    return {
+      storageKey,
+      audioUrl: await app.storage.presignedUrl(storageKey, 3600),
+      durationSec: tts.durationSec,
+      targetSeconds: target,
+      diffSec: Math.round((tts.durationSec - target) * 10) / 10,
+      words: tts.words,
+      wps: Math.round(tts.wps * 100) / 100,
+      model: tts.model,
+      clipId: clip?.id ?? null,
+      cleanText: stripEmotionTags(body.text),
+      status: 'ready',
+    };
+  });
+
+  /** Remove a clip's AI voiceover (the clip renders with the project audio again). */
+  app.delete('/projects/:id/clips/:clipId/voiceover', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id: projectId, clipId } = req.params as { id: string; clipId: string };
+    const clip = await db.editClip.findFirst({ where: { id: clipId, project: { id: projectId, tenantId } } });
+    if (!clip) return reply.code(404).send({ error: 'NotFound' });
+    const { voiceover: _drop, ...edl } = (clip.edl ?? {}) as Record<string, unknown>;
+    await db.editClip.update({ where: { id: clipId }, data: { edl: edl as object } });
+    return { ok: true };
+  });
+
+  /** Remove the project-level voiceover. */
+  app.delete('/projects/:id/voiceover', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id } = req.params as { id: string };
+    const project = await db.editProject.findFirst({ where: { id, tenantId } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+    const { voiceoverKey: _k, voiceoverText: _t, voiceoverCleanText: _c, voiceoverDuration: _d, ...cfg } =
+      (project.config as Record<string, unknown>) || {};
+    await db.editProject.update({ where: { id }, data: { audioMode: 'keep', config: cfg as object } });
+    return { ok: true };
+  });
+
+  // ── Send rendered masters to uniquification (one UniquifyJob per master) ──
+  app.post('/projects/:id/send-to-uniquify', async (req, reply) => {
+    const { tenantId, userId } = req.user;
+    const { id: projectId } = req.params as { id: string };
+    const body = z.object({
+      variantCount: z.number().int().min(1).max(100).default(5),
+      stealthLevel: z.enum(['standard', 'maximum']).default('maximum'),
+      targetPlatforms: z.array(z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge'])).default([]),
+      clipIds: z.array(z.string().uuid()).optional(),
+    }).parse(req.body ?? {});
+
+    const project = await db.editProject.findFirst({ where: { id: projectId, tenantId } });
+    if (!project) return reply.code(404).send({ error: 'NotFound' });
+    const clips = await db.editClip.findMany({
+      where: {
+        projectId,
+        outputSourceVideoId: { not: null },
+        ...(body.clipIds?.length ? { id: { in: body.clipIds } } : {}),
+      },
+      orderBy: { order: 'asc' },
+    });
+    if (clips.length === 0) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Нет отрендеренных роликов — сначала запустите рендер' });
+    }
+
+    const jobs: { clipId: string; uniquifyJobId: string; title: string }[] = [];
+    for (const clip of clips) {
+      const uj = await db.uniquifyJob.create({
+        data: {
+          tenantId,
+          sourceVideoId: clip.outputSourceVideoId!,
+          createdBy: userId,
+          status: 'pending',
+          variantCount: body.variantCount,
+          targetPlatforms: body.targetPlatforms as any,
+          config: {
+            // The master keeps its own sound/subtitles; uniquify only perturbs it.
+            mode: 'preserve_context',
+            stealthLevel: body.stealthLevel,
+            enableSubtitles: false,
+            enableBgm: false,
+            aspectRatio: project.aspect,
+            fps: project.fps,
+            language: 'ru',
+            targetSeconds: Math.round(Number(clip.durationSec ?? project.targetClipSeconds)),
+            editProjectId: projectId,
+          } as object,
+        },
+      });
+      await uniquifyAnalyzeQueue.add(`uniquify-analyze-${uj.id}`, {
+        sourceVideoId: clip.outputSourceVideoId!,
+        tenantId,
+        uniquifyJobId: uj.id,
+      } satisfies UniquifyAnalyzeJobPayload);
+      jobs.push({ clipId: clip.id, uniquifyJobId: uj.id, title: clip.title });
+    }
+    await db.editProject.update({
+      where: { id: projectId },
+      data: { config: { ...((project.config as object) ?? {}), uniquifyJobIds: jobs.map((j) => j.uniquifyJobId) } as object },
+    });
+    return reply.code(201).send({ jobs, totalVariants: jobs.length * body.variantCount });
   });
 
   // ── Delete project ──────────────────────────────────────────────────────────
