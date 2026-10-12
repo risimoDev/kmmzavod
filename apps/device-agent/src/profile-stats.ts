@@ -13,6 +13,7 @@
  */
 import type { Logger } from 'pino';
 import type { AdbClient } from './adb-client';
+import { PackageResolver } from './package-resolver';
 
 export interface ProfileTile {
   index: number;          // 0 = top-left (newest unless pinned)
@@ -165,12 +166,17 @@ export async function collectProfileStats(
     await adb.shell(deviceId, 'wm dismiss-keyguard');
     const { width, height } = await adb.getScreenSize(deviceId);
 
+    const pkgResolver = new PackageResolver(adb, logger);
+    const resolved = await pkgResolver.resolve(deviceId, platform);
+    const targetPkg = resolved.packageName;
+
     if (platform === 'instagram') {
-      await adb.openUrl(deviceId, `instagram://user?username=${user}`, 'com.instagram.android')
-        .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`));
+      await adb.openUrl(deviceId, `instagram://user?username=${user}`, targetPkg || 'com.instagram.android')
+        .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
     } else {
-      await adb.openUrl(deviceId, `https://www.tiktok.com/@${user}`)
-        .catch(() => adb.openUrl(deviceId, `snssdk1233://user/profile/${user}`));
+      const scheme = targetPkg?.includes('trill') ? 'snssdk1180' : 'snssdk1233';
+      await adb.openUrl(deviceId, `${scheme}://user/profile/${user}`, targetPkg)
+        .catch(() => adb.openUrl(deviceId, `https://www.tiktok.com/@${user}`, targetPkg));
     }
     await new Promise((r) => setTimeout(r, 5000));
 

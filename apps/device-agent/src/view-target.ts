@@ -16,6 +16,7 @@
 import type { Logger } from 'pino';
 import { AdbClient } from './adb-client';
 import { ProxyManager, type DeviceIpCheckResult } from './proxy-manager';
+import { PackageResolver } from './package-resolver';
 
 export interface ViewTargetRequest {
   deviceId: string;
@@ -77,20 +78,28 @@ export async function runViewTarget(
     await adb.shell(deviceId, 'wm dismiss-keyguard');
     const { width, height } = await adb.getScreenSize(deviceId);
 
-    logger.info({ deviceId, platform, cleanUsername, width, height }, 'view-target: launching target profile');
+    const pkgResolver = new PackageResolver(adb, logger);
+    const resolved = await pkgResolver.resolve(deviceId, platform);
+    if (!resolved.installed || !resolved.packageName) {
+      return { ok: false, detail: resolved.error || `Приложение ${platform} не установлено на плате ${deviceId}`, ipCheck };
+    }
+    const targetPkg = resolved.packageName;
 
-    // 3. Open target profile via deep links
+    logger.info({ deviceId, platform, targetPkg, cleanUsername, width, height }, 'view-target: launching target profile');
+
+    // 3. Open target profile via deep links with resolved package
     if (platform === 'instagram') {
       try {
-        await adb.openUrl(deviceId, `instagram://user?username=${cleanUsername}`, 'com.instagram.android');
+        await adb.openUrl(deviceId, `instagram://user?username=${cleanUsername}`, targetPkg);
       } catch {
-        await adb.openUrl(deviceId, `https://www.instagram.com/${cleanUsername}`);
+        await adb.openUrl(deviceId, `https://www.instagram.com/${cleanUsername}`, targetPkg);
       }
     } else {
+      const scheme = targetPkg.includes('trill') ? 'snssdk1180' : 'snssdk1233';
       try {
-        await adb.openUrl(deviceId, `snssdk1233://user/profile/${cleanUsername}`);
+        await adb.openUrl(deviceId, `${scheme}://user/profile/${cleanUsername}`, targetPkg);
       } catch {
-        await adb.openUrl(deviceId, `https://www.tiktok.com/@${cleanUsername}`);
+        await adb.openUrl(deviceId, `https://www.tiktok.com/@${cleanUsername}`, targetPkg);
       }
     }
 

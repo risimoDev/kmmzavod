@@ -29,6 +29,7 @@ import {
   ProxyError,
   UpstreamProxy,
   extractIp,
+  isWildberriesHost,
   upstreamKey,
   type ListenerStats,
   type ProxyType,
@@ -47,6 +48,7 @@ export interface DeviceProxyConfig {
   password?: string;
   type?: ProxyType;
   rotateUrl?: string;
+  country?: string;
 }
 
 /** Proxy config as exposed over HTTP — never contains the password. */
@@ -338,9 +340,18 @@ export class ProxyManager {
     }
   }
 
-  private routeFor(deviceId: string): RouteDecision {
+  private routeFor(deviceId: string, targetHost?: string): RouteDecision {
     const entry = this.devices.get(deviceId);
     if (!entry) return { kind: 'block', reason: 'Для этой платы прокси не настроен' };
+
+    // Wildberries routing: must always open with Russian IP.
+    if (targetHost && isWildberriesHost(targetHost)) {
+      if (entry.proxy.country && !['Russia', 'Russian Federation', 'RU'].includes(entry.proxy.country)) {
+        this.logger.debug({ deviceId, targetHost, proxyCountry: entry.proxy.country }, 'proxy-manager: routing Wildberries direct to ensure Russian IP');
+        return { kind: 'direct' };
+      }
+    }
+
     if (this.mode === 'private_parallel' || this.activeDeviceId === deviceId) {
       return { kind: 'proxy', upstream: this.getUpstream(entry.proxy) };
     }
@@ -372,7 +383,7 @@ export class ProxyManager {
     else this.reservedPorts.add(preferredPort);
 
     const start = (async () => {
-      const listener = new DeviceProxyListener(deviceId, () => this.routeFor(deviceId), this.logger, {
+      const listener = new DeviceProxyListener(deviceId, (targetHost) => this.routeFor(deviceId, targetHost), this.logger, {
         bindHost: config.PROXY_BIND_HOST,
         idleTimeoutMs: config.PROXY_IDLE_TIMEOUT_MS,
       });

@@ -15,6 +15,7 @@
 import type { Logger } from 'pino';
 import { AdbClient } from './adb-client';
 import { ProxyManager, type DeviceIpCheckResult } from './proxy-manager';
+import { PackageResolver } from './package-resolver';
 
 export interface WbWarmupRequest {
   deviceId: string;
@@ -68,7 +69,7 @@ export async function runWbWarmup(
 
   let ipCheck: DeviceIpCheckResult | undefined;
 
-  // 1. Guardrail: the phone must leave via its proxy (shared proxy is already leased by the caller)
+  // 1. Guardrail: verify network and ensure Russian IP for Wildberries
   if (checkIpFirst) {
     logger.info({ deviceId, sku }, 'wb-warmup: running pre-flight IP check');
     const guard = await proxyManager.preflight(deviceId);
@@ -77,8 +78,33 @@ export async function runWbWarmup(
       logger.warn({ deviceId, sku, detail: guard.detail }, 'wb-warmup: network pre-flight failed, aborting');
       return { ok: false, sku, detail: `${guard.detail}. Прогрев отменён для защиты аккаунта WB.`, ipCheck };
     }
-    logger.info({ deviceId, sku, ip: ipCheck?.ip }, 'wb-warmup: IP verified safe for Wildberries');
+
+    // Wildberries strictly requires Russian IP
+    const isRu = ipCheck?.country ? ['Russia', 'Russian Federation', 'RU'].includes(ipCheck.country) : true;
+    if (!isRu && ipCheck?.country) {
+      logger.warn({ deviceId, sku, ip: ipCheck.ip, country: ipCheck.country }, 'wb-warmup: non-Russian IP detected for Wildberries');
+      return {
+        ok: false,
+        sku,
+        detail: `Wildberries должен открываться только через российский IP! Обнаружен: ${ipCheck.ip} (${ipCheck.country}). Прогрев отменён для защиты от бана WB.`,
+        ipCheck,
+      };
+    }
+    logger.info({ deviceId, sku, ip: ipCheck?.ip, country: ipCheck?.country }, 'wb-warmup: Russian IP verified safe for Wildberries');
   }
+
+  // Verify that the Wildberries application is installed on the phone
+  const pkgResolver = new PackageResolver(adb, logger);
+  const resolvedWb = await pkgResolver.resolve(deviceId, 'wildberries');
+  if (!resolvedWb.installed || !resolvedWb.packageName) {
+    return {
+      ok: false,
+      sku,
+      detail: resolvedWb.error || `Приложение Wildberries (com.wildberries.ru) не установлено на плате ${deviceId}`,
+      ipCheck,
+    };
+  }
+  const wbPackage = resolvedWb.packageName;
 
   try {
     // 2. Wake screen and get dimensions
@@ -86,16 +112,16 @@ export async function runWbWarmup(
     await adb.shell(deviceId, 'wm dismiss-keyguard');
     const { width, height } = await adb.getScreenSize(deviceId);
 
-    logger.info({ deviceId, sku, width, height }, 'wb-warmup: opening Wildberries product card');
+    logger.info({ deviceId, sku, width, height, wbPackage }, 'wb-warmup: opening Wildberries product card');
 
     // 3. Open product card via deep link or URL intent
     const deepLink = `wildberries://card?nmId=${sku}`;
     const webIntent = `https://www.wildberries.ru/catalog/${sku}/detail.aspx`;
 
     try {
-      await adb.openUrl(deviceId, deepLink, 'com.wildberries.ru');
+      await adb.openUrl(deviceId, deepLink, wbPackage);
     } catch {
-      await adb.openUrl(deviceId, webIntent, 'com.wildberries.ru');
+      await adb.openUrl(deviceId, webIntent, wbPackage);
     }
 
     // Wait for card to load

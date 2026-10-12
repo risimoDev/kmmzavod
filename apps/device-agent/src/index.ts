@@ -11,6 +11,9 @@ import { AutoHealManager } from './auto-heal';
 import { ApkManager } from './apk-manager';
 import { ScriptEngine } from './script-engine';
 import { collectProfileStats } from './profile-stats';
+import { PackageResolver } from './package-resolver';
+import { runDeviceAccountLogin } from './account-login';
+import { testImapConnection, pollVerificationCode } from './imap-client';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const adb = new AdbClient(logger, config.ADB_PATH);
@@ -18,6 +21,7 @@ const proxyManager = new ProxyManager(adb, logger);
 const autoHeal = new AutoHealManager(adb, logger);
 const apkManager = new ApkManager(logger);
 const scriptEngine = new ScriptEngine(logger);
+const packageResolver = new PackageResolver(adb, logger);
 
 const app = Fastify({
   logger: false,
@@ -41,6 +45,12 @@ app.get('/health', async () => ({
 app.get('/devices', async (_req, reply) => {
   try {
     const rawDevices = await adb.listDevices();
+    const appsMap: Record<string, any> = {};
+    for (const d of rawDevices) {
+      if (d.state === 'device') {
+        appsMap[d.serial] = await packageResolver.checkAllPlatforms(d.serial).catch(() => ({}));
+      }
+    }
     return {
       ok: true,
       raw: rawDevices,
@@ -48,6 +58,7 @@ app.get('/devices', async (_req, reply) => {
       proxies: proxyManager.getAllProxies(),
       proxyStatus: proxyManager.getStatus().devices,
       proxyMode: proxyManager.getMode(),
+      apps: appsMap,
     };
   } catch (err) {
     reply.code(502);
@@ -64,6 +75,7 @@ const ProxyFields = {
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
   rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
+  country: z.string().optional(),
 };
 
 /** ProxyError = bad proxy / bad input (400); anything else = agent/ADB failure (502). */
@@ -445,6 +457,95 @@ app.post('/stats/profile', async (req, reply) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+  }
+});
+
+// ── Automated Account Login & Verification Code Endpoints ─────────────────
+
+const DeviceAccountLoginBody = z.object({
+  deviceId: z.string().min(1),
+  platform: z.enum(['tiktok', 'instagram']),
+  username: z.string().min(1),
+  password: z.string().optional(),
+  email: z.string().optional(),
+  emailPassword: z.string().optional(),
+  imapHost: z.string().optional(),
+  imapPort: z.number().int().min(1).max(65535).optional(),
+});
+
+app.post('/device/account/login', async (req, reply) => {
+  const parsed = DeviceAccountLoginBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+
+  let release: (() => void) | undefined;
+  try {
+    release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
+    const result = await runDeviceAccountLogin(parsed.data, adb, packageResolver, logger);
+    if (!result.ok) reply.code(502);
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/account/login failed');
+    reply.code(502);
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
+  }
+});
+
+const TestEmailBody = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+  host: z.string().optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+});
+
+app.post('/device/account/test-email', async (req, reply) => {
+  const parsed = TestEmailBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  const result = await testImapConnection(parsed.data);
+  if (!result.ok) reply.code(400);
+  return result;
+});
+
+const EmailCodeBody = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+  host: z.string().optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  platform: z.enum(['tiktok', 'instagram']).optional(),
+  maxWaitSec: z.number().int().min(5).max(300).default(60),
+});
+
+app.post('/device/account/email-code', async (req, reply) => {
+  const parsed = EmailCodeBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  const { email, password, host, port, platform, maxWaitSec } = parsed.data;
+  const result = await pollVerificationCode({ email, password, host, port }, { platform, maxWaitSec });
+  if (!result.ok) reply.code(502);
+  return result;
+});
+
+app.get('/device/:deviceId/apps-check', async (req, reply) => {
+  const { deviceId } = req.params as { deviceId: string };
+  if (!deviceId) {
+    reply.code(400);
+    return { ok: false, error: 'Missing deviceId parameter' };
+  }
+  try {
+    const apps = await packageResolver.checkAllPlatforms(deviceId);
+    return { ok: true, deviceId, apps };
+  } catch (err: any) {
+    reply.code(502);
+    return { ok: false, error: err.message || String(err) };
   }
 });
 

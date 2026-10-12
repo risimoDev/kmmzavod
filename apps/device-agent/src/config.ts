@@ -78,6 +78,6 @@ export const config = {
   // Hosts the phone reaches directly (Android global-proxy exclusion list).
   PROXY_BYPASS_LIST: env(
     'DEVICE_AGENT_PROXY_BYPASS',
-    'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn',
+    'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn,*.wildberries.ru,*.wb.ru,*.wbcontent.net',
   ),
 };

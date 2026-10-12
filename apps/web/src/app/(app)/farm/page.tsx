@@ -695,17 +695,70 @@ function getImportFormats(
     }];
   }
   if (method === "device") {
-    return [{
-      id: "name_device_id",
-      label: "accountName:deviceId (серийный номер в ADB, см. GET /devices device-agent'а)",
-      template: "accountName:deviceId",
-      placeholder: "my_account:8f3a1c92",
-      parse: (line) => {
-        const [accountName, deviceId] = splitFirst(line, ":");
-        if (!accountName || !deviceId) return null;
-        return { accountName, deviceId };
+    return [
+      {
+        id: "login_pass_mail_phone",
+        label: "login:password:mail:mailpass:deviceId (авто-вход на телефоне + 2FA код из почты)",
+        template: "login:password:mail:mailpass:deviceId",
+        placeholder: "my_account:MyPassword123:box@mail.ru:mailAppPassword:8f3a1c92",
+        parse: (line) => {
+          const parts = line.split(":");
+          if (parts.length < 5 || !parts[0] || !parts[1] || !parts[2] || !parts[3] || !parts[4]) return null;
+          return {
+            accountName: parts[0].trim(),
+            username: parts[0].trim(),
+            password: parts[1].trim(),
+            email: parts[2].trim(),
+            emailPassword: parts[3].trim(),
+            deviceId: parts[4].trim(),
+          };
+        },
       },
-    }];
+      {
+        id: "login_pass_mail",
+        label: "login:password:mail:mailpass (телефон назначить позже)",
+        template: "login:password:mail:mailpass",
+        placeholder: "my_account:MyPassword123:box@mail.ru:mailAppPassword",
+        parse: (line) => {
+          const parts = line.split(":");
+          if (parts.length < 4 || !parts[0] || !parts[1] || !parts[2] || !parts[3]) return null;
+          return {
+            accountName: parts[0].trim(),
+            username: parts[0].trim(),
+            password: parts[1].trim(),
+            email: parts[2].trim(),
+            emailPassword: parts[3].trim(),
+          };
+        },
+      },
+      {
+        id: "login_pass_phone",
+        label: "login:password:deviceId (логин + пароль для телефона)",
+        template: "login:password:deviceId",
+        placeholder: "my_account:MyPassword123:8f3a1c92",
+        parse: (line) => {
+          const parts = line.split(":");
+          if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+          return {
+            accountName: parts[0].trim(),
+            username: parts[0].trim(),
+            password: parts[1].trim(),
+            deviceId: parts[2].trim(),
+          };
+        },
+      },
+      {
+        id: "name_device_id",
+        label: "accountName:deviceId (только серийный номер ADB)",
+        template: "accountName:deviceId",
+        placeholder: "my_account:8f3a1c92",
+        parse: (line) => {
+          const [accountName, deviceId] = splitFirst(line, ":");
+          if (!accountName || !deviceId) return null;
+          return { accountName: accountName.trim(), deviceId: deviceId.trim() };
+        },
+      },
+    ];
   }
   if (platform === "instagram") {
     return [
@@ -820,13 +873,18 @@ const TIKTOK_POST_READY = new Set(["user_pass_mail_cookies", "name_sessionid"]);
 function AccountsTab() {
   const [data, setData] = useState<{ accounts: FarmSocialAccount[]; total: number } | null>(null);
   const [groups, setGroups] = useState<AccountGroup[]>([]);
+  const [devices, setDevices] = useState<FarmDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<FarmSocialAccount | null>(null);
+  const [loggingInId, setLoggingInId] = useState<string | null>(null);
+  const [actionToast, setActionToast] = useState<{ id: string; ok: boolean; message: string } | null>(null);
   const [importing, setImporting] = useState(false);
   const [raw, setRaw] = useState("");
   const [platform, setPlatform] = useState<"tiktok" | "instagram" | "youtube_shorts" | "postbridge">("tiktok");
-  const [authMethod, setAuthMethod] = useState<"official" | "private" | "device">("official");
+  const [authMethod, setAuthMethod] = useState<"official" | "private" | "device">("device");
   const [groupId, setGroupId] = useState("");
   const [formatId, setFormatId] = useState("");
 
@@ -841,12 +899,14 @@ function AccountsTab() {
     setLoading(true);
     setError(null);
     try {
-      const [accRes, grpRes] = await Promise.all([
+      const [accRes, grpRes, devRes] = await Promise.all([
         accountFarmApi.listAccounts({ limit: 100 }),
         accountFarmApi.listGroups(),
+        accountFarmApi.listDevices().catch(() => ({ ok: false, total: 0, devices: [] as FarmDevice[] })),
       ]);
       setData({ accounts: accRes.accounts, total: accRes.total });
       setGroups(grpRes);
+      setDevices(devRes.devices || []);
     } catch (e: any) {
       setError(e.message ?? "Failed to load accounts");
     } finally {
@@ -855,6 +915,25 @@ function AccountsTab() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleQuickDeviceLogin = async (account: FarmSocialAccount) => {
+    setLoggingInId(account.id);
+    setActionToast(null);
+    try {
+      const res = await accountFarmApi.deviceLogin(account.id);
+      if (res.ok) {
+        const extra = res.codeRetrieved ? ` (2FA код из почты: ${res.codeRetrieved})` : "";
+        setActionToast({ id: account.id, ok: true, message: `Вход выполнен! ${res.detail}${extra}` });
+      } else {
+        setActionToast({ id: account.id, ok: false, message: `Ошибка входа: ${res.error || res.detail}` });
+      }
+      load();
+    } catch (e: any) {
+      setActionToast({ id: account.id, ok: false, message: `Ошибка: ${e.message || "Не удалось выполнить вход"}` });
+    } finally {
+      setLoggingInId(null);
+    }
+  };
 
   const handleImport = async () => {
     if (!activeFormat) { alert("Выберите формат"); return; }
@@ -900,7 +979,10 @@ function AccountsTab() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <p className="text-xs text-text-tertiary">{data?.total ?? 0} accounts</p>
-        <Button variant="primary" size="sm" onClick={() => setShowImport(true)}>Bulk Import</Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setShowCreate(true)}>+ Добавить аккаунт</Button>
+          <Button variant="primary" size="sm" onClick={() => setShowImport(true)}>Bulk Import</Button>
+        </div>
       </div>
 
       {!data || data.accounts.length === 0 ? (
@@ -923,6 +1005,19 @@ function AccountsTab() {
                     <Badge variant="outline" className="text-2xs capitalize">{a.platform}</Badge>
                     {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
                     {a.authMethod === "device" && <Badge variant="brand" className="text-2xs">device{a.deviceId ? ` · ${a.deviceId}` : ""}</Badge>}
+                    {a.authMethod === "device" && (
+                      a.deviceCredentials?.loginStatus === "logged_in" ? (
+                        <Badge variant="success" className="text-2xs">вход выполнен</Badge>
+                      ) : a.deviceCredentials?.loginStatus === "logging_in" ? (
+                        <Badge variant="warning" className="text-2xs">выполняется вход</Badge>
+                      ) : a.deviceCredentials?.loginStatus === "login_failed" ? (
+                        <Badge variant="danger" className="text-2xs">ошибка логина</Badge>
+                      ) : a.deviceCredentials?.hasPassword ? (
+                        <Badge variant="outline" className="text-2xs">пароль сохранён</Badge>
+                      ) : (
+                        <Badge variant="default" className="text-2xs">не залогинен</Badge>
+                      )
+                    )}
                     {a.readiness && (a.readiness.canPublish
                       ? <Badge variant="success" className="text-2xs">готов к постингу</Badge>
                       : <Badge variant="danger" className="text-2xs">нельзя постить</Badge>)}
@@ -932,18 +1027,51 @@ function AccountsTab() {
                   <div className="flex flex-wrap gap-2 text-[11px] text-text-tertiary mt-0.5">
                     {a.accountGroup?.name && <span>{a.accountGroup.name}</span>}
                     {a.proxy && <span>proxy {a.proxy.host}:{a.proxy.port}</span>}
-                    {!a.proxy && <span className="text-warning">no proxy</span>}
+                    {!a.proxy && a.authMethod !== "device" && <span className="text-warning">no proxy</span>}
+                    {a.authMethod === "device" && a.deviceCredentials?.email && (
+                      <span className="text-text-secondary">✉ {a.deviceCredentials.email} {a.deviceCredentials.hasEmailPassword ? "(IMAP ✓)" : ""}</span>
+                    )}
                     <span>{a.dailyPostCount} today</span>
                     <span>warmup: {a.warmupStatus}</span>
                   </div>
+                  {a.deviceCredentials?.lastLoginError && (
+                    <p className="text-[11px] text-danger mt-0.5">Ошибка входа: {a.deviceCredentials.lastLoginError}</p>
+                  )}
                   {a.readiness && !a.readiness.canPublish && (
                     <p className="text-[11px] text-danger mt-0.5">{a.readiness.blockers.join(" · ")}</p>
                   )}
                   {a.readiness && a.readiness.canPublish && a.readiness.warnings.length > 0 && (
                     <p className="text-[11px] text-warning mt-0.5">{a.readiness.warnings.join(" · ")}</p>
                   )}
+                  {actionToast && actionToast.id === a.id && (
+                    <div className={cn("text-xs p-2 rounded-md mt-2 flex items-center justify-between", actionToast.ok ? "bg-success/15 text-success" : "bg-danger/15 text-danger")}>
+                      <span>{actionToast.message}</span>
+                      <button onClick={() => setActionToast(null)} className="text-2xs font-semibold ml-2 hover:opacity-80">✕</button>
+                    </div>
+                  )}
                 </div>
-                <HealthBadge score={a.healthScore} />
+                <div className="flex items-center gap-2 shrink-0">
+                  {a.authMethod === "device" && (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      loading={loggingInId === a.id}
+                      disabled={loggingInId !== null && loggingInId !== a.id}
+                      onClick={() => handleQuickDeviceLogin(a)}
+                      title="Автоматический вход на телефоне через ADB с вводом пароля и кодов из почты"
+                    >
+                      Войти на телефоне
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    onClick={() => setEditingAccount(a)}
+                  >
+                    {a.authMethod === "device" ? "Управление / Почта" : "Параметры"}
+                  </Button>
+                  <HealthBadge score={a.healthScore} />
+                </div>
               </CardContent>
             </Card>
           ))}
@@ -973,9 +1101,9 @@ function AccountsTab() {
                 onChange={(e) => setAuthMethod(e.target.value as any)}
                 className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-sm text-text-primary"
               >
-                <option value="official">Official API</option>
-                <option value="private">Private (no API)</option>
                 <option value="device">Device (реальный телефон, ADB)</option>
+                <option value="private">Private (no API)</option>
+                <option value="official">Official API</option>
               </select>
             </div>
             <div>
@@ -998,9 +1126,8 @@ function AccountsTab() {
           )}
           {authMethod === "device" && (
             <p className="text-xs text-text-secondary">
-              Публикация идёт через реальный телефон в ферме (apps/device-agent по AmneziaWG-туннелю через ADB) —
-              приложение должно быть уже залогинено на телефоне под этим аккаунтом. См.{" "}
-              <code>docs/PHONE_FARM_INTEGRATION_PLAN.md</code>.
+              Публикация идёт через реальный телефон в ферме (apps/device-agent по AmneziaWG-туннелю через ADB).
+              Можно импортировать логины, пароли и почту — ферма выполнит автоматический вход и перехват 2FA кодов.
             </p>
           )}
 
@@ -1052,7 +1179,524 @@ function AccountsTab() {
           <ModalActions onCancel={() => setShowImport(false)} onConfirm={handleImport} loading={importing} disabled={!raw.trim()} confirmLabel="Import" />
         </Modal>
       )}
+
+      {showCreate && (
+        <CreateAccountModal
+          groups={groups}
+          devices={devices}
+          onClose={() => setShowCreate(false)}
+          onCreated={() => { setShowCreate(false); load(); }}
+        />
+      )}
+
+      {editingAccount && (
+        <EditCredentialsModal
+          account={editingAccount}
+          devices={devices}
+          onClose={() => setEditingAccount(null)}
+          onSaved={load}
+        />
+      )}
     </div>
+  );
+}
+
+function EditCredentialsModal({
+  account,
+  devices,
+  onClose,
+  onSaved,
+}: {
+  account: FarmSocialAccount;
+  devices: FarmDevice[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const creds = account.deviceCredentials;
+  const [username, setUsername] = useState(creds?.username ?? account.accountName);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] = useState(creds?.email ?? "");
+  const [emailPassword, setEmailPassword] = useState("");
+  const [showEmailPassword, setShowEmailPassword] = useState(false);
+  const [imapHost, setImapHost] = useState(creds?.imapHost ?? "");
+  const [imapPort, setImapPort] = useState(creds?.imapPort ? String(creds.imapPort) : "993");
+  const [deviceId, setDeviceId] = useState(account.deviceId ?? "");
+
+  const [saving, setSaving] = useState(false);
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
+
+  const handleEmailChange = (val: string) => {
+    setEmail(val);
+    if (!imapHost || imapHost.includes("mail.ru") || imapHost.includes("yandex") || imapHost.includes("gmail") || imapHost.includes("rambler")) {
+      const lower = val.toLowerCase();
+      if (lower.includes("@mail.ru") || lower.includes("@inbox.ru") || lower.includes("@bk.ru") || lower.includes("@list.ru") || lower.includes("@internet.ru")) {
+        setImapHost("imap.mail.ru");
+      } else if (lower.includes("@yandex.ru") || lower.includes("@ya.ru")) {
+        setImapHost("imap.yandex.ru");
+      } else if (lower.includes("@gmail.com")) {
+        setImapHost("imap.gmail.com");
+      } else if (lower.includes("@rambler.ru")) {
+        setImapHost("imap.rambler.ru");
+      } else if (lower.includes("@outlook.com") || lower.includes("@hotmail.com")) {
+        setImapHost("outlook.office365.com");
+      }
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
+      await accountFarmApi.setAccountCredentials(account.id, {
+        authMethod: targetAuthMethod,
+        username: username.trim() || undefined,
+        password: password.trim() || undefined,
+        email: email.trim() || undefined,
+        emailPassword: emailPassword.trim() || undefined,
+        imapHost: imapHost.trim() || undefined,
+        imapPort: imapPort ? Number(imapPort) : undefined,
+        deviceId: deviceId.trim() || undefined,
+      });
+      setFeedback({ type: "success", msg: "Данные аккаунта и почты успешно сохранены в зашифрованном виде." });
+      onSaved();
+    } catch (e: any) {
+      setFeedback({ type: "error", msg: e.message || "Ошибка при сохранении" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTestEmail = async () => {
+    setTestingEmail(true);
+    setFeedback({ type: "info", msg: "Проверка подключения к IMAP серверу почты..." });
+    try {
+      const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
+      if (email || emailPassword || imapHost) {
+        await accountFarmApi.setAccountCredentials(account.id, {
+          authMethod: targetAuthMethod,
+          email: email.trim() || undefined,
+          emailPassword: emailPassword.trim() || undefined,
+          imapHost: imapHost.trim() || undefined,
+          imapPort: imapPort ? Number(imapPort) : undefined,
+        });
+      }
+      const res = await accountFarmApi.testEmail(account.id);
+      if (res.ok) {
+        setFeedback({
+          type: "success",
+          msg: `IMAP подключение успешно! Всего писем в ящике: ${res.messageCount ?? 0}. Чтение кодов подтверждения активно.`,
+        });
+      } else {
+        setFeedback({ type: "error", msg: `Ошибка IMAP: ${res.error || "Не удалось авторизоваться"}` });
+      }
+      onSaved();
+    } catch (e: any) {
+      setFeedback({ type: "error", msg: e.message || "Ошибка проверки почты" });
+    } finally {
+      setTestingEmail(false);
+    }
+  };
+
+  const handleDeviceLogin = async () => {
+    setLoggingIn(true);
+    setFeedback({
+      type: "info",
+      msg: `Запуск приложения ${account.platform} на телефоне ${deviceId || account.deviceId || "..."}... Ввод логина, пароля и чтение 2FA кода из почты.`,
+    });
+    try {
+      const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
+      if (username || password || email || emailPassword || deviceId) {
+        await accountFarmApi.setAccountCredentials(account.id, {
+          authMethod: targetAuthMethod,
+          username: username.trim() || undefined,
+          password: password.trim() || undefined,
+          email: email.trim() || undefined,
+          emailPassword: emailPassword.trim() || undefined,
+          deviceId: deviceId.trim() || undefined,
+        });
+      }
+      const res = await accountFarmApi.deviceLogin(account.id);
+      if (res.ok) {
+        const extra = res.codeRetrieved ? ` (Получен код из почты: ${res.codeRetrieved})` : "";
+        setFeedback({ type: "success", msg: `Успешный вход в приложение на телефоне! ${res.detail}${extra}` });
+      } else {
+        setFeedback({ type: "error", msg: `Ошибка входа: ${res.error || res.detail}` });
+      }
+      onSaved();
+    } catch (e: any) {
+      setFeedback({ type: "error", msg: e.message || "Ошибка при выполнении входа на телефоне" });
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  return (
+    <Modal title={`Управление входом и почтой: ${account.accountName}`} onClose={onClose} maxWidth="max-w-xl">
+      <div className="space-y-4">
+        {feedback && (
+          <div
+            className={cn(
+              "text-xs p-3 rounded-lg border",
+              feedback.type === "success" && "bg-success/10 border-success/30 text-success",
+              feedback.type === "error" && "bg-danger/10 border-danger/30 text-danger",
+              feedback.type === "info" && "bg-brand-500/10 border-brand-500/30 text-brand-300",
+            )}
+          >
+            {feedback.msg}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Платформа</label>
+            <div className="text-xs font-semibold text-text-primary px-3 py-2 bg-surface-2 rounded-md capitalize">
+              {account.platform}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Телефон в ферме (ADB)</label>
+            <select
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-text-primary"
+            >
+              <option value="">-- Не назначен --</option>
+              {devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.name || d.deviceId} ({d.model}){d.apps?.[account.platform] ? " ✓ приложение есть" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="border-t border-border/50 pt-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
+              Данные аккаунта ({account.platform})
+            </h4>
+            {creds?.hasPassword && (
+              <Badge variant="success" className="text-2xs">Пароль сохранён</Badge>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-medium text-text-secondary block mb-1">Логин / Username</label>
+              <Input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Логин в соцсети"
+                className="text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-text-secondary block mb-1">
+                Пароль от аккаунта
+                {creds?.hasPassword && <span className="text-text-tertiary ml-1 font-normal">(сохранён)</span>}
+              </label>
+              <div className="relative">
+                <Input
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={creds?.hasPassword ? "•••••••• (сохранён)" : "Введите пароль"}
+                  className="text-xs pr-12"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2 top-2 text-2xs text-text-tertiary hover:text-text-primary"
+                >
+                  {showPassword ? "Скрыть" : "Показ"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-border/50 pt-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
+              Привязанная почта (для авто-извлечения 2FA кодов)
+            </h4>
+            {creds?.hasEmailPassword && (
+              <Badge variant="success" className="text-2xs">IMAP пароль сохранён</Badge>
+            )}
+          </div>
+          <p className="text-2xs text-text-tertiary">
+            Когда соцсеть запрашивает код подтверждения при входе, телефонная ферма автоматически опрашивает этот ящик через IMAP (порт 993) и вводит 6-значный код на экране телефона.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-medium text-text-secondary block mb-1">Email ящик</label>
+              <Input
+                type="email"
+                value={email}
+                onChange={(e) => handleEmailChange(e.target.value)}
+                placeholder="box@mail.ru"
+                className="text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-text-secondary block mb-1">
+                Пароль от почты (IMAP / приложение)
+                {creds?.hasEmailPassword && <span className="text-text-tertiary ml-1 font-normal">(сохранён)</span>}
+              </label>
+              <div className="relative">
+                <Input
+                  type={showEmailPassword ? "text" : "password"}
+                  value={emailPassword}
+                  onChange={(e) => setEmailPassword(e.target.value)}
+                  placeholder={creds?.hasEmailPassword ? "•••••••• (сохранён)" : "Пароль для внешних приложений"}
+                  className="text-xs pr-12"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowEmailPassword(!showEmailPassword)}
+                  className="absolute right-2 top-2 text-2xs text-text-tertiary hover:text-text-primary"
+                >
+                  {showEmailPassword ? "Скрыть" : "Показ"}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-2">
+              <label className="text-xs font-medium text-text-secondary block mb-1">IMAP Host (автоопределение)</label>
+              <Input
+                value={imapHost}
+                onChange={(e) => setImapHost(e.target.value)}
+                placeholder="imap.mail.ru / imap.yandex.ru"
+                className="text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-text-secondary block mb-1">IMAP Port</label>
+              <Input
+                value={imapPort}
+                onChange={(e) => setImapPort(e.target.value)}
+                placeholder="993"
+                className="text-xs"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-border/50 pt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              loading={testingEmail}
+              disabled={saving || loggingIn || (!email && !creds?.email)}
+              onClick={handleTestEmail}
+            >
+              ✉ Проверить почту (IMAP)
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={loggingIn}
+              disabled={saving || testingEmail || !deviceId}
+              onClick={handleDeviceLogin}
+              title={!deviceId ? "Сначала выберите телефон из фермы" : "Войти в приложение на телефоне"}
+            >
+              📱 Войти на телефоне
+            </Button>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Закрыть
+            </Button>
+            <Button variant="secondary" size="sm" loading={saving} disabled={testingEmail || loggingIn} onClick={handleSave}>
+              Сохранить
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function CreateAccountModal({
+  groups,
+  devices,
+  onClose,
+  onCreated,
+}: {
+  groups: AccountGroup[];
+  devices: FarmDevice[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [platform, setPlatform] = useState<"tiktok" | "instagram">("tiktok");
+  const [authMethod, setAuthMethod] = useState<"device" | "private" | "official">("device");
+  const [accountName, setAccountName] = useState("");
+  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
+  const [emailPassword, setEmailPassword] = useState("");
+  const [deviceId, setDeviceId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCreate = async () => {
+    if (!accountName.trim()) {
+      setError("Укажите логин или название аккаунта");
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await accountFarmApi.bulkImportAccounts({
+        accounts: [
+          {
+            platform,
+            authMethod,
+            accountName: accountName.trim(),
+            username: accountName.trim(),
+            password: password.trim() || undefined,
+            email: email.trim() || undefined,
+            emailPassword: emailPassword.trim() || undefined,
+            deviceId: deviceId.trim() || undefined,
+            accountGroupId: groupId || undefined,
+          },
+        ],
+        autoAssign: true,
+      });
+      if (res.results[0]?.status === "failed") {
+        throw new Error(res.results[0].error || "Не удалось создать аккаунт");
+      }
+      onCreated();
+    } catch (e: any) {
+      setError(e.message || "Ошибка при создании аккаунта");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <Modal title="Добавить аккаунт" onClose={onClose} maxWidth="max-w-md">
+      <div className="space-y-3">
+        {error && <div className="text-xs p-2.5 rounded-lg bg-danger/10 border border-danger/30 text-danger">{error}</div>}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Платформа</label>
+            <select
+              value={platform}
+              onChange={(e) => setPlatform(e.target.value as any)}
+              className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-text-primary"
+            >
+              <option value="tiktok">TikTok</option>
+              <option value="instagram">Instagram</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Метод работы</label>
+            <select
+              value={authMethod}
+              onChange={(e) => setAuthMethod(e.target.value as any)}
+              className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-text-primary"
+            >
+              <option value="device">Device (телефонная ферма)</option>
+              <option value="private">Private (через прокси)</option>
+              <option value="official">Official API</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-text-secondary block mb-1">Логин аккаунта *</label>
+          <Input
+            value={accountName}
+            onChange={(e) => setAccountName(e.target.value)}
+            placeholder="my_tiktok_user"
+            className="text-xs"
+          />
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-text-secondary block mb-1">Пароль от аккаунта</label>
+          <Input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Пароль"
+            className="text-xs"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Почта (для 2FA кодов)</label>
+            <Input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="box@mail.ru"
+              className="text-xs"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Пароль от почты (IMAP)</label>
+            <Input
+              type="password"
+              value={emailPassword}
+              onChange={(e) => setEmailPassword(e.target.value)}
+              placeholder="Пароль приложения"
+              className="text-xs"
+            />
+          </div>
+        </div>
+
+        {authMethod === "device" && (
+          <div>
+            <label className="text-xs font-medium text-text-secondary block mb-1">Телефон в ферме (ADB)</label>
+            <select
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-text-primary"
+            >
+              <option value="">-- Назначить автоматически / позже --</option>
+              {devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.name || d.deviceId} ({d.model})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <label className="text-xs font-medium text-text-secondary block mb-1">Группа</label>
+          <select
+            value={groupId}
+            onChange={(e) => setGroupId(e.target.value)}
+            className="w-full h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-text-primary"
+          >
+            <option value="">Без группы</option>
+            {groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <ModalActions
+          onCancel={onClose}
+          onConfirm={handleCreate}
+          loading={creating}
+          disabled={!accountName.trim()}
+          confirmLabel="Добавить"
+        />
+      </div>
+    </Modal>
   );
 }
 

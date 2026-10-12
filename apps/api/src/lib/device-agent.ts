@@ -497,5 +497,58 @@ export const deviceAgentClient = {
     const res = await axios.post(`${BASE}/device/scripts/run`, opts, { timeout: 600_000 });
     return res.data;
   },
+
+  async loginAccount(opts: {
+    deviceId: string;
+    platform: 'tiktok' | 'instagram';
+    username: string;
+    password?: string;
+    email?: string;
+    emailPassword?: string;
+    imapHost?: string;
+    imapPort?: number;
+  }): Promise<{
+    ok: boolean;
+    deviceId: string;
+    platform: 'tiktok' | 'instagram';
+    alreadyLoggedIn?: boolean;
+    codeRetrieved?: string;
+    detail: string;
+    error?: string;
+  }> {
+    const res = await axios.post(`${BASE}/device/account/login`, opts, { timeout: 180_000 });
+    return res.data;
+  },
+
+  async testEmail(opts: {
+    email: string;
+    password: string;
+    host?: string;
+    port?: number;
+  }): Promise<{ ok: boolean; messageCount?: number; error?: string }> {
+    const res = await axios.post(`${BASE}/device/account/test-email`, opts, { timeout: 20_000 });
+    return res.data;
+  },
+
+  async getEmailCode(opts: {
+    email: string;
+    password: string;
+    host?: string;
+    port?: number;
+    platform?: 'tiktok' | 'instagram';
+    maxWaitSec?: number;
+  }): Promise<{ ok: boolean; code?: string; subject?: string; from?: string; date?: string; error?: string }> {
+    const res = await axios.post(`${BASE}/device/account/email-code`, opts, { timeout: 120_000 });
+    return res.data;
+  },
+
+  async checkApps(deviceId: string): Promise<{
+    ok: boolean;
+    deviceId: string;
+    apps: Record<string, { installed: boolean; packageName?: string; error?: string }>;
+  }> {
+    const res = await axios.get(`${BASE}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 });
+    return res.data;
+  },
 };
 

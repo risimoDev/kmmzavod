@@ -703,6 +703,20 @@ export type RouteDecision =
   | { kind: 'direct' }
   | { kind: 'block'; reason: string };
 
+export function isWildberriesHost(host: string): boolean {
+  const h = (host || '').toLowerCase().trim();
+  return (
+    h === 'wildberries.ru' ||
+    h.endsWith('.wildberries.ru') ||
+    h === 'wb.ru' ||
+    h.endsWith('.wb.ru') ||
+    h === 'wbcontent.net' ||
+    h.endsWith('.wbcontent.net') ||
+    h.includes('wildberries') ||
+    h.includes('wb.ru')
+  );
+}
+
 export interface ListenerStats {
   port: number;
   activeConnections: number;
@@ -750,7 +764,7 @@ export class DeviceProxyListener {
 
   constructor(
     readonly deviceId: string,
-    private readonly resolveRoute: () => RouteDecision,
+    private readonly resolveRoute: (targetHost?: string) => RouteDecision,
     private readonly logger: Logger,
     private readonly opts: ListenerOptions,
   ) {}
@@ -826,9 +840,9 @@ export class DeviceProxyListener {
     return n;
   }
 
-  private route(): RouteDecision {
+  private route(targetHost?: string): RouteDecision {
     try {
-      return this.resolveRoute();
+      return this.resolveRoute(targetHost);
     } catch (err) {
       return { kind: 'block', reason: err instanceof Error ? err.message : String(err) };
     }
@@ -871,7 +885,7 @@ export class DeviceProxyListener {
       this.rejectSocket(client, 400, `Некорректная цель CONNECT: ${req.url}`);
       return;
     }
-    const route = this.route();
+    const route = this.route(target.host);
     if (route.kind === 'block') {
       this.rejectSocket(client, 403, route.reason);
       return;
@@ -953,13 +967,12 @@ export class DeviceProxyListener {
     }
     this.counters.total++;
     this.lastActivityAt = Date.now();
-    const route = this.route();
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const route = this.route(host);
     if (route.kind === 'block') {
       this.replyError(res, 403, route.reason);
       return;
     }
-
-    const host = url.hostname.replace(/^\[|\]$/g, '');
     const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
     const headers: http.OutgoingHttpHeaders = {};
     for (const [k, v] of Object.entries(req.headers)) {

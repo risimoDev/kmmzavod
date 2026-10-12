@@ -26,6 +26,7 @@ import type { PrismaClient, Autopilot } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { nextWallClock, startOfZonedDay } from '../lib/tz';
 import { journal, failBatch } from './journal';
+import { deviceAgentService } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'autopilot-loop' });
 
@@ -273,13 +274,48 @@ export async function eligibleAccounts(db: PrismaClient, ap: Autopilot): Promise
       ...(targets.length ? { OR: targets } : {}),
     },
     select: {
-      id: true, platform: true, deviceId: true, warmupStatus: true,
+      id: true, platform: true, deviceId: true, warmupStatus: true, accountName: true,
       accountGroup: { select: { enforceWarmup: true, maxPostsPerDay: true } },
     },
   });
-  return rows
-    .filter((a) => !(a.warmupStatus === 'cold' && a.accountGroup?.enforceWarmup === true))
-    .map((a) => ({ id: a.id, platform: a.platform, deviceId: a.deviceId, maxPostsPerDay: a.accountGroup?.maxPostsPerDay ?? null }));
+
+  const warmupFiltered = rows.filter((a) => !(a.warmupStatus === 'cold' && a.accountGroup?.enforceWarmup === true));
+
+  // Check if target phone has the platform application actually installed
+  const result: EligibleAccount[] = [];
+  for (const a of warmupFiltered) {
+    if (!a.deviceId) continue;
+    try {
+      const check = await deviceAgentService.checkApps(a.deviceId).catch(() => null);
+      if (check && check.ok && check.apps) {
+        const platKey = a.platform.toLowerCase();
+        const appInfo = check.apps[platKey];
+        if (appInfo && !appInfo.installed) {
+          logger.warn(
+            { autopilotId: ap.id, deviceId: a.deviceId, platform: a.platform, accountName: a.accountName },
+            'Autopilot: device lacks target platform application, skipping account',
+          );
+          await journal(
+            db,
+            ap,
+            'info',
+            `Плата ${a.deviceId} (@${a.accountName}): не установлено приложение ${a.platform} (${appInfo.error || 'требуется установка APK'}). Аккаунт временно исключён из автопилота.`,
+          ).catch(() => {});
+          continue;
+        }
+      }
+    } catch {
+      // Non-fatal if device-agent is unreachable during check
+    }
+    result.push({
+      id: a.id,
+      platform: a.platform,
+      deviceId: a.deviceId,
+      maxPostsPerDay: a.accountGroup?.maxPostsPerDay ?? null,
+    });
+  }
+
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

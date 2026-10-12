@@ -70,6 +70,8 @@ const BulkSocialAccountBody = z.object({
     twoFactorSeed: z.string().optional(),
     email: z.string().optional(),
     emailPassword: z.string().optional(),
+    imapHost: z.string().optional(),
+    imapPort: z.number().int().min(1).max(65535).optional(),
     // Device-path: id of the phone as known to ADB (serial, see GET /devices on device-agent).
     deviceId: z.string().optional(),
     accountGroupId: z.string().uuid().optional(),
@@ -89,6 +91,8 @@ const SetCredentialsBody = z.object({
   twoFactorSeed: z.string().optional(),
   email: z.string().optional(),
   emailPassword: z.string().optional(),
+  imapHost: z.string().optional(),
+  imapPort: z.number().int().min(1).max(65535).optional(),
   accessToken: z.string().optional(),
   deviceId: z.string().optional(),
 });
@@ -690,8 +694,18 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           accessTokenEnc = encrypt('private'); // placeholder (column is NOT NULL)
           importNote = note;
         } else if (acc.authMethod === 'device') {
-          // Device accounts can be linked to physical ADB boards during import or later via the UI
-          accessTokenEnc = encrypt('device'); // placeholder (column is NOT NULL) — the phone's logged-in app IS the session
+          accessTokenEnc = encrypt('device');
+          if (acc.username || acc.password || acc.email || acc.emailPassword) {
+            sessionDataEnc = encrypt(JSON.stringify({
+              username: acc.username || acc.accountName,
+              password: acc.password,
+              email: acc.email,
+              emailPassword: acc.emailPassword,
+              imapHost: acc.imapHost,
+              imapPort: acc.imapPort,
+              loginStatus: 'needs_login',
+            }));
+          }
         } else {
           if (!acc.accessToken) throw new Error('Official account needs accessToken');
           accessTokenEnc = encrypt(acc.accessToken);
@@ -766,7 +780,17 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (ADB device serial)' });
       data.deviceId = body.deviceId;
       data.accessToken = encrypt('device');
-      data.sessionData = null;
+      if (body.username || body.password || body.email || body.emailPassword) {
+        data.sessionData = encrypt(JSON.stringify({
+          username: body.username,
+          password: body.password,
+          email: body.email,
+          emailPassword: body.emailPassword,
+          imapHost: body.imapHost,
+          imapPort: body.imapPort,
+          loginStatus: 'needs_login',
+        }));
+      }
     } else {
       if (!body.accessToken) return reply.status(400).send({ error: 'Official account needs accessToken' });
       data.accessToken = encrypt(body.accessToken);
@@ -776,6 +800,118 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     await db.socialAccount.update({ where: { id }, data });
     logger.info({ accountId: id, authMethod: body.authMethod }, 'Account credentials updated');
     return reply.send({ updated: true, authMethod: body.authMethod, ...(credNote ? { note: credNote } : {}) });
+  });
+
+  // ── Auto-Login on Phone Farm Board ────────────────────────────────────────
+
+  app.post('/social-accounts/:id/device-login', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const account = await db.socialAccount.findFirst({
+      where: { id, tenantId },
+      include: { proxy: true },
+    });
+    if (!account) return reply.status(404).send({ error: 'Account not found' });
+    if (account.authMethod !== 'device') {
+      return reply.status(400).send({ error: 'Авторизация на телефоне доступна только для аккаунтов с методом device' });
+    }
+    if (!account.deviceId) {
+      return reply.status(400).send({ error: 'К аккаунту не привязана плата фермы (укажите deviceId)' });
+    }
+    if (account.platform !== 'tiktok' && account.platform !== 'instagram') {
+      return reply.status(400).send({ error: `Авто-вход не поддерживается для платформы ${account.platform}` });
+    }
+
+    let creds: any = {};
+    if (account.sessionData) {
+      try {
+        creds = JSON.parse(decrypt(account.sessionData));
+      } catch (e: any) {
+        return reply.status(400).send({ error: `Не удалось прочитать учетные данные: ${e.message}` });
+      }
+    }
+
+    const username = creds.username || account.accountName;
+    const password = creds.password;
+    if (!password) {
+      return reply.status(400).send({ error: 'Пароль от аккаунта не задан. Укажите пароль в настройках аккаунта.' });
+    }
+
+    try {
+      const loginRes = await deviceAgentClient.loginAccount({
+        deviceId: account.deviceId,
+        platform: account.platform as 'tiktok' | 'instagram',
+        username,
+        password,
+        email: creds.email,
+        emailPassword: creds.emailPassword,
+        imapHost: creds.imapHost,
+        imapPort: creds.imapPort,
+      });
+
+      const updatedCreds = {
+        ...creds,
+        lastLoginAt: new Date().toISOString(),
+        loginStatus: loginRes.ok ? 'logged_in' : 'login_failed',
+        lastLoginError: loginRes.ok ? undefined : (loginRes.error || loginRes.detail),
+      };
+
+      await db.socialAccount.update({
+        where: { id },
+        data: {
+          sessionData: encrypt(JSON.stringify(updatedCreds)),
+          lastError: loginRes.ok ? null : loginRes.detail,
+          healthScore: loginRes.ok ? Math.max(account.healthScore, 70) : Math.max(0, account.healthScore - 10),
+        },
+      });
+
+      if (!loginRes.ok) {
+        return reply.status(502).send(loginRes);
+      }
+      return reply.send(loginRes);
+    } catch (err: unknown) {
+      return reply.status(deviceAgentErrorStatus(err)).send({
+        ok: false,
+        detail: describeDeviceAgentError(err),
+      });
+    }
+  });
+
+  app.post('/social-accounts/:id/test-email', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const account = await db.socialAccount.findFirst({
+      where: { id, tenantId },
+    });
+    if (!account) return reply.status(404).send({ error: 'Account not found' });
+
+    let creds: any = {};
+    if (account.sessionData) {
+      try {
+        creds = JSON.parse(decrypt(account.sessionData));
+      } catch {}
+    }
+
+    if (!creds.email || !creds.emailPassword) {
+      return reply.status(400).send({ error: 'Почта и пароль от почты не сохранены для этого аккаунта' });
+    }
+
+    try {
+      const testRes = await deviceAgentClient.testEmail({
+        email: creds.email,
+        password: creds.emailPassword,
+        host: creds.imapHost,
+        port: creds.imapPort,
+      });
+      return reply.send(testRes);
+    } catch (err: unknown) {
+      return reply.status(deviceAgentErrorStatus(err)).send({
+        ok: false,
+        error: describeDeviceAgentError(err),
+      });
+    }
   });
 
   // ── Reset Daily Post Counts (call via cron every midnight per timezone) ────
@@ -836,15 +972,34 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     ]);
 
     // Attach publish-readiness; strip secrets from the response.
-    const accounts = rows.map(({ accessToken: _at, refreshToken: _rt, sessionData, ...a }) => ({
-      ...a,
-      readiness: computeReadiness({
-        isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
-        warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
-        hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
-        enforceWarmup: a.accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
-      }),
-    }));
+    const accounts = rows.map(({ accessToken: _at, refreshToken: _rt, sessionData, ...a }) => {
+      let devCreds: any = null;
+      if (sessionData && a.authMethod === 'device') {
+        try {
+          devCreds = JSON.parse(decrypt(sessionData));
+        } catch {}
+      }
+      return {
+        ...a,
+        deviceCredentials: devCreds ? {
+          username: devCreds.username,
+          hasPassword: Boolean(devCreds.password),
+          email: devCreds.email,
+          hasEmailPassword: Boolean(devCreds.emailPassword),
+          imapHost: devCreds.imapHost,
+          imapPort: devCreds.imapPort,
+          loginStatus: devCreds.loginStatus,
+          lastLoginAt: devCreds.lastLoginAt,
+          lastLoginError: devCreds.lastLoginError,
+        } : null,
+        readiness: computeReadiness({
+          isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
+          warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
+          hasSession: !!sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
+          enforceWarmup: a.accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
+        }),
+      };
+    });
 
     return reply.send({ accounts, total, page, limit });
   });

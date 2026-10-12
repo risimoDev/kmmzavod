@@ -162,5 +162,14 @@ export const deviceAgentService = {
     const res = await axios.post(`${BASE}/farm/optimize`, { deviceIds }, { timeout: 30_000 });
     return res.data;
   },
+
+  async checkApps(deviceId: string): Promise<{
+    ok: boolean;
+    deviceId: string;
+    apps: Record<string, { installed: boolean; packageName?: string; error?: string }>;
+  }> {
+    const res = await axios.get(`${BASE}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 });
+    return res.data;
+  },
 };
 

@@ -14,6 +14,7 @@ import axios from 'axios';
 import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
+import { PackageResolver } from './package-resolver';
 
 export interface PublishRequest {
   deviceId: string;
@@ -73,24 +74,12 @@ export async function publishToDevice(
     await adb.shell(deviceId, 'wm dismiss-keyguard');
 
     // 5. Verify target package is installed
-    let primaryPkg: string;
-    let altPkg = '';
-    if (platform === 'instagram') {
-      primaryPkg = 'com.instagram.android';
-    } else if (platform === 'tiktok') {
-      primaryPkg = 'com.zhiliaoapp.musically';
-      altPkg = 'com.ss.android.ugc.trill';
-    } else {
-      primaryPkg = 'com.google.android.youtube';
+    const pkgResolver = new PackageResolver(adb, logger);
+    const resolved = await pkgResolver.resolve(deviceId, platform);
+    if (!resolved.installed || !resolved.packageName) {
+      throw new Error(resolved.error || `Приложение ${platform} не установлено на телефоне ${deviceId}`);
     }
-    const pkgCheck = await adb.shell(deviceId, `pm list packages`).catch(() => '');
-    const hasPrimary = pkgCheck.includes(primaryPkg);
-    const hasAlt = altPkg ? pkgCheck.includes(altPkg) : false;
-
-    if (!hasPrimary && !hasAlt) {
-      throw new Error(`Приложение ${platform} (${primaryPkg}) не установлено на телефоне ${deviceId}`);
-    }
-    const resolvedPkg = hasPrimary ? primaryPkg : altPkg;
+    const resolvedPkg = resolved.packageName;
 
     // 6. Set Android clipboard with caption & hashtags
     if (caption && caption.trim()) {

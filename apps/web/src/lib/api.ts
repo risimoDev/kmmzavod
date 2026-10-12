@@ -448,6 +448,18 @@ export interface Proxy {
   _count?: { accounts: number };
 }
 
+export interface DeviceCredentialsInfo {
+  username?: string;
+  hasPassword?: boolean;
+  email?: string;
+  hasEmailPassword?: boolean;
+  imapHost?: string;
+  imapPort?: number;
+  loginStatus?: 'logged_in' | 'needs_login' | 'logging_in' | 'login_failed';
+  lastLoginAt?: string;
+  lastLoginError?: string;
+}
+
 export interface FarmSocialAccount {
   id: string;
   platform: string;
@@ -471,6 +483,7 @@ export interface FarmSocialAccount {
   readiness?: PublishReadiness;
   accountGroup?: { name: string; enforceWarmup?: boolean } | null;
   proxy?: { host: string; port: number; type: string } | null;
+  deviceCredentials?: DeviceCredentialsInfo | null;
 }
 
 export interface FarmMetrics {
@@ -592,10 +605,30 @@ export const accountFarmApi = {
     sessionId?: string;
     accessToken?: string;
     deviceId?: string;
+    email?: string;
+    emailPassword?: string;
+    imapHost?: string;
+    imapPort?: number;
   }) => apiFetch<{ updated: boolean; authMethod: string }>(
     `/api/v1/farm/social-accounts/${id}/credentials`,
     { method: 'PUT', body: JSON.stringify(body) }
   ),
+
+  deviceLogin: (id: string) => apiFetch<{
+    ok: boolean;
+    deviceId: string;
+    platform: string;
+    alreadyLoggedIn?: boolean;
+    codeRetrieved?: string;
+    detail: string;
+    error?: string;
+  }>(`/api/v1/farm/social-accounts/${id}/device-login`, { method: 'POST' }),
+
+  testEmail: (id: string) => apiFetch<{
+    ok: boolean;
+    messageCount?: number;
+    error?: string;
+  }>(`/api/v1/farm/social-accounts/${id}/test-email`, { method: 'POST' }),
 
   resetDaily: (timezone?: string) => {
     const q = new URLSearchParams();
@@ -1071,6 +1104,7 @@ export interface FarmDevice {
   name: string;
   model: string;
   online: boolean;
+  apps?: Record<string, boolean>;
   assignedAccount?: {
     id: string;
     accountName: string;
