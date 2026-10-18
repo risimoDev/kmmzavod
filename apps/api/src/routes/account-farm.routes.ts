@@ -936,6 +936,64 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post('/social-accounts/:id/submit-code', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { code } = z.object({ code: z.string().min(4).max(10) }).parse(request.body);
+
+    const account = await db.socialAccount.findFirst({
+      where: { id, tenantId },
+    });
+    if (!account) return reply.status(404).send({ error: 'Account not found' });
+
+    let creds: any = {};
+    if (account.sessionData) {
+      try {
+        creds = JSON.parse(decrypt(account.sessionData));
+      } catch {}
+    }
+
+    const deviceId = account.deviceId || creds.deviceId;
+    if (!deviceId) {
+      return reply.status(400).send({ error: 'К аккаунту не привязан телефон в ферме (deviceId)' });
+    }
+
+    try {
+      const res = await deviceAgentClient.submitVerificationCode({
+        deviceId,
+        code,
+        platform: account.platform as 'tiktok' | 'instagram',
+      });
+
+      if (res.ok) {
+        const updatedCreds = {
+          ...creds,
+          lastLoginAt: new Date().toISOString(),
+          loginStatus: 'logged_in',
+          lastLoginError: undefined,
+        };
+        await db.socialAccount.update({
+          where: { id },
+          data: {
+            sessionData: encrypt(JSON.stringify(updatedCreds)),
+            lastError: null,
+            healthScore: Math.max(account.healthScore, 70),
+          },
+        });
+      }
+
+      return reply.send(res);
+    } catch (err: unknown) {
+      const msg = describeDeviceAgentError(err);
+      return reply.status(deviceAgentErrorStatus(err)).send({
+        ok: false,
+        detail: msg,
+        error: msg,
+        message: msg,
+      });
+    }
+  });
+
   // ── Reset Daily Post Counts (call via cron every midnight per timezone) ────
 
   app.post('/social-accounts/reset-daily', async (request, reply) => {

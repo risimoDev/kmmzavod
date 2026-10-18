@@ -12,7 +12,7 @@ import { ApkManager } from './apk-manager';
 import { ScriptEngine } from './script-engine';
 import { collectProfileStats } from './profile-stats';
 import { PackageResolver } from './package-resolver';
-import { runDeviceAccountLogin } from './account-login';
+import { runDeviceAccountLogin, submitVerificationCodeOnDevice } from './account-login';
 import { testImapConnection, pollVerificationCode } from './imap-client';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
@@ -550,6 +550,36 @@ const accountEmailCodeHandler = async (req: any, reply: any) => {
 
 app.post('/device/account/email-code', accountEmailCodeHandler);
 app.post('/account/email-code', accountEmailCodeHandler);
+
+const SubmitCodeBody = z.object({
+  deviceId: z.string().min(1),
+  code: z.string().min(4).max(8),
+  platform: z.enum(['tiktok', 'instagram']).optional(),
+});
+
+const accountSubmitCodeHandler = async (req: any, reply: any) => {
+  const parsed = SubmitCodeBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  let release: (() => void) | undefined;
+  try {
+    release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
+    const result = await submitVerificationCodeOnDevice(parsed.data, adb, logger);
+    if (!result.ok) reply.code(400);
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'device-agent: /device/account/submit-code failed');
+    reply.code(502);
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    release?.();
+  }
+};
+
+app.post('/device/account/submit-code', accountSubmitCodeHandler);
+app.post('/account/submit-code', accountSubmitCodeHandler);
 
 app.get('/device/:deviceId/apps-check', async (req, reply) => {
   const { deviceId } = req.params as { deviceId: string };

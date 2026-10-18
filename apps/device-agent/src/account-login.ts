@@ -265,7 +265,7 @@ export async function runDeviceAccountLogin(
           ok: false,
           deviceId,
           platform,
-          detail: `Экран подтверждения: ${codeRes.error || 'код не поступил на почту'}`,
+          detail: `Экран подтверждения: ${codeRes.error || 'код не поступил на почту'}. Телефон остался на экране ввода кода — вы можете ввести код вручную.`,
           error: codeRes.error,
         };
       }
@@ -357,6 +357,119 @@ export async function runDeviceAccountLogin(
       deviceId,
       platform,
       detail: `Сбой автоматического входа: ${err.message}`,
+      error: err.message,
+    };
+  }
+}
+
+export interface SubmitVerificationCodeOpts {
+  deviceId: string;
+  code: string;
+  platform?: 'tiktok' | 'instagram';
+}
+
+/**
+ * Manually submit a 4-8 digit verification code directly onto the phone screen.
+ * Used when email cannot be read via IMAP (e.g. Outlook Basic Auth disabled)
+ * or when the user receives the code in a browser webmail.
+ */
+export async function submitVerificationCodeOnDevice(
+  opts: SubmitVerificationCodeOpts,
+  adb: AdbClient,
+  logger: Logger,
+): Promise<{ ok: boolean; detail: string; error?: string }> {
+  const { deviceId, code, platform } = opts;
+  const sanitizedCode = (code || '').trim().replace(/\s+/g, '');
+  if (!sanitizedCode || sanitizedCode.length < 4 || sanitizedCode.length > 8) {
+    return { ok: false, detail: 'Код должен содержать от 4 до 8 цифр', error: 'Invalid code format' };
+  }
+
+  logger.info({ deviceId, platform, codeLength: sanitizedCode.length }, 'device-agent: submitting verification code to device');
+
+  try {
+    await adb.wakeUp(deviceId);
+    await adb.shell(deviceId, 'wm dismiss-keyguard');
+    const { width, height } = await adb.getScreenSize(deviceId);
+
+    let xml = await dumpUi(adb, deviceId);
+    let nodes = parseUiTree(xml);
+
+    // Find code input field or tap likely area
+    const codeInput = nodes.find((n) =>
+      /code|код|pin|number|verification/i.test(`${n.text} ${n.desc} ${n.resId}`) ||
+      (n.bounds[3] - n.bounds[1] > 20 && n.bounds[1] < height * 0.6 && n.bounds[1] > height * 0.2),
+    );
+
+    if (codeInput) {
+      const [x1, y1, x2, y2] = codeInput.bounds;
+      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
+    } else {
+      await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.4));
+    }
+
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Clear existing input if any
+    for (let i = 0; i < 10; i++) {
+      await adb.keyevent(deviceId, 67); // KEYCODE_DEL
+    }
+
+    await adb.inputText(deviceId, sanitizedCode);
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Dismiss keyboard
+    await adb.keyevent(deviceId, 111); // KEYCODE_ESCAPE
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Find Confirm / Submit button
+    xml = await dumpUi(adb, deviceId);
+    nodes = parseUiTree(xml);
+    const confirmBtn = nodes.find((n) =>
+      /^(confirm|подтвердить|next|далее|submit|отправить|войти|готово|done)$/i.test(n.text.trim()) ||
+      /^(confirm|подтвердить|next|далее|submit|отправить|войти|готово|done)$/i.test(n.desc.trim()) ||
+      /submit|next_button|confirm/i.test(n.resId),
+    );
+
+    if (confirmBtn) {
+      const [x1, y1, x2, y2] = confirmBtn.bounds;
+      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
+    } else {
+      await adb.keyevent(deviceId, 66); // KEYCODE_ENTER
+    }
+
+    // Wait for validation
+    await new Promise((r) => setTimeout(r, 6000));
+
+    // Post-check screen
+    xml = await dumpUi(adb, deviceId);
+    nodes = parseUiTree(xml);
+
+    // Check for any error dialog/message on screen
+    const errorNode = nodes.find((n) =>
+      /incorrect code|неверный код|invalid code|expired|истёк|error|ошибка/i.test(`${n.text} ${n.desc}`),
+    );
+
+    if (errorNode) {
+      const errText = errorNode.text || errorNode.desc || 'Неверный проверочный код';
+      return { ok: false, detail: `Ошибка на телефоне: ${errText}`, error: errText };
+    }
+
+    // Dismiss any "Save login info" prompt if it appeared
+    const saveInfoBtn = nodes.find((n) => /save|сохранить|not now|не сейчас/i.test(`${n.text} ${n.desc}`));
+    if (saveInfoBtn) {
+      const [x1, y1, x2, y2] = saveInfoBtn.bounds;
+      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
+    }
+
+    return {
+      ok: true,
+      detail: `Код ${sanitizedCode} успешно введён и подтверждён на телефоне! Вход выполнен.`,
+    };
+  } catch (err: any) {
+    logger.error({ deviceId, platform, err: err.message }, 'device-agent: manual code submission failed');
+    return {
+      ok: false,
+      detail: `Не удалось ввести код: ${err.message}`,
       error: err.message,
     };
   }

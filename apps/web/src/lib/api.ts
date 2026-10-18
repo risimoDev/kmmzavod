@@ -630,6 +630,15 @@ export const accountFarmApi = {
     error?: string;
   }>(`/api/v1/farm/social-accounts/${id}/test-email`, { method: 'POST' }),
 
+  submitCode: (id: string, code: string) => apiFetch<{
+    ok: boolean;
+    detail: string;
+    error?: string;
+  }>(`/api/v1/farm/social-accounts/${id}/submit-code`, {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  }),
+
   resetDaily: (timezone?: string) => {
     const q = new URLSearchParams();
     if (timezone) q.set('timezone', timezone);

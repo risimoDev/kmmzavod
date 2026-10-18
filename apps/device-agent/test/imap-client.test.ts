@@ -1,4 +1,4 @@
-import { detectImapHost, extractVerificationCode } from '../src/imap-client';
+import { detectImapHost, extractVerificationCode, formatImapError } from '../src/imap-client';
 
 const ok = (c: boolean, m: string) => console.log(c ? 'PASS' : 'FAIL', m);
 
@@ -39,5 +39,14 @@ Subject: Verification Code
 Код подтверждения для входа в аккаунт: 381920
 `;
 ok(extractVerificationCode(ttEmail2, 'tiktok') === '381920', `TikTok RU code: ${extractVerificationCode(ttEmail2, 'tiktok')}`);
+
+// 4. Error formatting and permanent auth detection
+const outlookErr = formatImapError('IMAP Error: Basic authentication is disabled.', 'lisaschrempf976239@outlook.com', 'outlook.office365.com');
+ok(outlookErr.isPermanentAuth === true, 'Outlook basic auth disabled detected as permanent');
+ok(outlookErr.message.includes('Пароль приложения'), 'Outlook message contains App Password advice');
+
+const mailruErr = formatImapError('IMAP Error: [AUTHENTICATIONFAILED] Invalid credentials', 'bot@mail.ru', 'imap.mail.ru');
+ok(mailruErr.isPermanentAuth === true, 'Mail.ru invalid credentials detected as permanent');
+ok(mailruErr.message.includes('Пароль для внешних приложений'), 'Mail.ru message contains external app password advice');
 
 console.log('All IMAP tests completed successfully!');

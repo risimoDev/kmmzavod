@@ -1228,6 +1228,12 @@ function EditCredentialsModal({
   const [loggingIn, setLoggingIn] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
 
+  const [manualCode, setManualCode] = useState("");
+  const [submittingCode, setSubmittingCode] = useState(false);
+  const [showManualCodeInput, setShowManualCodeInput] = useState(
+    Boolean(creds?.lastLoginError && /код|подтвержден|verification|auth/i.test(creds.lastLoginError))
+  );
+
   const handleEmailChange = (val: string) => {
     setEmail(val);
     if (!imapHost || imapHost.includes("mail.ru") || imapHost.includes("yandex") || imapHost.includes("gmail") || imapHost.includes("rambler")) {
@@ -1243,6 +1249,28 @@ function EditCredentialsModal({
       } else if (lower.includes("@outlook.com") || lower.includes("@hotmail.com")) {
         setImapHost("outlook.office365.com");
       }
+    }
+  };
+
+  const handleSubmitManualCode = async () => {
+    const clean = manualCode.trim().replace(/\D/g, "");
+    if (!clean) return;
+    setSubmittingCode(true);
+    setFeedback({ type: "info", msg: `Отправка проверочного кода ${clean} на телефон ${deviceId || account.deviceId}...` });
+    try {
+      const res = await accountFarmApi.submitCode(account.id, clean);
+      if (res.ok) {
+        setFeedback({ type: "success", msg: res.detail || `Код ${clean} успешно подтверждён на телефоне! Вход выполнен.` });
+        setManualCode("");
+        setShowManualCodeInput(false);
+        onSaved();
+      } else {
+        setFeedback({ type: "error", msg: `Ошибка ввода кода: ${res.error || res.detail}` });
+      }
+    } catch (e: any) {
+      setFeedback({ type: "error", msg: e.message || "Ошибка отправки кода на телефон" });
+    } finally {
+      setSubmittingCode(false);
     }
   };
 
@@ -1325,6 +1353,9 @@ function EditCredentialsModal({
         setFeedback({ type: "success", msg: `Успешный вход в приложение на телефоне! ${res.detail}${extra}` });
       } else {
         setFeedback({ type: "error", msg: `Ошибка входа: ${res.error || res.detail}` });
+        if (/код|подтвержден|verification|disabled|auth/i.test(`${res.error} ${res.detail}`)) {
+          setShowManualCodeInput(true);
+        }
       }
       onSaved();
     } catch (e: any) {
@@ -1349,6 +1380,48 @@ function EditCredentialsModal({
             {feedback.msg}
           </div>
         )}
+
+        {/* Manual 2FA Code Input block */}
+        <div className="border border-brand-500/30 bg-brand-500/5 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-text-primary">Ввод 2FA кода подтверждения</span>
+              <Badge variant="outline" className="text-2xs">Прямой ввод на экран</Badge>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowManualCodeInput(!showManualCodeInput)}
+              className="text-xs text-brand-400 hover:text-brand-300 underline"
+            >
+              {showManualCodeInput ? "Скрыть" : "Открыть ввод кода"}
+            </button>
+          </div>
+          <p className="text-2xs text-text-tertiary">
+            Если код пришел в веб-почту (например, outlook.live.com) или IMAP недоступен, введите код здесь — телефон автоматически введет его на экране и завершит вход.
+          </p>
+          {showManualCodeInput && (
+            <div className="flex gap-2 items-center pt-1">
+              <Input
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                placeholder="6-значный проверочный код"
+                className="text-xs h-9 font-mono tracking-widest"
+                maxLength={8}
+                disabled={submittingCode}
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                loading={submittingCode}
+                disabled={!manualCode.trim() || manualCode.length < 4 || !deviceId}
+                onClick={handleSubmitManualCode}
+                className="whitespace-nowrap"
+              >
+                ✓ Отправить на телефон
+              </Button>
+            </div>
+          )}
+        </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -1429,6 +1502,8 @@ function EditCredentialsModal({
           </div>
           <p className="text-2xs text-text-tertiary">
             Когда соцсеть запрашивает код подтверждения при входе, телефонная ферма автоматически опрашивает этот ящик через IMAP (порт 993) и вводит 6-значный код на экране телефона.
+            <br />
+            <span className="text-amber-400 font-medium">Важно:</span> Для <b>Outlook / Hotmail</b> Microsoft заблокировал вход по обычному паролю — требуется «Пароль приложения» (account.microsoft.com/security &rarr; Пароли приложений, требует 2FA) или OAuth2 токен, либо вводите код вручную блоком выше. Для <b>Mail.ru</b> и <b>Яндекс</b> используйте «Пароль для внешних приложений».
           </p>
           <div className="grid grid-cols-2 gap-3">
             <div>

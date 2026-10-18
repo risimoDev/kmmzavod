@@ -14,9 +14,12 @@ import tls from 'node:tls';
 
 export interface ImapConfig {
   email: string;
-  password: string;
+  password?: string;
   host?: string;
   port?: number;
+  oauthAccessToken?: string;
+  oauthRefreshToken?: string;
+  oauthClientId?: string;
 }
 
 export interface VerificationCodeResult {
@@ -56,6 +59,89 @@ export function detectImapHost(email: string): { host: string; port: number } {
     return { host: 'imap.mail.ru', port: 993 };
   }
   return { host: `imap.${domain || 'mail.ru'}`, port: 993 };
+}
+
+/** Format IMAP errors into helpful, actionable messages and identify permanent auth failures. */
+export function formatImapError(err: Error | string, email: string, host: string): { message: string; isPermanentAuth: boolean } {
+  const raw = typeof err === 'string' ? err : err.message || String(err);
+  const domain = (email.split('@')[1] || '').toLowerCase().trim();
+
+  const isPermanentAuth =
+    /basic authentication is disabled|authenticationfailed|invalid credentials|login failed|not accepted|application-specific password|password for application|bad credentials/i.test(
+      raw,
+    );
+
+  if (/basic authentication is disabled/i.test(raw) || domain.includes('outlook') || domain.includes('hotmail') || host.includes('office365')) {
+    if (isPermanentAuth) {
+      return {
+        message: `Microsoft IMAP: вход по обычному паролю заблокирован (Basic authentication is disabled). Для почт @outlook.com / @hotmail.com используйте «Пароль приложения» (App Password) из личного кабинета Microsoft (account.microsoft.com/security -> Пароли приложений, требует включённой 2FA) или OAuth2 токен, либо введите проверочный код вручную кнопкой «Ввести код на телефоне».`,
+        isPermanentAuth: true,
+      };
+    }
+  }
+
+  if (domain.includes('mail.ru') || domain.includes('inbox.ru') || domain.includes('bk.ru') || domain.includes('list.ru')) {
+    if (isPermanentAuth) {
+      return {
+        message: `Mail.ru IMAP: ошибка авторизации. Для доступа по IMAP создайте «Пароль для внешних приложений» (Настройки почты Mail.ru -> Пароль и безопасность -> Пароли для внешних приложений).`,
+        isPermanentAuth: true,
+      };
+    }
+  }
+
+  if (domain.includes('yandex.') || domain.includes('ya.ru')) {
+    if (isPermanentAuth) {
+      return {
+        message: `Яндекс IMAP: ошибка авторизации. Создайте «Пароль приложений» (id.yandex.ru -> Безопасность -> Пароли приложений -> Почта).`,
+        isPermanentAuth: true,
+      };
+    }
+  }
+
+  if (domain.includes('gmail.') || domain.includes('googlemail.')) {
+    if (isPermanentAuth) {
+      return {
+        message: `Gmail IMAP: ошибка авторизации. Требуется создать «Пароль приложений» Google (myaccount.google.com/apppasswords, требует 2FA).`,
+        isPermanentAuth: true,
+      };
+    }
+  }
+
+  return {
+    message: raw,
+    isPermanentAuth,
+  };
+}
+
+/** Refresh Microsoft OAuth2 token using Thunderbird public client ID or custom client ID. */
+export async function refreshMicrosoftToken(
+  refreshToken: string,
+  clientId = '9e5f94bc-e8a4-4e73-b8be-63364c29d753',
+): Promise<string> {
+  const cleanToken = refreshToken.trim();
+  const params = new URLSearchParams({
+    client_id: clientId,
+    grant_type: 'refresh_token',
+    refresh_token: cleanToken,
+    scope: 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access',
+  });
+
+  const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Microsoft OAuth токен отклонен (${res.status}): ${errText.slice(0, 300)}`);
+  }
+
+  const data = (await res.json()) as any;
+  if (!data.access_token) {
+    throw new Error('Ответ Microsoft OAuth не содержит access_token');
+  }
+  return data.access_token;
 }
 
 /** Extract 4 to 8 digit verification code from message subject or body text. */
@@ -201,6 +287,76 @@ class ImapSession {
     }
     return out;
   }
+
+  /**
+   * Authenticate via modern OAuth2 (XOAUTH2) if tokens provided, or fall back to standard LOGIN.
+   */
+  async authenticate(cfg: ImapConfig): Promise<void> {
+    const isOutlook = /outlook|office365|hotmail|live|msn/i.test((cfg.host || '') + (cfg.email || ''));
+    const tokenCandidate = (cfg.password || '').trim();
+
+    // 1. Direct access token provided
+    if (cfg.oauthAccessToken) {
+      await this.authenticateXOAuth2(cfg.email, cfg.oauthAccessToken);
+      return;
+    }
+
+    // 2. Refresh token provided or password format resembles a Microsoft/OAuth token
+    if (cfg.oauthRefreshToken || (isOutlook && /^(M\.R|M\.C|eyJ)/i.test(tokenCandidate))) {
+      const refreshToken = cfg.oauthRefreshToken || tokenCandidate;
+      const accessToken = await refreshMicrosoftToken(refreshToken, cfg.oauthClientId);
+      await this.authenticateXOAuth2(cfg.email, accessToken);
+      return;
+    }
+
+    // 3. Standard IMAP LOGIN
+    const pass = cfg.password || '';
+    if (!pass) {
+      throw new Error('Пароль от почты не указан');
+    }
+    const safeUser = cfg.email.replace(/["\\]/g, '\\$&');
+    const safePass = pass.replace(/["\\]/g, '\\$&');
+    await this.sendCommand(`LOGIN "${safeUser}" "${safePass}"`, 12_000);
+  }
+
+  async authenticateXOAuth2(email: string, accessToken: string, timeoutMs = 15_000): Promise<string> {
+    if (!this.socket) throw new Error('Not connected');
+    const tag = `A${this.tagIndex++}`;
+    const authString = `user=${email}\x01auth=Bearer ${accessToken}\x01\x01`;
+    const base64Auth = Buffer.from(authString, 'utf-8').toString('base64');
+    const fullCmd = `${tag} AUTHENTICATE XOAUTH2 ${base64Auth}\r\n`;
+
+    this.buffer = '';
+    this.socket.write(fullCmd);
+
+    const out = await this.readUntil(
+      (b) => b.includes(`${tag} OK`) || b.includes(`${tag} NO`) || b.includes(`${tag} BAD`) || b.includes('+ '),
+      timeoutMs,
+    );
+
+    // If server issues a challenge (e.g. "+ ..."), send empty line to trigger completion or error response
+    if (out.includes('+ ') && !out.includes(`${tag} `)) {
+      this.buffer = '';
+      this.socket.write('\r\n');
+      const finalOut = await this.readUntil(
+        (b) => b.includes(`${tag} OK`) || b.includes(`${tag} NO`) || b.includes(`${tag} BAD`),
+        timeoutMs,
+      );
+      if (finalOut.includes(`${tag} NO`) || finalOut.includes(`${tag} BAD`)) {
+        const match = finalOut.match(new RegExp(`${tag}\\s+(?:NO|BAD)\\s+([^\\r\\n]+)`, 'i'));
+        const reason = match ? match[1] : 'XOAUTH2 rejected';
+        throw new Error(`IMAP XOAUTH2 Error: ${reason}`);
+      }
+      return finalOut;
+    }
+
+    if (out.includes(`${tag} NO`) || out.includes(`${tag} BAD`)) {
+      const match = out.match(new RegExp(`${tag}\\s+(?:NO|BAD)\\s+([^\\r\\n]+)`, 'i'));
+      const reason = match ? match[1] : 'XOAUTH2 rejected';
+      throw new Error(`IMAP XOAUTH2 Error: ${reason}`);
+    }
+    return out;
+  }
 }
 
 /**
@@ -215,10 +371,7 @@ export async function testImapConnection(cfg: ImapConfig): Promise<{ ok: boolean
     // Read greeting
     await session.readUntil((b) => b.startsWith('* OK') || b.includes('\r\n'), 8000);
 
-    // Escape quotes in password
-    const safeUser = cfg.email.replace(/["\\]/g, '\\$&');
-    const safePass = cfg.password.replace(/["\\]/g, '\\$&');
-    await session.sendCommand(`LOGIN "${safeUser}" "${safePass}"`, 12_000);
+    await session.authenticate({ ...cfg, host, port });
 
     const selectOut = await session.sendCommand(`SELECT INBOX`, 10_000);
     const countMatch = selectOut.match(/\*\s+(\d+)\s+EXISTS/i);
@@ -230,7 +383,8 @@ export async function testImapConnection(cfg: ImapConfig): Promise<{ ok: boolean
     return { ok: true, messageCount };
   } catch (err: any) {
     session.destroy();
-    return { ok: false, error: err.message || String(err) };
+    const formatted = formatImapError(err, cfg.email, host);
+    return { ok: false, error: formatted.message };
   }
 }
 
@@ -258,9 +412,7 @@ export async function pollVerificationCode(
       await session.connect(host, port, 10_000);
       await session.readUntil((b) => b.startsWith('* OK') || b.includes('\r\n'), 6000);
 
-      const safeUser = cfg.email.replace(/["\\]/g, '\\$&');
-      const safePass = cfg.password.replace(/["\\]/g, '\\$&');
-      await session.sendCommand(`LOGIN "${safeUser}" "${safePass}"`, 10_000);
+      await session.authenticate({ ...cfg, host, port });
       await session.sendCommand(`SELECT INBOX`, 8000);
 
       // Search recent messages (UNSEEN or all recent)
@@ -317,7 +469,16 @@ export async function pollVerificationCode(
       session.destroy();
     } catch (err: any) {
       session.destroy();
-      lastError = err.message || String(err);
+      const formatted = formatImapError(err, cfg.email, host);
+      lastError = formatted.message;
+
+      // Fail fast immediately on permanent authentication errors (e.g. Basic auth disabled, wrong pass)
+      if (formatted.isPermanentAuth) {
+        return {
+          ok: false,
+          error: formatted.message,
+        };
+      }
     }
 
     await new Promise((r) => setTimeout(r, pollIntervalMs));

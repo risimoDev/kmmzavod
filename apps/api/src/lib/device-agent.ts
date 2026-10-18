@@ -548,6 +548,15 @@ export const deviceAgentClient = {
     return res.data;
   },
 
+  async submitVerificationCode(opts: {
+    deviceId: string;
+    code: string;
+    platform?: 'tiktok' | 'instagram';
+  }): Promise<{ ok: boolean; detail: string; error?: string }> {
+    const res = await axios.post(`${BASE}/device/account/submit-code`, opts, { timeout: 30_000 });
+    return res.data;
+  },
+
   async checkApps(deviceId: string): Promise<{
     ok: boolean;
     deviceId: string;
