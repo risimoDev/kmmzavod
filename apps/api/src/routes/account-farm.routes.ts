@@ -780,15 +780,31 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (ADB device serial)' });
       data.deviceId = body.deviceId;
       data.accessToken = encrypt('device');
-      if (body.username || body.password || body.email || body.emailPassword) {
+
+      // Preserve existing credentials if partially updated
+      let existingCreds: any = {};
+      const existingAcc = await db.socialAccount.findUnique({ where: { id }, select: { sessionData: true } });
+      if (existingAcc?.sessionData) {
+        try { existingCreds = JSON.parse(decrypt(existingAcc.sessionData)); } catch {}
+      }
+
+      const mergedUsername = body.username ?? existingCreds.username;
+      const mergedPassword = (body.password !== undefined && body.password !== '') ? body.password : existingCreds.password;
+      const mergedEmail = (body.email !== undefined && body.email !== '') ? body.email : existingCreds.email;
+      const mergedEmailPassword = (body.emailPassword !== undefined && body.emailPassword !== '') ? body.emailPassword : existingCreds.emailPassword;
+      const mergedImapHost = (body.imapHost !== undefined && body.imapHost !== '') ? body.imapHost : existingCreds.imapHost;
+      const mergedImapPort = body.imapPort ?? existingCreds.imapPort;
+
+      if (mergedUsername || mergedPassword || mergedEmail || mergedEmailPassword) {
         data.sessionData = encrypt(JSON.stringify({
-          username: body.username,
-          password: body.password,
-          email: body.email,
-          emailPassword: body.emailPassword,
-          imapHost: body.imapHost,
-          imapPort: body.imapPort,
-          loginStatus: 'needs_login',
+          ...existingCreds,
+          username: mergedUsername,
+          password: mergedPassword,
+          email: mergedEmail,
+          emailPassword: mergedEmailPassword,
+          imapHost: mergedImapHost,
+          imapPort: mergedImapPort,
+          loginStatus: existingCreds.loginStatus ?? 'needs_login',
         }));
       }
     } else {
@@ -871,9 +887,12 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       }
       return reply.send(loginRes);
     } catch (err: unknown) {
+      const msg = describeDeviceAgentError(err);
       return reply.status(deviceAgentErrorStatus(err)).send({
         ok: false,
-        detail: describeDeviceAgentError(err),
+        detail: msg,
+        error: msg,
+        message: msg,
       });
     }
   });
@@ -907,9 +926,12 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       });
       return reply.send(testRes);
     } catch (err: unknown) {
+      const msg = describeDeviceAgentError(err);
       return reply.status(deviceAgentErrorStatus(err)).send({
         ok: false,
-        error: describeDeviceAgentError(err),
+        error: msg,
+        detail: msg,
+        message: msg,
       });
     }
   });

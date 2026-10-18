@@ -35,6 +35,14 @@ app.addContentTypeParser(
   }
 );
 
+app.setNotFoundHandler((req, reply) => {
+  reply.code(404).send({
+    ok: false,
+    error: 'NotFound',
+    message: `Маршрут ${req.method} ${req.url} не найден в device-agent`,
+  });
+});
+
 app.get('/health', async () => ({
   ok: true,
   timestamp: new Date().toISOString(),
@@ -473,7 +481,7 @@ const DeviceAccountLoginBody = z.object({
   imapPort: z.number().int().min(1).max(65535).optional(),
 });
 
-app.post('/device/account/login', async (req, reply) => {
+const accountLoginHandler = async (req: any, reply: any) => {
   const parsed = DeviceAccountLoginBody.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400);
@@ -493,7 +501,10 @@ app.post('/device/account/login', async (req, reply) => {
   } finally {
     release?.();
   }
-});
+};
+
+app.post('/device/account/login', accountLoginHandler);
+app.post('/account/login', accountLoginHandler);
 
 const TestEmailBody = z.object({
   email: z.string().email(),
@@ -502,7 +513,7 @@ const TestEmailBody = z.object({
   port: z.number().int().min(1).max(65535).optional(),
 });
 
-app.post('/device/account/test-email', async (req, reply) => {
+const accountTestEmailHandler = async (req: any, reply: any) => {
   const parsed = TestEmailBody.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400);
@@ -511,7 +522,10 @@ app.post('/device/account/test-email', async (req, reply) => {
   const result = await testImapConnection(parsed.data);
   if (!result.ok) reply.code(400);
   return result;
-});
+};
+
+app.post('/device/account/test-email', accountTestEmailHandler);
+app.post('/account/test-email', accountTestEmailHandler);
 
 const EmailCodeBody = z.object({
   email: z.string().email(),
@@ -522,7 +536,7 @@ const EmailCodeBody = z.object({
   maxWaitSec: z.number().int().min(5).max(300).default(60),
 });
 
-app.post('/device/account/email-code', async (req, reply) => {
+const accountEmailCodeHandler = async (req: any, reply: any) => {
   const parsed = EmailCodeBody.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400);
@@ -532,7 +546,10 @@ app.post('/device/account/email-code', async (req, reply) => {
   const result = await pollVerificationCode({ email, password, host, port }, { platform, maxWaitSec });
   if (!result.ok) reply.code(502);
   return result;
-});
+};
+
+app.post('/device/account/email-code', accountEmailCodeHandler);
+app.post('/account/email-code', accountEmailCodeHandler);
 
 app.get('/device/:deviceId/apps-check', async (req, reply) => {
   const { deviceId } = req.params as { deviceId: string };

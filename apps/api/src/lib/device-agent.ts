@@ -113,7 +113,13 @@ export function describeDeviceAgentError(err: unknown): string {
     }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string; error?: unknown; message?: string } | string | undefined;
-    const body = typeof data === 'string' ? data : (data?.detail ?? data?.error ?? data?.message ?? err.message);
+    if (status === 404) {
+      const routeMsg = typeof data === 'object' && data?.message ? `: ${data.message}` : '';
+      return `Эндпоинт ${err.config?.url ?? ''} не найден на device-agent (${BASE})${routeMsg}. Перезапустите apps/device-agent на ПК фермы (pnpm --filter @kmmzavod/device-agent run build && pnpm --filter @kmmzavod/device-agent run start).`;
+    }
+    const body = typeof data === 'string'
+      ? data
+      : (data?.detail ?? data?.message ?? (data?.error && data.error !== 'Not Found' ? data.error : undefined) ?? err.message);
     const text = typeof body === 'string' ? body : JSON.stringify(body);
     return status && status >= 500 ? `device-agent: ${text.slice(0, 800)}` : text.slice(0, 800);
   }
