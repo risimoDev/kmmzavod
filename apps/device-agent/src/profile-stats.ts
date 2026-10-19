@@ -88,6 +88,35 @@ export function parseUiTree(xml: string): UiNode[] {
 }
 
 const FOLLOWERS_RE = /(подписчик|followers?\b)/i;
+const POSTS_RE = /(публикаци|posts?\b)/i;
+
+/**
+ * Number in a profile header next to `labelRe` ("123 posts", "1,2 тыс.\nподписчиков"):
+ * inline in the label node, or a number node right above it in the same column.
+ */
+function headerCount(nodes: UiNode[], labelRe: RegExp, inlineRe: RegExp, screenW: number): { value: number | null; bottom: number } {
+  let value: number | null = null;
+  let bottom = 0;
+  for (const n of nodes) {
+    const label = `${n.text} ${n.desc}`;
+    if (!labelRe.test(label)) continue;
+    bottom = Math.max(bottom, n.bounds[3]);
+    const inline = inlineRe.exec(label);
+    if (inline && parseCount(inline[1]) != null) { value = parseCount(inline[1]); continue; }
+    const cx = (n.bounds[0] + n.bounds[2]) / 2;
+    const above = nodes
+      .filter((x) => parseCount(x.text) != null && x.bounds[3] <= n.bounds[1] + 10 && n.bounds[1] - x.bounds[3] < 160
+        && Math.abs((x.bounds[0] + x.bounds[2]) / 2 - cx) < screenW * 0.12)
+      .sort((a, b) => b.bounds[3] - a.bounds[3]);
+    if (above[0]) value = parseCount(above[0].text);
+  }
+  return { value, bottom };
+}
+
+/** Instagram profile header "N posts / N публикаций" (TikTok shows no post count → null). */
+export function parsePostsCount(xml: string, screenW: number): number | null {
+  return headerCount(parseUiTree(xml), POSTS_RE, /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(публикаци|posts?\b)/i, screenW).value;
+}
 const PINNED_RE = /(закреплен|pinned)/i;
 
 function descendants(n: UiNode): UiNode[] {
@@ -103,21 +132,9 @@ export function parseProfileDump(xml: string, screenW: number, screenH: number):
 
   // Followers: "1,2 тыс.\nподписчиков" in one node, or a number node right above
   // (same column) a "Подписчики/Followers" label.
-  let followers: number | null = null;
-  let headerBottom = 0;
-  for (const n of nodes) {
-    const label = `${n.text} ${n.desc}`;
-    if (!FOLLOWERS_RE.test(label)) continue;
-    headerBottom = Math.max(headerBottom, n.bounds[3]);
-    const inline = /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(подписчик|followers)/i.exec(label);
-    if (inline && parseCount(inline[1]) != null) { followers = parseCount(inline[1]); continue; }
-    const cx = (n.bounds[0] + n.bounds[2]) / 2;
-    const above = nodes
-      .filter((x) => parseCount(x.text) != null && x.bounds[3] <= n.bounds[1] + 10 && n.bounds[1] - x.bounds[3] < 160
-        && Math.abs((x.bounds[0] + x.bounds[2]) / 2 - cx) < screenW * 0.12)
-      .sort((a, b) => b.bounds[3] - a.bounds[3]);
-    if (above[0]) followers = parseCount(above[0].text);
-  }
+  const header = headerCount(nodes, FOLLOWERS_RE, /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(подписчик|followers)/i, screenW);
+  const followers = header.value;
+  const headerBottom = header.bottom;
   const onProfile = headerBottom > 0;
 
   // Grid tiles: count nodes below the header and above the bottom navigation,
@@ -154,6 +171,45 @@ async function dump(adb: AdbClient, deviceId: string): Promise<string> {
   return adb.shell(deviceId, 'cat /sdcard/kmm_ui.xml', 15_000);
 }
 
+/** Open the account's own profile in the app via deep link (web URL as fallback). */
+export async function openProfile(
+  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg?: string,
+): Promise<void> {
+  const user = username.replace(/^@+/, '').trim();
+  if (platform === 'instagram') {
+    await adb.openUrl(deviceId, `instagram://user?username=${user}`, targetPkg || 'com.instagram.android')
+      .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
+  } else {
+    const scheme = targetPkg?.includes('trill') ? 'snssdk1180' : 'snssdk1233';
+    await adb.openUrl(deviceId, `${scheme}://user/profile/${user}`, targetPkg)
+      .catch(() => adb.openUrl(deviceId, `https://www.tiktok.com/@${user}`, targetPkg));
+  }
+}
+
+export interface ProfileSnapshot {
+  onProfile: boolean;
+  /** Instagram header post count; null on TikTok / when not readable. */
+  posts: number | null;
+  /** Grid tiles excluding pinned ones, newest first. */
+  tiles: ProfileTile[];
+}
+
+/** Open the own profile and read post count + grid (used to verify a fresh post). */
+export async function snapshotProfile(
+  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg?: string,
+): Promise<ProfileSnapshot> {
+  const { width, height } = await adb.getScreenSize(deviceId);
+  await openProfile(adb, deviceId, platform, username, targetPkg);
+  await new Promise((r) => setTimeout(r, 5000));
+  const xml = await dump(adb, deviceId).catch(() => '');
+  const parsed = parseProfileDump(xml, width, height);
+  return {
+    onProfile: parsed.onProfile,
+    posts: platform === 'instagram' ? parsePostsCount(xml, width) : null,
+    tiles: parsed.tiles.filter((t) => !t.pinned),
+  };
+}
+
 export async function collectProfileStats(
   req: { deviceId: string; platform: 'instagram' | 'tiktok'; username: string },
   adb: AdbClient,
@@ -170,14 +226,7 @@ export async function collectProfileStats(
     const resolved = await pkgResolver.resolve(deviceId, platform);
     const targetPkg = resolved.packageName;
 
-    if (platform === 'instagram') {
-      await adb.openUrl(deviceId, `instagram://user?username=${user}`, targetPkg || 'com.instagram.android')
-        .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
-    } else {
-      const scheme = targetPkg?.includes('trill') ? 'snssdk1180' : 'snssdk1233';
-      await adb.openUrl(deviceId, `${scheme}://user/profile/${user}`, targetPkg)
-        .catch(() => adb.openUrl(deviceId, `https://www.tiktok.com/@${user}`, targetPkg));
-    }
+    await openProfile(adb, deviceId, platform, user, targetPkg);
     await new Promise((r) => setTimeout(r, 5000));
 
     let xml = await dump(adb, deviceId);

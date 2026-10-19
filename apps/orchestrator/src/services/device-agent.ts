@@ -14,7 +14,20 @@ const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
 export interface DevicePublishResult {
   ok: boolean;
   detail?: string;
+  stage?: string;
+  /** no = nothing reached the platform (retry is safe); unknown = Share tapped, not confirmed. */
+  posted?: 'yes' | 'no' | 'unknown';
+  retryable?: boolean;
+  verified?: { app: boolean; profile: boolean | null };
+  captionTyped?: boolean;
+  debugSnapshot?: string;
 }
+
+/**
+ * The agent walks the app, waits for the upload and re-checks the profile:
+ * up to ~3 min compose + 8 min upload + ~1.5 min verification + download/push.
+ */
+export const DEVICE_PUBLISH_TIMEOUT_MS = 20 * 60_000;
 
 export interface DeviceProxyConfig {
   host: string;
@@ -93,16 +106,18 @@ export const deviceAgentService = {
     platform: 'instagram' | 'tiktok' | 'youtube_shorts';
     videoUrl: string;
     caption: string;
+    username?: string;
   }): Promise<DevicePublishResult> {
     const res = await axios.post(`${BASE}/publish`, {
       deviceId: opts.deviceId,
       platform: opts.platform,
       videoUrl: opts.videoUrl,
       caption: opts.caption,
+      username: opts.username,
       // The agent refuses to open the app if the phone would post from the farm's own IP.
       checkIpFirst: true,
-    }, { timeout: 600_000 });
-    return { ok: res.data.ok, detail: res.data.detail };
+    }, { timeout: DEVICE_PUBLISH_TIMEOUT_MS });
+    return res.data as DevicePublishResult;
   },
 
   async listDevices(): Promise<{ ok: boolean; raw?: unknown; proxies?: Record<string, DeviceProxyConfig>; error?: string }> {

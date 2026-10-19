@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Worker, Queue, DelayedError, type ConnectionOptions } from 'bullmq';
+import { Worker, Queue, DelayedError, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
@@ -25,7 +25,23 @@ import { decrypt, encrypt } from '../lib/crypto';
 import { getRedisConnection } from '../lib/redis';
 import type Redis from 'ioredis';
 import { publisherService, describePublisherError } from '../services/publisher';
-import { deviceAgentService, describeDeviceAgentError } from '../services/device-agent';
+import {
+  deviceAgentService,
+  describeDeviceAgentError,
+  DEVICE_PUBLISH_TIMEOUT_MS,
+  type DevicePublishResult,
+} from '../services/device-agent';
+
+/** Username the device-agent opens to verify the post: from stored device credentials, else accountName. */
+function deviceUsername(sessionData: string | null, accountName: string): string | undefined {
+  let name: unknown;
+  if (sessionData) {
+    try { name = (JSON.parse(decrypt(sessionData)) as { username?: unknown }).username; } catch { /* fall back */ }
+  }
+  const raw = typeof name === 'string' && name.trim() ? name : accountName;
+  const clean = raw.replace(/^@+/, '').trim();
+  return /^[\w.]{1,60}$/.test(clean) ? clean : undefined;
+}
 
 const logger = rootLogger.child({ worker: 'publish' });
 
@@ -60,7 +76,7 @@ async function releaseDeviceLock(redis: Redis, deviceId: string, owner: string):
  * publisher outage drives every account below the 30-point safety floor.
  */
 const INFRA_ERROR_RE =
-  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят/i;
+  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят|не подтверждена|ADBKeyboard|не распознан|не удалось дойти|отклонило видео|не установлено|не автоматизирована/i;
 
 export function isInfrastructureError(message: string): boolean {
   return INFRA_ERROR_RE.test(message);
@@ -152,6 +168,10 @@ export function createPublishWorker(deps: Deps): Worker {
       /** Set the moment the platform accepted the post — from then on, never retry. */
       let posted = false;
       let externalPostId: string | undefined;
+      /** Set when the post was found on the account's profile (device path). */
+      let verifiedAt: Date | null = null;
+      /** Non-fatal remark from the publisher, kept in PublishJob.error of a published job. */
+      let publishNote: string | null = null;
 
       // Mark as uploading
       await db.publishJob.update({
@@ -315,8 +335,8 @@ export function createPublishWorker(deps: Deps): Worker {
           const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
           const redis = getRedisConnection();
-          // TTL covers the agent call (600s): it may wait for the shared farm proxy before uploading.
-          const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId, 660);
+          // TTL covers the whole agent call (incl. waiting for the shared farm proxy) plus margin.
+          const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId, Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 300);
           if (!lockOwner) {
             // A busy phone is not the account's fault: re-queue later without consuming an
             // attempt or touching healthScore, and free this worker slot meanwhile.
@@ -328,21 +348,39 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new DelayedError();
           }
 
+          let result: DevicePublishResult;
           try {
-            const result = await deviceAgentService.publish({
+            result = await deviceAgentService.publish({
               deviceId: accountRaw.deviceId,
               platform,
               videoUrl: presignedUrl,
               caption: fullCaption,
+              username: deviceUsername(accountRaw.sessionData, accountRaw.accountName),
             });
-            if (!result.ok) throw new Error(result.detail ?? 'device-agent reported failure');
-            posted = true;
-            // No external post id available from real-app UI automation.
           } catch (err: unknown) {
-            throw new Error(`device-${platform}: ${describeDeviceAgentError(err)}`);
+            // Transport failure. A timeout means the agent may still be mid-upload → not safe to retry.
+            const msg = describeDeviceAgentError(err);
+            if (/did not answer in time/i.test(msg)) {
+              throw new UnrecoverableError(`device-${platform}: ${msg}. Публикация не подтверждена — проверьте профиль вручную`);
+            }
+            throw new Error(`device-${platform}: ${msg}`);
           } finally {
             await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
+
+          if (!result.ok) {
+            const where = result.debugSnapshot ? ` [снимок экрана: ${result.debugSnapshot}]` : '';
+            const msg = `device-${platform}: ${result.detail ?? 'device-agent reported failure'}${where}`;
+            // Share was tapped but the post was not confirmed → never retry (could post twice).
+            if (result.posted === 'unknown') throw new UnrecoverableError(`${msg} (публикация не подтверждена)`);
+            if (result.retryable === false) throw new UnrecoverableError(msg);
+            throw new Error(msg);
+          }
+          posted = true;
+          // The agent re-read the profile and found the new post.
+          if (result.verified?.profile) verifiedAt = new Date();
+          if (result.detail) publishNote = result.detail; // e.g. caption could not be checked
+          // No external post id available from real-app UI automation.
         } else
         switch (platform) {
           // ── TikTok: download to temp file → upload ──────────────────────────
@@ -494,7 +532,7 @@ export function createPublishWorker(deps: Deps): Worker {
         const now = new Date();
         await db.publishJob.update({
           where: { id: publishJobId },
-          data: { status: 'published', publishedAt: now, externalPostId, error: null },
+          data: { status: 'published', publishedAt: now, externalPostId, verifiedAt, error: publishNote },
         });
         await db.socialAccount.update({
           where: { id: socialAccountId },
@@ -558,7 +596,8 @@ export function createPublishWorker(deps: Deps): Worker {
         }
 
         const maxAttempts = job.opts?.attempts ?? 1;
-        const isFinal = job.attemptsMade + 1 >= maxAttempts;
+        // UnrecoverableError: BullMQ will not retry it regardless of attempts left.
+        const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
         logger.error({ publishJobId, platform, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Publish: failed');
 
         if (!isFinal) {

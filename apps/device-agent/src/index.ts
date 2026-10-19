@@ -391,17 +391,25 @@ app.post('/wb/warmup', async (req, reply) => {
 
 // ── Publish Video (Instagram & TikTok) ──────────────────────────────────────
 
-const PUBLISH_PROXY_HOLD_MS = 120_000;
+/** After the post is confirmed the app may still send trailing requests — keep the shared proxy a bit. */
+const PUBLISH_PROXY_HOLD_MS = 30_000;
 
 const PublishBody = z.object({
   deviceId: z.string().min(1),
   platform: z.enum(['instagram', 'tiktok', 'youtube_shorts']),
   videoUrl: z.string().url(),
   caption: z.string().default(''),
+  // Own username — lets the agent verify the post on the profile (ok only after that).
+  username: z.string().max(100).optional(),
   // Verify the phone leaves via its proxy before opening the app (only enforced when the farm uses proxies).
   checkIpFirst: z.boolean().default(true),
 });
 
+/**
+ * Always answers 200 with a PublishResult for flow outcomes (ok:false included): the caller
+ * needs `posted` / `retryable` to decide whether a retry is safe. 4xx/5xx = bad request or
+ * an agent bug, never "maybe posted".
+ */
 app.post('/publish', async (req, reply) => {
   const parsed = PublishBody.safeParse(req.body);
   if (!parsed.success) {
@@ -417,23 +425,23 @@ app.post('/publish', async (req, reply) => {
     if (checkIpFirst) {
       const guard = await proxyManager.preflight(publishReq.deviceId);
       if (!guard.ok) {
-        reply.code(502);
-        return { ok: false, detail: `${guard.detail}. Публикация отменена для защиты аккаунта.`, ipCheck: guard.ipCheck };
+        return {
+          ok: false, stage: 'prepare', posted: 'no', retryable: true, ipCheck: guard.ipCheck,
+          detail: `${guard.detail}. Публикация отменена для защиты аккаунта.`,
+        };
       }
     }
     const result = await publishToDevice(publishReq, adb, logger);
-    if (result.ok && release) {
-      // The app keeps uploading after the share intent returns — keep the shared proxy on this phone a while.
+    if (result.posted !== 'no' && release) {
       const hold = release;
       release = undefined;
       setTimeout(hold, PUBLISH_PROXY_HOLD_MS).unref();
     }
-    if (!result.ok) reply.code(502);
     return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: publish failed');
-    reply.code(502);
-    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    // Only reachable before publishToDevice ran (lease / preflight) — nothing was posted.
+    return { ok: false, stage: 'prepare', posted: 'no', retryable: true, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
   }
