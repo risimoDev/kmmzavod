@@ -41,101 +41,110 @@ const ListVideosQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+/**
+ * SSE and authed routes are sibling scopes: a hook added to a plugin also applies to
+ * child scopes registered from it (they load after the parent body runs), so the SSE
+ * route must not be a child of the scope that adds `authenticate`.
+ */
 export async function videoRoutes(app: FastifyInstance) {
-  // SSE endpoint — isolated encapsulation scope so the global auth hook below
-  // does NOT apply. EventSource cannot set Authorization header, so we accept
-  // the token from: 1) Authorization header, 2) httpOnly cookie, 3) ?token= query (last resort).
-  app.register(async function sseScope(sse) {
-    sse.get('/:id/progress', {
-      preHandler: async (req, reply) => {
-        // 1. Standard header (for SSE polyfills that support headers)
-        let token: string | undefined;
-        const authHeader = req.headers.authorization;
-        if (authHeader?.startsWith('Bearer ')) {
-          token = authHeader.slice(7);
-        }
-        // 2. httpOnly cookie
-        if (!token) {
-          const cookies = req.headers.cookie;
-          if (cookies) {
-            const match = cookies.match(/(?:^|;\s*)sse_token=([^\s;]+)/);
-            if (match) token = match[1];
-          }
-        }
-        // 3. Query param fallback (logged as warning)
-        if (!token) {
-          const { token: qToken } = req.query as { token?: string };
-          if (qToken) {
-            token = qToken;
-            req.log.warn({ url: req.url }, 'SSE auth via query param — migrate to cookie');
-          }
-        }
-        if (!token) return reply.code(401).send({ error: 'Unauthorized' });
-        try {
-          const decoded = app.jwt.verify(token);
-          if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
-          req.user = decoded as typeof req.user;
-        } catch {
-          return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
-        }
-      },
-    }, async (req, reply) => {
-      const { id } = req.params as { id: string };
-      const { tenantId } = req.user;
+  app.register(videoProgressRoutes);
+  app.register(authedVideoRoutes);
+}
 
-      const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true, error: true } });
-      if (!video) return reply.code(404).send({ error: 'NotFound' });
-
-      // Already terminal — send single event and close
-      if (video.status === 'completed' || video.status === 'failed') {
-        reply.raw.setHeader('Content-Type', 'text/event-stream');
-        reply.raw.setHeader('Cache-Control', 'no-cache');
-        reply.raw.setHeader('Connection', 'keep-alive');
-        reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: video.status === 'completed' ? 100 : 0, isComplete: true, status: video.status, error: video.error ?? null, timestamp: new Date().toISOString() })}\n\n`);
-        reply.raw.end();
-        return;
+// SSE endpoint — EventSource cannot set Authorization header, so we accept the token
+// from: 1) Authorization header, 2) httpOnly cookie, 3) ?token= query (last resort).
+async function videoProgressRoutes(app: FastifyInstance) {
+  app.get('/:id/progress', {
+    preHandler: async (req, reply) => {
+      // 1. Standard header (for SSE polyfills that support headers)
+      let token: string | undefined;
+      const authHeader = req.headers.authorization;
+      if (authHeader?.startsWith('Bearer ')) {
+        token = authHeader.slice(7);
       }
+      // 2. httpOnly cookie
+      if (!token) {
+        const cookies = req.headers.cookie;
+        if (cookies) {
+          const match = cookies.match(/(?:^|;\s*)sse_token=([^\s;]+)/);
+          if (match) token = match[1];
+        }
+      }
+      // 3. Query param fallback (logged as warning)
+      if (!token) {
+        const { token: qToken } = req.query as { token?: string };
+        if (qToken) {
+          token = qToken;
+          req.log.warn({ url: req.url }, 'SSE auth via query param — migrate to cookie');
+        }
+      }
+      if (!token) return reply.code(401).send({ error: 'Unauthorized' });
+      try {
+        const decoded = app.jwt.verify(token);
+        if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
+        req.user = decoded as typeof req.user;
+      } catch {
+        return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+      }
+    },
+  }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { tenantId } = req.user;
 
-      // SSE headers
+    const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true, error: true } });
+    if (!video) return reply.code(404).send({ error: 'NotFound' });
+
+    // Already terminal — send single event and close
+    if (video.status === 'completed' || video.status === 'failed') {
       reply.raw.setHeader('Content-Type', 'text/event-stream');
       reply.raw.setHeader('Cache-Control', 'no-cache');
       reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Accel-Buffering', 'no');
-      reply.raw.flushHeaders();
+      reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: video.status === 'completed' ? 100 : 0, isComplete: true, status: video.status, error: video.error ?? null, timestamp: new Date().toISOString() })}\n\n`);
+      reply.raw.end();
+      return;
+    }
 
-      // Heartbeat
-      let closed = false;
-      const heartbeat = setInterval(() => {
-        if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
-      }, 25_000);
+    // SSE headers
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders();
 
-      // Shared Redis pub/sub — single connection multiplexed across all SSE clients
-      const channel = `video:progress:${tenantId}:${id}`;
-      const unsubscribe = sseSubscriber.subscribe(channel, (message: string) => {
-        if (closed || reply.raw.writableEnded) return;
-        try {
-          const event = JSON.parse(message);
-          reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-          if (event.status === 'completed' || event.status === 'failed' || event.isComplete) {
-            setTimeout(() => {
-              if (!reply.raw.writableEnded) reply.raw.end();
-            }, 500);
-          }
-        } catch { /* ignore parse errors */ }
-      });
+    // Heartbeat
+    let closed = false;
+    const heartbeat = setInterval(() => {
+      if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
+    }, 25_000);
 
-      // Cleanup — unsubscribe from shared subscriber
-      const cleanup = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe();
-      };
-      reply.raw.on('close', cleanup);
-      reply.raw.on('error', cleanup);
+    // Shared Redis pub/sub — single connection multiplexed across all SSE clients
+    const channel = `video:progress:${tenantId}:${id}`;
+    const unsubscribe = sseSubscriber.subscribe(channel, (message: string) => {
+      if (closed || reply.raw.writableEnded) return;
+      try {
+        const event = JSON.parse(message);
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (event.status === 'completed' || event.status === 'failed' || event.isComplete) {
+          setTimeout(() => {
+            if (!reply.raw.writableEnded) reply.raw.end();
+          }, 500);
+        }
+      } catch { /* ignore parse errors */ }
     });
-  });
 
+    // Cleanup — unsubscribe from shared subscriber
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    reply.raw.on('close', cleanup);
+    reply.raw.on('error', cleanup);
+  });
+}
+
+async function authedVideoRoutes(app: FastifyInstance) {
   // Все остальные маршруты требуют авторизации через Authorization header
   app.addHook('preHandler', app.authenticate);
 

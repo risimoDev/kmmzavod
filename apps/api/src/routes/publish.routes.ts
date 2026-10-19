@@ -3,7 +3,6 @@
  */
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import { isAccessTokenPayload } from '../plugins/auth.plugin';
 import { db } from '../lib/db';
 import { encrypt } from '../lib/crypto';
 import { createOAuthState, verifyOAuthState } from '../lib/oauth-state';
@@ -48,9 +47,29 @@ const ListPublishJobsQuery = z.object({
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
+/**
+ * Callbacks and authed routes live in sibling scopes: in Fastify a hook added to a
+ * plugin applies to every route of that plugin (even ones declared before the hook)
+ * and to its child scopes, so the provider redirect would otherwise hit authenticate.
+ */
 export async function publishRoutes(app: FastifyInstance) {
+  app.register(oauthCallbackRoutes);
+  app.register(protectedPublishRoutes);
+}
 
-  // ── Social OAuth (Public Callbacks) ─────────────────────────────────────
+/** Verify the signed state; on failure the callback redirects back with an error. */
+function readOAuthState(state: unknown): { tenantId: string } | null {
+  try {
+    return verifyOAuthState(String(state ?? ''));
+  } catch (err) {
+    logger.warn({ err }, 'OAuth callback with invalid state');
+    return null;
+  }
+}
+
+// ── Social OAuth (Public Callbacks) ─────────────────────────────────────────
+
+async function oauthCallbackRoutes(app: FastifyInstance) {
 
   app.get('/social/tiktok/callback', async (req, reply) => {
     const { code, state, error, error_description } = req.query as any;
@@ -59,6 +78,9 @@ export async function publishRoutes(app: FastifyInstance) {
       return reply.redirect(`${getFrontendUrl()}/settings?error=tiktok_auth_failed`);
     }
     if (!code) return reply.code(400).send({ error: 'Missing code' });
+    const verified = readOAuthState(state);
+    if (!verified) return reply.redirect(`${getFrontendUrl()}/settings?error=tiktok_auth_failed`);
+    const { tenantId } = verified;
     try {
       const tokenRes = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
         method: 'POST',
@@ -78,7 +100,6 @@ export async function publishRoutes(app: FastifyInstance) {
       });
       const userData = await userRes.json() as any;
       const accountName = userData?.data?.user?.display_name || userData?.data?.user?.username || 'TikTok Account';
-      const { tenantId } = verifyOAuthState(state);
       await db.socialAccount.create({
         data: {
           tenantId,
@@ -100,6 +121,9 @@ export async function publishRoutes(app: FastifyInstance) {
     const { code, state, error } = req.query as any;
     if (error) return reply.redirect(`${getFrontendUrl()}/settings?error=youtube_auth_failed`);
     if (!code) return reply.code(400).send({ error: 'Missing code' });
+    const verified = readOAuthState(state);
+    if (!verified) return reply.redirect(`${getFrontendUrl()}/settings?error=youtube_auth_failed`);
+    const { tenantId } = verified;
     try {
       const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -119,7 +143,6 @@ export async function publishRoutes(app: FastifyInstance) {
       });
       const userData = await userRes.json() as any;
       const accountName = userData?.name || 'YouTube Account';
-      const { tenantId } = verifyOAuthState(state);
       await db.socialAccount.create({
         data: {
           tenantId,
@@ -141,6 +164,9 @@ export async function publishRoutes(app: FastifyInstance) {
     const { code, state, error } = req.query as any;
     if (error) return reply.redirect(`${getFrontendUrl()}/settings?error=instagram_auth_failed`);
     if (!code) return reply.code(400).send({ error: 'Missing code' });
+    const verified = readOAuthState(state);
+    if (!verified) return reply.redirect(`${getFrontendUrl()}/settings?error=instagram_auth_failed`);
+    const { tenantId } = verified;
     try {
       const tokenRes = await fetch('https://graph.facebook.com/v19.0/oauth/access_token', {
         method: 'POST',
@@ -170,7 +196,6 @@ export async function publishRoutes(app: FastifyInstance) {
         }
       }
       if (!igAccountId) throw new Error('No Instagram Business Account linked');
-      const { tenantId } = verifyOAuthState(state);
       await db.socialAccount.create({
         data: {
           tenantId,
@@ -188,29 +213,16 @@ export async function publishRoutes(app: FastifyInstance) {
     }
   });
 
-  // ── Protected Routes ───────────────────────────────────────────────────
+}
 
+// ── Protected Routes ────────────────────────────────────────────────────────
+
+async function protectedPublishRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
 
-  // OAuth authorize endpoints need special auth handling:
-  // Browser navigates directly (window.location.href), so token comes via ?token= query param.
-  // The global authenticate hook reads from Authorization header (set by fetch).
-  // This preValidation hook adds query-param support for authorize endpoints only.
-  const oauthAuthorizeAuth = async (req: any, reply: any) => {
-    // If already authenticated via header (e.g. future fetch-based flow), skip
-    if (req.user) return;
-    const { token } = req.query as { token?: string };
-    if (!token) return reply.code(401).send({ error: 'Unauthorized', message: 'Token required' });
-    try {
-      const decoded = app.jwt.verify(token);
-      if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
-      req.user = decoded;
-    } catch {
-      return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
-    }
-  };
-
-  app.get('/social/tiktok/authorize', { preHandler: oauthAuthorizeAuth }, async (req, reply) => {
+  // OAuth start: the SPA calls this with its Bearer token and navigates to the returned
+  // provider URL, so the access token never ends up in a URL / server logs.
+  app.post('/social/tiktok/authorize-url', async (req, reply) => {
     if (!config.TIKTOK_CLIENT_KEY) return reply.code(400).send({ error: 'TikTok OAuth not configured' });
     const state = createOAuthState(req.user.tenantId, req.user.userId);
     const qs = new URLSearchParams({
@@ -220,10 +232,10 @@ export async function publishRoutes(app: FastifyInstance) {
       redirect_uri: `${config.NEXT_PUBLIC_API_URL}/api/v1/social/tiktok/callback`,
       state,
     }).toString();
-    return reply.redirect(`https://www.tiktok.com/v2/auth/authorize/?${qs}`);
+    return { url: `https://www.tiktok.com/v2/auth/authorize/?${qs}` };
   });
 
-  app.get('/social/youtube/authorize', { preHandler: oauthAuthorizeAuth }, async (req, reply) => {
+  app.post('/social/youtube/authorize-url', async (req, reply) => {
     if (!config.YOUTUBE_CLIENT_ID) return reply.code(400).send({ error: 'YouTube OAuth not configured' });
     const state = createOAuthState(req.user.tenantId, req.user.userId);
     const qs = new URLSearchParams({
@@ -235,10 +247,10 @@ export async function publishRoutes(app: FastifyInstance) {
       prompt: 'consent',
       state,
     }).toString();
-    return reply.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${qs}`);
+    return { url: `https://accounts.google.com/o/oauth2/v2/auth?${qs}` };
   });
 
-  app.get('/social/instagram/authorize', { preHandler: oauthAuthorizeAuth }, async (req, reply) => {
+  app.post('/social/instagram/authorize-url', async (req, reply) => {
     if (!config.INSTAGRAM_APP_ID) return reply.code(400).send({ error: 'Instagram OAuth not configured' });
     const state = createOAuthState(req.user.tenantId, req.user.userId);
     const qs = new URLSearchParams({
@@ -248,7 +260,7 @@ export async function publishRoutes(app: FastifyInstance) {
       response_type: 'code',
       state,
     }).toString();
-    return reply.redirect(`https://www.facebook.com/v19.0/dialog/oauth?${qs}`);
+    return { url: `https://www.facebook.com/v19.0/dialog/oauth?${qs}` };
   });
 
   app.post('/social-accounts', async (req, reply) => {

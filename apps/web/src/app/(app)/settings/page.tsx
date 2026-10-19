@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { TopBar } from "@/components/layout/AppShell";
 import { Button, Badge, Card, CardContent, LoadingSpinner } from "@/components/ui/primitives";
-import { socialAccountsApi, type SocialAccount, getAccessToken } from "@/lib/api";
+import { socialAccountsApi, type SocialAccount } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // ── Platform metadata ─────────────────────────────────────────────────────────
@@ -74,10 +74,13 @@ function SettingsContent() {
     setShowManual(false);
   };
 
-  const handleOAuth = (p: string) => {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
-    // Construct the authorize URL with token (carried in state eventually)
-    window.location.href = `${apiBase}/api/v1/social/${p}/authorize?token=${getAccessToken()}`;
+  const handleOAuth = async (p: string) => {
+    setError(null);
+    try {
+      window.location.href = await socialAccountsApi.authorizeUrl(p);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Ошибка при подключении аккаунта");
+    }
   };
 
   const handleAddManual = async () => {

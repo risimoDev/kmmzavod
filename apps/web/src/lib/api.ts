@@ -55,57 +55,70 @@ export function getStoredTenant(): AuthTenant | null {
 
 // ── Fetch wrapper with auto-refresh ──────────────────────────────────────────
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+function authHeaders(init: RequestInit, isFormData: boolean): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${getAccessToken()}`,
     ...(init.headers as Record<string, string> ?? {}),
   };
   if (init.body && !isFormData) headers['Content-Type'] = 'application/json';
+  return headers;
+}
 
-  const res = await fetch(`${BASE}${path}`, {
+async function toError(res: Response): Promise<Error> {
+  const body = await res.json().catch(() => ({}));
+  const msg = (body as any).message || (body as any).error || (body as any).detail;
+  return new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
+}
+
+async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  const sentToken = getAccessToken();
+
+  let res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers,
+    headers: authHeaders(init, isFormData),
   });
 
-  // Token expired — try refresh
+  // Token expired — try refresh. If another request already rotated the tokens while
+  // this one was in flight, just retry with the new access token.
   if (res.status === 401 && getRefreshToken()) {
-    const refreshed = await refreshTokens();
-    if (refreshed) {
-      const retryHeaders: Record<string, string> = {
-        Authorization: `Bearer ${getAccessToken()}`,
-        ...(init.headers as Record<string, string> ?? {}),
-      };
-      if (init.body && !isFormData) retryHeaders['Content-Type'] = 'application/json';
-
-      const retry = await fetch(`${BASE}${path}`, {
-        ...init,
-        headers: retryHeaders,
-      });
-      if (retry.ok) {
-        if (retry.status === 204) return undefined as T;
-        return retry.json() as Promise<T>;
+    const refreshed = getAccessToken() !== sentToken || await refreshTokens();
+    if (!refreshed) {
+      // The refresh itself failed — the session is gone
+      clearTokens();
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
       }
+      throw new Error('Session expired');
     }
-    // Refresh failed — clear everything, redirect to login
-    clearTokens();
-    if (typeof window !== 'undefined') {
-      window.location.href = '/login';
-    }
-    throw new Error('Session expired');
+    res = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: authHeaders(init, isFormData),
+    });
   }
 
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const msg = (body as any).message || (body as any).error || (body as any).detail;
-    throw new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
-  }
+  if (!res.ok) throw await toError(res);
 
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
-async function refreshTokens(): Promise<boolean> {
+/**
+ * Single-flight: refresh tokens are rotated on use, so parallel 401s must share one
+ * refresh call — a second call with the same (now revoked) token would fail and log out.
+ */
+let refreshInFlight: Promise<boolean> | null = null;
+
+function refreshTokens(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefreshTokens().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function doRefreshTokens(): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/api/v1/auth/refresh`, {
       method: 'POST',
@@ -411,6 +424,11 @@ export const socialAccountsApi = {
 
   delete: (id: string) =>
     apiFetch<{ success: boolean }>(`/api/v1/social-accounts/${id}`, { method: 'DELETE' }),
+
+  /** Provider OAuth URL (signed state bound to the current user); navigate the browser to it. */
+  authorizeUrl: (platform: string) =>
+    apiFetch<{ url: string }>(`/api/v1/social/${platform}/authorize-url`, { method: 'POST' })
+      .then(r => r.url),
 };
 
 // ── Account Farm Types ────────────────────────────────────────────────────────
