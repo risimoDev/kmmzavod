@@ -764,6 +764,23 @@ export const accountFarmApi = {
   screenshotDevice: (deviceId: string) =>
     apiFetch<{ ok: boolean; data?: any; error?: string }>(`/api/v1/farm/devices/${deviceId}/screenshot`, { method: 'POST' }),
 
+  /** Live remote view frame as a binary Blob (no base64) + full device resolution. */
+  async screenFrameDevice(deviceId: string, signal?: AbortSignal): Promise<{ blob: Blob; width: number; height: number }> {
+    const url = `${BASE}/api/v1/farm/devices/${encodeURIComponent(deviceId)}/frame`;
+    const get = () => fetch(url, { headers: { Authorization: `Bearer ${getAccessToken()}` }, signal, cache: 'no-store' });
+    let res = await get();
+    if (res.status === 401 && getRefreshToken() && (await refreshTokens())) res = await get();
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as any).error || (body as any).message || `HTTP ${res.status}`);
+    }
+    return {
+      blob: await res.blob(),
+      width: Number(res.headers.get('x-screen-width')) || 0,
+      height: Number(res.headers.get('x-screen-height')) || 0,
+    };
+  },
+
   healDevice: (deviceId: string) =>
     apiFetch<{ ok: boolean; message?: string; error?: string }>(`/api/v1/farm/devices/${deviceId}/heal`, { method: 'POST' }),
 

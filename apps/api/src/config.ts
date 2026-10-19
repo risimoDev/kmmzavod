@@ -31,6 +31,8 @@ const schema = z.object({
 
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+  // Per-user, per-route limit for live phone control (frames/taps/swipes), requests/minute
+  FARM_CONTROL_RATE_LIMIT_MAX: z.coerce.number().default(1200),
 
   // Encryption key for social tokens at rest (32 hex bytes = 64 chars)
   ENCRYPTION_KEY: z.preprocess(v => (v === '' ? undefined : v), z.string().length(64).regex(/^[0-9a-fA-F]+$/).optional()),

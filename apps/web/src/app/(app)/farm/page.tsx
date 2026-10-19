@@ -2462,21 +2462,25 @@ function DevicesTab() {
   const remoteImgRef = useRef<HTMLImageElement>(null);
   const deviceResolutionRef = useRef<{ width: number; height: number }>({ width: 1080, height: 2220 });
 
+  /** Object URL of the frame currently shown — revoked when replaced to free the Blob. */
+  const remoteFrameUrlRef = useRef<string | null>(null);
+  const setRemoteFrameUrl = useCallback((url: string | null) => {
+    const prev = remoteFrameUrlRef.current;
+    remoteFrameUrlRef.current = url;
+    setRemoteScreenData(url);
+    if (prev) URL.revokeObjectURL(prev);
+  }, []);
+
   const refreshRemoteFrame = useCallback(async () => {
     if (!selectedDevice || inFlightFrameRef.current) return;
     inFlightFrameRef.current = true;
     setRemoteScreenLoading(true);
     try {
-      const res = await accountFarmApi.screenshotDevice(selectedDevice.deviceId);
-      if (res.ok && res.data) {
-        const raw = (res.data as any).data || res.data;
-        if (typeof raw === 'string') {
-          const s = raw.trim();
-          setRemoteScreenData(s.startsWith('data:image') || s.startsWith('http') ? s : `data:image/jpeg;base64,${s}`);
-        }
-        if (res.data.width && res.data.height) {
-          deviceResolutionRef.current = { width: res.data.width, height: res.data.height };
-        }
+      // Binary frame (no base64 JSON): smaller transfer, no string decode on either side.
+      const frame = await accountFarmApi.screenFrameDevice(selectedDevice.deviceId);
+      setRemoteFrameUrl(URL.createObjectURL(frame.blob));
+      if (frame.width && frame.height) {
+        deviceResolutionRef.current = { width: frame.width, height: frame.height };
       }
     } catch {
       // silent retry on frame capture
@@ -2484,7 +2488,15 @@ function DevicesTab() {
       inFlightFrameRef.current = false;
       setRemoteScreenLoading(false);
     }
-  }, [selectedDevice]);
+  }, [selectedDevice, setRemoteFrameUrl]);
+
+  // Free the last frame's Blob when the remote view closes or the page unmounts.
+  useEffect(() => {
+    if (!remoteModalOpen) setRemoteFrameUrl(null);
+  }, [remoteModalOpen, setRemoteFrameUrl]);
+  useEffect(() => () => {
+    if (remoteFrameUrlRef.current) URL.revokeObjectURL(remoteFrameUrlRef.current);
+  }, []);
 
   useEffect(() => {
     if (!remoteModalOpen || !selectedDevice) return;

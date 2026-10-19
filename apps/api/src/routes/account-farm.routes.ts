@@ -13,6 +13,7 @@ import { deviceAgentClient, describeDeviceAgentError, deviceAgentErrorStatus, ty
 import { farmScheduler } from '../lib/farm-scheduler';
 import { signValue, verifySignedValue } from '../lib/signed-url';
 import { config } from '../config';
+import { farmControlRateLimit } from '../plugins/rate-limit.plugin';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -1794,13 +1795,29 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     return reply.send({ ok: true, deviceId, socialAccountId, proxyLinked });
   });
 
-  app.post('/devices/:deviceId/screenshot', async (request, reply) => {
+  app.post('/devices/:deviceId/screenshot', { config: farmControlRateLimit }, async (request, reply) => {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     try {
       const res = await deviceAgentClient.screenshot(deviceId);
       return reply.send(res);
     } catch (err) {
       return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  /** Live remote view: binary JPEG/PNG frame, screen size in X-Screen-Width/Height. */
+  app.get('/devices/:deviceId/frame', { config: farmControlRateLimit }, async (request, reply) => {
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    try {
+      const frame = await deviceAgentClient.frame(deviceId);
+      return reply
+        .header('content-type', frame.contentType)
+        .header('cache-control', 'no-store')
+        .header('x-screen-width', String(frame.width))
+        .header('x-screen-height', String(frame.height))
+        .send(frame.image);
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
   });
 
@@ -1867,7 +1884,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     targetDeviceIds: z.array(z.string()).optional(),
   });
 
-  app.post('/devices/:deviceId/tap', async (request, reply) => {
+  app.post('/devices/:deviceId/tap', { config: farmControlRateLimit }, async (request, reply) => {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = DeviceTapBody.parse(request.body || {});
     try {
@@ -1878,7 +1895,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/devices/:deviceId/swipe', async (request, reply) => {
+  app.post('/devices/:deviceId/swipe', { config: farmControlRateLimit }, async (request, reply) => {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = DeviceSwipeBody.parse(request.body || {});
     try {
@@ -1889,7 +1906,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/devices/:deviceId/key', async (request, reply) => {
+  app.post('/devices/:deviceId/key', { config: farmControlRateLimit }, async (request, reply) => {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = DeviceKeyBody.parse(request.body || {});
     try {
@@ -1900,7 +1917,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/devices/:deviceId/text', async (request, reply) => {
+  app.post('/devices/:deviceId/text', { config: farmControlRateLimit }, async (request, reply) => {
     const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
     const body = DeviceTextBody.parse(request.body || {});
     try {

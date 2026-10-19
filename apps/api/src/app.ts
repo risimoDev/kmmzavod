@@ -65,6 +65,8 @@ export async function buildApp() {
   await app.register(fastifyCors, {
     origin: config.NODE_ENV === 'production' ? corsOrigins : true,
     credentials: true,
+    // Remote-view frames carry the device's full resolution in headers (cross-origin in dev)
+    exposedHeaders: ['x-screen-width', 'x-screen-height'],
   });
 
   await app.register(fastifyJwt, {

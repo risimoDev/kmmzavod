@@ -710,6 +710,31 @@ app.post('/device/screenshot', async (req, reply) => {
   }
 });
 
+/**
+ * Binary screen frame for the live remote view: raw JPEG/PNG bytes (no base64/JSON,
+ * ~25% smaller and no decode work). Full-resolution size goes in headers so taps can
+ * be mapped to device coordinates.
+ */
+app.post('/device/frame', async (req, reply) => {
+  const parsed = DeviceControlBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  try {
+    const frame = await adb.captureFrame(parsed.data.deviceId);
+    return reply
+      .header('content-type', `image/${frame.format}`)
+      .header('cache-control', 'no-store')
+      .header('x-screen-width', String(frame.width))
+      .header('x-screen-height', String(frame.height))
+      .send(frame.image);
+  } catch (err) {
+    reply.code(502);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
 app.post('/device/health', async (req, reply) => {
   const parsed = DeviceControlBody.safeParse(req.body);
   if (!parsed.success) {

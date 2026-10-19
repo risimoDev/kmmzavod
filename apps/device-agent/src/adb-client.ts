@@ -13,7 +13,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Logger } from 'pino';
 import { config } from './config';
-import { encodeJpeg, downsample2x } from './lib/jpeg-encoder';
+import { encodeFrameJpeg } from './lib/jpeg-pool';
+import { PersistentShell } from './lib/persistent-shell';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,17 @@ export interface ScreenshotResult {
   height: number;
   format: 'jpeg' | 'png';
 }
+
+/** Raw screen frame (binary image bytes, no base64). */
+export interface ScreenFrame {
+  image: Buffer;
+  width: number;
+  height: number;
+  format: 'jpeg' | 'png';
+}
+
+/** Persistent input shells unused for this long are closed. */
+const INPUT_SHELL_IDLE_MS = 5 * 60_000;
 
 export interface AdbDevice {
   serial: string;
@@ -34,9 +46,44 @@ export interface AdbDevice {
 
 export class AdbClient {
   private adbPath: string;
+  private inputShells = new Map<string, PersistentShell>();
+  /** Concurrent frame requests for one device share a single capture. */
+  private inflightFrames = new Map<string, Promise<ScreenFrame>>();
 
   constructor(private readonly logger: Logger, adbPath?: string) {
     this.adbPath = adbPath || config.ADB_PATH || 'adb';
+    setInterval(() => this.closeIdleInputShells(), 60_000).unref();
+  }
+
+  /**
+   * Run a short command through the device's persistent shell (see lib/persistent-shell).
+   * Falls back to a one-off `adb shell` if the persistent session cannot be used.
+   */
+  async fastShell(serial: string, command: string, timeoutMs = 15_000): Promise<string> {
+    let sh = this.inputShells.get(serial);
+    if (!sh || sh.isDead) {
+      sh = new PersistentShell(() => spawn(this.adbPath, ['-s', serial, 'shell'], { stdio: 'pipe', windowsHide: true }));
+      this.inputShells.set(serial, sh);
+    }
+    try {
+      return await sh.run(command, timeoutMs);
+    } catch (err: any) {
+      if (!sh.isDead) throw err; // the command itself failed — report it as is
+      // Session broke (device reconnect, adb restart, timeout): retry once, one-off.
+      this.inputShells.delete(serial);
+      this.logger.debug({ serial, err: err?.message }, 'adb: persistent shell unavailable, using one-off shell');
+      return this.shell(serial, command, timeoutMs);
+    }
+  }
+
+  private closeIdleInputShells(): void {
+    const now = Date.now();
+    for (const [serial, sh] of this.inputShells) {
+      if (sh.isDead || now - sh.lastUsedAt > INPUT_SHELL_IDLE_MS) {
+        sh.close();
+        this.inputShells.delete(serial);
+      }
+    }
   }
 
   /** Run ADB command and return stdout string. */
@@ -110,77 +157,92 @@ export class AdbClient {
   }
 
   /**
-   * Ultra-fast native screen capture directly from Android framebuffer.
-   * Reads uncompressed framebuffer in ~10ms, downsamples 2x and encodes to JPEG in pure TS (~15ms).
-   * Resulting JPEG is ~40-60 KB (75x smaller than PNG), streaming over WireGuard in ~20ms.
-   * Falls back gracefully to `screencap -p` (PNG) if raw framebuffer header is non-standard.
+   * Screen frame as binary image bytes (no base64), for the remote-control view.
+   * Concurrent requests for the same device (several viewers, overlapping polls) share
+   * one capture instead of each running their own screencap.
    */
-  async takeScreenshotFast(serial: string, timeoutMs = 15_000): Promise<ScreenshotResult> {
+  captureFrame(serial: string, timeoutMs = 15_000): Promise<ScreenFrame> {
+    const inflight = this.inflightFrames.get(serial);
+    if (inflight) return inflight;
+    const p = this.captureFrameUncached(serial, timeoutMs).finally(() => this.inflightFrames.delete(serial));
+    this.inflightFrames.set(serial, p);
+    return p;
+  }
+
+  /**
+   * Native capture from the Android framebuffer (`exec-out screencap`, raw RGBA),
+   * downsampled 2x and JPEG-encoded in a worker thread (lib/jpeg-pool) so encoding
+   * never blocks the agent's event loop. Falls back to `screencap -p` (PNG) if the raw
+   * framebuffer header is non-standard.
+   */
+  private async captureFrameUncached(serial: string, timeoutMs: number): Promise<ScreenFrame> {
+    let raw: { pixels: Buffer; width: number; height: number };
     try {
-      return await new Promise<ScreenshotResult>((resolve, reject) => {
-        const proc = spawn(this.adbPath, ['-s', serial, 'exec-out', 'screencap']);
-        const chunks: Buffer[] = [];
-        let errBuf = '';
-
-        const timer = setTimeout(() => {
-          proc.kill();
-          reject(new Error(`ADB raw screencap timeout (${timeoutMs}ms) for ${serial}`));
-        }, timeoutMs);
-
-        proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-        proc.stderr.on('data', (d) => { errBuf += d.toString(); });
-
-        proc.on('close', (code) => {
-          clearTimeout(timer);
-          if (code === 0 && chunks.length > 0) {
-            const buf = Buffer.concat(chunks);
-            if (buf.length >= 12) {
-              const width = buf.readUInt32LE(0);
-              const height = buf.readUInt32LE(4);
-              const expectedPixels = width * height * 4;
-
-              let headerSize = 0;
-              if (buf.length === expectedPixels + 12) {
-                headerSize = 12;
-              } else if (buf.length === expectedPixels + 16) {
-                headerSize = 16;
-              }
-
-              if (headerSize > 0 && width > 0 && height > 0 && width <= 4096 && height <= 4096) {
-                const rawPixels = buf.subarray(headerSize, headerSize + expectedPixels);
-                const down = downsample2x(rawPixels, width, height);
-                const jpegBuf = encodeJpeg(down.data, down.width, down.height, 65);
-                const base64 = `data:image/jpeg;base64,${jpegBuf.toString('base64')}`;
-                return resolve({
-                  data: base64,
-                  width,
-                  height,
-                  format: 'jpeg',
-                });
-              }
-            }
-            reject(new Error(`screencap raw format unrecognized (length: ${buf.length})`));
-          } else {
-            reject(new Error(`screencap failed with exit code ${code}: ${errBuf || 'empty buffer'}`));
-          }
-        });
-
-        proc.on('error', (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-      });
+      raw = await this.rawScreencap(serial, timeoutMs);
     } catch (rawErr: any) {
       this.logger.debug({ serial, err: rawErr.message }, 'adb: raw screencap failed, falling back to screencap -p (PNG)');
       const pngBase64 = await this.takeScreenshot(serial, timeoutMs);
       const size = await this.getScreenSize(serial);
       return {
-        data: pngBase64.startsWith('data:') ? pngBase64 : `data:image/png;base64,${pngBase64}`,
+        image: Buffer.from(pngBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'),
         width: size.width,
         height: size.height,
         format: 'png',
       };
     }
+    const image = await encodeFrameJpeg(raw.pixels, raw.width, raw.height, 65);
+    return { image, width: raw.width, height: raw.height, format: 'jpeg' };
+  }
+
+  /** `adb exec-out screencap` → RGBA pixels + full-resolution size. */
+  private rawScreencap(serial: string, timeoutMs: number): Promise<{ pixels: Buffer; width: number; height: number }> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(this.adbPath, ['-s', serial, 'exec-out', 'screencap'], { windowsHide: true });
+      const chunks: Buffer[] = [];
+      let errBuf = '';
+
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error(`ADB raw screencap timeout (${timeoutMs}ms) for ${serial}`));
+      }, timeoutMs);
+
+      proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+      proc.stderr.on('data', (d) => { errBuf += d.toString(); });
+
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code !== 0 || chunks.length === 0) {
+          return reject(new Error(`screencap failed with exit code ${code}: ${errBuf || 'empty buffer'}`));
+        }
+        const buf = Buffer.concat(chunks);
+        if (buf.length >= 12) {
+          const width = buf.readUInt32LE(0);
+          const height = buf.readUInt32LE(4);
+          const expectedPixels = width * height * 4;
+          const headerSize = buf.length === expectedPixels + 12 ? 12 : buf.length === expectedPixels + 16 ? 16 : 0;
+          if (headerSize > 0 && width > 0 && height > 0 && width <= 4096 && height <= 4096) {
+            return resolve({ pixels: buf.subarray(headerSize, headerSize + expectedPixels), width, height });
+          }
+        }
+        reject(new Error(`screencap raw format unrecognized (length: ${buf.length})`));
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  /** Legacy JSON form of captureFrame(): image as a base64 data URL. */
+  async takeScreenshotFast(serial: string, timeoutMs = 15_000): Promise<ScreenshotResult> {
+    const frame = await this.captureFrame(serial, timeoutMs);
+    return {
+      data: `data:image/${frame.format};base64,${frame.image.toString('base64')}`,
+      width: frame.width,
+      height: frame.height,
+      format: frame.format,
+    };
   }
 
   /**
@@ -254,24 +316,25 @@ export class AdbClient {
 
   /** Tap screen at (x, y). */
   async tap(serial: string, x: number, y: number): Promise<void> {
-    await this.shell(serial, `input tap ${Math.round(x)} ${Math.round(y)}`);
+    await this.fastShell(serial, `input tap ${Math.round(x)} ${Math.round(y)}`);
   }
 
   /** Swipe from (x1, y1) to (x2, y2) over durationMs. */
   async swipe(serial: string, x1: number, y1: number, x2: number, y2: number, durationMs = 300): Promise<void> {
-    await this.shell(serial, `input swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ${Math.round(y2)} ${Math.round(durationMs)}`);
+    await this.fastShell(serial, `input swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ${Math.round(y2)} ${Math.round(durationMs)}`);
   }
 
   /** Input text string. */
   async inputText(serial: string, text: string): Promise<void> {
-    // Escape shell-sensitive characters
-    const escaped = text.replace(/([ "$\\`'()|&;<>*?~])/g, '\\$1');
-    await this.shell(serial, `input text ${escaped}`);
+    // Newlines would split the shell command (and `input text` cannot type them anyway),
+    // then escape shell-sensitive characters.
+    const escaped = text.replace(/[\r\n]+/g, ' ').replace(/([ "$\\`'()|&;<>*?~])/g, '\\$1');
+    await this.fastShell(serial, `input text ${escaped}`);
   }
 
   /** Send keyevent (e.g. 3 = HOME, 4 = BACK, 224 = WAKEUP, 26 = POWER). */
   async keyevent(serial: string, code: number): Promise<void> {
-    await this.shell(serial, `input keyevent ${code}`);
+    await this.fastShell(serial, `input keyevent ${code}`);
   }
 
   /** Wake up and turn screen on. */

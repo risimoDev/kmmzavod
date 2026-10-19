@@ -274,6 +274,27 @@ export const deviceAgentClient = {
     return res.data;
   },
 
+  /** Binary screen frame (JPEG/PNG bytes) + full-resolution screen size. */
+  async frame(deviceId: string): Promise<{ image: Buffer; contentType: string; width: number; height: number }> {
+    try {
+      const res = await axios.post(`${BASE}/device/frame`, { deviceId }, { timeout: 15_000, responseType: 'arraybuffer' });
+      return {
+        image: Buffer.from(res.data),
+        contentType: String(res.headers['content-type'] ?? 'image/jpeg'),
+        width: Number(res.headers['x-screen-width']) || 0,
+        height: Number(res.headers['x-screen-height']) || 0,
+      };
+    } catch (err) {
+      // Error bodies arrive as bytes too — decode the agent's JSON so error messages stay readable.
+      const body = axios.isAxiosError(err) ? err.response?.data : undefined;
+      if (axios.isAxiosError(err) && err.response && (Buffer.isBuffer(body) || body instanceof ArrayBuffer)) {
+        const text = Buffer.from(body as Buffer).toString('utf8');
+        try { err.response.data = JSON.parse(text); } catch { err.response.data = text; }
+      }
+      throw err;
+    }
+  },
+
   async heal(deviceId: string): Promise<{ ok: boolean; message?: string; error?: string }> {
     const res = await axios.post(`${BASE}/device/heal`, { deviceId }, { timeout: 15_000 });
     return res.data;
