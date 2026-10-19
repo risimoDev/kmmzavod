@@ -200,9 +200,39 @@ else
 fi
 
 # =============================================================================
-# 4. Обновление сервисов (zero-downtime)
+# 4. Миграции базы данных — ДО запуска нового кода
 # =============================================================================
-header "4/6 · Обновление сервисов"
+# Новый код может обращаться к новым колонкам/таблицам, поэтому схема обновляется
+# раньше, чем стартуют новые контейнеры. Миграции запускаются из НОВОГО образа api
+# (docker compose run): в уже работающем api-контейнере лежат старые migrations/.
+if $DO_MIGRATE; then
+  header "4/6 · Миграции базы данных"
+
+  docker compose up -d postgres redis minio
+
+  info "Ожидаем готовности PostgreSQL..."
+  WAIT=0
+  until docker compose exec -T postgres pg_isready -U kmmzavod -q 2>/dev/null; do
+    sleep 2; WAIT=$((WAIT+2))
+    [ "$WAIT" -ge 30 ] && error "PostgreSQL не ответил за 30 сек"
+  done
+
+  info "Применяем миграции Prisma..."
+  if docker compose run --rm --no-deps api     sh -c 'cd /app && npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
+    success "Миграции применены"
+  else
+    # Не запускаем новый код поверх несовпадающей схемы — старые контейнеры продолжают работать
+    error "Миграции не применены — обновление сервисов отменено. Запустите вручную:
+  docker compose run --rm --no-deps api sh -c 'cd /app && npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma'"
+  fi
+else
+  header "4/6 · Миграции пропущены (--no-migrate)"
+fi
+
+# =============================================================================
+# 5. Обновление сервисов
+# =============================================================================
+header "5/6 · Обновление сервисов"
 
 if [ -n "$SINGLE_SERVICE" ]; then
   info "Обновление только $SINGLE_SERVICE..."
@@ -218,62 +248,13 @@ else
   docker compose up -d postgres redis minio
   sleep 3
 
-  # Приложения — с пересборкой
-  docker compose up -d --no-deps api orchestrator video-processor web nginx
+  # Все сервисы из docker-compose.yml (api, orchestrator, video-processor, editor, web,
+  # nginx, farm-proxy-relay, ...) — без явного списка, чтобы новые сервисы не выпадали
+  # из деплоя. Сервисы под profiles (publisher) стартуют только если профиль включён
+  # через COMPOSE_PROFILES.
+  docker compose up -d --remove-orphans
 
   success "Все сервисы обновлены"
-fi
-
-# =============================================================================
-# 5. Миграции базы данных
-# =============================================================================
-if $DO_MIGRATE; then
-  header "5/6 · Миграции базы данных"
-
-  info "Ожидаем готовности PostgreSQL..."
-  WAIT=0
-  until docker compose exec -T postgres pg_isready -U kmmzavod -q 2>/dev/null; do
-    sleep 2; WAIT=$((WAIT+2))
-    [ "$WAIT" -ge 30 ] && error "PostgreSQL не ответил за 30 сек"
-  done
-
-  info "Применяем миграции Prisma..."
-  MIGRATED=false
-
-  # Ожидаем готовности api-контейнера (до 30 сек)
-  WAIT=0
-  until docker compose exec -T api sh -c 'echo ok' &>/dev/null; do
-    sleep 3; WAIT=$((WAIT+3))
-    [ "$WAIT" -ge 30 ] && break
-  done
-
-  # Вариант 1: через api контейнер (основной способ на сервере)
-  if docker compose exec -T api sh -c 'command -v npx' &>/dev/null 2>&1; then
-    if docker compose exec -T api \
-      sh -c 'npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
-      MIGRATED=true
-    fi
-  fi
-
-  # Вариант 2: docker compose run с явным DATABASE_URL (fallback)
-  if ! $MIGRATED; then
-    info "Fallback: docker compose run с DATABASE_URL..."
-    PG_PASS_FROM_ENV="$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
-    if docker compose run --rm \
-      -e DATABASE_URL="postgresql://kmmzavod:${PG_PASS_FROM_ENV}@postgres:5432/kmmzavod" \
-      api sh -c 'cd /app && npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
-      MIGRATED=true
-    fi
-  fi
-
-  if $MIGRATED; then
-    success "Миграции применены"
-  else
-    warn "Не удалось применить миграции автоматически."
-    echo -e "  ${CYAN}docker compose exec api sh -c 'npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma'${RESET}"
-  fi
-else
-  header "5/6 · Миграции пропущены (--no-migrate)"
 fi
 
 # =============================================================================
