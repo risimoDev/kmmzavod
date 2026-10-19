@@ -8,6 +8,13 @@ export class MinioStorageClient implements IStorageClient {
   private bucket: string;
   private _publicBaseUrl: string | undefined;
   private _region: string;
+  /**
+   * Signs GET URLs for the public host (MINIO_PUBLIC_URL, e.g. https://example.com/storage).
+   * SigV4 covers the Host header, so URLs must be signed for the host the browser hits;
+   * nginx then forwards that Host unchanged to MinIO. Never used for network calls.
+   */
+  private publicSigner: MinioClient | undefined;
+  private publicPathPrefix = '';
 
   constructor(opts: {
     endPoint: string;
@@ -51,6 +58,25 @@ export class MinioStorageClient implements IStorageClient {
     });
     this.bucket = opts.bucket;
     this._publicBaseUrl = opts.publicBaseUrl?.replace(/\/+$/, '');
+    if (this._publicBaseUrl) {
+      try {
+        const u = new URL(this._publicBaseUrl);
+        const publicSSL = u.protocol === 'https:';
+        this.publicSigner = new MinioClient({
+          endPoint: u.hostname,
+          port: u.port ? Number(u.port) : publicSSL ? 443 : 80,
+          useSSL: publicSSL,
+          accessKey: opts.accessKey,
+          secretKey: opts.secretKey,
+          region: this._region, // known region → presigning needs no network round-trip
+          pathStyle: true,
+        });
+        this.publicPathPrefix = u.pathname.replace(/\/+$/, '');
+      } catch {
+        console.warn(`[storage] MINIO_PUBLIC_URL '${this._publicBaseUrl}' is not a valid URL — falling back to direct presigned URLs`);
+        this._publicBaseUrl = undefined;
+      }
+    }
 
     if (this._publicBaseUrl && !['minio', 'localhost', '127.0.0.1'].includes(cleanEndpoint)) {
       if (this._publicBaseUrl.includes('/storage')) {
@@ -66,19 +92,10 @@ export class MinioStorageClient implements IStorageClient {
       if (!exists) {
         await this.client.makeBucket(this.bucket, this._region);
       }
-      // If public proxy is configured, set bucket policy to allow anonymous read
-      if (this._publicBaseUrl) {
-        const policy = JSON.stringify({
-          Version: '2012-10-17',
-          Statement: [{
-            Effect: 'Allow',
-            Principal: { AWS: ['*'] },
-            Action: ['s3:GetObject'],
-            Resource: [`arn:aws:s3:::${this.bucket}/*`],
-          }],
-        });
-        await this.client.setBucketPolicy(this.bucket, policy).catch(() => {});
-      }
+      // Older versions made the whole bucket anonymously readable when MINIO_PUBLIC_URL
+      // was set (all tenants' media, APKs, footage). Media is now served via signed URLs,
+      // so drop that anonymous-read policy if it is still in place.
+      await this.removeLegacyPublicReadPolicy();
     } catch (err: any) {
       // In external cloud S3 (AWS, Timeweb, Selectel, Yandex), bucketExists or makeBucket
       // might fail with AccessDenied if credentials have scoped object permissions.
@@ -114,19 +131,47 @@ export class MinioStorageClient implements IStorageClient {
   }
 
   async presignedUrl(key: string, expirySeconds = 3600): Promise<string> {
-    // If a public proxy URL is configured, return a clean public URL without signatures.
-    // The proxy (nginx) handles auth to MinIO internally.
-    if (this._publicBaseUrl) {
-      return `${this._publicBaseUrl}/${this.bucket}/${key}`;
+    if (this.publicSigner) {
+      // Signed for the public host; the path prefix (/storage) is stripped by nginx before
+      // the request reaches MinIO, so it is added only after signing.
+      const signed = new URL(await this.publicSigner.presignedGetObject(this.bucket, key, expirySeconds));
+      signed.pathname = `${this.publicPathPrefix}${signed.pathname}`;
+      return signed.toString();
     }
     return this.client.presignedGetObject(this.bucket, key, expirySeconds);
+  }
+
+  private async removeLegacyPublicReadPolicy(): Promise<void> {
+    let raw: string;
+    try {
+      raw = await this.client.getBucketPolicy(this.bucket);
+    } catch {
+      return; // no policy set
+    }
+    try {
+      const policy = JSON.parse(raw) as { Statement?: Array<Record<string, unknown>> };
+      const isLegacyPublicRead = (policy.Statement ?? []).some((st) => {
+        const principal = JSON.stringify(st.Principal ?? '');
+        const action = JSON.stringify(st.Action ?? '');
+        return st.Effect === 'Allow' && principal.includes('*') && action.includes('s3:GetObject');
+      });
+      if (isLegacyPublicRead) {
+        await this.client.setBucketPolicy(this.bucket, '');
+        console.warn(`[storage] Removed anonymous-read policy from bucket '${this.bucket}' (media is served via signed URLs now)`);
+      }
+    } catch (err: any) {
+      console.warn('[storage] Could not inspect/remove bucket policy:', err?.message || err);
+    }
   }
 
   async presignedPutUrl(key: string, _contentType?: string, expirySeconds = 3600): Promise<string> {
     return this.client.presignedPutObject(this.bucket, key, expirySeconds);
   }
 
-  /** Public URL for a key (no signature). Requires publicBaseUrl to be configured. */
+  /**
+   * Unsigned URL for a key. Only works for objects that are explicitly public — the bucket
+   * itself is private, so prefer presignedUrl().
+   */
   publicUrl(key: string): string {
     if (!this._publicBaseUrl) {
       throw new Error('publicBaseUrl is not configured — set MINIO_PUBLIC_URL');

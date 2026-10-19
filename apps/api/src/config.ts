@@ -39,6 +39,9 @@ const schema = z.object({
   NEXT_PUBLIC_API_URL: z.string().url().default('http://localhost:3000'),
   // Real phone-farm bridge (apps/device-agent), reached over AmneziaWG
   DEVICE_AGENT_URL: z.string().url().default('http://10.66.66.2:8300'),
+  // Tenants (comma-separated UUIDs) allowed to drive the physical phone farm in addition
+  // to super_admins. The farm is one shared rack, so ordinary tenants never get it.
+  FARM_TENANT_IDS: z.string().default('').transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean)),
   // Frontend URL for OAuth redirects (separate from API URL)
   FRONTEND_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
 

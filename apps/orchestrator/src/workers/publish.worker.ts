@@ -4,12 +4,15 @@
  * TikTok:   скачивает видео из MinIO во temp файл → uploadVideo() → удаляет файл
  * Instagram: генерирует presigned URL → uploadReel() (Instagram сам скачивает)
  *
- * Retry: BullMQ retries (attempts: 3, fixed backoff 30s). При финальном провале → status: failed.
+ * Retry: BullMQ retries (attempts: 3, fixed backoff 30s). Между попытками → status: pending,
+ * при финальном провале → status: failed (и один штраф healthScore, если виноват не наш сервис).
+ * Занятый телефон откладывает задачу без расхода попытки. Опубликованное повторно не постится.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Worker, Queue, type ConnectionOptions } from 'bullmq';
+import { randomUUID } from 'node:crypto';
+import { Worker, Queue, DelayedError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
@@ -26,20 +29,89 @@ import { deviceAgentService, describeDeviceAgentError } from '../services/device
 
 const logger = rootLogger.child({ worker: 'publish' });
 
-async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec = 120, timeoutMs = 60_000): Promise<boolean> {
+/** A busy phone re-queues the job after this delay without burning an attempt. */
+const DEVICE_BUSY_RETRY_MS = 90_000;
+
+/**
+ * Per-device publish lock. The value is a random owner token so a worker whose lock
+ * already expired can never delete a lock that another worker acquired since.
+ * Returns the token, or null if the device stayed busy for `waitMs`.
+ */
+async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec: number, waitMs = 5_000): Promise<string | null> {
   const key = `lock:device:${deviceId}`;
+  const owner = randomUUID();
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const res = await redis.set(key, '1', 'EX', ttlSec, 'NX');
-    if (res === 'OK') return true;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  return false;
+  do {
+    if ((await redis.set(key, owner, 'EX', ttlSec, 'NX')) === 'OK') return owner;
+    await new Promise((r) => setTimeout(r, 1000));
+  } while (Date.now() - start < waitMs);
+  return null;
 }
 
-async function releaseDeviceLock(redis: Redis, deviceId: string): Promise<void> {
-  const key = `lock:device:${deviceId}`;
-  await redis.del(key).catch(() => {});
+const RELEASE_LOCK_LUA = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+
+async function releaseDeviceLock(redis: Redis, deviceId: string, owner: string): Promise<void> {
+  await redis.eval(RELEASE_LOCK_LUA, 1, `lock:device:${deviceId}`, owner).catch(() => {});
+}
+
+/**
+ * Failures that say nothing about the social account itself (our services, network,
+ * storage, config). They must not lower the account's healthScore — otherwise a
+ * publisher outage drives every account below the 30-point safety floor.
+ */
+const INFRA_ERROR_RE =
+  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят/i;
+
+export function isInfrastructureError(message: string): boolean {
+  return INFRA_ERROR_RE.test(message);
+}
+
+const DIST_ITEM_OPEN = ['pending', 'scheduled', 'publishing'] as const;
+
+/**
+ * Records the final outcome of a publish on its DistributeItem (if any) exactly once:
+ * the item is claimed with a conditional update, so retries, the worker and the
+ * BullMQ `failed` handler can all call this without double-counting.
+ */
+export async function settleDistributeItem(
+  db: PrismaClient,
+  publishJobId: string,
+  outcome: { status: 'published'; at: Date } | { status: 'failed'; error: string },
+): Promise<void> {
+  const item = await db.distributeItem.findFirst({
+    where: { publishJobId },
+    select: { id: true, distributeJobId: true },
+  });
+  if (!item) return;
+
+  const claimed = await db.distributeItem.updateMany({
+    where: { id: item.id, status: { in: [...DIST_ITEM_OPEN] } },
+    data: outcome.status === 'published'
+      ? { status: 'published', publishedAt: outcome.at }
+      : { status: 'failed', error: outcome.error },
+  });
+  if (claimed.count === 0) return; // already settled
+
+  const distJob = await db.distributeJob.update({
+    where: { id: item.distributeJobId },
+    data: outcome.status === 'published' ? { publishedCount: { increment: 1 } } : { failedCount: { increment: 1 } },
+    select: { publishedCount: true, failedCount: true, totalItems: true },
+  });
+  if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
+    await db.distributeJob.update({
+      where: { id: item.distributeJobId },
+      data: { status: 'completed', completedAt: new Date() },
+    });
+  }
+}
+
+/** Final (all attempts used) failure bookkeeping. Idempotent. */
+export async function finalizePublishFailure(db: PrismaClient, publishJobId: string, errorMsg: string): Promise<void> {
+  await db.publishJob.updateMany({
+    where: { id: publishJobId, status: { not: 'published' } },
+    data: { status: 'failed', error: errorMsg },
+  });
+  await settleDistributeItem(db, publishJobId, { status: 'failed', error: errorMsg });
 }
 
 interface Deps {
@@ -59,30 +131,46 @@ interface Deps {
 export function createPublishWorker(deps: Deps): Worker {
   const { db, storage, connection, shadowBanCheckQueue } = deps;
 
-  const tiktok = deps.tiktokClientKey && deps.tiktokClientSecret
-    ? new TikTokClient(deps.tiktokClientKey, deps.tiktokClientSecret)
-    : null;
-  const instagram = deps.instagramAppId && deps.instagramAppSecret
-    ? new InstagramClient(deps.instagramAppId, deps.instagramAppSecret)
-    : null;
-  const postbridge = deps.postBridgeApiKey
-    ? new PostBridgeClient(deps.postBridgeApiKey)
-    : null;
-  const youtube = new YouTubeClient();
-
   return new Worker<PublishJobPayload>(
     QUEUES['publish'].name,
-    async (job) => {
+    async (job, token) => {
       const { publishJobId, videoId, tenantId, platform, socialAccountId } = job.data;
       logger.info({ publishJobId, platform, videoId, attempt: job.attemptsMade + 1 }, 'Publish: старт');
 
+      // Idempotency: a retry (or a duplicate enqueue) must never post the same job twice.
+      const existing = await db.publishJob.findUnique({ where: { id: publishJobId }, select: { status: true } });
+      if (!existing) {
+        logger.warn({ publishJobId }, 'Publish: PublishJob not found, skipping');
+        return;
+      }
+      if (existing.status === 'published') {
+        logger.warn({ publishJobId }, 'Publish: already published, skipping duplicate run');
+        return;
+      }
+
       let accountName = socialAccountId;
+      /** Set the moment the platform accepted the post — from then on, never retry. */
+      let posted = false;
+      let externalPostId: string | undefined;
 
       // Mark as uploading
       await db.publishJob.update({
         where: { id: publishJobId },
         data: { status: 'uploading' },
       });
+
+      // Social clients are created per job: their `proxyUrl` is mutable state, and with
+      // concurrency > 1 shared instances let one account post through another's proxy.
+      const tiktok = deps.tiktokClientKey && deps.tiktokClientSecret
+        ? new TikTokClient(deps.tiktokClientKey, deps.tiktokClientSecret)
+        : null;
+      const instagram = deps.instagramAppId && deps.instagramAppSecret
+        ? new InstagramClient(deps.instagramAppId, deps.instagramAppSecret)
+        : null;
+      const postbridge = deps.postBridgeApiKey
+        ? new PostBridgeClient(deps.postBridgeApiKey)
+        : null;
+      const youtube = new YouTubeClient();
 
       try {
         // Load social account and decrypt tokens
@@ -168,8 +256,6 @@ export function createPublishWorker(deps: Deps): Worker {
           throw new Error(`PublishJob ${publishJobId} has no videoId or uniqueVariantId`);
         }
 
-        let externalPostId: string | undefined;
-
         // ── Private path (unofficial publisher microservice) ───────────────────
         // Routes Instagram/TikTok through apps/publisher (instagrapi / tiktok-uploader)
         // using the account's stored session + proxy, instead of the official API.
@@ -205,6 +291,7 @@ export function createPublishWorker(deps: Deps): Worker {
                     sessionData,
                   });
 
+            posted = true;
             externalPostId = result.externalId ?? undefined;
 
             // Persist the refreshed session so the next post reuses it (no re-login).
@@ -229,9 +316,16 @@ export function createPublishWorker(deps: Deps): Worker {
 
           const redis = getRedisConnection();
           // TTL covers the agent call (600s): it may wait for the shared farm proxy before uploading.
-          const locked = await acquireDeviceLock(redis, accountRaw.deviceId, 660, 60_000);
-          if (!locked) {
-            throw new Error(`Устройство ${accountRaw.deviceId} занято публикацией другого ролика. Задача вернётся в очередь.`);
+          const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId, 660);
+          if (!lockOwner) {
+            // A busy phone is not the account's fault: re-queue later without consuming an
+            // attempt or touching healthScore, and free this worker slot meanwhile.
+            await db.publishJob.update({
+              where: { id: publishJobId },
+              data: { status: 'pending', error: `Телефон ${accountRaw.deviceId} занят — повтор через ~${Math.round(DEVICE_BUSY_RETRY_MS / 1000)} с` },
+            });
+            await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+            throw new DelayedError();
           }
 
           try {
@@ -242,11 +336,12 @@ export function createPublishWorker(deps: Deps): Worker {
               caption: fullCaption,
             });
             if (!result.ok) throw new Error(result.detail ?? 'device-agent reported failure');
+            posted = true;
             // No external post id available from real-app UI automation.
           } catch (err: unknown) {
             throw new Error(`device-${platform}: ${describeDeviceAgentError(err)}`);
           } finally {
-            await releaseDeviceLock(redis, accountRaw.deviceId);
+            await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
         } else
         switch (platform) {
@@ -265,6 +360,7 @@ export function createPublishWorker(deps: Deps): Worker {
                 tmpFile,
                 fullCaption,
               );
+              posted = true;
               externalPostId = result.publishId;
 
               // Persist rotated tokens if returned
@@ -297,6 +393,7 @@ export function createPublishWorker(deps: Deps): Worker {
               publishJob.caption ?? '',
               publishJob.hashtags as string[] | undefined,
             );
+            posted = true;
             externalPostId = result.mediaId;
             break;
           }
@@ -352,6 +449,7 @@ export function createPublishWorker(deps: Deps): Worker {
                 description,
                 hashtags,
               );
+              posted = true;
               externalPostId = result.videoId;
             } finally {
               try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -379,6 +477,7 @@ export function createPublishWorker(deps: Deps): Worker {
                 socialAccountIds: [pbAccountId],
                 mediaIds: [mediaId],
               });
+              posted = true;
               externalPostId = result.id;
             } finally {
               try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -390,55 +489,28 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new Error(`Unknown platform: ${platform}`);
         }
 
-        // Mark as published and update account health
+        // Mark as published FIRST (on its own): if any later bookkeeping fails, the catch
+        // block sees `posted` and will not hand the job back to BullMQ for a re-post.
         const now = new Date();
-        await db.$transaction([
-          db.publishJob.update({
-            where: { id: publishJobId },
-            data: {
-              status: 'published',
-              publishedAt: now,
-              externalPostId,
-            },
-          }),
-          db.socialAccount.update({
-            where: { id: socialAccountId },
-            data: {
-              dailyPostCount: { increment: 1 },
-              lastPostAt: now,
-              healthScore: { increment: 5 },
-            },
-          }),
-        ]);
+        await db.publishJob.update({
+          where: { id: publishJobId },
+          data: { status: 'published', publishedAt: now, externalPostId, error: null },
+        });
+        await db.socialAccount.update({
+          where: { id: socialAccountId },
+          data: {
+            dailyPostCount: { increment: 1 },
+            lastPostAt: now,
+            healthScore: { increment: 5 },
+          },
+        });
         // Clamp healthScore at 100 via a second update if needed (Prisma doesn't support cap in single update)
         await db.socialAccount.updateMany({
           where: { id: socialAccountId, healthScore: { gt: 100 } },
           data: { healthScore: 100 },
         });
 
-        // Update linked DistributeItem if this publish came from distribution
-        const distItem = await db.distributeItem.findFirst({
-          where: { publishJobId },
-          select: { id: true, distributeJobId: true },
-        });
-        if (distItem) {
-          await db.distributeItem.update({
-            where: { id: distItem.id },
-            data: { status: 'published', publishedAt: now },
-          });
-          // Increment published count and check if distribution is complete
-          const distJob = await db.distributeJob.update({
-            where: { id: distItem.distributeJobId },
-            data: { publishedCount: { increment: 1 } },
-            select: { publishedCount: true, failedCount: true, totalItems: true },
-          });
-          if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
-            await db.distributeJob.update({
-              where: { id: distItem.distributeJobId },
-              data: { status: 'completed', completedAt: now },
-            });
-          }
-        }
+        await settleDistributeItem(db, publishJobId, { status: 'published', at: now });
 
         logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
 
@@ -468,67 +540,65 @@ export function createPublishWorker(deps: Deps): Worker {
           );
         }
       } catch (err: unknown) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error({ publishJobId, platform, err: errorMsg }, 'Publish: failed');
+        if (err instanceof DelayedError) throw err; // phone busy → re-queued, not a failure
 
-        const now = new Date();
-        const isRateLimit = /rate.?limit|too.?many|429|action.?block/i.test(errorMsg);
-        const healthDelta = isRateLimit ? -30 : -20;
-        await db.$transaction([
-          db.publishJob.update({
+        const errorMsg = err instanceof Error ? err.message : String(err);
+
+        if (posted) {
+          // The platform already has the post. Retrying would publish it twice, so only
+          // make sure the job is recorded as published and swallow the error.
+          logger.error({ publishJobId, platform, err: errorMsg }, 'Publish: posted, but bookkeeping failed — not retrying');
+          const now = new Date();
+          await db.publishJob.update({
             where: { id: publishJobId },
-            data: { status: 'failed', error: errorMsg },
-          }),
-          db.socialAccount.update({
+            data: { status: 'published', publishedAt: now, externalPostId, error: `Опубликовано; ошибка учёта: ${errorMsg}`.slice(0, 2000) },
+          }).catch(() => {});
+          await settleDistributeItem(db, publishJobId, { status: 'published', at: now }).catch(() => {});
+          return;
+        }
+
+        const maxAttempts = job.opts?.attempts ?? 1;
+        const isFinal = job.attemptsMade + 1 >= maxAttempts;
+        logger.error({ publishJobId, platform, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Publish: failed');
+
+        if (!isFinal) {
+          // BullMQ will retry: keep the job (and its distribution item) open.
+          await db.publishJob.update({
+            where: { id: publishJobId },
+            data: { status: 'pending', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) },
+          }).catch(() => {});
+          throw err;
+        }
+
+        await finalizePublishFailure(db, publishJobId, errorMsg);
+
+        // Penalize the account once per job, and only for account/platform-side failures.
+        if (!isInfrastructureError(errorMsg)) {
+          const isRateLimit = /rate.?limit|too.?many|429|action.?block/i.test(errorMsg);
+          await db.socialAccount.update({
             where: { id: socialAccountId },
             data: {
-              healthScore: { increment: healthDelta },
+              healthScore: { increment: isRateLimit ? -30 : -20 },
               ...(isRateLimit ? { lastError: errorMsg } : {}),
             },
-          }),
-        ]);
-        // Clamp healthScore at 0
-        await db.socialAccount.updateMany({
-          where: { id: socialAccountId, healthScore: { lt: 0 } },
-          data: { healthScore: 0 },
-        });
-
-        // Update linked DistributeItem on failure so distribution can complete
-        const distItem = await db.distributeItem.findFirst({
-          where: { publishJobId },
-          select: { id: true, distributeJobId: true },
-        });
-        if (distItem) {
-          await db.distributeItem.update({
-            where: { id: distItem.id },
-            data: { status: 'failed', error: errorMsg },
-          });
-          const distJob = await db.distributeJob.update({
-            where: { id: distItem.distributeJobId },
-            data: { failedCount: { increment: 1 } },
-            select: { publishedCount: true, failedCount: true, totalItems: true },
-          });
-          if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
-            await db.distributeJob.update({
-              where: { id: distItem.distributeJobId },
-              data: { status: 'completed', completedAt: now },
-            });
-          }
-        }
-
-        if ((job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 3)) {
-          await db.notification.create({
-            data: {
-              tenantId,
-              type: 'job_failed',
-              title: `Ошибка публикации (${platform.toUpperCase()})`,
-              body: `Аккаунт: ${accountName}. Ошибка: ${errorMsg}`,
-              actionUrl: `/uniquify`,
-            },
           }).catch(() => {});
+          await db.socialAccount.updateMany({
+            where: { id: socialAccountId, healthScore: { lt: 0 } },
+            data: { healthScore: 0 },
+          });
         }
 
-        throw err; // Let BullMQ handle retries
+        await db.notification.create({
+          data: {
+            tenantId,
+            type: 'job_failed',
+            title: `Ошибка публикации (${platform.toUpperCase()})`,
+            body: `Аккаунт: ${accountName}. Ошибка: ${errorMsg}`,
+            actionUrl: `/uniquify`,
+          },
+        }).catch(() => {});
+
+        throw err; // last attempt → BullMQ moves the job to failed
       }
     },
     {

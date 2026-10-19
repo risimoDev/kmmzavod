@@ -496,18 +496,19 @@ http {
       proxy_read_timeout 3600s;
     }
 
+    # Private bucket + SigV4-presigned URLs: forward the client Host and raw URI untouched
     location /storage/ {
       set $upstream_minio http://minio:9000;
-      rewrite ^/storage/(.*)$ /$1 break;
-      proxy_pass $upstream_minio;
+      if ($request_uri ~ ^/storage(/.*)$) { set $minio_uri $1; }
+      proxy_pass $upstream_minio$minio_uri;
       proxy_http_version 1.1;
-      proxy_set_header Host minio:9000;
+      proxy_set_header Host $http_host;
       proxy_set_header Connection "";
       proxy_hide_header x-amz-request-id;
       proxy_hide_header x-amz-id-2;
       proxy_hide_header x-amz-meta-server-side-encryption;
       proxy_hide_header x-amz-server-side-encryption;
-      add_header Cache-Control "public, max-age=86400, immutable";
+      add_header Cache-Control "private, max-age=3600";
       add_header X-Content-Type-Options "nosniff" always;
     }
 

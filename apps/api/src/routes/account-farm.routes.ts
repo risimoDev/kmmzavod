@@ -11,6 +11,8 @@ import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
 import { deviceAgentClient, describeDeviceAgentError, deviceAgentErrorStatus, type DeviceProxyConfig } from '../lib/device-agent';
 import { farmScheduler } from '../lib/farm-scheduler';
+import { signValue, verifySignedValue } from '../lib/signed-url';
+import { config } from '../config';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -486,15 +488,44 @@ function generateFingerprint() {
   };
 }
 
+// ── Farm access ─────────────────────────────────────────────────────────────
+
+const FARM_PREFIX = '/api/v1/farm';
+const APK_DOWNLOAD_ROUTE = `${FARM_PREFIX}/apks/download`;
+const APK_URL_PURPOSE = 'farm-apk-download';
+const APK_URL_TTL_SEC = 6 * 60 * 60;
+
+/** Routes that reach the device-agent (or schedule work on it). */
+function isFarmDeviceRoute(route: string): boolean {
+  const p = route.startsWith(FARM_PREFIX) ? route.slice(FARM_PREFIX.length) : route;
+  return (
+    /^\/(devices|network|apks|apps|schedules)(\/|$)/.test(p) ||
+    p === '/scripts/run' ||
+    /^\/proxies\/batch-/.test(p) ||
+    /^\/social-accounts\/:id\/(device-login|test-email|submit-code)$/.test(p)
+  );
+}
+
+function hasFarmAccess(user: { tenantId: string; platformRole: string }): boolean {
+  return user.platformRole === 'super_admin' || config.FARM_TENANT_IDS.includes(user.tenantId);
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 export async function accountFarmRoutes(app: FastifyInstance) {
-  // All farm routes require JWT authentication (except APK download for device-agent over VPN)
+  // All farm routes require JWT authentication, except the APK download the device-agent
+  // fetches (it carries an HMAC signature instead). Match on the route *pattern*, never on
+  // request.url: the raw URL includes the query string and is attacker-controlled.
   app.addHook('preHandler', async (request, reply) => {
-    if (request.url.includes('/apks/download')) {
-      return;
-    }
+    const route = request.routeOptions.url ?? '';
+    if (route === APK_DOWNLOAD_ROUTE) return;
     await app.authenticate(request, reply);
+    if (reply.sent) return;
+    // Routes that drive the shared physical phone farm are not tenant-scoped,
+    // so only super_admins / explicitly allowed tenants may use them.
+    if (isFarmDeviceRoute(route) && !hasFarmAccess(request.user)) {
+      return reply.code(403).send({ error: 'Forbidden', message: 'Нет доступа к телефонной ферме' });
+    }
   });
 
   // ── Account Groups ─────────────────────────────────────────────────────────
@@ -1941,8 +1972,10 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         contentType: 'application/vnd.android.package-archive',
       });
 
-      const baseUrl = process.env.DEVICE_AGENT_ACCESSIBLE_API_URL || process.env.PUBLIC_API_URL || 'http://10.66.66.1:3000';
-      const apkUrl = `${baseUrl}/api/v1/farm/apks/download?key=${encodeURIComponent(storageKey)}`;
+      // API port 3000 is bound to loopback on the server, so the farm PC fetches via nginx.
+      const baseUrl = (process.env.DEVICE_AGENT_ACCESSIBLE_API_URL || process.env.PUBLIC_API_URL || config.NEXT_PUBLIC_API_URL).replace(/\/+$/, '');
+      const { exp, sig } = signValue(APK_URL_PURPOSE, storageKey, APK_URL_TTL_SEC);
+      const apkUrl = `${baseUrl}/api/v1/farm/apks/download?key=${encodeURIComponent(storageKey)}&exp=${exp}&sig=${sig}`;
 
       return reply.send({
         ok: true,
@@ -1958,10 +1991,16 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   });
 
   app.get('/apks/download', async (request, reply) => {
-    const { key } = z.object({ key: z.string().min(1) }).parse(request.query);
+    // Unauthenticated (the device-agent has no JWT) — the HMAC signature issued by
+    // /apks/upload is the capability: valid only for this exact key and for 6 hours.
+    const { key, exp, sig } = z.object({
+      key: z.string().min(1),
+      exp: z.string().optional(),
+      sig: z.string().optional(),
+    }).parse(request.query);
 
-    if (!key.startsWith('farm-apks/')) {
-      return reply.status(403).send({ error: 'Forbidden', message: 'Invalid APK key' });
+    if (!key.startsWith('farm-apks/') || !verifySignedValue(APK_URL_PURPOSE, key, exp, sig)) {
+      return reply.status(403).send({ error: 'Forbidden', message: 'Invalid or expired APK link' });
     }
 
     try {

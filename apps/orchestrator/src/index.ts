@@ -265,13 +265,19 @@ async function main() {
   );
 
   // ── Failed event handlers — permanent failure after all retries exhausted ─
+  // BullMQ emits `failed` after EVERY failed attempt, including ones it will retry.
+  // Only a final failure sets `finishedOn` (attempts exhausted or UnrecoverableError),
+  // so act only then — otherwise each retry marks the video failed and refunds again.
+  const isFinalFailure = (bullJob: { finishedOn?: number } | undefined): boolean =>
+    !!bullJob?.finishedOn;
+
   // Generic handler for job-level failures (pipeline, gpt-script, video-compose)
   const handleJobFailure = async (
-    bullJob: { data: { jobId: string; tenantId: string } } | undefined,
+    bullJob: { data: { jobId: string; tenantId: string }; finishedOn?: number } | undefined,
     err:     Error,
     stage:   string,
   ) => {
-    if (!bullJob) return;
+    if (!bullJob || !isFinalFailure(bullJob)) return;
     const { jobId, tenantId } = bullJob.data;
     const errorMsg = err.message || `${stage} failed`;
     try {
@@ -303,11 +309,11 @@ async function main() {
 
   // Scene-level failure handler (heygen, runway, image-gen)
   const handleSceneFailure = async (
-    bullJob: { data: { jobId: string; sceneId: string; tenantId: string } } | undefined,
+    bullJob: { data: { jobId: string; sceneId: string; tenantId: string }; finishedOn?: number } | undefined,
     err:     Error,
     stage:   string,
   ) => {
-    if (!bullJob) return;
+    if (!bullJob || !isFinalFailure(bullJob)) return;
     const { jobId, sceneId, tenantId } = bullJob.data;
     try {
       const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
@@ -344,36 +350,14 @@ async function main() {
   runwayWorker.on('failed',         (j, err) => handleSceneFailure(j, err, 'runway-clip'));
   imageGenWorker.on('failed',       (j, err) => handleSceneFailure(j, err, 'image-gen'));
 
+  // The worker itself finalizes failures; this catches the paths where its catch block
+  // never ran (stalled job, process crash). finalizePublishFailure is idempotent.
   publishWorker.on('failed', async (j, err) => {
-    if (!j) return;
+    if (!j || !isFinalFailure(j)) return;
     const { publishJobId, tenantId } = j.data;
     try {
-      await db.publishJob.update({
-        where: { id: publishJobId },
-        data: { status: 'failed', error: err.message },
-      });
-      // Update linked DistributeItem if this publish came from distribution
-      const distItem = await db.distributeItem.findFirst({
-        where: { publishJobId },
-        select: { id: true, distributeJobId: true },
-      });
-      if (distItem) {
-        await db.distributeItem.update({
-          where: { id: distItem.id },
-          data: { status: 'failed', error: err.message },
-        });
-        const distJob = await db.distributeJob.update({
-          where: { id: distItem.distributeJobId },
-          data: { failedCount: { increment: 1 } },
-          select: { publishedCount: true, failedCount: true, totalItems: true },
-        });
-        if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
-          await db.distributeJob.update({
-            where: { id: distItem.distributeJobId },
-            data: { status: 'completed', completedAt: new Date() },
-          });
-        }
-      }
+      const { finalizePublishFailure } = await import('./workers/publish.worker');
+      await finalizePublishFailure(db, publishJobId, err.message);
       logger.error({ publishJobId, tenantId, err: err.message }, 'Publish: final failure after retries');
     } catch (dbErr) {
       logger.error({ dbErr, publishJobId }, 'Publish failed handler: DB error');

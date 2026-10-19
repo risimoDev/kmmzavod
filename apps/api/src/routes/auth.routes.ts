@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
+import { config } from '../config';
 import { logger } from '../logger';
 
 const RegisterBody = z.object({
@@ -130,8 +132,9 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/refresh', async (req, reply) => {
     const { refreshToken } = RefreshBody.parse(req.body);
 
+    const tokenHash = hashRefreshToken(refreshToken);
     const session = await db.userSession.findUnique({
-      where: { refreshToken },
+      where: { refreshToken: tokenHash },
       include: {
         user: {
           include: { tenant: { select: { id: true, isActive: true } } },
@@ -140,7 +143,7 @@ export async function authRoutes(app: FastifyInstance) {
     });
 
     if (!session || session.expiresAt < new Date()) {
-      await db.userSession.deleteMany({ where: { refreshToken } });
+      await db.userSession.deleteMany({ where: { refreshToken: tokenHash } });
       return reply.code(401).send({ error: 'Unauthorized', message: 'Refresh token невалиден' });
     }
 
@@ -148,8 +151,12 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
     }
 
-    // Ротация: удаляем старый, выдаём новый
-    await db.userSession.delete({ where: { id: session.id } });
+    // Ротация: удаляем старый, выдаём новый. Параллельный refresh тем же токеном
+    // увидит count = 0 и получит 401, а не 404 от Prisma.
+    const { count } = await db.userSession.deleteMany({ where: { id: session.id } });
+    if (count === 0) {
+      return reply.code(401).send({ error: 'Unauthorized', message: 'Refresh token невалиден' });
+    }
     const tokens = generateTokens(app, session.user, session.user.tenant.id);
     await saveRefreshToken(session.user.id, tokens.refreshToken, req);
 
@@ -160,7 +167,7 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/logout', { preHandler: app.authenticate }, async (req, reply) => {
     const { refreshToken } = RefreshBody.parse(req.body);
     await db.userSession.deleteMany({
-      where: { refreshToken, userId: req.user.userId },
+      where: { refreshToken: hashRefreshToken(refreshToken), userId: req.user.userId },
     });
     return reply.code(204).send();
   });
@@ -199,18 +206,32 @@ function generateTokens(
     platformRole: user.platformRole as 'super_admin' | 'user',
   };
 
-  const accessToken = app.jwt.sign(payload, { expiresIn: '15m' });
-  const refreshToken = app.jwt.sign({ ...payload, type: 'refresh' } as any, { expiresIn: '30d' });
+  const accessToken = app.jwt.sign(payload, { expiresIn: config.JWT_ACCESS_TTL });
+  // Refresh token is an opaque random secret, not a JWT: it can never be replayed as an
+  // access token, and only its hash is stored, so a DB leak does not leak sessions.
+  const refreshToken = crypto.randomBytes(32).toString('base64url');
 
   return { accessToken, refreshToken };
 }
 
+function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/** '30d' | '12h' | '15m' | '45s' | plain seconds → milliseconds. */
+function ttlToMs(ttl: string): number {
+  const m = /^(\d+)\s*([smhd]?)$/.exec(ttl.trim());
+  if (!m) return 30 * 24 * 60 * 60 * 1000;
+  const unit = { '': 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2] as '' | 's' | 'm' | 'h' | 'd'];
+  return Number(m[1]) * unit * 1000;
+}
+
 async function saveRefreshToken(userId: string, refreshToken: string, req?: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + ttlToMs(config.JWT_REFRESH_TTL));
   await db.userSession.create({
     data: {
       userId,
-      refreshToken,
+      refreshToken: hashRefreshToken(refreshToken),
       expiresAt,
       ipAddress: req?.ip,
       userAgent: typeof req?.headers?.['user-agent'] === 'string' ? req.headers['user-agent'].slice(0, 500) : undefined,

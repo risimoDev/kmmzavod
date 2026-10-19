@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
+import { isAccessTokenPayload } from '../plugins/auth.plugin';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { sseSubscriber } from '../lib/sse-subscriber';
@@ -72,6 +73,7 @@ export async function videoRoutes(app: FastifyInstance) {
         if (!token) return reply.code(401).send({ error: 'Unauthorized' });
         try {
           const decoded = app.jwt.verify(token);
+          if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
           req.user = decoded as typeof req.user;
         } catch {
           return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });

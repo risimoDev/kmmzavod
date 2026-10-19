@@ -11,6 +11,7 @@ session_data: { "sessionid"?, "cookies"? }   (at least one required)
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -74,24 +75,31 @@ def publish(
     if cookies_list:
         kwargs["cookies_list"] = cookies_list
     proxy = _parse_proxy(proxy_url)
+    if proxy_url and not proxy:
+        # Never fall back to the server's own IP: that links every account to it.
+        raise ValueError("tiktok: proxy_url is set but could not be parsed — refusing to upload without proxy")
     if proxy:
         kwargs["proxy"] = proxy
     opts = _chrome_options()
     if opts is not None:
         kwargs["options"] = opts
 
-    # tiktok-uploader's signature varies across versions — drop unsupported kwargs.
-    for drop in (None, "options", "proxy"):
-        try:
-            if drop:
-                kwargs.pop(drop, None)
-            failed = upload_video(**kwargs)
-            break
-        except TypeError as e:
-            logger.warning("tiktok upload_video kwarg unsupported (%s), retrying simpler: %s", drop, e)
-            continue
-    else:
-        raise RuntimeError("tiktok-uploader upload_video signature incompatible")
+    # tiktok-uploader's signature varies across versions. Decide up front which kwargs
+    # it accepts instead of retrying on TypeError: a TypeError raised *inside* the
+    # upload would otherwise trigger a second upload, possibly without the proxy.
+    params = inspect.signature(upload_video).parameters
+    accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if not accepts_any:
+        if "proxy" in kwargs and "proxy" not in params:
+            raise RuntimeError(
+                "installed tiktok-uploader does not support `proxy` — refusing to upload from the server IP"
+            )
+        unsupported = [k for k in kwargs if k not in params]
+        for k in unsupported:
+            logger.warning("tiktok upload_video: dropping unsupported kwarg %s", k)
+            kwargs.pop(k)
+
+    failed = upload_video(**kwargs)
 
     if failed:  # non-empty list = some uploads failed
         raise RuntimeError("tiktok upload reported failure")

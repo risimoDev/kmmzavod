@@ -54,8 +54,10 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    # Loopback only: public traffic must go through nginx (TLS, headers). Docker-published
+    # ports bypass ufw, so "3000:3000" would expose the API on every interface.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     logging:
       driver: "json-file"
       options:
@@ -103,6 +105,10 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       # Home-PC bridge to the native ADB phone farm, reached over AmneziaWG
       DEVICE_AGENT_URL: ${DEVICE_AGENT_URL:-http://10.66.66.2:8300}
+      # Base URL the farm PC uses to download uploaded APKs (default: NEXT_PUBLIC_API_URL)
+      DEVICE_AGENT_ACCESSIBLE_API_URL: ${DEVICE_AGENT_ACCESSIBLE_API_URL:-}
+      # Tenants allowed to drive the phone farm besides super_admins (comma-separated UUIDs)
+      FARM_TENANT_IDS: ${FARM_TENANT_IDS:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -313,7 +319,7 @@ services:
         NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000}
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     logging:
       driver: "json-file"
       options:

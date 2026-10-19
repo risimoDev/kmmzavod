@@ -22,6 +22,18 @@ declare module '@fastify/jwt' {
   }
 }
 
+/**
+ * Only access tokens may authenticate requests. Legacy refresh tokens were JWTs signed
+ * with the same secret (marked `type: 'refresh'`) and live 30 days — reject them.
+ */
+export function isAccessTokenPayload(payload: unknown): boolean {
+  return !!payload && typeof payload === 'object' && (payload as { type?: unknown }).type === undefined;
+}
+
+/** Routes a read-only `viewer` may still call with a mutating method. */
+const VIEWER_WRITE_ALLOWED = /^\/api\/v1\/(auth|notifications)(\/|$)/;
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 async function authPlugin(app: FastifyInstance) {
   // Декоратор authenticate — вешается на маршруты как preHandler
   app.decorate(
@@ -31,6 +43,18 @@ async function authPlugin(app: FastifyInstance) {
         await req.jwtVerify();
       } catch (err) {
         reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
+        return;
+      }
+      if (!isAccessTokenPayload(req.user)) {
+        reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
+        return;
+      }
+      if (
+        req.user.role === 'viewer' &&
+        !READ_METHODS.has(req.method) &&
+        !VIEWER_WRITE_ALLOWED.test(req.routeOptions.url ?? '')
+      ) {
+        reply.code(403).send({ error: 'Forbidden', message: 'Роль «наблюдатель» — только просмотр' });
         return;
       }
       // Verify user and tenant are still active (token may outlive a ban)
@@ -56,6 +80,10 @@ async function authPlugin(app: FastifyInstance) {
       try {
         await req.jwtVerify();
       } catch {
+        reply.code(401).send({ error: 'Unauthorized' });
+        return;
+      }
+      if (!isAccessTokenPayload(req.user)) {
         reply.code(401).send({ error: 'Unauthorized' });
         return;
       }

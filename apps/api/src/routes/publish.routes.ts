@@ -3,6 +3,7 @@
  */
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
+import { isAccessTokenPayload } from '../plugins/auth.plugin';
 import { db } from '../lib/db';
 import { encrypt } from '../lib/crypto';
 import { createOAuthState, verifyOAuthState } from '../lib/oauth-state';
@@ -202,6 +203,7 @@ export async function publishRoutes(app: FastifyInstance) {
     if (!token) return reply.code(401).send({ error: 'Unauthorized', message: 'Token required' });
     try {
       const decoded = app.jwt.verify(token);
+      if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
       req.user = decoded;
     } catch {
       return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
