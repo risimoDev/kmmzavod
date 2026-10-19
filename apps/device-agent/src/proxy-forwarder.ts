@@ -717,6 +717,83 @@ export function isWildberriesHost(host: string): boolean {
   );
 }
 
+/** Check if host is system telemetry, captive portal check or excluded from proxying. */
+export function isBypassedHost(host: string, bypassList?: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().trim();
+
+  // Local loopback & private RFC1918 networks (never proxy local traffic)
+  if (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '::1' ||
+    h.startsWith('10.') ||
+    h.startsWith('192.168.') ||
+    h.startsWith('172.16.') ||
+    h.startsWith('172.17.') ||
+    h.startsWith('172.18.') ||
+    h.startsWith('172.19.') ||
+    h.startsWith('172.20.') ||
+    h.startsWith('172.21.') ||
+    h.startsWith('172.22.') ||
+    h.startsWith('172.23.') ||
+    h.startsWith('172.24.') ||
+    h.startsWith('172.25.') ||
+    h.startsWith('172.26.') ||
+    h.startsWith('172.27.') ||
+    h.startsWith('172.28.') ||
+    h.startsWith('172.29.') ||
+    h.startsWith('172.30.') ||
+    h.startsWith('172.31.')
+  ) {
+    return true;
+  }
+
+  // Wildberries always uses Russian IP direct
+  if (isWildberriesHost(h)) return true;
+
+  // Samsung OS telemetry, push notifications, and background store services
+  if (
+    h.includes('samsung.com') ||
+    h.includes('samsungapps.com') ||
+    h.includes('samsungcloud.com') ||
+    h.includes('samsungqbe.com') ||
+    h.includes('ssp.samsung.com') ||
+    h.includes('secb2b.com')
+  ) {
+    return true;
+  }
+
+  // Android OS connectivity checks, time sync, and Google Play Store downloads
+  if (
+    h === 'connectivitycheck.gstatic.com' ||
+    h === 'connectivitycheck.android.com' ||
+    h === 'clients3.google.com' ||
+    h === 'play.googleapis.com' ||
+    h === 'android.apis.google.com' ||
+    h === 'time.android.com' ||
+    h.endsWith('.gvt1.com') ||
+    h.endsWith('.gvt2.com')
+  ) {
+    return true;
+  }
+
+  // User-configured bypass list
+  if (bypassList) {
+    const list = bypassList.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    for (const item of list) {
+      if (item.startsWith('*.')) {
+        const suffix = item.slice(1);
+        if (h.endsWith(suffix) || h === item.slice(2)) return true;
+      } else if (h === item) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 export interface ListenerStats {
   port: number;
   activeConnections: number;

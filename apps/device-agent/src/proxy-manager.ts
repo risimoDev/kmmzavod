@@ -29,6 +29,7 @@ import {
   ProxyError,
   UpstreamProxy,
   extractIp,
+  isBypassedHost,
   isWildberriesHost,
   upstreamKey,
   type ListenerStats,
@@ -342,7 +343,12 @@ export class ProxyManager {
 
   private routeFor(deviceId: string, targetHost?: string): RouteDecision {
     const entry = this.devices.get(deviceId);
-    if (!entry) return { kind: 'block', reason: 'Для этой платы прокси не настроен' };
+    if (!entry) return { kind: 'direct' };
+
+    // Bypass OS telemetry, captive portal checks, Google Play downloads, local network directly
+    if (targetHost && isBypassedHost(targetHost, config.PROXY_BYPASS_LIST)) {
+      return { kind: 'direct' };
+    }
 
     // Wildberries routing: must always open with Russian IP.
     if (targetHost && isWildberriesHost(targetHost)) {

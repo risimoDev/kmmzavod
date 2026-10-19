@@ -64,8 +64,8 @@ export const config = {
   PROXY_BASE_PORT: Number(env('DEVICE_AGENT_PROXY_BASE_PORT', '18800')),
   // Port the phone itself uses (`settings put global http_proxy 127.0.0.1:<port>`).
   PROXY_DEVICE_PORT: Number(env('DEVICE_AGENT_PROXY_DEVICE_PORT', '8888')),
-  // Max concurrent connections per upstream proxy (shared mobile proxies often cap at 50). 0 = unlimited.
-  PROXY_MAX_CONNECTIONS: Number(env('DEVICE_AGENT_PROXY_MAX_CONNECTIONS', '45')),
+  // Max concurrent connections per upstream proxy (0 = unlimited, avoids dropping app connections).
+  PROXY_MAX_CONNECTIONS: Number(env('DEVICE_AGENT_PROXY_MAX_CONNECTIONS', '0')),
   PROXY_IDLE_TIMEOUT_MS: Number(env('DEVICE_AGENT_PROXY_IDLE_TIMEOUT_MS', '180000')),
   // Dial every upstream proxy through this HTTP CONNECT relay (infra/proxy-relay on the server,
   // reached over AmneziaWG), e.g. http://10.66.66.1:3129. Needed when the farm ISP's DPI blocks
@@ -78,6 +78,6 @@ export const config = {
   // Hosts the phone reaches directly (Android global-proxy exclusion list).
   PROXY_BYPASS_LIST: env(
     'DEVICE_AGENT_PROXY_BYPASS',
-    'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.cloudfront.cn,*.wildberries.ru,*.wb.ru,*.wbcontent.net',
+    'localhost,127.0.0.1,*.samsung.com,*.samsungapps.com,*.samsungcloud.com,*.bigdata.ssp.samsung.com,*.samsungqbe.com,*.secb2b.com,*.cloudfront.cn,*.wildberries.ru,*.wb.ru,*.wbcontent.net,connectivitycheck.gstatic.com,connectivitycheck.android.com,clients3.google.com,play.googleapis.com,android.apis.google.com,time.android.com,*.gvt1.com,*.gvt2.com',
   ),
 };
