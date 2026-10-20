@@ -109,14 +109,31 @@ export async function fishSearchVoices(cfg: FishConfig, query: { title?: string;
   if (!res.ok) throw new FishError(`Поиск голосов: HTTP ${res.status}`, 'http');
   const json: any = await res.json();
   const items: any[] = json?.items ?? (Array.isArray(json) ? json : []);
-  return items.map((m) => ({
+  return items.map(toVoiceInfo);
+}
+
+/**
+ * One voice (model) by id from the fish.audio library — used to check a hand-typed
+ * voice id and pick up its title. null = no such voice.
+ */
+export async function fishGetVoice(cfg: FishConfig, id: string): Promise<VoiceInfo | null> {
+  const base = (cfg.baseUrl || 'https://api.fish.audio/v1').replace(/\/+$/, '').replace(/\/v1$/, '');
+  const doFetch = cfg.fetch ?? ((u, i) => fetch(u, i));
+  const res = await doFetch(`${base}/model/${encodeURIComponent(id)}`, { method: 'GET', headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+  if (res.status === 404 || res.status === 400 || res.status === 422) return null;
+  if (!res.ok) throw new FishError(`Голос ${id}: HTTP ${res.status}`, 'http');
+  return toVoiceInfo(await res.json());
+}
+
+function toVoiceInfo(m: any): VoiceInfo {
+  return {
     id: String(m._id ?? m.id),
     name: String(m.title ?? m.name ?? 'Без названия'),
     gender: (m.gender === 'female' || m.gender === 'male' ? m.gender : 'unknown') as VoiceGender,
     category: 'community',
     description: String(m.description ?? '').slice(0, 200),
     previewText: String(m.sample_text ?? ''),
-  }));
+  };
 }
 
 function clamp(v: number, lo: number, hi: number): number {

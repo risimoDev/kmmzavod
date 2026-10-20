@@ -124,6 +124,15 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
         const voiceId = ap.voiceIds.length ? ap.voiceIds[seq % ap.voiceIds.length] : DEFAULT_VOICE_ID;
         const speed = Number(ap.voiceSpeed) || 1.0;
         const paceTable = await getPaceTable();
+        // Hand-typed voices are not in the catalogue: their gender comes from the tenant library.
+        let narrator = voiceGender(voiceId);
+        if (narrator === 'unknown') {
+          const lib = await db.tenantVoice.findUnique({
+            where: { tenantId_voiceId: { tenantId: ap.tenantId, voiceId } },
+            select: { gender: true },
+          });
+          if (lib?.gender === 'male' || lib?.gender === 'female') narrator = lib.gender;
+        }
 
         // Recent hooks of this autopilot — the next video must open differently.
         const recent = await db.autopilotBatch.findMany({
@@ -141,7 +150,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
           style,
           seconds: ap.targetSeconds,
           wps: paceFor(paceTable, voiceId, speed),
-          narrator: voiceGender(voiceId),
+          narrator,
           cta: { type: (ap.ctaType as CtaType) ?? 'article', word: ap.directWord ?? undefined },
           avoidHooks: recent.map((r) => firstSentence(r.script!)),
           captionsCount: Math.max(1, Math.min(batch.variantCount || 1, 30)),

@@ -10,8 +10,9 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { FISH_VOICES } from '@kmmzavod/ai';
-import { aiStatus } from '../lib/ai';
+import { FISH_VOICES, VOICE_ID_RE, fishGetVoice, voiceById } from '@kmmzavod/ai';
+import { aiStatus, getFishConfig } from '../lib/ai';
+import { logger } from '../logger';
 import { config } from '../config';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
@@ -36,7 +37,12 @@ const Shape = z.object({
   scriptStyles: z.array(z.enum(SCRIPT_STYLES)).min(1).max(8).default(['blogger']),
   ctaType: z.enum(['article', 'direct', 'auto']).default('article'),
   directWord: z.string().max(50).nullish(),
-  voiceIds: z.array(z.string().max(100)).max(10).default([]),
+  // Fish Audio voice ids rotated per montage: catalogue voices and/or hand-typed ids
+  // (the latter are remembered in the tenant's voice library, see /voices).
+  voiceIds: z.array(z.string().trim().regex(VOICE_ID_RE, 'Неверный формат ID голоса Fish Audio'))
+    .max(20)
+    .transform((ids) => [...new Set(ids)])
+    .default([]),
   voiceSpeed: z.number().min(0.5).max(2).default(1),
   // Uniquify
   uniquifyMode: z.enum(['preserve_context']).default('preserve_context'), // montage already carries the voice
@@ -57,6 +63,25 @@ const Shape = z.object({
   maxParallelBatches: z.number().int().min(1).max(5).default(2),
 });
 const UpdateBody = Shape.partial();
+
+const VoiceBody = z.object({
+  voiceId: z.string().trim().regex(VOICE_ID_RE, 'Неверный формат ID голоса Fish Audio'),
+  name: z.string().trim().min(1).max(100).optional(),
+  gender: z.enum(['male', 'female', 'unknown']).optional(),
+});
+
+/**
+ * Hand-typed voice ids used in an autopilot go into the tenant's voice library, so they
+ * are offered again next time. Catalogue voices are skipped; existing entries untouched.
+ */
+async function rememberVoices(tenantId: string, voiceIds: string[] | undefined): Promise<void> {
+  const custom = (voiceIds ?? []).filter((id) => !voiceById(id));
+  if (!custom.length) return;
+  await db.tenantVoice.createMany({
+    data: custom.map((voiceId) => ({ tenantId, voiceId, name: `Голос ${voiceId.slice(0, 8)}` })),
+    skipDuplicates: true,
+  });
+}
 
 function toMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number);
@@ -205,8 +230,72 @@ export async function autopilotRoutes(app: FastifyInstance) {
       projects: projects.map((p) => ({ ...p, sourceCount: counts.find((c) => c.projectId === p.id)?._count._all ?? 0 })),
       groups,
       voices: FISH_VOICES,
+      customVoices: await db.tenantVoice.findMany({
+        where: { tenantId },
+        orderBy: { createdAt: 'asc' },
+        select: { voiceId: true, name: true, gender: true },
+      }),
       aiKeys: await aiKeyStatus(),
     };
+  });
+
+  // ── Voice library (hand-typed Fish Audio voice ids) ───────────────────────
+  /**
+   * Add (or rename / re-gender) a voice in the tenant library. When a Fish Audio key is
+   * configured the id is checked against fish.audio first and its title is used as the
+   * default name; an unknown id is rejected instead of failing later at TTS time.
+   */
+  app.post('/voices', async (req, reply) => {
+    const { tenantId } = req.user;
+    const b = VoiceBody.parse(req.body);
+    if (voiceById(b.voiceId)) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Этот голос уже есть во встроенном списке — просто выберите его' });
+    }
+
+    let fishName: string | undefined;
+    let fishGender: 'male' | 'female' | 'unknown' | undefined;
+    let warning: string | undefined;
+    const fish = await getFishConfig();
+    if (fish.apiKey) {
+      try {
+        const found = await fishGetVoice(fish, b.voiceId);
+        if (!found) {
+          return reply.code(400).send({ error: 'BadRequest', message: `Голос ${b.voiceId} не найден в Fish Audio — проверьте ID` });
+        }
+        fishName = found.name;
+        if (found.gender !== 'unknown') fishGender = found.gender;
+      } catch (err) {
+        warning = 'Fish Audio сейчас недоступен — ID сохранён без проверки';
+        logger.warn({ err: String(err), voiceId: b.voiceId }, 'autopilot: fish voice lookup failed');
+      }
+    } else {
+      warning = 'Ключ Fish Audio не задан — ID сохранён без проверки';
+    }
+
+    const existing = await db.tenantVoice.findUnique({ where: { tenantId_voiceId: { tenantId, voiceId: b.voiceId } } });
+    const voice = await db.tenantVoice.upsert({
+      where: { tenantId_voiceId: { tenantId, voiceId: b.voiceId } },
+      create: {
+        tenantId,
+        voiceId: b.voiceId,
+        name: b.name ?? fishName ?? `Голос ${b.voiceId.slice(0, 8)}`,
+        gender: b.gender ?? fishGender ?? 'unknown',
+      },
+      update: {
+        // An auto-remembered placeholder name gets replaced by the Fish title.
+        ...(b.name ? { name: b.name } : fishName && existing?.name.startsWith('Голос ') ? { name: fishName } : {}),
+        ...(b.gender ? { gender: b.gender } : fishGender && existing?.gender === 'unknown' ? { gender: fishGender } : {}),
+      },
+      select: { voiceId: true, name: true, gender: true },
+    });
+    return reply.code(existing ? 200 : 201).send({ voice, ...(warning ? { warning } : {}) });
+  });
+
+  app.delete('/voices/:voiceId', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { voiceId } = z.object({ voiceId: z.string().min(1).max(100) }).parse(req.params);
+    await db.tenantVoice.deleteMany({ where: { tenantId, voiceId } });
+    return reply.code(204).send();
   });
 
   // ── Readiness preview for the wizard ───────────────────────────────────────
@@ -325,6 +414,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     const ap = await db.autopilot.create({
       data: { ...b, publishTimes: w.times, tenantId, status: 'draft' } as any,
     });
+    await rememberVoices(tenantId, b.voiceIds);
     return reply.code(201).send({ autopilot: ap, warnings: w.warnings });
   });
 
@@ -350,6 +440,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     if (b.publishTimes || b.timezone || b.jitterMinutes !== undefined) data.nextWindowAt = null;
 
     const updated = await db.autopilot.update({ where: { id }, data: data as any });
+    await rememberVoices(tenantId, b.voiceIds);
     return { autopilot: updated, warnings };
   });
 

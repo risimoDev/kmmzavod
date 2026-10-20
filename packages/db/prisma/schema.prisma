@@ -48,6 +48,7 @@ model Tenant {
   distributeSchedules DistributeSchedule[]
   campaigns           Campaign[]
   autopilots          Autopilot[]
+  voices              TenantVoice[]
 
   @@map("tenants")
 }
@@ -1493,6 +1494,22 @@ enum AutopilotBatchStatus {
   failed // ошибка на одном из шагов
 
   @@map("autopilot_batch_status")
+}
+
+// Библиотека голосов Fish Audio организации: ID, вписанные вручную, с названием и полом
+// (пол нужен для согласования рода в сценарии: «заказал» / «заказала»).
+model TenantVoice {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  voiceId   String   @map("voice_id") // Fish Audio model id
+  name      String
+  gender    String   @default("unknown") // male | female | unknown
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, voiceId])
+  @@map("tenant_voices")
 }
 
 model Autopilot {

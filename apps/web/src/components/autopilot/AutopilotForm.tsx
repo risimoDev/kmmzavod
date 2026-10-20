@@ -13,6 +13,7 @@ import {
   autopilotApi, uniquifyApi,
   type AutopilotInput, type AutopilotMeta, type AutopilotPreview, type BgmTrack,
 } from "@/lib/api";
+import { VoicePicker } from "./VoicePicker";
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
@@ -195,7 +196,7 @@ export function AutopilotForm({
     autopilotApi.meta().then((m) => {
       setMeta(m);
       setV((p) => (p.projectId || m.projects.length === 0 ? p : { ...p, projectId: m.projects[0].id }));
-    }).catch(() => setMeta({ projects: [], groups: [], voices: [], aiKeys: { openrouter: false, fishAudio: false } }));
+    }).catch(() => setMeta({ projects: [], groups: [], voices: [], customVoices: [], aiKeys: { openrouter: false, fishAudio: false } }));
     uniquifyApi.listBgm().then((r) => setBgm(r.items)).catch(() => setBgm([]));
   }, []);
 
@@ -407,18 +408,16 @@ export function AutopilotForm({
             )}
           </div>
 
-          <Field label="Голоса (чередуются)" hint={v.voiceIds.length ? `${v.voiceIds.length} в ротации` : "голос по умолчанию"}>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {(meta?.voices ?? []).map((voice) => (
-                <Pill key={voice.id} active={v.voiceIds.includes(voice.id)} onClick={() => set("voiceIds", toggle(v.voiceIds, voice.id))}>
-                  <div className="flex items-center gap-1.5">
-                    <span>{voice.gender === "female" ? "♀" : "♂"}</span>
-                    <span>{voice.name}</span>
-                  </div>
-                  <div className="text-2xs font-normal text-text-tertiary line-clamp-1">{voice.description}</div>
-                </Pill>
-              ))}
-            </div>
+          <Field label="Голоса (чередуются по монтажам)"
+            hint={v.voiceIds.length ? `${v.voiceIds.length} в ротации` : "голос по умолчанию"}>
+            <VoicePicker
+              value={v.voiceIds}
+              onChange={(update) => setV((p) => ({ ...p, voiceIds: update(p.voiceIds) }))}
+              presets={meta?.voices ?? []}
+              library={meta?.customVoices ?? []}
+              onLibraryChange={(lib) => setMeta((m) => (m ? { ...m, customVoices: lib } : m))}
+              speed={v.voiceSpeed}
+            />
           </Field>
           <Field label="Скорость речи">
             <Range value={v.voiceSpeed} min={0.8} max={1.3} step={0.05} onChange={(n) => set("voiceSpeed", n)} suffix="×" />

@@ -59,6 +59,9 @@ export const FISH_VOICES: VoiceInfo[] = [
 
 export const DEFAULT_VOICE_ID = FISH_VOICES[0].id;
 
+/** Shape of a Fish Audio voice (model) id as typed by a user, e.g. 32 hex chars. */
+export const VOICE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
 export function voiceById(id: string | null | undefined): VoiceInfo | undefined {
   return id ? FISH_VOICES.find((v) => v.id === id) : undefined;
 }

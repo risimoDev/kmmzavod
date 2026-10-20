@@ -2375,7 +2375,15 @@ export interface AutopilotMeta {
   projects: { id: string; name: string; description: string | null; sourceCount: number }[];
   groups: { id: string; name: string }[];
   voices: FishAudioVoice[];
+  /** Tenant voice library: hand-typed Fish Audio ids. */
+  customVoices: TenantVoice[];
   aiKeys: { openrouter: boolean; fishAudio: boolean };
+}
+
+export interface TenantVoice {
+  voiceId: string;
+  name: string;
+  gender: 'male' | 'female' | 'unknown';
 }
 
 export interface AutopilotPreview {
@@ -2405,4 +2413,9 @@ export const autopilotApi = {
   publishNow: (id: string) =>
     apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${id}/publish-now`, { method: 'POST' }),
   remove: (id: string) => apiFetch<void>(`/api/v1/autopilots/${id}`, { method: 'DELETE' }),
+  /** Add / rename a voice in the tenant library (id is checked against Fish Audio). */
+  saveVoice: (body: { voiceId: string; name?: string; gender?: TenantVoice['gender'] }) =>
+    apiFetch<{ voice: TenantVoice; warning?: string }>('/api/v1/autopilots/voices', { method: 'POST', body: JSON.stringify(body) }),
+  deleteVoice: (voiceId: string) =>
+    apiFetch<void>(`/api/v1/autopilots/voices/${encodeURIComponent(voiceId)}`, { method: 'DELETE' }),
 };
