@@ -116,13 +116,14 @@ export const DEBUG_DIR = '/sdcard/kmm-debug';
 export async function dumpScreen(adb: AdbClient, deviceId: string, attempts = 3): Promise<UiScreen | null> {
   for (let i = 0; i < attempts; i++) {
     try {
-      const out = await adb.fastShell(deviceId, `uiautomator dump ${DUMP_PATH} >/dev/null 2>&1; cat ${DUMP_PATH}; rm -f ${DUMP_PATH}`, 30_000);
+      const dumpCmd = i % 2 === 0 ? `uiautomator dump --compressed ${DUMP_PATH}` : `uiautomator dump ${DUMP_PATH}`;
+      const out = await adb.fastShell(deviceId, `${dumpCmd} >/dev/null 2>&1; cat ${DUMP_PATH}; rm -f ${DUMP_PATH}`, 20_000);
       const start = out.indexOf('<?xml');
       if (start >= 0 && out.includes('<hierarchy')) return parseUi(out.slice(start));
     } catch {
       // retry
     }
-    await sleep(1200);
+    await sleep(800);
   }
   return null;
 }

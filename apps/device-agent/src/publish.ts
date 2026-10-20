@@ -134,7 +134,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
     await adb.fastShell(
       deviceId,
-      `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM ${streamUri} --grant-read-uri-permission ${component ? `-n ${component}` : pkg}`,
+      `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM ${streamUri} --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`,
     );
     await sleep(3500);
 
@@ -181,6 +181,11 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           continue;
         }
         unknown++;
+        if (st.captionDone && !st.shareTapped && unknown >= 3) {
+          const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+          await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.75), Math.round(width / 2), Math.round(height * 0.35), 300).catch(() => {});
+          await sleep(1000);
+        }
       }
       if (unknown >= UNKNOWN_SCREEN_LIMIT) {
         const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unknown`, screen?.xml).catch(() => undefined);
@@ -291,7 +296,13 @@ async function captionLanded(adb: AdbClient, deviceId: string, caption: string):
 async function hideKeyboard(adb: AdbClient, deviceId: string): Promise<void> {
   const ime = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
   if (/=true/.test(ime)) {
-    await adb.back(deviceId).catch(() => {});
+    // 111 = KEYCODE_ESCAPE: dismisses IME window safely without triggering Activity.onBackPressed
+    await adb.fastShell(deviceId, 'input keyevent 111').catch(() => {});
+    await sleep(500);
+    const still = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
+    if (/=true/.test(still)) {
+      await adb.back(deviceId).catch(() => {});
+    }
     await sleep(600);
   }
 }

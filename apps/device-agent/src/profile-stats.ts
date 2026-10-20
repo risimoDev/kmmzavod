@@ -167,7 +167,7 @@ export function parseProfileDump(xml: string, screenW: number, screenH: number):
 // ── Device flow ───────────────────────────────────────────────────────────────
 
 async function dump(adb: AdbClient, deviceId: string): Promise<string> {
-  await adb.shell(deviceId, 'uiautomator dump /sdcard/kmm_ui.xml', 25_000);
+  await adb.shell(deviceId, 'uiautomator dump --compressed /sdcard/kmm_ui.xml >/dev/null 2>&1 || uiautomator dump /sdcard/kmm_ui.xml', 25_000);
   return adb.shell(deviceId, 'cat /sdcard/kmm_ui.xml', 15_000);
 }
 
@@ -180,9 +180,27 @@ export async function openProfile(
     await adb.openUrl(deviceId, `instagram://user?username=${user}`, targetPkg || 'com.instagram.android')
       .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
   } else {
-    const scheme = targetPkg?.includes('trill') ? 'snssdk1180' : 'snssdk1233';
-    await adb.openUrl(deviceId, `${scheme}://user/profile/${user}`, targetPkg)
-      .catch(() => adb.openUrl(deviceId, `https://www.tiktok.com/@${user}`, targetPkg));
+    const pkg = targetPkg || 'com.zhiliaoapp.musically';
+    await adb.fastShell(deviceId, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`).catch(() => {});
+    await new Promise((r) => setTimeout(r, 2000));
+    const xml = await adb.fastShell(deviceId, 'uiautomator dump --compressed /sdcard/kmm_ui.xml >/dev/null 2>&1; cat /sdcard/kmm_ui.xml; rm -f /sdcard/kmm_ui.xml', 15_000).catch(() => '');
+    if (xml) {
+      const nodes = parseUiTree(xml);
+      const profileTab = nodes.find((n) =>
+        /^(profile|профиль|я)$/i.test(n.desc.trim()) ||
+        /^(profile|профиль|я)$/i.test(n.text.trim()) ||
+        /profile_tab|navigation_profile/i.test(n.resId)
+      );
+      if (profileTab) {
+        const [x1, y1, x2, y2] = profileTab.bounds;
+        await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
+        return;
+      }
+    }
+    const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+    await adb.tap(deviceId, Math.round(width * 0.9), Math.round(height * 0.96));
+
+
   }
 }
 

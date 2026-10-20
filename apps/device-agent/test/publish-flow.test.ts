@@ -116,6 +116,32 @@ const ttConfirm = screen(TT, el({ text: 'Post video?', b: [60, 900, 1020, 1000] 
 a = decide('tiktok', ttConfirm, st({ shareTapped: true }), true);
 ok(a.kind === 'tap' && !a.marks, 'TikTok confirm → Post now');
 
+const ttShareSheet = screen(TT,
+  el({ text: 'Поделиться', b: [40, 1500, 600, 1560] }),
+  button('Чаты', [40, 1600, 1040, 1700]),
+  button('Опубликовать в ленту', [40, 1720, 1040, 1820]));
+a = decide('tiktok', ttShareSheet, st(), true);
+
+ok(a.kind === 'tap' && a.marks === 'target' && /Опубликовать в ленту/.test(a.el.text || ''), `TikTok share sheet → tap Feed target (${a.kind})`);
+
+const ttPostNow = screen(TT,
+  el({ id: 'com.zhiliaoapp.musically:id/desc', cls: 'android.widget.EditText', text: 'Добавьте описание...', click: true, b: [40, 300, 800, 600] }),
+  button('Опубликовать сейчас', [560, 2200, 1040, 2320]));
+a = decide('tiktok', ttPostNow, st({ captionDone: true }), true);
+ok(a.kind === 'tap' && a.marks === 'share', 'TikTok post screen → Опубликовать сейчас');
+
+const ttPreConfirm = screen(TT,
+  el({ text: 'Проверка авторских прав на звук', b: [60, 900, 1020, 1000] }),
+  button('Всё равно опубликовать', [60, 1100, 1020, 1200]));
+a = decide('tiktok', ttPreConfirm, st(), true);
+ok(a.kind === 'tap' && !a.marks && /Всё равно опубликовать/.test(a.el.text || ''), 'TikTok pre-confirm → Всё равно опубликовать');
+
+const ttHomeAfterShare = screen(TT,
+  el({ text: 'Главная', b: [50, 2300, 200, 2380] }),
+  el({ text: 'Профиль', b: [850, 2300, 1000, 2380] }));
+a = decide('tiktok', ttHomeAfterShare, st({ shareTapped: true }), true);
+ok(a.kind === 'success', 'TikTok after share: return to home/profile bottom nav → success');
+
 // ── Profile verification ─────────────────────────────────────────────────────
 ok(isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 13, tiles: [] }), 'IG: posts 12 → 13 = new post');
 ok(!isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 12, tiles: [] }), 'IG: posts unchanged = not posted');
