@@ -50,8 +50,9 @@ const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликоват�
 const TT_OTHER_TARGETS = /^(chats|чаты|друзья|friends|direct|сообщения|messages)$/i;
 const IG_SHARE = /^(share|поделиться|опубликовать)$/i;
 const IG_SHARE_ID = /share_button|(^|_)share$/i;
-const TT_POST = /^(post(\s+now|\s+video)?|опубликовать(\s+сейчас|\s+видео)?)$/i;
-const TT_POST_ID = /publish|post_button|(^|_)post(_layout|_btn|_view|_title)?$/i;
+const TT_POST = /(?:^|\b|\W)(post(\s+now|\s+video)?|опубликовать(\s+сейчас|\s+видео)?|publish)(?:$|\b|\W)/i;
+const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
+const TT_POST_ID = /publish|post_button|(^|_)post(_layout|_btn|_view|_title|_action)?$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|inbox|входящие|profile|профиль|я)$/i;
 
@@ -65,6 +66,32 @@ const IN_PROGRESS = /\b(posting|uploading|sharing|processing)\b|публикуе
 const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео загружено|^загружено$|публикация завершена/i;
 
 // ── Decision ──────────────────────────────────────────────────────────────────
+
+/**
+ * Locate the final Share/Post button in the lower half of the screen.
+ * TikTok headers often have static title text "Post" at the top of the screen —
+ * restricting candidates to the bottom half (y >= maxY * 0.45) prevents tapping the title.
+ */
+export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | undefined {
+  const maxY = Math.max(...s.els.map((e) => e.bounds[3]), 1000);
+  const bottomHalfMinY = maxY * 0.45;
+
+  const matchEl = (e: UiEl, labelRe: RegExp, idRe: RegExp): boolean => {
+    if (!isVisible(e) || !e.enabled) return false;
+    const txt = `${e.text} ${e.desc}`.trim();
+    if (TT_POST_EXCLUDE.test(txt)) return false;
+    const resId = e.resId.replace(/^.*:id\//, '');
+    return labelRe.test(txt) || idRe.test(resId);
+  };
+
+  if (platform === 'instagram') {
+    return s.els.slice().reverse().find((e) => e.bounds[1] >= bottomHalfMinY && matchEl(e, IG_SHARE, IG_SHARE_ID))
+      ?? s.els.slice().reverse().find((e) => matchEl(e, IG_SHARE, IG_SHARE_ID));
+  }
+
+  // TikTok: strictly in the lower half of the screen, bottom-most first
+  return s.els.slice().reverse().find((e) => e.bounds[1] >= bottomHalfMinY && matchEl(e, TT_POST, TT_POST_ID));
+}
 
 function captionField(s: UiScreen): UiEl | undefined {
   const fields = editTexts(s);

@@ -168,7 +168,7 @@ function userPrompt(b: ScriptBrief, words: number, captions: number): string {
   if (b.avoidHooks?.length) {
     lines.push(`НЕ повторяй и не перефразируй близко эти уже использованные хуки:\n- ${b.avoidHooks.slice(0, 12).join('\n- ')}`);
   }
-  lines.push(`Подписей к посту (captions): ровно ${captions}, все разные по формулировке и хэштегам (3–6 хэштегов).`);
+  lines.push(`Подписей к посту (captions): ровно ${captions}, все разные по формулировке и хэштегам (3–6 хэштегов). Если в фактах о товаре указан артикул (WB/Ozon) или код — обязательно укажи его в каждой подписи к посту (например «Артикул: …»).`);
   return lines.filter(Boolean).join('\n');
 }
 

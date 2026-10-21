@@ -164,7 +164,7 @@ export function createDistributeWorker(deps: Deps): Worker {
         // Advance next available slot for this account by 3 hours
         accountNextAvailableMs.set(item.socialAccount.id, effectiveTimeMs + 3 * 3600 * 1000);
 
-        // Precedence: explicit manual assignment caption -> AI auto-generated caption -> template fallback
+        // Precedence: explicit manual assignment caption -> template with AI caption -> AI auto-generated caption
         const autoCaption = item.uniqueVariant.generatedCaption;
         const autoHashtags = item.uniqueVariant.generatedHashtags;
 
@@ -174,25 +174,40 @@ export function createDistributeWorker(deps: Deps): Worker {
               ? autoHashtags
               : (Array.isArray(distJob.hashtags) ? distJob.hashtags : []));
 
-        const hashtagStr = resolvedHashtags.map((h: string) => (h.startsWith('#') ? h : `#${h}`)).join(' ');
+        // Deduplicate and ensure clean single '#' prefix
+        const cleanHashtags = [...new Set(
+          resolvedHashtags
+            .map((h: string) => String(h).trim().replace(/^#+/, ''))
+            .filter(Boolean)
+            .map((h: string) => `#${h}`)
+        )];
+        const hashtagStr = cleanHashtags.join(' ');
 
         let caption: string;
         if (item.caption && item.caption.trim()) {
-          caption = hashtagStr && !item.caption.includes('#')
-            ? `${item.caption.trim()}\n\n${hashtagStr}`
-            : item.caption.trim();
+          caption = item.caption.trim();
+        } else if (distJob.captionTemplate && distJob.captionTemplate.trim()) {
+          let templated = distJob.captionTemplate.trim();
+          if (/\{\{?caption\}?}/i.test(templated)) {
+            templated = templated.replace(/\{\{?caption\}?}/gi, autoCaption?.trim() || '');
+          } else if (autoCaption && autoCaption.trim()) {
+            templated = `${autoCaption.trim()}\n\n${templated}`;
+          }
+          caption = templated;
         } else if (autoCaption && autoCaption.trim()) {
-          caption = hashtagStr
-            ? `${autoCaption.trim()}\n\n${hashtagStr}`
-            : autoCaption.trim();
+          caption = autoCaption.trim();
         } else {
           caption = buildCaption(
             distJob.captionTemplate,
             item.caption,
-            resolvedHashtags,
+            cleanHashtags,
             itemIndex,
             item.socialAccount.platform,
           );
+        }
+
+        if (hashtagStr && !caption.includes('#')) {
+          caption = `${caption}\n\n${hashtagStr}`;
         }
 
         // Create PublishJob

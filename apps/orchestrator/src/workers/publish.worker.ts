@@ -650,9 +650,14 @@ export function createPublishWorker(deps: Deps): Worker {
 function buildCaption(caption: string | null, hashtags: string[]): string {
   const parts: string[] = [];
   if (caption) parts.push(caption);
-  if (hashtags.length > 0) {
-    const tags = hashtags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(' ');
-    parts.push(tags);
+  if (hashtags && hashtags.length > 0) {
+    const missing = hashtags
+      .map((t) => t.replace(/^#+/, '').trim())
+      .filter((t) => Boolean(t) && !caption?.toLowerCase().includes(`#${t.toLowerCase()}`))
+      .map((t) => `#${t}`);
+    if (missing.length > 0) {
+      parts.push(missing.join(' '));
+    }
   }
   return parts.join('\n\n');
 }
