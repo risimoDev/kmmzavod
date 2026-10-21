@@ -134,7 +134,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
     await adb.fastShell(
       deviceId,
-      `am start -a android.intent.action.SEND -t video/mp4 --eu android.intent.extra.STREAM ${streamUri} --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`,
+      `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`,
     );
     await sleep(3500);
 
@@ -181,7 +181,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           continue;
         }
         unknown++;
-        if (st.captionDone && !st.shareTapped && unknown >= 3) {
+        if (st.captionDone && !st.shareTapped && unknown >= 1) {
           const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
           await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.75), Math.round(width / 2), Math.round(height * 0.35), 300).catch(() => {});
           await sleep(1000);
@@ -203,7 +203,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let lastActivity = Date.now();
     const uploadDeadline = Date.now() + UPLOAD_TIMEOUT_MS;
     while (Date.now() < uploadDeadline && Date.now() - lastActivity < UPLOAD_QUIET_MS) {
-      await sleep(4000);
+      await sleep(3000);
+      const top = await adb.fastShell(deviceId, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp"').catch(() => "");
+      if (/MainActivity|MainTabActivity|TabActivity/i.test(top) && !/publish|edit|compose|record/i.test(top)) {
+        logger.info({ deviceId, platform, top }, "publish: detected return to MainActivity after share");
+        appConfirmed = true;
+        break;
+      }
       const screen = await dumpScreen(adb, deviceId, 1);
       if (!screen) continue;
       const action = decide(flowPlatform, screen, st, !!caption);
@@ -283,8 +289,9 @@ async function pickShareComponent(adb: AdbClient, deviceId: string, pkg: string,
   const escaped = pkg.replace(/\./g, '\\.');
   const comps = [...out.matchAll(new RegExp(`(${escaped}/[\\w.$]+)`, 'g'))].map((m) => m[1]);
   const usable = comps.filter((c) => !/story|direct|thread|chat|im\b|friend|message/i.test(c.split('/')[1]));
+  // Only Instagram needs an explicit component because it separates Reels/Stories/Feed.
   if (platform === 'instagram') return usable.find((c) => /reel|clips/i.test(c)) ?? null;
-  return usable[0] ?? null;
+  return null;
 }
 
 /** The caption field now shows (the start of) the caption. */
@@ -300,7 +307,7 @@ async function hideKeyboard(adb: AdbClient, deviceId: string): Promise<void> {
   const ime = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
   if (/=true/.test(ime)) {
     // 111 = KEYCODE_ESCAPE: dismisses IME window safely without triggering Activity.onBackPressed
-    await adb.fastShell(deviceId, 'input keyevent 111').catch(() => {});
+    await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
     await sleep(500);
     const still = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
     if (/=true/.test(still)) {
