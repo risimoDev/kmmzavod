@@ -2266,6 +2266,8 @@ export interface AutopilotInput {
   smartCrop: boolean;
   bgmKeys: string[];
   productInfo?: string | null;
+  /** WB/Ozon article — always added to the post description ("Артикул: …" + #hashtag). */
+  productArticle?: string | null;
   scriptStyles: string[];
   ctaType: 'article' | 'direct' | 'auto';
   directWord?: string | null;

@@ -24,7 +24,7 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
-import { decide, initialFlowState, isNewPostOnProfile, type FlowPlatform } from './publish-flow';
+import { decide, initialFlowState, isComposeScreen, isNewPostOnProfile, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, type ProfileSnapshot } from './profile-stats';
 import { dumpScreen, editTexts, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
 
@@ -62,6 +62,8 @@ const UPLOAD_QUIET_MS = 60_000;
 /** Consecutive unrecognised screens before giving up (≈ 2 s apart). */
 const UNKNOWN_SCREEN_LIMIT = 8;
 const PROFILE_CHECKS = 3;
+/** Taps on the final Share/Post button before concluding it does not react. */
+const SHARE_TAP_ATTEMPTS = 3;
 const PROFILE_CHECK_GAP_MS = 20_000;
 const MEDIA_URI = 'content://media/external/video/media';
 
@@ -94,14 +96,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 1. Download on the host PC (wired link, no mobile-proxy traffic)
     logger.info({ deviceId, platform }, 'publish: downloading video on host PC');
-    const response = await axios({ method: 'GET', url: videoUrl, responseType: 'stream', timeout: 120_000 });
-    await new Promise<void>((resolve, reject) => {
-      const writer = fs.createWriteStream(localFilePath);
-      response.data.on('error', reject);
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-      response.data.pipe(writer);
-    });
+    await downloadWithRetry(videoUrl, localFilePath, logger);
 
     // 2. Push into the gallery and index it
     stage = 'push';
@@ -121,9 +116,11 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     }
     const pkg = resolved.packageName;
 
+    // Instagram opens the profile by username (deep link); TikTok via its own "Profile" tab.
+    const canReadProfile = flowPlatform === 'tiktok' || Boolean(username);
     let baseline: ProfileSnapshot | null = null;
-    if (username) {
-      baseline = await snapshotProfile(adb, deviceId, flowPlatform, username, pkg).catch(() => null);
+    if (canReadProfile) {
+      baseline = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
       if (!baseline?.onProfile) {
         logger.warn({ deviceId, username }, 'publish: own profile not readable before posting — verification falls back to the app');
         baseline = null;
@@ -197,6 +194,25 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
       await sleep(2000);
     }
 
+    // 5b. The tap must have left the compose screen. A tap that landed on a label, or was
+    // swallowed by an animation, leaves the video unposted with the button still there.
+    for (let attempt = 1; ; attempt++) {
+      await sleep(3000);
+      const screen = await dumpScreen(adb, deviceId, 2);
+      if (!screen || !isComposeScreen(flowPlatform, screen)) break;
+      if (attempt >= SHARE_TAP_ATTEMPTS) {
+        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_post_button`, screen.xml).catch(() => undefined);
+        return result({
+          ok: false, retryable: false, debugSnapshot: snap, captionTyped,
+          detail: `Кнопка публикации нажата ${attempt} раза, но экран публикации не закрылся — проверьте телефон`,
+        });
+      }
+      const action = decide(flowPlatform, screen, { ...st, shareTapped: false }, false);
+      if (action.kind !== 'tap' || action.marks !== 'share') break;
+      logger.warn({ deviceId, platform, attempt }, 'publish: still on the compose screen after Share/Post — tapping again');
+      await tapEl(adb, deviceId, action.el);
+    }
+
     // 6. Upload: wait for the app's confirmation / the progress to finish
     stage = 'upload';
     let appConfirmed = false;
@@ -225,9 +241,9 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     // 7. Verify on the profile
     stage = 'verify';
     let profileVerified: boolean | null = null;
-    if (username && baseline) {
+    if (baseline) {
       for (let i = 0; i < PROFILE_CHECKS; i++) {
-        const after = await snapshotProfile(adb, deviceId, flowPlatform, username, pkg).catch(() => null);
+        const after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
         if (after?.onProfile && isNewPostOnProfile(baseline, after)) { profileVerified = true; break; }
         profileVerified = false;
         if (i < PROFILE_CHECKS - 1) await sleep(PROFILE_CHECK_GAP_MS);
@@ -243,7 +259,9 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
         detail: profileVerified === false
           ? 'Пост не появился на профиле после публикации — проверьте вручную (повтор отключён, чтобы не опубликовать дважды)'
-          : 'Приложение не подтвердило публикацию, а профиль проверить нельзя (нет username) — проверьте вручную',
+          : canReadProfile
+            ? 'Приложение не подтвердило публикацию, а профиль не удалось прочитать до публикации — проверьте вручную'
+            : 'Приложение не подтвердило публикацию, а профиль Instagram проверить нельзя (у аккаунта не указан username) — проверьте вручную',
       });
     }
 
@@ -268,6 +286,30 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/** Download to `dest`, retrying transient network errors (ECONNRESET etc.). */
+async function downloadWithRetry(url: string, dest: string, logger: Logger, attempts = 3): Promise<void> {
+  for (let i = 1; ; i++) {
+    try {
+      const response = await axios({ method: 'GET', url, responseType: 'stream', timeout: 120_000 });
+      await new Promise<void>((resolve, reject) => {
+        const writer = fs.createWriteStream(dest);
+        response.data.on('error', reject);
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+        response.data.pipe(writer);
+      });
+      if (fs.statSync(dest).size === 0) throw new Error('downloaded video is empty');
+      return;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status;
+      // 4xx = expired/invalid link: retrying the same URL will not help.
+      if (i >= attempts || (status && status >= 400 && status < 500)) throw err;
+      logger.warn({ attempt: i, err: (err as Error).message }, 'publish: download failed, retrying');
+      await sleep(3000 * i);
+    }
+  }
+}
 
 /** MediaStore _id of the pushed file (needed for a content:// URI). */
 async function resolveMediaId(adb: AdbClient, deviceId: string, fileName: string): Promise<string | null> {

@@ -38,9 +38,14 @@ function deviceUsername(sessionData: string | null, accountName: string): string
   if (sessionData) {
     try { name = (JSON.parse(decrypt(sessionData)) as { username?: unknown }).username; } catch { /* fall back */ }
   }
-  const raw = typeof name === 'string' && name.trim() ? name : accountName;
-  const clean = raw.replace(/^@+/, '').trim();
-  return /^[\w.]{1,60}$/.test(clean) ? clean : undefined;
+  // The login can be an email or phone number — not a profile handle. Use the first
+  // candidate that looks like a username, falling back to accountName.
+  const valid = (v: unknown): string | undefined => {
+    if (typeof v !== 'string') return undefined;
+    const clean = v.replace(/^@+/, '').trim();
+    return /^[\w.]{1,60}$/.test(clean) && !/^\+?\d{6,}$/.test(clean) ? clean : undefined;
+  };
+  return valid(name) ?? valid(accountName);
 }
 
 const logger = rootLogger.child({ worker: 'publish' });

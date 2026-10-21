@@ -34,6 +34,11 @@ const Shape = z.object({
   bgmKeys: z.array(z.string().max(500)).max(50).default([]),
   // AI script + voice
   productInfo: z.string().max(3000).nullish(),
+  // Marketplace article (WB/Ozon), e.g. 123456789 — appended to every post description.
+  productArticle: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().replace(/^#+/, '') : v) || null,
+    z.string().max(40).regex(/^[\p{L}\d_-]+$/u, 'Артикул: только буквы, цифры, «-» и «_»').nullish(),
+  ),
   scriptStyles: z.array(z.enum(SCRIPT_STYLES)).min(1).max(8).default(['blogger']),
   ctaType: z.enum(['article', 'direct', 'auto']).default('article'),
   directWord: z.string().max(50).nullish(),

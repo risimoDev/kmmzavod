@@ -1,4 +1,4 @@
-import { decide, initialFlowState, isNewPostOnProfile, type FlowState } from '../src/publish-flow';
+import { decide, findPostButton, initialFlowState, isComposeScreen, isNewPostOnProfile, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
 import { parsePostsCount } from '../src/profile-stats';
 
@@ -165,6 +165,33 @@ ok(parsePostsCount(header('57'), 1080) === 57, `IG header posts 57 → ${parsePo
 const headerRu = `<?xml version='1.0' ?><hierarchy rotation="0">` +
   el({ cls: 'android.widget.FrameLayout', b: [0, 0, 1080, 2400] }, el({ desc: '1 024\nпубликации', b: [300, 300, 450, 420] })).replace(/PKG/g, IG) + `</hierarchy>`;
 ok(parsePostsCount(headerRu, 1080) === 1024, `IG header (ru, inline) 1 024 публикации → ${parsePostsCount(headerRu, 1080)}`);
+
+// ── Regression: TikTok post screen as on the farm (2026-10-21) ────────────────
+// Header title "Post" at the top and an "Everyone can view this post" row must never be
+// taken for the button; the red "Post" in the bottom bar (next to "Drafts") must.
+const ttPostReal = screen(TT,
+  el({ desc: 'Back', click: true, b: [20, 90, 120, 190] }),
+  el({ text: 'Post', b: [470, 110, 610, 170] }),
+  el({ id: 'com.zhiliaoapp.musically:id/desc', cls: 'android.widget.EditText', click: true, b: [40, 230, 760, 640],
+    text: 'Создайте волшебные волны с этой плойкой!\nНажимай на хештег и копируй артикул для вб\n#волны #укладка' }),
+  el({ text: 'Select cover', click: true, b: [800, 230, 1040, 640] }),
+  el({ text: '# Hashtags', click: true, b: [40, 680, 300, 740] }),
+  el({ text: '@ Friends', click: true, b: [320, 680, 560, 740] }),
+  el({ cls: 'android.widget.LinearLayout', click: true, b: [0, 900, 1080, 1000] },
+    el({ text: 'Everyone can view this post', b: [120, 920, 900, 980] })),
+  el({ text: 'More options', click: true, b: [120, 1040, 900, 1100] }),
+  el({ cls: 'android.widget.LinearLayout', click: true, b: [40, 2180, 520, 2300] }, el({ text: 'Drafts', b: [200, 2210, 360, 2270] })),
+  el({ cls: 'android.widget.LinearLayout', click: true, b: [560, 2180, 1040, 2300] }, el({ text: 'Post', b: [740, 2210, 860, 2270] })));
+const fpb = findPostButton(ttPostReal, 'tiktok');
+ok(!!fpb && fpb.bounds[1] > 2000 && fpb.text === 'Post', `TikTok: bottom "Post" picked, not the header (${fpb?.text}@${fpb?.bounds[1]})`);
+a = decide('tiktok', ttPostReal, st({ captionDone: true }), true);
+ok(a.kind === 'tap' && a.marks === 'share' && a.el.bounds[1] > 2000, `TikTok real screen, caption typed → tap bottom Post (${a.kind} @${a.kind === 'tap' ? a.el.bounds[1] : '-'})`);
+ok(isComposeScreen('tiktok', ttPostReal), 'TikTok real screen recognised as compose screen');
+const ttHeaderOnly = screen(TT, el({ text: 'Post', b: [470, 110, 610, 170] }),
+  el({ id: 'com.zhiliaoapp.musically:id/desc', cls: 'android.widget.EditText', click: true, b: [40, 230, 760, 640], text: 'x' }));
+ok(!findPostButton(ttHeaderOnly, 'tiktok'), 'TikTok: header "Post" alone is never the button');
+const ttFeedAfter = screen(TT, el({ text: 'Home', click: true, b: [0, 2250, 200, 2350] }), el({ text: 'Profile', click: true, b: [880, 2250, 1080, 2350] }));
+ok(!isComposeScreen('tiktok', ttFeedAfter), 'TikTok feed after posting is not a compose screen');
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exitCode = failed ? 1 : 0;

@@ -340,6 +340,7 @@ function toInput(ap: AutopilotDetail["autopilot"]): Partial<AutopilotInput> {
     smartCrop: ap.smartCrop,
     bgmKeys: ap.bgmKeys,
     productInfo: ap.productInfo ?? "",
+    productArticle: ap.productArticle ?? "",
     scriptStyles: ap.scriptStyles,
     ctaType: ap.ctaType,
     directWord: ap.directWord ?? "",

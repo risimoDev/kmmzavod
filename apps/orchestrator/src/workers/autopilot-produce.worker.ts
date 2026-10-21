@@ -22,6 +22,7 @@ import {
 } from '@kmmzavod/ai';
 import { getLlm, getFishConfig, getPaceTable, recordPace } from '../lib/ai';
 import { journal, failBatch } from '../autopilot/journal';
+import { withArticle } from '../lib/article';
 
 const logger = rootLogger.child({ worker: 'autopilot-produce' });
 
@@ -146,7 +147,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
         // instead of publishing a generic script to the farm.
         const script = await writeScript(await getLlm(), {
           product: ap.project.name,
-          productInfo: ap.productInfo ?? ap.project.description ?? undefined,
+          productInfo: withArticle(ap.productInfo ?? ap.project.description ?? undefined, ap.productArticle),
           style,
           seconds: ap.targetSeconds,
           wps: paceFor(paceTable, voiceId, speed),

@@ -50,9 +50,14 @@ const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликоват�
 const TT_OTHER_TARGETS = /^(chats|чаты|друзья|friends|direct|сообщения|messages)$/i;
 const IG_SHARE = /^(share|поделиться|опубликовать)$/i;
 const IG_SHARE_ID = /share_button|(^|_)share$/i;
-const TT_POST = /(?:^|\b|\W)(post(\s+now|\s+video)?|опубликовать(\s+сейчас|\s+видео)?|publish)(?:$|\b|\W)/i;
+/**
+ * The final button's WHOLE label. Never a substring match: the TikTok post screen also has
+ * a "Post" title in its header and a "Everyone can view this post" privacy row — tapping
+ * either of those leaves the video unposted.
+ */
+const TT_POST = /^(post|post now|post video|опубликовать|опубликовать сейчас|опубликовать видео|publish)$/i;
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
-const TT_POST_ID = /publish|post_button|(^|_)post(_layout|_btn|_view|_title|_action)?$/i;
+const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|(^|_)publish$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|inbox|входящие|profile|профиль|я)$/i;
 
@@ -68,29 +73,31 @@ const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео �
 // ── Decision ──────────────────────────────────────────────────────────────────
 
 /**
- * Locate the final Share/Post button in the lower half of the screen.
- * TikTok headers often have static title text "Post" at the top of the screen —
- * restricting candidates to the bottom half (y >= maxY * 0.45) prevents tapping the title.
+ * The final Share/Post button: an element whose whole label (or resource-id) says so,
+ * in the lower part of the screen, the bottom-most one. Headers ("Post" title) and rows
+ * like "Everyone can view this post" are never candidates; "Drafts"/"Story" are excluded.
  */
 export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | undefined {
-  const maxY = Math.max(...s.els.map((e) => e.bounds[3]), 1000);
-  const bottomHalfMinY = maxY * 0.45;
-
-  const matchEl = (e: UiEl, labelRe: RegExp, idRe: RegExp): boolean => {
+  const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
+  const labelRe = platform === 'instagram' ? IG_SHARE : TT_POST;
+  const idRe = platform === 'instagram' ? IG_SHARE_ID : TT_POST_ID;
+  const candidates = s.els.filter((e) => {
     if (!isVisible(e) || !e.enabled) return false;
-    const txt = `${e.text} ${e.desc}`.trim();
-    if (TT_POST_EXCLUDE.test(txt)) return false;
-    const resId = e.resId.replace(/^.*:id\//, '');
-    return labelRe.test(txt) || idRe.test(resId);
-  };
+    const text = e.text.trim();
+    const desc = e.desc.trim();
+    if (TT_POST_EXCLUDE.test(`${text} ${desc}`)) return false;
+    return labelRe.test(text) || labelRe.test(desc) || idRe.test(e.resId.replace(/^.*:id\//, ''));
+  });
+  // TikTok keeps Post in a bottom bar; Instagram's Share also sits at the bottom on new
+  // versions but in the top bar on old ones → bottom half preferred, top accepted for IG.
+  const lower = candidates.filter((e) => e.bounds[1] >= screenH * 0.5);
+  const pool = lower.length ? lower : platform === 'instagram' ? candidates : [];
+  return pool.sort((a, b) => b.bounds[1] - a.bounds[1])[0];
+}
 
-  if (platform === 'instagram') {
-    return s.els.slice().reverse().find((e) => e.bounds[1] >= bottomHalfMinY && matchEl(e, IG_SHARE, IG_SHARE_ID))
-      ?? s.els.slice().reverse().find((e) => matchEl(e, IG_SHARE, IG_SHARE_ID));
-  }
-
-  // TikTok: strictly in the lower half of the screen, bottom-most first
-  return s.els.slice().reverse().find((e) => e.bounds[1] >= bottomHalfMinY && matchEl(e, TT_POST, TT_POST_ID));
+/** Still on the final compose screen (caption field + Share/Post button visible)? */
+export function isComposeScreen(platform: FlowPlatform, s: UiScreen): boolean {
+  return Boolean(findPostButton(s, platform) && captionField(s));
 }
 
 function captionField(s: UiScreen): UiEl | undefined {
@@ -139,9 +146,7 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
   }
 
   // Final screen: caption field + Share/Post button.
-  const finalBtn = platform === 'instagram'
-    ? byLabel(s, IG_SHARE) ?? byResId(s, IG_SHARE_ID)
-    : byLabel(s, TT_POST) ?? byResId(s, TT_POST_ID);
+  const finalBtn = findPostButton(s, platform);
   const field = captionField(s);
   if (finalBtn && field) {
     if (hasCaption && !st.captionDone) return { kind: 'caption', el: field };

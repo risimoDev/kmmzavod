@@ -10,6 +10,7 @@ import { Worker, Queue, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type DistributeJobPayload, type PublishJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
+import { ensureArticleInCaption } from '../lib/article';
 
 const logger = rootLogger.child({ worker: 'distribute' });
 
@@ -60,6 +61,11 @@ export function createDistributeWorker(deps: Deps): Worker {
         where: { id: distributeJobId },
         data: { status: 'distributing' },
       });
+
+      // Autopilot posts always carry the product article in the description.
+      const productArticle = distJob.autopilotId
+        ? (await db.autopilot.findUnique({ where: { id: distJob.autopilotId }, select: { productArticle: true } }))?.productArticle ?? null
+        : null;
 
       const staggerMs = distJob.staggerMinutes * 60 * 1000;
       let itemIndex = 0;
@@ -209,6 +215,7 @@ export function createDistributeWorker(deps: Deps): Worker {
         if (hashtagStr && !caption.includes('#')) {
           caption = `${caption}\n\n${hashtagStr}`;
         }
+        caption = ensureArticleInCaption(caption, productArticle);
 
         // Create PublishJob
         const publishJob = await db.publishJob.create({

@@ -1530,6 +1530,8 @@ model Autopilot {
   bgmKeys             String[]         @default([]) @map("bgm_keys")
   // ── AI-сценарий + озвучка ─────────────────────────────────────────────
   productInfo         String?          @map("product_info") @db.Text
+  // Артикул товара (WB/Ozon): всегда дописывается в описание поста строкой «Артикул: …» и хэштегом
+  productArticle      String?          @map("product_article")
   scriptStyles        String[]         @default(["blogger"]) @map("script_styles") // ротация стилей подачи
   ctaType             String           @default("article") @map("cta_type") // article | direct | auto
   directWord          String?          @map("direct_word")

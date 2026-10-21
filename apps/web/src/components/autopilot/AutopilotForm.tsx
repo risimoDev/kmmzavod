@@ -70,6 +70,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotInput = {
   smartCrop: true,
   bgmKeys: [],
   productInfo: "",
+  productArticle: "",
   scriptStyles: ["blogger", "story", "hype"],
   ctaType: "article",
   directWord: "ХОЧУ",
@@ -375,6 +376,11 @@ export function AutopilotForm({
             <textarea rows={3} className={cn(inputCls, "resize-none")} value={v.productInfo ?? ""}
               onChange={(e) => set("productInfo", e.target.value)}
               placeholder="Беспроводная плойка: локоны за 5 минут, керамика не портит волосы, заряда на неделю…" />
+          </Field>
+          <Field label="Артикул товара (WB / Ozon)" hint="добавляется в описание каждого поста: «Артикул: …» и #хэштег">
+            <input className={cn(inputCls, "font-mono")} value={v.productArticle ?? ""} inputMode="text"
+              onChange={(e) => set("productArticle", e.target.value.replace(/^#+/, "").replace(/\s+/g, ""))}
+              placeholder="например 123456789" />
           </Field>
 
           <Field label="Подачи (чередуются от ролика к ролику)">
