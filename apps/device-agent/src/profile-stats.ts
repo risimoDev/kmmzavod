@@ -187,9 +187,9 @@ export async function openProfile(
     if (xml) {
       const nodes = parseUiTree(xml);
       const profileTab = nodes.find((n) =>
-        /^(profile|профиль|я)$/i.test(n.desc.trim()) ||
-        /^(profile|профиль|я)$/i.test(n.text.trim()) ||
-        /profile_tab|navigation_profile/i.test(n.resId)
+        /^(profile|профиль|я|me)$/i.test(n.desc.trim()) ||
+        /^(profile|профиль|я|me)$/i.test(n.text.trim()) ||
+        /profile_tab|navigation_profile|tab_me|me_tab/i.test(n.resId)
       );
       if (profileTab) {
         const [x1, y1, x2, y2] = profileTab.bounds;

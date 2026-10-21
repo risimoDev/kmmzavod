@@ -22,6 +22,7 @@ import { PostBridgeClient } from '../clients/social/postbridge.client';
 import { YouTubeClient } from '../clients/social/youtube.client';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
+import { normalizeCaption } from '../lib/caption';
 import { getRedisConnection } from '../lib/redis';
 import type Redis from 'ioredis';
 import { publisherService, describePublisherError } from '../services/publisher';
@@ -664,5 +665,5 @@ function buildCaption(caption: string | null, hashtags: string[]): string {
       parts.push(missing.join(' '));
     }
   }
-  return parts.join('\n\n');
+  return normalizeCaption(parts.join('\n\n'));
 }

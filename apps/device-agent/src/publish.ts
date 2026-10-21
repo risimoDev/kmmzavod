@@ -197,8 +197,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     // 5b. The tap must have left the compose screen. A tap that landed on a label, or was
     // swallowed by an animation, leaves the video unposted with the button still there.
     for (let attempt = 1; ; attempt++) {
+      await sleep(5000);
+      let screen = await dumpScreen(adb, deviceId, 2);
+      if (!screen || !isComposeScreen(flowPlatform, screen)) break;
+      // Slow phones can need a few more seconds to react to the first tap — look again
+      // before tapping a second time, so a slow transition never turns into a double post.
       await sleep(3000);
-      const screen = await dumpScreen(adb, deviceId, 2);
+      screen = await dumpScreen(adb, deviceId, 2);
       if (!screen || !isComposeScreen(flowPlatform, screen)) break;
       if (attempt >= SHARE_TAP_ATTEMPTS) {
         const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_post_button`, screen.xml).catch(() => undefined);
@@ -249,12 +254,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         if (i < PROFILE_CHECKS - 1) await sleep(PROFILE_CHECK_GAP_MS);
       }
     }
-    await adb.home(deviceId).catch(() => {});
-
     const verified = { app: appConfirmed, profile: profileVerified };
     const confirmed = profileVerified === true || appConfirmed === true;
     if (!confirmed) {
-      const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`).catch(() => undefined);
+      // Capture the screen the app is on now — before leaving it.
+      const unconfirmedScreen = await dumpScreen(adb, deviceId, 1);
+      const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`, unconfirmedScreen?.xml).catch(() => undefined);
+      await adb.home(deviceId).catch(() => {});
       return result({
         ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
         detail: profileVerified === false
@@ -265,6 +271,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
       });
     }
 
+    await adb.home(deviceId).catch(() => {});
     stage = 'done';
     posted = 'yes';
     logger.info({ deviceId, platform, verified, captionTyped }, 'publish: post confirmed');
@@ -276,7 +283,8 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     });
   } catch (err) {
     logger.error({ deviceId, platform, stage, err: (err as Error).message }, 'publish: failed');
-    const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_exception`).catch(() => undefined);
+    const errScreen = await dumpScreen(adb, deviceId, 1).catch(() => null);
+    const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_exception`, errScreen?.xml).catch(() => undefined);
     return result({ ok: false, retryable: posted === 'no', debugSnapshot: snap, detail: `Ошибка публикации через ADB (${stage}): ${(err as Error).message}` });
   } finally {
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }

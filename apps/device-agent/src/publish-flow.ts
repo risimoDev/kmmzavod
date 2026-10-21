@@ -59,7 +59,7 @@ const TT_POST = /^(post|post now|post video|опубликовать|опубл�
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
 const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|(^|_)publish$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить)$/i;
-const TT_HOME_NAV = /^(home|главная|friends|друзья|inbox|входящие|profile|профиль|я)$/i;
+const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|интересное|inbox|входящие|profile|профиль|я|me)$/i;
 
 const CAPTION_FIELD_ID = /caption|desc|title/i;
 const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag/i;

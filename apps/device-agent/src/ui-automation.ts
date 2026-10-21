@@ -128,8 +128,14 @@ export async function dumpScreen(adb: AdbClient, deviceId: string, attempts = 3)
   return null;
 }
 
+/**
+ * Tap the element itself (its own centre). A touch inside a label reaches its clickable
+ * parent anyway, whereas the centre of that parent can be far away when the parent is a
+ * large container (a bottom panel, the whole page) — a tap that misses the button.
+ * The clickable ancestor is used only when the element has no size of its own.
+ */
 export async function tapEl(adb: AdbClient, deviceId: string, el: UiEl): Promise<void> {
-  const { x, y } = center(clickTarget(el));
+  const { x, y } = center(isVisible(el) ? el : clickTarget(el));
   await adb.tap(deviceId, x, y);
 }
 
