@@ -230,10 +230,11 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     await adb.home(deviceId).catch(() => {});
 
     const verified = { app: appConfirmed, profile: profileVerified };
-    const confirmed = profileVerified === true || (profileVerified === null && appConfirmed);
+    const confirmed = profileVerified === true || appConfirmed === true;
     if (!confirmed) {
+      const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`).catch(() => undefined);
       return result({
-        ok: false, retryable: false, verified, captionTyped,
+        ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
         detail: profileVerified === false
           ? 'Пост не появился на профиле после публикации — проверьте вручную (повтор отключён, чтобы не опубликовать дважды)'
           : 'Приложение не подтвердило публикацию, а профиль проверить нельзя (нет username) — проверьте вручную',
@@ -245,7 +246,9 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     logger.info({ deviceId, platform, verified, captionTyped }, 'publish: post confirmed');
     return result({
       ok: true, retryable: false, verified, captionTyped,
-      ...(captionTyped ? {} : { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' }),
+      ...(profileVerified === false && appConfirmed
+        ? { detail: 'Пост опубликован (выгрузка подтверждена приложением, появление в профиле ожидается)' }
+        : (!captionTyped ? { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' } : {})),
     });
   } catch (err) {
     logger.error({ deviceId, platform, stage, err: (err as Error).message }, 'publish: failed');

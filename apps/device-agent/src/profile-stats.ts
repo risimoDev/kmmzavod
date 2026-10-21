@@ -218,6 +218,11 @@ export async function snapshotProfile(
 ): Promise<ProfileSnapshot> {
   const { width, height } = await adb.getScreenSize(deviceId);
   await openProfile(adb, deviceId, platform, username, targetPkg);
+  if (platform === 'tiktok') {
+    // Swipe down to refresh TikTok profile grid (otherwise cached view without new post is read)
+    await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.35), Math.round(width / 2), Math.round(height * 0.75), 400).catch(() => {});
+    await new Promise((r) => setTimeout(r, 3000));
+  }
   await new Promise((r) => setTimeout(r, 5000));
   const xml = await dump(adb, deviceId).catch(() => '');
   const parsed = parseProfileDump(xml, width, height);
