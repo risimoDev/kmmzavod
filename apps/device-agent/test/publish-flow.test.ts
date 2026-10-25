@@ -1,4 +1,6 @@
-import { decide, findPostButton, initialFlowState, isComposeScreen, isNewPostOnProfile, type FlowState } from '../src/publish-flow';
+import fs from 'node:fs';
+import path from 'node:path';
+import { decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
 import { parsePostsCount } from '../src/profile-stats';
 
@@ -192,6 +194,12 @@ const ttHeaderOnly = screen(TT, el({ text: 'Post', b: [470, 110, 610, 170] }),
 ok(!findPostButton(ttHeaderOnly, 'tiktok'), 'TikTok: header "Post" alone is never the button');
 const ttFeedAfter = screen(TT, el({ text: 'Home', click: true, b: [0, 2250, 200, 2350] }), el({ text: 'Profile', click: true, b: [880, 2250, 1080, 2350] }));
 ok(!isComposeScreen('tiktok', ttFeedAfter), 'TikTok feed after posting is not a compose screen');
+
+// ── Real dump from the farm (TikTok Lite 47.0.3, 2026-10-25): upload stuck at 58%, "Network error"
+const netErr = parseUi(fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-lite-network-error.xml'), 'utf8'));
+ok(isAppOffline(netErr), 'real dump: TikTok Lite "Network error" detected');
+ok(uploadPercent(netErr) === 58, `real dump: upload badge 58% read (${uploadPercent(netErr)})`);
+ok(!isAppOffline(ttPostReal) && uploadPercent(ttPostReal) === null, 'post screen: neither offline nor uploading');
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exitCode = failed ? 1 : 0;

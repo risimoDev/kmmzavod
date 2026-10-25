@@ -68,6 +68,9 @@ const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описа
 const VIDEO_REJECTED = /(video|видео) (is )?(too (short|long)|слишком (коротк|длинн))|unsupported (video|file|format)|неподдерживаем|can.?t (use|import) this video|не удалось импортировать/i;
 const UPLOAD_FAILED = /((couldn.?t|could not|can.?t|unable to) (post|upload|share))|не удалось (опубликовать|загрузить|поделиться|отправить)|upload failed|ошибка (загрузки|публикации)|публикация не удалась/i;
 const IN_PROGRESS = /\b(posting|uploading|sharing|processing)\b|публикуется|загружается|идёт загрузка|идет загрузка|отправка|обработка видео|^публикация\.{0,3}$|\b\d{1,3}\s?%/i;
+/** The app itself says it has no connection (TikTok: "Network error / Please check your network"). */
+const APP_OFFLINE = /network error|check your network|no internet connection|you.?re offline|нет (подключения к интернету|соединения|сети)|ошибка сети|проверьте (подключение|соединение)/i;
+const PERCENT = /^(\d{1,3})\s?%$/;
 const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео загружено|^загружено$|публикация завершена/i;
 
 // ── Decision ──────────────────────────────────────────────────────────────────
@@ -195,6 +198,23 @@ export function isNewPostOnProfile(before: ProfileView, after: ProfileView): boo
   if (!prevNewest || !shifted || !fresh || prevNewest.views == null || shifted.views == null) return false;
   if (shifted.views < prevNewest.views) return false;
   return fresh.views == null || (fresh.views < prevNewest.views && fresh.views <= FRESH_POST_MAX_VIEWS);
+}
+
+/** The app shows its own "no network" message. */
+export function isAppOffline(s: UiScreen): boolean {
+  return screenHas(s, APP_OFFLINE);
+}
+
+/** Upload percentage shown by the app (TikTok's "58%" badge), or null. */
+export function uploadPercent(s: UiScreen): number | null {
+  for (const e of s.els) {
+    const m = PERCENT.exec(e.text.trim()) ?? PERCENT.exec(e.desc.trim());
+    if (m) {
+      const n = Number(m[1]);
+      if (n >= 0 && n <= 100) return n;
+    }
+  }
+  return null;
 }
 
 function decideAfterShare(s: UiScreen): FlowAction {

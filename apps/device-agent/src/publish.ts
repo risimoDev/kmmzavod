@@ -24,7 +24,7 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
-import { decide, initialFlowState, isComposeScreen, isNewPostOnProfile, type FlowPlatform } from './publish-flow';
+import { decide, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, type ProfileSnapshot } from './profile-stats';
 import { dumpScreen, editTexts, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
 
@@ -62,6 +62,8 @@ const UPLOAD_QUIET_MS = 60_000;
 /** Consecutive unrecognised screens before giving up (≈ 2 s apart). */
 const UNKNOWN_SCREEN_LIMIT = 8;
 const PROFILE_CHECKS = 3;
+/** App says "no network" and the upload percentage has not moved for this long → stop waiting. */
+const UPLOAD_STALL_MS = 90_000;
 /** Taps on the final Share/Post button before concluding it does not react. */
 const SHARE_TAP_ATTEMPTS = 3;
 const PROFILE_CHECK_GAP_MS = 20_000;
@@ -125,6 +127,17 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         logger.warn({ deviceId, username }, 'publish: own profile not readable before posting — verification falls back to the app');
         baseline = null;
       }
+    }
+
+    // 3b. The app must have network: with "Network error" the upload would hang mid-way
+    // (seen on the farm: TikTok stuck at 58%). Nothing is posted yet → safe to retry later.
+    const before = await dumpScreen(adb, deviceId, 1);
+    if (before && before.pkg === pkg && isAppOffline(before)) {
+      const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_offline`, before.xml).catch(() => undefined);
+      return result({
+        ok: false, retryable: true, debugSnapshot: snap,
+        detail: 'Приложение на телефоне без сети («Network error») ещё до публикации — проверьте прокси/интернет платы',
+      });
     }
 
     // 4. Share the video into the app
@@ -221,26 +234,48 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     // 6. Upload: wait for the app's confirmation / the progress to finish
     stage = 'upload';
     let appConfirmed = false;
+    let offline = false;
+    let lastPct: number | null = null;
+    let lastPctChange = Date.now();
     let lastActivity = Date.now();
     const uploadDeadline = Date.now() + UPLOAD_TIMEOUT_MS;
     while (Date.now() < uploadDeadline && Date.now() - lastActivity < UPLOAD_QUIET_MS) {
       await sleep(3000);
-      const top = await adb.fastShell(deviceId, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp"').catch(() => "");
-      if (/MainActivity|MainTabActivity|TabActivity/i.test(top) && !/publish|edit|compose|record/i.test(top)) {
-        logger.info({ deviceId, platform, top }, "publish: detected return to MainActivity after share");
-        appConfirmed = true;
+      const screen = await dumpScreen(adb, deviceId, 1);
+      const pct = screen ? uploadPercent(screen) : null;
+      if (screen && isAppOffline(screen)) offline = true;
+      if (pct != null && pct !== lastPct) {
+        lastPct = pct;
+        lastPctChange = Date.now();
+        lastActivity = Date.now();
+      }
+      // "Network error" and a frozen percentage: the upload is not moving — stop waiting.
+      if (offline && Date.now() - lastPctChange > UPLOAD_STALL_MS) {
+        logger.warn({ deviceId, platform, lastPct }, 'publish: app offline, upload stalled');
         break;
       }
-      const screen = await dumpScreen(adb, deviceId, 1);
-      if (!screen) continue;
-      const action = decide(flowPlatform, screen, st, !!caption);
-      if (action.kind === 'success') { appConfirmed = true; break; }
-      if (action.kind === 'error') {
-        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_upload`, screen.xml).catch(() => undefined);
-        return result({ ok: false, retryable: false, debugSnapshot: snap, captionTyped, detail: `${action.why} — проверьте профиль вручную` });
+
+      if (screen) {
+        const action = decide(flowPlatform, screen, st, !!caption);
+        if (action.kind === 'success' && !offline && pct == null) { appConfirmed = true; break; }
+        if (action.kind === 'error') {
+          const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_upload`, screen.xml).catch(() => undefined);
+          return result({ ok: false, retryable: false, debugSnapshot: snap, captionTyped, detail: `${action.why} — проверьте профиль вручную` });
+        }
+        if (action.kind === 'tap') { await tapEl(adb, deviceId, action.el); lastActivity = Date.now(); }
+        if (action.kind === 'progress' && !offline) lastActivity = Date.now();
       }
-      if (action.kind === 'tap') { await tapEl(adb, deviceId, action.el); lastActivity = Date.now(); }
-      if (action.kind === 'progress') lastActivity = Date.now();
+
+      // Back on the app's main screen with no upload badge and no network error: the app
+      // accepted the post (verified on the profile below when possible).
+      if (!offline && pct == null) {
+        const top = await adb.fastShell(deviceId, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp"').catch(() => '');
+        if (/MainActivity|MainTabActivity|TabActivity/i.test(top) && !/publish|edit|compose|record/i.test(top)) {
+          logger.info({ deviceId, platform, top }, 'publish: back on the main screen after share');
+          appConfirmed = true;
+          break;
+        }
+      }
     }
 
     // 7. Verify on the profile
@@ -263,7 +298,10 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
       await adb.home(deviceId).catch(() => {});
       return result({
         ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
-        detail: profileVerified === false
+        detail: offline
+          ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — ` +
+            'проверьте прокси/интернет платы. Пост мог не выйти; повтор отключён, чтобы не опубликовать дважды'
+          : profileVerified === false
           ? 'Пост не появился на профиле после публикации — проверьте вручную (повтор отключён, чтобы не опубликовать дважды)'
           : canReadProfile
             ? 'Приложение не подтвердило публикацию, а профиль не удалось прочитать до публикации — проверьте вручную'
