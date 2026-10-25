@@ -2269,6 +2269,8 @@ export interface AutopilotInput {
   /** WB/Ozon article — always added to the post description ("Артикул: …" + #hashtag). */
   productArticle?: string | null;
   scriptStyles: string[];
+  /** New voiceover text every N montages (1 = every montage gets its own text). */
+  scriptEvery: number;
   ctaType: 'article' | 'direct' | 'auto';
   directWord?: string | null;
   voiceIds: string[];

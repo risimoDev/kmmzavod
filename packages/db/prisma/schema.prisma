@@ -1533,6 +1533,8 @@ model Autopilot {
   // Артикул товара (WB/Ozon): всегда дописывается в описание поста строкой «Артикул: …» и хэштегом
   productArticle      String?          @map("product_article")
   scriptStyles        String[]         @default(["blogger"]) @map("script_styles") // ротация стилей подачи
+  // Новый текст озвучки каждые N монтажей (1 = каждый ролик со своим текстом)
+  scriptEvery         Int              @default(1) @map("script_every")
   ctaType             String           @default("article") @map("cta_type") // article | direct | auto
   directWord          String?          @map("direct_word")
   voiceIds            String[]         @default([]) @map("voice_ids") // ротация голосов Fish Audio

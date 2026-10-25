@@ -40,6 +40,8 @@ const Shape = z.object({
     z.string().max(40).regex(/^[\p{L}\d_-]+$/u, 'Артикул: только буквы, цифры, «-» и «_»').nullish(),
   ),
   scriptStyles: z.array(z.enum(SCRIPT_STYLES)).min(1).max(8).default(['blogger']),
+  // One voiceover text for N montages in a row, then a new one (1 = new every montage).
+  scriptEvery: z.number().int().min(1).max(50).default(1),
   ctaType: z.enum(['article', 'direct', 'auto']).default('article'),
   directWord: z.string().max(50).nullish(),
   // Fish Audio voice ids rotated per montage: catalogue voices and/or hand-typed ids

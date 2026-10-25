@@ -72,6 +72,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotInput = {
   productInfo: "",
   productArticle: "",
   scriptStyles: ["blogger", "story", "hype"],
+  scriptEvery: 1,
   ctaType: "article",
   directWord: "ХОЧУ",
   voiceIds: [],
@@ -381,6 +382,15 @@ export function AutopilotForm({
             <input className={cn(inputCls, "font-mono")} value={v.productArticle ?? ""} inputMode="text"
               onChange={(e) => set("productArticle", e.target.value.replace(/^#+/, "").replace(/\s+/g, ""))}
               placeholder="например 123456789" />
+          </Field>
+
+          <Field label="Новый текст озвучки каждые N роликов"
+            hint={v.scriptEvery <= 1 ? "у каждого ролика свой текст" : `один текст на ${v.scriptEvery} ролика подряд, потом новый`}>
+            <Range value={v.scriptEvery} min={1} max={20} onChange={(n) => set("scriptEvery", n)} />
+            <p className="text-2xs text-text-tertiary">
+              Ролик = один монтаж (из него делаются копии для телефонов). При повторе текста монтаж, музыка и
+              голос из ротации всё равно меняются; если голос тот же — готовая озвучка используется повторно.
+            </p>
           </Field>
 
           <Field label="Подачи (чередуются от ролика к ролику)">

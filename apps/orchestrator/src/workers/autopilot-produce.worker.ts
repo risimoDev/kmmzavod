@@ -17,12 +17,13 @@ import type { PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
 import { logger as rootLogger } from '../logger';
 import {
-  writeScript, fishTts, firstSentence, paceFor, voiceGender, DEFAULT_VOICE_ID, SCRIPT_STYLES,
-  type ScriptStyle, type CtaType,
+  writeScript, writeCaptions, fishTts, firstSentence, paceFor, voiceGender, DEFAULT_VOICE_ID, SCRIPT_STYLES,
+  type ScriptStyle, type CtaType, type ScriptCaption,
 } from '@kmmzavod/ai';
 import { getLlm, getFishConfig, getPaceTable, recordPace } from '../lib/ai';
 import { journal, failBatch } from '../autopilot/journal';
 import { withArticle } from '../lib/article';
+import { pickScriptReuse, rotate } from '../autopilot/script-reuse';
 
 const logger = rootLogger.child({ worker: 'autopilot-produce' });
 
@@ -135,38 +136,98 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
           if (lib?.gender === 'male' || lib?.gender === 'female') narrator = lib.gender;
         }
 
-        // Recent hooks of this autopilot — the next video must open differently.
-        const recent = await db.autopilotBatch.findMany({
-          where: { autopilotId: ap.id, id: { not: batchId }, script: { not: null } },
-          select: { script: true },
-          orderBy: { createdAt: 'desc' },
-          take: 12,
-        });
+        const productInfo = withArticle(ap.productInfo ?? ap.project.description ?? undefined, ap.productArticle);
+        const cta = { type: (ap.ctaType as CtaType) ?? 'article', word: ap.directWord ?? undefined };
+        const captionsCount = Math.max(1, Math.min(batch.variantCount || 1, 30));
 
-        // No template fallback: without a working LLM the batch fails loudly
-        // instead of publishing a generic script to the farm.
-        const script = await writeScript(await getLlm(), {
-          product: ap.project.name,
-          productInfo: withArticle(ap.productInfo ?? ap.project.description ?? undefined, ap.productArticle),
-          style,
-          seconds: ap.targetSeconds,
-          wps: paceFor(paceTable, voiceId, speed),
-          narrator,
-          cta: { type: (ap.ctaType as CtaType) ?? 'article', word: ap.directWord ?? undefined },
-          avoidHooks: recent.map((r) => firstSentence(r.script!)),
-          captionsCount: Math.max(1, Math.min(batch.variantCount || 1, 30)),
-          allowTemplate: false,
-        });
-        if (script.notes.length) {
-          await journal(db, ap, 'info', `Сценарий: ${script.notes.join('; ')}`, { summary: { batchId, provider: script.provider, model: script.model } });
+        // Setting «Новый текст озвучки каждые N роликов»: reuse the newest text until it
+        // has been used N times in a row (montage, music and rotated voice still change).
+        const scriptEvery = Math.max(1, ap.scriptEvery ?? 1);
+        const prevWithScript = scriptEvery > 1
+          ? await db.autopilotBatch.findMany({
+              where: { autopilotId: ap.id, id: { not: batchId }, status: { not: 'failed' }, script: { not: null }, createdAt: { lt: batch.createdAt } },
+              select: { script: true, scriptStyle: true, voiceId: true, voiceoverKey: true, voiceDuration: true, editProjectId: true },
+              orderBy: { createdAt: 'desc' },
+              take: scriptEvery,
+            })
+          : [];
+        const reuse = pickScriptReuse(prevWithScript, scriptEvery);
+
+        let scriptText: string;
+        let scriptHook: string | undefined;
+        let scriptTitle: string | undefined;
+        let captions: ScriptCaption[] | undefined;
+        let aiModelUsed: string;
+        let scriptStyle: string = style;
+        if (reuse) {
+          const srcCfg = (reuse.source.editProjectId
+            ? (await db.editProject.findUnique({ where: { id: reuse.source.editProjectId }, select: { config: true } }))?.config
+            : null) as Record<string, unknown> | null;
+          scriptText = reuse.source.script!;
+          scriptStyle = reuse.source.scriptStyle ?? style;
+          scriptHook = typeof srcCfg?.scriptHook === 'string' ? srcCfg.scriptHook : undefined;
+          scriptTitle = typeof srcCfg?.scriptTitle === 'string' ? srcCfg.scriptTitle : undefined;
+          aiModelUsed = typeof srcCfg?.aiModelUsed === 'string' ? srcCfg.aiModelUsed : 'reused';
+          // Same voiceover, new post captions — posts must not repeat each other 1:1.
+          try {
+            ({ captions } = await writeCaptions(await getLlm(), {
+              product: ap.project.name, productInfo, cta, transcript: scriptText, count: captionsCount,
+            }));
+          } catch {
+            const prior = Array.isArray(srcCfg?.socialCaptions) ? (srcCfg.socialCaptions as ScriptCaption[]) : [];
+            captions = prior.length ? rotate(prior, reuse.usedTimes * captionsCount) : undefined;
+          }
+        } else {
+          // Recent hooks of this autopilot — the next video must open differently.
+          const recent = await db.autopilotBatch.findMany({
+            where: { autopilotId: ap.id, id: { not: batchId }, script: { not: null } },
+            select: { script: true },
+            orderBy: { createdAt: 'desc' },
+            take: 12,
+          });
+
+          // No template fallback: without a working LLM the batch fails loudly
+          // instead of publishing a generic script to the farm.
+          const script = await writeScript(await getLlm(), {
+            product: ap.project.name,
+            productInfo,
+            style,
+            seconds: ap.targetSeconds,
+            wps: paceFor(paceTable, voiceId, speed),
+            narrator,
+            cta,
+            avoidHooks: recent.map((r) => firstSentence(r.script!)),
+            captionsCount,
+            allowTemplate: false,
+          });
+          if (script.notes.length) {
+            await journal(db, ap, 'info', `Сценарий: ${script.notes.join('; ')}`, { summary: { batchId, provider: script.provider, model: script.model } });
+          }
+          scriptText = script.script;
+          scriptHook = script.hook;
+          scriptTitle = script.title;
+          captions = script.captions;
+          aiModelUsed = `${script.provider}/${script.model}`;
         }
 
         // ── 2. Voiceover ────────────────────────────────────────────────────
-        const tts = await fishTts(await getFishConfig(), { text: script.script, voiceId, speed });
-        const voiceoverKey = `tenants/${ap.tenantId}/autopilot/${ap.id}/${batchId}/voiceover.mp3`;
-        await storage.uploadBuffer(voiceoverKey, tts.audio, { contentType: 'audio/mpeg' });
-        await recordPace(voiceId, speed, tts.words, tts.durationSec);
-        const voiceDuration = tts.durationSec > 0 ? tts.durationSec : ap.targetSeconds;
+        // Same text + same voice as the reused montage → reuse its audio (no new TTS).
+        let voiceoverKey: string;
+        let voiceDuration: number;
+        const reusableAudio = reuse && reuse.source.voiceId === voiceId && reuse.source.voiceoverKey
+          && Number(reuse.source.voiceDuration) > 0 && (await storage.exists(reuse.source.voiceoverKey))
+          ? { key: reuse.source.voiceoverKey, duration: Number(reuse.source.voiceDuration) }
+          : null;
+        if (reusableAudio) {
+          voiceoverKey = reusableAudio.key;
+          voiceDuration = reusableAudio.duration;
+        } else {
+          const tts = await fishTts(await getFishConfig(), { text: scriptText, voiceId, speed });
+          voiceoverKey = `tenants/${ap.tenantId}/autopilot/${ap.id}/${batchId}/voiceover.mp3`;
+          await storage.uploadBuffer(voiceoverKey, tts.audio, { contentType: 'audio/mpeg' });
+          await recordPace(voiceId, speed, tts.words, tts.durationSec);
+          voiceDuration = tts.durationSec > 0 ? tts.durationSec : ap.targetSeconds;
+        }
 
         // ── 3. Montage project ──────────────────────────────────────────────
         const bgmKey = ap.bgmKeys.length ? ap.bgmKeys[seq % ap.bgmKeys.length] : undefined;
@@ -198,14 +259,14 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
               excludeRanges,
               voiceoverKey: voiceoverKey,
               voiceId,
-              voiceoverText: script.script,
+              voiceoverText: scriptText,
               productInfo: ap.productInfo ?? undefined,
               ...(bgmKey ? { bgmKey } : {}),
-              generatedScript: script.script,
-              scriptHook: script.hook,
-              scriptTitle: script.title,
-              socialCaptions: script.captions,
-              aiModelUsed: `${script.provider}/${script.model}`,
+              generatedScript: scriptText,
+              scriptHook,
+              scriptTitle,
+              socialCaptions: captions,
+              aiModelUsed,
             } as object,
             sources: {
               create: ordered.map((s, order) => ({ storageKey: s.storageKey, order })),
@@ -219,9 +280,9 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
             status: 'analyzing',
             stageStartedAt: new Date(),
             editProjectId: project.id,
-            script: script.script,
-            scriptStyle: style,
-            caption: script.captions?.[0]?.caption ?? script.title ?? null,
+            script: scriptText,
+            scriptStyle,
+            caption: captions?.[0]?.caption ?? scriptTitle ?? null,
             voiceId,
             voiceoverKey: voiceoverKey,
             voiceDuration,
@@ -233,8 +294,11 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
           QUEUES['editor-analyze'].defaultJobOptions as any,
         );
 
-        await journal(db, ap, 'produce', `Монтаж #${seq + 1}: сценарий «${style}», озвучка ${voiceDuration.toFixed(1)}с, исходников ${ordered.length}`, {
-          summary: { batchId, editProjectId: project.id, style, voiceId, voiceDuration, sources: ordered.map((s) => s.title) },
+        const textNote = reuse
+          ? `текст повторно (${reuse.usedTimes + 1}/${scriptEvery})${reusableAudio ? ', та же озвучка' : ', новая озвучка'}`
+          : scriptEvery > 1 ? `новый текст (1/${scriptEvery})` : 'новый текст';
+        await journal(db, ap, 'produce', `Монтаж #${seq + 1}: сценарий «${scriptStyle}», ${textNote}, озвучка ${voiceDuration.toFixed(1)}с, исходников ${ordered.length}`, {
+          summary: { batchId, editProjectId: project.id, style: scriptStyle, voiceId, voiceDuration, scriptReused: Boolean(reuse), sources: ordered.map((s) => s.title) },
         });
         logger.info({ batchId, autopilotId: ap.id, editProjectId: project.id, voiceDuration }, 'Autopilot: montage project created');
       } catch (err: unknown) {
