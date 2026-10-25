@@ -327,7 +327,7 @@ export class ProxyManager {
       up = new UpstreamProxy(
         { host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, type: proxy.type },
         this.logger,
-        { maxConnections: config.PROXY_MAX_CONNECTIONS, via: config.PROXY_UPSTREAM_VIA || undefined },
+        { maxConnections: config.PROXY_MAX_CONNECTIONS, retryWindowMs: config.PROXY_RETRY_WINDOW_MS, via: config.PROXY_UPSTREAM_VIA || undefined },
       );
       this.upstreams.set(key, up);
     }
@@ -834,11 +834,34 @@ export class ProxyManager {
     };
     try {
       if (this.activeDeviceId !== deviceId) await this.switchActiveDevice(deviceId, { force: true });
+      if (this.lease?.count === 1) await this.freshIpForTask(deviceId);
     } catch (err) {
       release();
       throw err;
     }
     return release;
+  }
+
+  /** Device whose task last got a fresh IP (consecutive tasks of one phone keep its IP). */
+  private lastRotatedFor: string | null = null;
+
+  /**
+   * shared_sequential: before the shared proxy serves another phone's task, switch its IP
+   * via the provider's rotation link (when one is configured), so every account works from
+   * its own fresh IP — and the IP is changed only BETWEEN tasks, never mid-upload.
+   * A failed rotation is logged and the task goes on with the current IP.
+   */
+  private async freshIpForTask(deviceId: string): Promise<void> {
+    if (this.mode !== 'shared_sequential' || this.lastRotatedFor === deviceId) return;
+    if (!this.devices.get(deviceId)?.proxy.rotateUrl) return;
+    this.lastRotatedFor = deviceId;
+    try {
+      // Mobile modems take 5–25 s to come back; the gateway rides out the rest.
+      const r = await this.rotateProxyIp(deviceId, undefined, 10_000);
+      this.logger.info({ deviceId, ip: r.check.ip, ok: r.check.ok }, 'proxy-manager: fresh IP for the next task');
+    } catch (err) {
+      this.logger.warn({ deviceId, err: err instanceof Error ? err.message : String(err) }, 'proxy-manager: IP rotation before task failed — continuing with the current IP');
+    }
   }
 
   /**

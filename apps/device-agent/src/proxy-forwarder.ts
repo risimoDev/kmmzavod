@@ -221,6 +221,8 @@ export interface UpstreamTestResult {
 
 export interface UpstreamOptions {
   maxConnections: number;
+  /** Keep retrying retryable failures (403/5xx/reset/refused) for this long. Default 25 s. */
+  retryWindowMs?: number;
   connectTimeoutMs?: number;
   queueTimeoutMs?: number;
   /**
@@ -318,7 +320,9 @@ export class UpstreamProxy {
   private readonly limiter: ConnectionLimiter;
   private readonly connectTimeoutMs: number;
   private readonly queueTimeoutMs: number;
+  private readonly retryWindowMs: number;
   private readonly via?: { host: string; port: number };
+  private waitingLoggedAt = 0;
   lastError?: string;
   lastErrorAt?: number;
 
@@ -331,6 +335,7 @@ export class UpstreamProxy {
     this.limiter = new ConnectionLimiter(opts.maxConnections);
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 12_000;
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 20_000;
+    this.retryWindowMs = opts.retryWindowMs ?? 25_000;
     this.via = parseVia(opts.via);
   }
 
@@ -417,15 +422,21 @@ export class UpstreamProxy {
   }
 
   /**
-   * Open a raw TCP tunnel to `host:port` through the upstream. Retries transient failures
-   * (403/5xx bursts, resets). The returned socket is paused; its slot is freed on close.
+   * Open a raw TCP tunnel to `host:port` through the upstream. The returned socket is
+   * paused; its slot is freed on close.
+   *
+   * Transient failures (403/5xx, resets, refused) are retried for up to `retryWindowMs`:
+   * a mobile proxy refuses every connection for 5–25 s while its modem switches IP (seen
+   * on the farm every 2 min). Riding that window out turns an app-visible "Network error"
+   * — which made TikTok abandon uploads at 58% — into a few seconds of a slow connect.
    */
   async openTunnel(host: string, port: number): Promise<net.Socket> {
     const release = await this.limiter.acquire(this.queueTimeoutMs);
     try {
       const protocol = await this.resolveProtocol();
+      const deadline = Date.now() + this.retryWindowMs;
       let lastErr: ProxyError | undefined;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; ; attempt++) {
         try {
           const sock =
             protocol === 'socks5' ? await this.socks5Connect(host, port) : await this.httpConnect(host, port);
@@ -434,8 +445,13 @@ export class UpstreamProxy {
         } catch (err) {
           lastErr = toProxyError(err);
           if (lastErr.code === 'protocol') this.protocol = null;
-          if (!lastErr.retryable || attempt === 3) break;
-          await delay(300 * attempt);
+          const backoff = Math.min(3_000, 400 * attempt);
+          if (!lastErr.retryable || Date.now() + backoff > deadline) break;
+          if (attempt === 3 && Date.now() - this.waitingLoggedAt > 30_000) {
+            this.waitingLoggedAt = Date.now();
+            this.logger.info({ upstream: this.label, err: lastErr.message }, 'proxy: upstream refusing — waiting it out (IP rotation?)');
+          }
+          await delay(backoff);
         }
       }
       const finalErr = lastErr ?? new ProxyError('Неизвестная ошибка прокси', 'unreachable');

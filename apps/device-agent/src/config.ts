@@ -66,6 +66,10 @@ export const config = {
   PROXY_DEVICE_PORT: Number(env('DEVICE_AGENT_PROXY_DEVICE_PORT', '8888')),
   // Max concurrent connections per upstream proxy (0 = unlimited, avoids dropping app connections).
   PROXY_MAX_CONNECTIONS: Number(env('DEVICE_AGENT_PROXY_MAX_CONNECTIONS', '0')),
+  // How long a new connection keeps retrying while the upstream refuses (403 / reset /
+  // refused). Mobile proxies refuse for 5–25 s while the modem switches IP; failing at once
+  // makes apps show "Network error" and drop uploads mid-way.
+  PROXY_RETRY_WINDOW_MS: Number(env('DEVICE_AGENT_PROXY_RETRY_WINDOW_MS', '25000')),
   PROXY_IDLE_TIMEOUT_MS: Number(env('DEVICE_AGENT_PROXY_IDLE_TIMEOUT_MS', '180000')),
   // Dial every upstream proxy through this HTTP CONNECT relay (infra/proxy-relay on the server,
   // reached over AmneziaWG), e.g. http://10.66.66.1:3129. Needed when the farm ISP's DPI blocks
