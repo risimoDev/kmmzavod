@@ -281,16 +281,32 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     // 7. Verify on the profile
     stage = 'verify';
     let profileVerified: boolean | null = null;
+    let stuckAt: number | null = null;
     if (baseline) {
       for (let i = 0; i < PROFILE_CHECKS; i++) {
-        const after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
+        let after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
+        // TikTok shows the new post in the grid with a "96%" badge while it still uploads.
+        // Confirm only once the upload has finished — a post stuck at 96% is not published.
+        const uploadWaitUntil = Date.now() + UPLOAD_TIMEOUT_MS;
+        let lastUploadPct: number | null = null;
+        let lastUploadChange = Date.now();
+        while (after?.uploading != null && Date.now() < uploadWaitUntil) {
+          if (after.uploading !== lastUploadPct) { lastUploadPct = after.uploading; lastUploadChange = Date.now(); }
+          if (Date.now() - lastUploadChange > UPLOAD_STALL_MS) break;
+          logger.info({ deviceId, platform, uploading: after.uploading }, 'publish: post still uploading in the profile grid');
+          await sleep(15_000);
+          after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
+        }
+        if (after?.uploading != null) { stuckAt = after.uploading; profileVerified = false; break; }
         if (after?.onProfile && isNewPostOnProfile(baseline, after)) { profileVerified = true; break; }
         profileVerified = false;
         if (i < PROFILE_CHECKS - 1) await sleep(PROFILE_CHECK_GAP_MS);
       }
     }
     const verified = { app: appConfirmed, profile: profileVerified };
-    const confirmed = profileVerified === true || appConfirmed === true;
+    // The app's own signal is enough only when the profile could not tell us otherwise:
+    // an upload stuck in the grid or a lost network means the post is NOT out.
+    const confirmed = profileVerified === true || (appConfirmed && stuckAt == null && !offline);
     if (!confirmed) {
       // Capture the screen the app is on now — before leaving it.
       const unconfirmedScreen = await dumpScreen(adb, deviceId, 1);
@@ -298,7 +314,10 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
       await adb.home(deviceId).catch(() => {});
       return result({
         ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
-        detail: offline
+        detail: stuckAt != null
+          ? `Загрузка ролика остановилась на ${stuckAt}% (видно в профиле) — проверьте сеть/прокси платы. ` +
+            'Пост не выложен до конца; повтор отключён, чтобы не опубликовать дважды'
+          : offline
           ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — ` +
             'проверьте прокси/интернет платы. Пост мог не выйти; повтор отключён, чтобы не опубликовать дважды'
           : profileVerified === false

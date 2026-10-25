@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
-import { parsePostsCount } from '../src/profile-stats';
+import { parsePostsCount, parseProfileDump } from '../src/profile-stats';
 
 let failed = 0;
 const ok = (c: boolean, m: string) => { if (!c) failed++; console.log(c ? 'PASS' : 'FAIL', m); };
@@ -200,6 +200,27 @@ const netErr = parseUi(fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-
 ok(isAppOffline(netErr), 'real dump: TikTok Lite "Network error" detected');
 ok(uploadPercent(netErr) === 58, `real dump: upload badge 58% read (${uploadPercent(netErr)})`);
 ok(!isAppOffline(ttPostReal) && uploadPercent(ttPostReal) === null, 'post screen: neither offline nor uploading');
+
+// ── Real dumps: main TikTok 47.1.4 (com.zhiliaoapp.musically), farm, 2026-10-26 ─────
+const fx = (f: string) => parseUi(fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8'));
+const mainEditor = fx('tiktok-main-editor.xml');
+a = decide('tiktok', mainEditor, st(), true);
+ok(a.kind === 'tap' && a.marks === 'next' && a.el.text === 'Next', `main TikTok editor → Next, not "Your Story" (${a.kind})`);
+const mainPost = fx('tiktok-main-post.xml');
+a = decide('tiktok', mainPost, st({ nextTaps: 1 }), true);
+ok(a.kind === 'caption' && /Add description/.test(a.el.text), 'main TikTok post screen → type into "Add description..."');
+a = decide('tiktok', mainPost, st({ nextTaps: 1, captionDone: true }), true);
+ok(a.kind === 'tap' && a.marks === 'share' && a.el.bounds[1] > 1800, `main TikTok post screen → bottom "Post" (@${a.kind === 'tap' ? a.el.bounds[1] : '-'})`);
+ok(isComposeScreen('tiktok', mainPost), 'main TikTok post screen is the compose screen');
+const mainAfter = fx('tiktok-main-after-post.xml');
+ok(decide('tiktok', mainAfter, st({ shareTapped: true }), true).kind === 'success', 'main TikTok: back on the Friends tab after Post → app accepted');
+ok(!isComposeScreen('tiktok', mainAfter), 'Friends tab is not a compose screen');
+const mainProfileXml = fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-main-profile-uploading.xml'), 'utf8');
+const prof = parseProfileDump(mainProfileXml, 1080, 2220);
+ok(prof.uploading === 96, `profile: uploading tile read as 96% (${prof.uploading})`);
+ok(prof.tiles.length === 3 && prof.tiles[0].views === null, `profile: uploading tile counted first, no views (${JSON.stringify(prof.tiles.map((t) => t.views))})`);
+ok(isNewPostOnProfile({ posts: null, tiles: [{ views: 0 }, { views: 436 }] }, { posts: null, tiles: prof.tiles }),
+  'profile: [0, 436] → [uploading, 0, 436] is a new post');
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exitCode = failed ? 1 : 0;

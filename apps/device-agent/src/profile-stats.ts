@@ -127,7 +127,7 @@ function descendants(n: UiNode): UiNode[] {
 }
 
 /** Pure parser: followers + grid tiles (with views) from a profile screen dump. */
-export function parseProfileDump(xml: string, screenW: number, screenH: number): { followers: number | null; tiles: ProfileTile[]; onProfile: boolean } {
+export function parseProfileDump(xml: string, screenW: number, screenH: number): { followers: number | null; tiles: ProfileTile[]; onProfile: boolean; uploading: number | null } {
   const nodes = parseUiTree(xml);
 
   // Followers: "1,2 тыс.\nподписчиков" in one node, or a number node right above
@@ -140,8 +140,15 @@ export function parseProfileDump(xml: string, screenW: number, screenH: number):
   // Grid tiles: count nodes below the header and above the bottom navigation,
   // grouped by their tile container (≈ 1/3 of the screen wide).
   const tileW = screenW / 3;
+  // A tile still uploading shows a percentage ("96%") instead of a view count — it is a
+  // post all the same (the newest one), so it must be counted as a tile.
+  const pctOf = (n: UiNode): number | null => {
+    const m = /^(\d{1,3})\s?%$/.exec(n.text.trim()) ?? /^(\d{1,3})\s?%$/.exec(n.desc.trim());
+    return m && Number(m[1]) <= 100 ? Number(m[1]) : null;
+  };
+  let uploading: number | null = null;
   const counts = nodes.filter((n) => {
-    const v = parseCount(n.text) ?? parseCount(n.desc);
+    const v = parseCount(n.text) ?? parseCount(n.desc) ?? pctOf(n);
     return v != null && n.bounds[1] > headerBottom + 20 && n.bounds[3] < screenH * 0.93;
   });
   const tiles = new Map<UiNode, { node: UiNode; views: number | null }>();
@@ -149,13 +156,19 @@ export function parseProfileDump(xml: string, screenW: number, screenH: number):
     let t: UiNode | null = c.parent;
     while (t && !(Math.abs((t.bounds[2] - t.bounds[0]) - tileW) < tileW * 0.3 && t.bounds[3] - t.bounds[1] > tileW * 0.6)) t = t.parent;
     const tile = t ?? c;
-    if (!tiles.has(tile)) tiles.set(tile, { node: tile, views: parseCount(c.text) ?? parseCount(c.desc) });
+    const pct = pctOf(c);
+    if (pct != null) uploading = uploading ?? pct;
+    const views = pct != null ? null : parseCount(c.text) ?? parseCount(c.desc);
+    const known = tiles.get(tile);
+    if (!known) tiles.set(tile, { node: tile, views });
+    else if (pct != null) known.views = null; // an uploading tile has no views yet
   }
   const ordered = [...tiles.values()]
     .sort((a, b) => (Math.round(a.node.bounds[1] / 40) - Math.round(b.node.bounds[1] / 40)) || (a.node.bounds[0] - b.node.bounds[0]));
   return {
     followers,
     onProfile,
+    uploading,
     tiles: ordered.map((t, index) => ({
       index,
       views: t.views,
@@ -210,6 +223,8 @@ export interface ProfileSnapshot {
   posts: number | null;
   /** Grid tiles excluding pinned ones, newest first. */
   tiles: ProfileTile[];
+  /** Percentage of a post still uploading in the grid (TikTok), null when none. */
+  uploading: number | null;
 }
 
 /** Open the own profile and read post count + grid (used to verify a fresh post). */
@@ -230,6 +245,7 @@ export async function snapshotProfile(
     onProfile: parsed.onProfile,
     posts: platform === 'instagram' ? parsePostsCount(xml, width) : null,
     tiles: parsed.tiles.filter((t) => !t.pinned),
+    uploading: parsed.uploading,
   };
 }
 
