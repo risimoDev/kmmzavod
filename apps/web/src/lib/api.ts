@@ -2263,6 +2263,8 @@ export interface AutopilotInput {
   targetSeconds: number;
   aspect: '9:16' | '1:1' | '4:5' | '16:9';
   subtitleStyle: string;
+  /** Styles rotated at random, one per montage (empty → subtitleStyle only). */
+  subtitleStyles: string[];
   smartCrop: boolean;
   bgmKeys: string[];
   productInfo?: string | null;

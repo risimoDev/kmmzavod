@@ -24,6 +24,7 @@ import { getLlm, getFishConfig, getPaceTable, recordPace } from '../lib/ai';
 import { journal, failBatch } from '../autopilot/journal';
 import { withArticle } from '../lib/article';
 import { pickScriptReuse, rotate } from '../autopilot/script-reuse';
+import { pickSubtitleStyle } from '../autopilot/subtitle-pick';
 
 const logger = rootLogger.child({ worker: 'autopilot-produce' });
 
@@ -234,6 +235,16 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
         // Exact length: the editor fills the montage to this and fits it to the voice.
         const clipSeconds = Math.max(8, Math.round((voiceDuration + VOICE_TAIL_SEC) * 10) / 10);
         const excludeRanges = await usedRangesByKey(db, ap.id, batchId);
+        // Subtitle style: random among the selected ones, not the same as the last montage.
+        const prevProjectId = (await db.autopilotBatch.findFirst({
+          where: { autopilotId: ap.id, id: { not: batchId }, editProjectId: { not: null }, createdAt: { lt: batch.createdAt } },
+          orderBy: { createdAt: 'desc' },
+          select: { editProjectId: true },
+        }))?.editProjectId;
+        const prevSubtitleStyle = prevProjectId
+          ? (await db.editProject.findUnique({ where: { id: prevProjectId }, select: { subtitleStyle: true } }))?.subtitleStyle
+          : null;
+        const subtitleStyle = pickSubtitleStyle(ap.subtitleStyles ?? [], ap.subtitleStyle, prevSubtitleStyle);
         const project = await db.editProject.create({
           data: {
             tenantId: ap.tenantId,
@@ -244,7 +255,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
             fps: 30,
             smartCrop: ap.smartCrop,
             audioMode: 'replace',
-            subtitleStyle: ap.subtitleStyle,
+            subtitleStyle,
             useVision: false,
             targetClipCount: 1,
             targetClipSeconds: clipSeconds,
@@ -297,7 +308,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
         const textNote = reuse
           ? `текст повторно (${reuse.usedTimes + 1}/${scriptEvery})${reusableAudio ? ', та же озвучка' : ', новая озвучка'}`
           : scriptEvery > 1 ? `новый текст (1/${scriptEvery})` : 'новый текст';
-        await journal(db, ap, 'produce', `Монтаж #${seq + 1}: сценарий «${scriptStyle}», ${textNote}, озвучка ${voiceDuration.toFixed(1)}с, исходников ${ordered.length}`, {
+        await journal(db, ap, 'produce', `Монтаж #${seq + 1}: сценарий «${scriptStyle}», ${textNote}, субтитры «${subtitleStyle}», озвучка ${voiceDuration.toFixed(1)}с, исходников ${ordered.length}`, {
           summary: { batchId, editProjectId: project.id, style: scriptStyle, voiceId, voiceDuration, scriptReused: Boolean(reuse), sources: ordered.map((s) => s.title) },
         });
         logger.info({ batchId, autopilotId: ap.id, editProjectId: project.id, voiceDuration }, 'Autopilot: montage project created');

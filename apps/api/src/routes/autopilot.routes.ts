@@ -30,6 +30,8 @@ const Shape = z.object({
   targetSeconds: z.number().int().min(10).max(90).default(30),
   aspect: z.enum(['9:16', '1:1', '4:5', '16:9']).default('9:16'),
   subtitleStyle: z.string().max(40).default('tiktok'),
+  // Several styles → one is picked at random for every montage (never twice in a row).
+  subtitleStyles: z.array(z.string().max(40)).max(30).transform((l) => [...new Set(l)]).default([]),
   smartCrop: z.boolean().default(true),
   bgmKeys: z.array(z.string().max(500)).max(50).default([]),
   // AI script + voice

@@ -74,6 +74,14 @@ class SubtitleStyle(str, Enum):
     NEON_GLOW = "neon_glow"
     FIRE_HYPE = "fire_hype"
     SINGLE_WORD = "single_word"
+    YELLOW_BOX = "yellow_box"
+    DARK_PILL = "dark_pill"
+    NEWS = "news"
+    HANDWRITTEN = "handwritten"
+    PASTEL = "pastel"
+    GAMING = "gaming"
+    BLUE_POP = "blue_pop"
+    CENTER_BOLD = "center_bold"
 
 
 # ── Analysis data types ───────────────────────────────────────────────────────

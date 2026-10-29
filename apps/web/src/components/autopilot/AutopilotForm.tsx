@@ -36,6 +36,14 @@ const SUBTITLE_STYLES = [
   { value: "single_word", label: "1 слово", cls: "font-black text-amber-300" },
   { value: "cinematic", label: "Cinema", cls: "font-medium text-text-primary" },
   { value: "minimal", label: "Minimal", cls: "font-light text-text-secondary" },
+  { value: "yellow_box", label: "Yellow Box", cls: "font-black text-black bg-yellow-300 px-1 rounded" },
+  { value: "dark_pill", label: "Dark Pill", cls: "font-bold text-emerald-300 bg-black/60 px-1 rounded" },
+  { value: "news", label: "News", cls: "font-bold uppercase text-white bg-red-600 px-1 rounded" },
+  { value: "handwritten", label: "Рукопись", cls: "italic text-orange-300" },
+  { value: "pastel", label: "Pastel", cls: "font-bold text-pink-400" },
+  { value: "gaming", label: "Gaming", cls: "font-black uppercase text-lime-400" },
+  { value: "blue_pop", label: "Blue Pop", cls: "font-black text-sky-400" },
+  { value: "center_bold", label: "По центру", cls: "font-black uppercase text-yellow-300" },
   { value: "none", label: "Без субтитров", cls: "text-text-tertiary" },
 ];
 
@@ -67,6 +75,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotInput = {
   targetSeconds: 30,
   aspect: "9:16",
   subtitleStyle: "tiktok",
+  subtitleStyles: ["tiktok"],
   smartCrop: true,
   bgmKeys: [],
   productInfo: "",
@@ -193,6 +202,22 @@ export function AutopilotForm({
   );
 
   const set = <K extends keyof AutopilotInput>(k: K, val: AutopilotInput[K]) => setV((p) => ({ ...p, [k]: val }));
+
+  // Subtitles: several styles rotate at random; "none" is exclusive. subtitleStyle mirrors
+  // the first one for older consumers.
+  const setSubtitleStyles = (list: string[]) =>
+    setV((p) => ({ ...p, subtitleStyles: list, subtitleStyle: list[0] ?? "tiktok" }));
+  const toggleSubtitleStyle = (id: string) =>
+    setV((p) => {
+      let next: string[];
+      if (id === "none") next = p.subtitleStyles.includes("none") ? ["tiktok"] : ["none"];
+      else {
+        const cur = p.subtitleStyles.filter((x) => x !== "none");
+        next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+        if (!next.length) next = [id];
+      }
+      return { ...p, subtitleStyles: next, subtitleStyle: next[0] };
+    });
 
   useEffect(() => {
     autopilotApi.meta().then((m) => {
@@ -339,13 +364,22 @@ export function AutopilotForm({
             </Field>
           </div>
 
-          <Field label="Субтитры (вшиваются по озвучке)">
+          <Field label="Субтитры (вшиваются по озвучке)"
+            hint={v.subtitleStyles.includes("none") ? "без субтитров"
+              : v.subtitleStyles.length > 1 ? `${v.subtitleStyles.length} стилей — случайно, без повтора подряд` : "один стиль"}>
             <div className="flex flex-wrap gap-2">
               {SUBTITLE_STYLES.map((s) => (
-                <Pill key={s.value} active={v.subtitleStyle === s.value} onClick={() => set("subtitleStyle", s.value)}>
+                <Pill key={s.value} active={v.subtitleStyles.includes(s.value)} onClick={() => toggleSubtitleStyle(s.value)}>
                   <span className={s.cls}>{s.label}</span>
                 </Pill>
               ))}
+            </div>
+            <div className="flex gap-3 pt-1 text-2xs">
+              <button type="button" className="text-brand-400 hover:underline"
+                onClick={() => setSubtitleStyles(SUBTITLE_STYLES.map((s) => s.value).filter((x) => x !== "none"))}>
+                Выбрать все стили
+              </button>
+              <span className="text-text-tertiary">Отметьте несколько — каждый ролик получит случайный из них.</span>
             </div>
           </Field>
 

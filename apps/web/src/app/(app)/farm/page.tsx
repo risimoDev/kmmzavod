@@ -2450,12 +2450,31 @@ function DevicesTab() {
     }
   };
 
+  /** Network status of the phone opened in the remote panel (shared-proxy mode). */
+  const [remoteProxyNote, setRemoteProxyNote] = useState<{ ok: boolean; text: string } | null>(null);
+
   const handleOpenRemote = (device: FarmDevice) => {
     setSelectedDevice(device);
     setRemoteModalOpen(true);
     setRemoteScreenData(null);
     setRemoteTouchRipple(null);
     setDragStart(null);
+    setRemoteProxyNote(null);
+    // «По очереди» mode: phones without the shared proxy have no internet (inactive = block),
+    // so manual work (logging in, checking the app) would fail with "no network". Hand the
+    // proxy to the phone being opened — unless another phone is in the middle of a task.
+    if (proxyMode === 'shared_sequential' && activeProxyDeviceId !== device.deviceId) {
+      accountFarmApi.switchActiveProxyDevice(device.deviceId, false)
+        .then((res) => {
+          if (res.ok) {
+            setActiveProxyDeviceId(res.activeDeviceId);
+            setRemoteProxyNote({ ok: true, text: 'Прокси передан этому телефону — интернет есть, пока вы с ним работаете' });
+          }
+        })
+        .catch((err: any) => setRemoteProxyNote({ ok: false, text: `У телефона нет интернета: ${err.message}` }));
+    } else if (proxyMode === 'shared_sequential') {
+      setRemoteProxyNote({ ok: true, text: 'Прокси уже у этого телефона' });
+    }
   };
 
   const inFlightFrameRef = useRef(false);
@@ -4403,6 +4422,11 @@ function DevicesTab() {
             setDragStart(null);
           }}
         >
+          {remoteProxyNote && (
+            <div className={`mb-4 rounded-lg px-3 py-2 text-xs ${remoteProxyNote.ok ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+              🌐 {remoteProxyNote.text}
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
             {/* LEFT: Interactive Phone Screen & Navigation Bar */}
             <div className="md:col-span-5 flex flex-col items-center">

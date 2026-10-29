@@ -34,24 +34,77 @@ class SubLine:
 # Style definition:
 # (fontsize_frac, primary(=highlight), secondary(=unspoken), outline,
 #  outline_w, bold, align, margin_v_frac, border_style, back_colour, fontname)
+#
+# Colours are ASS &HAABBGGRR. border_style 1 = outline + shadow; 4 = one solid box behind
+# the whole line (libass ≥ 0.17; style 3 would draw a separate box per karaoke word).
+# Box styles set OutlineColour = BackColour = the box colour.
+# Fonts are installed in the editor image (see Dockerfile) and all cover Cyrillic:
+# Montserrat, Roboto, Open Sans, Comfortaa, PT Sans / PT Sans Narrow / PT Serif,
+# Lobster, DejaVu Sans, Liberation Sans. A missing font only falls back, never fails.
 _STYLES = {
-    # TikTok classic: Bright yellow highlight, crisp white unspoken, thick black stroke
-    "tiktok":      (0.040, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 3.4, -1, 2, 0.18, 1, "&H00000000", "Arial"),
-    # MrBeast style: Electric neon yellow, chunky bold, safe higher placement (avoiding TikTok UI), bouncy
-    "mrbeast":     (0.044, "&H0000E6FF", "&H00FFFFFF", "&H00000000", 4.0, -1, 2, 0.22, 1, "&H00000000", "Arial Black"),
-    # Neon Glow: Cyberpunk cyan highlight with vivid magenta outline & dark pill backing
-    "neon_glow":   (0.038, "&H00FFFF00", "&H00E0E0E0", "&H00FF0080", 3.0, -1, 2, 0.18, 1, "&H80000000", "Arial"),
-    # Fire Hype: Fiery orange-red highlight on pure white, high-energy impact
-    "fire_hype":   (0.042, "&H000077FF", "&H00FFFFFF", "&H00000000", 3.6, -1, 2, 0.20, 1, "&H00000000", "Arial Black"),
-    # 1-Word Flash: 1 word at a time, center screen, maximum retention for ultra-fast shorts
-    "single_word": (0.050, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 4.5, -1, 5, 0.45, 1, "&H00000000", "Arial Black"),
-    # Cinematic: Elegant serif/clean sans, wider tracking, lower third
-    "cinematic":   (0.032, "&H00FFFFFF", "&H00CCCCCC", "&H64000000", 2.0, 0, 2, 0.12, 1, "&H00000000", "Arial"),
-    # Minimal: Subtle, translucent back box, modern aesthetic
-    "minimal":     (0.028, "&H00FFFFFF", "&H00A0A0A0", "&H00000000", 1.5, 0, 2, 0.12, 1, "&H00000000", "Arial"),
+    # TikTok classic: bright yellow highlight, crisp white unspoken, thick black stroke
+    "tiktok":      (0.040, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 3.4, -1, 2, 0.18, 1, "&H00000000", "Montserrat"),
+    # MrBeast: electric yellow, chunky black-weight font, higher placement, bouncy
+    "mrbeast":     (0.044, "&H0000E6FF", "&H00FFFFFF", "&H00000000", 4.0, -1, 2, 0.22, 1, "&H00000000", "Montserrat Black"),
+    # Neon glow: cyan highlight, magenta outline, rounded font
+    "neon_glow":   (0.038, "&H00FFFF00", "&H00E0E0E0", "&H00FF0080", 3.0, -1, 2, 0.18, 1, "&H80000000", "Comfortaa"),
+    # Fire hype: orange-red highlight on white, heavy font
+    "fire_hype":   (0.042, "&H000077FF", "&H00FFFFFF", "&H00000000", 3.6, -1, 2, 0.20, 1, "&H00000000", "Roboto Black"),
+    # 1-word flash: one word at a time, centre screen
+    "single_word": (0.050, "&H0000FFFF", "&H00FFFFFF", "&H00000000", 4.5, -1, 5, 0.45, 1, "&H00000000", "Montserrat Black"),
+    # Cinematic: serif, lower third, soft
+    "cinematic":   (0.032, "&H00FFFFFF", "&H00CCCCCC", "&H64000000", 2.0, 0, 2, 0.12, 1, "&H00000000", "PT Serif"),
+    # Minimal: thin outline, modern sans
+    "minimal":     (0.028, "&H00FFFFFF", "&H00A0A0A0", "&H00000000", 1.5, 0, 2, 0.12, 1, "&H00000000", "Open Sans"),
+    # ── new ────────────────────────────────────────────────────────────────
+    # Yellow box: black words on a yellow block, spoken word turns red (IG-reels look)
+    "yellow_box":  (0.036, "&H000000D0", "&H00000000", "&H0000E6FF", 6.0, -1, 2, 0.20, 4, "&H0000E6FF", "Montserrat Black"),
+    # Dark pill: white text on a translucent black box, spoken word in mint
+    "dark_pill":   (0.034, "&H00B4FF6E", "&H00FFFFFF", "&H90000000", 8.0, -1, 2, 0.18, 4, "&H90000000", "Roboto"),
+    # News: uppercase white on a red bar, narrow font, lower third
+    "news":        (0.034, "&H0000FFFF", "&H00FFFFFF", "&H002020D0", 7.0, -1, 2, 0.10, 4, "&H002020D0", "PT Sans Narrow"),
+    # Handwritten: script font, warm peach highlight, soft dark outline
+    "handwritten": (0.044, "&H0080B4FF", "&H00FFFFFF", "&H00301E14", 2.6, 0, 2, 0.18, 1, "&H00000000", "Lobster"),
+    # Pastel: rounded font, pink highlight, light lavender outline
+    "pastel":      (0.038, "&H00C77BFF", "&H00FFFFFF", "&H00602840", 2.8, -1, 2, 0.18, 1, "&H00000000", "Comfortaa"),
+    # Gaming: neon green highlight, purple stroke, heavy font, bouncy
+    "gaming":      (0.042, "&H0000FF66", "&H00FFFFFF", "&H00A0208C", 3.8, -1, 2, 0.20, 1, "&H00000000", "Roboto Black"),
+    # Blue pop: white words, spoken word in electric blue, clean bold font
+    "blue_pop":    (0.040, "&H00FF9A1E", "&H00FFFFFF", "&H00000000", 3.2, -1, 2, 0.18, 1, "&H00000000", "Open Sans ExtraBold"),
+    # Center bold: big uppercase lines in the middle of the frame
+    "center_bold": (0.048, "&H0000E6FF", "&H00FFFFFF", "&H00000000", 4.2, -1, 5, 0.45, 1, "&H00000000", "PT Sans"),
     # Classic default
-    "default":     (0.038, "&H0000D7FF", "&H00FFFFFF", "&H00000000", 2.8, -1, 2, 0.18, 1, "&H00000000", "Arial"),
+    "default":     (0.038, "&H0000D7FF", "&H00FFFFFF", "&H00000000", 2.8, -1, 2, 0.18, 1, "&H00000000", "DejaVu Sans"),
 }
+
+# Behaviour per style (missing key → defaults below).
+#   words  — (max_words, max_chars, max_line_sec, break_gap) for karaoke regrouping
+#   fill   — smooth \kf highlight instead of the word-by-word \k flip
+#   bounce — scale-pop at the start of each line
+#   upper  — render the text in uppercase
+#   flash  — one word at a time with a pop-in (centre)
+_DEFAULT_TRAITS = {"words": (3, 20, 2.0, 0.45), "fill": False, "bounce": False, "upper": False, "flash": False}
+_TRAITS = {
+    "single_word": {"words": (1, 14, 1.0, 0.15), "flash": True, "upper": True},
+    "mrbeast":     {"words": (3, 18, 1.8, 0.4), "fill": True, "bounce": True},
+    "fire_hype":   {"words": (3, 18, 1.8, 0.4), "fill": True, "bounce": True},
+    "neon_glow":   {"fill": True},
+    "cinematic":   {"words": (5, 28, 3.0, 0.6)},
+    "yellow_box":  {"words": (3, 18, 1.8, 0.4), "upper": True},
+    "dark_pill":   {"words": (4, 24, 2.4, 0.5)},
+    "news":        {"words": (4, 26, 2.6, 0.5), "upper": True},
+    "handwritten": {"words": (4, 22, 2.4, 0.5), "fill": True},
+    "pastel":      {"words": (3, 20, 2.0, 0.45), "fill": True},
+    "gaming":      {"words": (2, 16, 1.4, 0.35), "fill": True, "bounce": True, "upper": True},
+    "blue_pop":    {"words": (3, 20, 2.0, 0.45), "bounce": True},
+    "center_bold": {"words": (2, 16, 1.4, 0.35), "upper": True, "bounce": True},
+}
+
+SUBTITLE_STYLE_IDS = tuple(k for k in _STYLES if k != "default")
+
+
+def _traits(style: str) -> dict:
+    return {**_DEFAULT_TRAITS, **_TRAITS.get(style, {})}
 
 
 def _ts(sec: float) -> str:
@@ -99,27 +152,7 @@ def regroup_words(lines: list[SubLine], style: str = "tiktok") -> list[SubLine]:
     if not words:
         return lines
 
-    if style == "single_word":
-        max_words = 1
-        max_chars = 14
-        max_line_sec = 1.0
-        break_gap = 0.15
-    elif style in ("mrbeast", "fire_hype"):
-        max_words = 3
-        max_chars = 18
-        max_line_sec = 1.8
-        break_gap = 0.4
-    elif style == "cinematic":
-        max_words = 5
-        max_chars = 28
-        max_line_sec = 3.0
-        break_gap = 0.6
-    else:
-        # Default / TikTok / Neon
-        max_words = 3
-        max_chars = 20
-        max_line_sec = 2.0
-        break_gap = 0.45
+    max_words, max_chars, max_line_sec, break_gap = _traits(style)["words"]
 
     out: list[SubLine] = []
     cur: list[SubWord] = []
@@ -147,7 +180,7 @@ def _karaoke_text(line: SubLine, style: str = "tiktok") -> str:
     then flips to PrimaryColour. Smooth fill (\\kf) used for high-energy styles."""
     if not line.words:
         return _wrap_line_fallback(_esc(line.text))
-    tag = "\\kf" if style in ("mrbeast", "fire_hype", "neon_glow") else "\\k"
+    tag = "\\kf" if _traits(style)["fill"] else "\\k"
     parts: list[str] = []
 
     # If the first word starts after the line starts, hold initial silence
@@ -200,17 +233,23 @@ def generate_ass(lines: list[SubLine], out_path: str, width: int, height: int,
         if ln.end <= ln.start:
             continue
 
-        if style == "single_word":
+        tr = _traits(style)
+        if tr["flash"]:
             # Pop-in bouncy scale animation for 1-word flash
             raw_text = _esc(ln.text).upper()
             anim = "{\\fad(30,30)\\t(0,70,\\fscx112\\fscy112)\\t(70,140,\\fscx100\\fscy100)}"
             text = f"{anim}{raw_text}"
-        elif style in ("mrbeast", "fire_hype"):
-            # Slight bounce on line start + karaoke highlighting
-            anim = "{\\t(0,80,\\fscx104\\fscy104)\\t(80,160,\\fscx100\\fscy100)}"
-            text = anim + (_karaoke_text(ln, style) if ln.words else _wrap_line_fallback(_esc(ln.text).upper()))
         else:
-            text = _karaoke_text(ln, style) if ln.words else _wrap_line_fallback(_esc(ln.text))
+            if ln.words:
+                body_text = _karaoke_text(ln, style)
+            else:
+                plain = _esc(ln.text)
+                body_text = _wrap_line_fallback(plain.upper() if tr["upper"] else plain)
+            if tr["upper"] and ln.words:
+                # Uppercase the words but not the {\\k..} override tags.
+                body_text = re.sub(r"(^|})([^{]*)", lambda m: m.group(1) + m.group(2).upper(), body_text)
+            anim = "{\\t(0,80,\\fscx104\\fscy104)\\t(80,160,\\fscx100\\fscy100)}" if tr["bounce"] else ""
+            text = anim + body_text
 
         if not text:
             continue

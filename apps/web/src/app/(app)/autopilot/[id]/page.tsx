@@ -337,6 +337,7 @@ function toInput(ap: AutopilotDetail["autopilot"]): Partial<AutopilotInput> {
     targetSeconds: ap.targetSeconds,
     aspect: ap.aspect,
     subtitleStyle: ap.subtitleStyle,
+    subtitleStyles: ap.subtitleStyles?.length ? ap.subtitleStyles : [ap.subtitleStyle],
     smartCrop: ap.smartCrop,
     bgmKeys: ap.bgmKeys,
     productInfo: ap.productInfo ?? "",

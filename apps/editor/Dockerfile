@@ -1,6 +1,8 @@
 FROM python:3.12-slim
 
 # FFmpeg + libass (subtitle burn at render phase) + fonts.
+# Subtitle fonts (all cover Cyrillic) are the ones app/services/subtitle.py styles use:
+# DejaVu, Montserrat, Roboto, Open Sans, Comfortaa, PT Sans/Serif (paratype), Lobster.
 # libgl1/libglib2.0-0 are required by opencv-python-headless.
 # libsndfile1 is required by soundfile (librosa beat detection).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,6 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     fontconfig \
     fonts-liberation \
+    fonts-dejavu-core \
+    fonts-montserrat \
+    fonts-roboto \
+    fonts-open-sans \
+    fonts-comfortaa \
+    fonts-paratype \
+    fonts-lobster \
     libgl1 \
     libglib2.0-0 \
     libsndfile1 \
