@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import axios from 'axios';
 import { Worker, Queue, DelayedError, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
@@ -59,7 +60,7 @@ const DEVICE_BUSY_RETRY_MS = 90_000;
  * already expired can never delete a lock that another worker acquired since.
  * Returns the token, or null if the device stayed busy for `waitMs`.
  */
-async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec: number, waitMs = 5_000): Promise<string | null> {
+export async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec: number, waitMs = 5_000): Promise<string | null> {
   const key = `lock:device:${deviceId}`;
   const owner = randomUUID();
   const start = Date.now();
@@ -72,7 +73,7 @@ async function acquireDeviceLock(redis: Redis, deviceId: string, ttlSec: number,
 
 const RELEASE_LOCK_LUA = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
 
-async function releaseDeviceLock(redis: Redis, deviceId: string, owner: string): Promise<void> {
+export async function releaseDeviceLock(redis: Redis, deviceId: string, owner: string): Promise<void> {
   await redis.eval(RELEASE_LOCK_LUA, 1, `lock:device:${deviceId}`, owner).catch(() => {});
 }
 
@@ -82,10 +83,25 @@ async function releaseDeviceLock(redis: Redis, deviceId: string, owner: string):
  * publisher outage drives every account below the 30-point safety floor.
  */
 const INFRA_ERROR_RE =
-  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят|не подтверждена|ADBKeyboard|не распознан|не удалось дойти|отклонило видео|не установлено|не автоматизирована/i;
+  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят|не подтверждена|ADBKeyboard|не распознан|не удалось дойти|отклонило видео|не установлено|не автоматизирована|прокси|утечк|шлюз|без сети|не удалось проверить установленные/i;
 
 export function isInfrastructureError(message: string): boolean {
   return INFRA_ERROR_RE.test(message);
+}
+
+/** Errors raised before the request could reach the service — nothing was posted, safe to retry. */
+const PRE_CONNECT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
+
+/**
+ * True when a long publish call failed after the request was sent and we never got an
+ * answer (timeout, dropped connection, the service crashing mid-flow): the post may be live.
+ * `serverErrorsUnknown` also counts 5xx — the device-agent answers handled failures with a
+ * structured result, so a 5xx from it means it died somewhere inside the flow.
+ */
+export function isOutcomeUnknown(err: unknown, serverErrorsUnknown: boolean): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  if (err.response) return serverErrorsUnknown && err.response.status >= 500;
+  return !PRE_CONNECT_CODES.has(err.code ?? '');
 }
 
 const DIST_ITEM_OPEN = ['pending', 'scheduled', 'publishing'] as const;
@@ -167,6 +183,15 @@ export function createPublishWorker(deps: Deps): Worker {
       }
       if (existing.status === 'published') {
         logger.warn({ publishJobId }, 'Publish: already published, skipping duplicate run');
+        return;
+      }
+      // Every handled exit resets 'uploading' (pending/failed/published), so seeing it here
+      // means the previous run died mid-upload (crash, SIGKILL, stalled job). The post may
+      // already be live — re-running could publish it twice.
+      if (existing.status === 'uploading') {
+        const msg = 'Публикация прервана перезапуском во время загрузки и не подтверждена — проверьте профиль вручную';
+        logger.error({ publishJobId, platform }, 'Publish: found in uploading state on entry, not re-running');
+        await finalizePublishFailure(db, publishJobId, msg);
         return;
       }
 
@@ -328,6 +353,9 @@ export function createPublishWorker(deps: Deps): Worker {
               });
             }
           } catch (err: unknown) {
+            if (isOutcomeUnknown(err, false)) {
+              throw new UnrecoverableError(`publisher-${platform}: ${describePublisherError(err)}. Публикация не подтверждена — проверьте профиль вручную`);
+            }
             throw new Error(`publisher-${platform}: ${describePublisherError(err)}`);
           }
         } else if (
@@ -366,7 +394,7 @@ export function createPublishWorker(deps: Deps): Worker {
           } catch (err: unknown) {
             // Transport failure. A timeout means the agent may still be mid-upload → not safe to retry.
             const msg = describeDeviceAgentError(err);
-            if (/did not answer in time/i.test(msg)) {
+            if (/did not answer in time/i.test(msg) || isOutcomeUnknown(err, true)) {
               throw new UnrecoverableError(`device-${platform}: ${msg}. Публикация не подтверждена — проверьте профиль вручную`);
             }
             throw new Error(`device-${platform}: ${msg}`);

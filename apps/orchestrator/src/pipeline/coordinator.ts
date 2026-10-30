@@ -3,8 +3,9 @@
 // Supports both direct video creation and VideoPreset-driven generation.
 
 import { Queue } from 'bullmq';
-import { QUEUE_DEFS, type GptScriptJobPayload, type ProductContext } from '@kmmzavod/queue';
+import { QUEUE_DEFS, addOrReplace, type GptScriptJobPayload, type ProductContext } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
+import { logger } from '../logger';
 import type { IStorageClient } from '@kmmzavod/storage';
 
 interface Deps {
@@ -16,22 +17,33 @@ interface Deps {
 export async function startPipeline(jobId: string, tenantId: string, deps: Deps): Promise<void> {
   const job = await deps.db.job.findUniqueOrThrow({
     where:  { id: jobId },
-    select: { payload: true, videoId: true },
+    select: { payload: true, videoId: true, status: true },
   });
 
-  // Mark job + video as running/processing atomically
-  await deps.db.$transaction([
-    deps.db.job.update({
-      where: { id: jobId },
-      data:  { status: 'running' },
-    }),
-    ...(job.videoId ? [
-      deps.db.video.update({
-        where: { id: job.videoId },
-        data:  { status: 'processing' },
-      }),
-    ] : []),
-  ]);
+  // Cancelled while waiting in the queue (API/admin cancel) — don't flip it back to running.
+  const video0 = job.videoId
+    ? await deps.db.video.findUnique({ where: { id: job.videoId }, select: { status: true } })
+    : null;
+  if (job.status === 'cancelled' || video0?.status === 'cancelled') {
+    logger.info({ jobId, tenantId }, 'Pipeline skipped: job was cancelled');
+    return;
+  }
+
+  // Claim the job: the status condition closes the race with a cancel landing right now.
+  const claimed = await deps.db.job.updateMany({
+    where: { id: jobId, status: { not: 'cancelled' } },
+    data:  { status: 'running' },
+  });
+  if (claimed.count === 0) {
+    logger.info({ jobId, tenantId }, 'Pipeline skipped: job was cancelled');
+    return;
+  }
+  if (job.videoId) {
+    await deps.db.video.updateMany({
+      where: { id: job.videoId, status: { not: 'cancelled' } },
+      data:  { status: 'processing' },
+    });
+  }
 
   await deps.db.jobEvent.create({
     data: { jobId, tenantId, stage: 'pipeline', status: 'started', message: 'Pipeline started' },
@@ -112,8 +124,10 @@ export async function startPipeline(jobId: string, tenantId: string, deps: Deps)
     usedIdeaHashes,
   };
 
-  await deps.gptQueue.add(`gpt:${jobId}`, gptPayload, {
+  // Deterministic jobId dedupes a retried coordinator; addOrReplace clears a finished
+  // (completed/failed) `gpt-<jobId>` so an admin retry actually re-runs the script stage.
+  await addOrReplace(deps.gptQueue, `gpt:${jobId}`, gptPayload, {
     ...QUEUE_DEFS.GPT_SCRIPT.defaultJobOptions,
-    jobId: `gpt-${jobId}`, // BullMQ deduplication: retried coordinator won't double-enqueue
+    jobId: `gpt-${jobId}`,
   });
 }

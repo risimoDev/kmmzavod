@@ -7,7 +7,7 @@ import { TopBar } from "@/components/layout/AppShell";
 import { Button, Progress, Badge, LoadingSpinner } from "@/components/ui/primitives";
 import { StatCard, VideoCard } from "@/components/ui/composite";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { getAccessToken } from "@/lib/api";
+import { getAccessToken, videosApi } from "@/lib/api";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 interface DashboardData {
@@ -49,17 +49,8 @@ export default function DashboardPage() {
       return;
     }
 
-    const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
-    fetch(`${BASE}/api/v1/videos/dashboard/stats`, {
-      headers: {
-        Authorization: `Bearer ${getAccessToken()}`,
-        "Content-Type": "application/json",
-      },
-    })
-      .then(async (res) => {
-        if (!res.ok) throw new Error("Failed to load data");
-        return res.json();
-      })
+    videosApi
+      .dashboardStats<DashboardData>()
       .then(setData)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));

@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { StoragePaths } from '@kmmzavod/storage';
+import { assertOwnStorageKey, isOwnStorageKey } from '../lib/storage-keys';
 
 const CreateProductBody = z.object({
   name: z.string().min(1).max(200),
@@ -42,6 +43,7 @@ export async function productRoutes(app: FastifyInstance) {
   app.post('/', async (req, reply) => {
     const body = CreateProductBody.parse(req.body);
     const { tenantId, userId } = req.user;
+    body.images.forEach((k) => assertOwnStorageKey(tenantId, k, 'images'));
 
     if (body.projectId) {
       const project = await db.project.findFirst({
@@ -140,6 +142,7 @@ export async function productRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const body = UpdateProductBody.parse(req.body);
     const { tenantId } = req.user;
+    body.images?.forEach((k) => assertOwnStorageKey(tenantId, k, 'images'));
 
     const existing = await db.product.findFirst({ where: { id, tenantId } });
     if (!existing) {
@@ -231,7 +234,7 @@ export async function productRoutes(app: FastifyInstance) {
     }
 
     // Verify the key belongs to this product
-    if (!product.images.includes(key)) {
+    if (!product.images.includes(key) || !isOwnStorageKey(tenantId, key)) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Изображение не принадлежит продукту' });
     }
 

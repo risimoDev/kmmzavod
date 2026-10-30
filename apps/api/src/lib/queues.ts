@@ -70,14 +70,44 @@ export const editorRenderQueue = new Queue(QUEUE_DEFS.EDITOR_RENDER.name, {
   defaultJobOptions: QUEUE_DEFS.EDITOR_RENDER.defaultJobOptions,
 });
 
-// All queues for unified stats
+export const uniquifyStateQueue = new Queue(QUEUE_DEFS.UNIQUIFY_STATE.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.UNIQUIFY_STATE.defaultJobOptions,
+});
+
+export const accountWarmupQueue = new Queue(QUEUE_DEFS.ACCOUNT_WARMUP.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.ACCOUNT_WARMUP.defaultJobOptions,
+});
+
+export const shadowBanQueue = new Queue(QUEUE_DEFS.SHADOW_BAN_CHECK.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.SHADOW_BAN_CHECK.defaultJobOptions,
+});
+
+export const autopilotProduceQueue = new Queue(QUEUE_DEFS.AUTOPILOT_PRODUCE.name, {
+  connection,
+  defaultJobOptions: QUEUE_DEFS.AUTOPILOT_PRODUCE.defaultJobOptions,
+});
+
+// All queues for unified stats (/admin/stats, /admin/queue-stats) — keyed by BullMQ queue name.
+// The scheduler queue is intentionally omitted (single repeatable tick, nothing to monitor).
 export const ALL_QUEUES = {
-  pipeline:       pipelineQueue,
-  'gpt-script':   gptScriptQueue,
-  'heygen-render': heygenQueue,
-  'runway-clip':  runwayQueue,
-  'image-gen':    imageGenQueue,
-  'video-compose': videoComposeQueue,
-  'pipeline-state': pipelineStateQueue,
-  'publish':         publishQueue,
+  pipeline:            pipelineQueue,
+  'gpt-script':        gptScriptQueue,
+  'heygen-render':     heygenQueue,
+  'runway-clip':       runwayQueue,
+  'image-gen':         imageGenQueue,
+  'video-compose':     videoComposeQueue,
+  'pipeline-state':    pipelineStateQueue,
+  'publish':           publishQueue,
+  'uniquify-analyze':  uniquifyAnalyzeQueue,
+  'uniquify-render':   uniquifyRenderQueue,
+  'uniquify-state':    uniquifyStateQueue,
+  'uniquify-distribute': distributeQueue,
+  'editor-analyze':    editorAnalyzeQueue,
+  'editor-render':     editorRenderQueue,
+  'account-warmup':    accountWarmupQueue,
+  'shadow-ban-check':  shadowBanQueue,
+  'autopilot-produce': autopilotProduceQueue,
 } as const;

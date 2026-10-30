@@ -7,22 +7,22 @@
 services:
   postgres:
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     networks:
       - backend
       - frontend
 
   redis:
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     networks:
       - backend
       - frontend
 
   minio:
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
 
   # ── Disable app services for local dev ─────────────────────────────────
   api:

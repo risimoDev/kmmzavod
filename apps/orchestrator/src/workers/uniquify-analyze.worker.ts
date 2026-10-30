@@ -14,7 +14,7 @@
  *      voice is identical, the edit/music are unique, and token spend is flat.
  */
 
-import { Worker, Queue, type ConnectionOptions } from 'bullmq';
+import { Worker, Queue, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
 import {
   QUEUES,
@@ -144,8 +144,8 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
       const config = (uniquifyJob.config ?? {}) as Record<string, unknown>;
 
       await db.$transaction([
-        db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'analyzing' } }),
-        db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'analyzing' } }),
+        db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'analyzing', error: null } }),
+        db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'analyzing', error: null } }),
       ]);
 
       try {
@@ -352,6 +352,10 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         // ── 7. Create variants + enqueue one montage render each ─────────────
         const seedBase = Math.floor(Math.random() * 1_000_000);
 
+        // A retry after a partial fan-out must not leave orphan variants that would
+        // inflate the job's variant count: drop never-rendered rows of this job first.
+        await db.uniqueVariant.deleteMany({ where: { uniquifyJobId, status: 'pending' } });
+
         const renderJobs: Array<{ name: string; data: UniquifyRenderJobPayload; opts: any }> = [];
         for (let i = 0; i < variantCount; i++) {
           const seed = seedBase + i * 7919; // spread seeds apart for distinct edits
@@ -420,7 +424,21 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
         }).catch(() => {});
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error({ sourceVideoId, uniquifyJobId, err: errorMsg }, 'Uniquify-analyze: failed');
+        const maxAttempts = job.opts?.attempts ?? 1;
+        // UnrecoverableError: BullMQ will not retry it regardless of attempts left.
+        const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
+        logger.error({ sourceVideoId, uniquifyJobId, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Uniquify-analyze: failed');
+
+        if (!isFinal) {
+          // BullMQ will retry: keep the job/source in-progress (not terminal `failed`);
+          // the retry clears `error` when it starts.
+          await db.$transaction([
+            db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'analyzing', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) } }),
+            db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'analyzing', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) } }),
+          ]).catch(() => {});
+          throw err;
+        }
+
         await db.$transaction([
           db.sourceVideo.update({ where: { id: sourceVideoId }, data: { status: 'failed', error: errorMsg } }),
           db.uniquifyJob.update({ where: { id: uniquifyJobId }, data: { status: 'failed', error: errorMsg } }),

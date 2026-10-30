@@ -21,3 +21,6 @@ apps/device-agent/bin/
 # phone-farm proxy assignments incl. proxy passwords
 apps/device-agent/devices-proxy-state.json
 apps/device-agent/devices-proxy-state.json.tmp
+
+# local env files (apps/web/.env.local etc.)
+.env.local

@@ -7,9 +7,8 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { pipelineQueue } from '../lib/queues';
 import { logger } from '../logger';
-import type { PipelineJobPayload } from '@kmmzavod/queue';
+import { createVideoJob } from '../lib/video-job';
 
 const EDIT_STYLES = ['dynamic', 'smooth', 'minimal', 'random'] as const;
 
@@ -46,6 +45,13 @@ function isValidCron(expr: string): boolean {
     const n = parseInt(field, 10);
     return !isNaN(n) && n >= lo && n <= hi;
   });
+}
+
+// Factory minimum interval is 1 hour: the minute field must be a single number
+// (not `*`, `*/n`, a list or a range), so the cron can fire at most once per hour.
+function isAtLeastHourlyCron(expr: string | null | undefined): boolean {
+  if (!expr) return true; // no cron → scheduler never reschedules it
+  return /^\d+$/.test(expr.trim().split(/\s+/)[0] ?? '');
 }
 
 const CRON_REFINE = { message: 'Некорректное cron-выражение. Пример: "0 10 * * *" (5 полей: мин час день-месяца месяц день-недели)' };
@@ -243,51 +249,45 @@ export async function presetRoutes(app: FastifyInstance) {
     });
     if (!preset) return reply.code(404).send({ error: 'Preset not found' });
 
-    // Create preview Video linked to preset
-    const video = await db.video.create({
-      data: {
-        tenantId,
-        productId: preset.productId,
-        presetId: preset.id,
-        title: `${preset.product?.name ?? 'Product'} — превью`,
-        status: 'pending',
-        metadata: { presetId: preset.id, isPreview: true },
+    // Same reserve + create + enqueue path as POST /videos: a preview costs credits like
+    // any other video. Payload is snake_case (script_prompt / avatar_id / voice_id) —
+    // that's what the pipeline coordinator reads.
+    const result = await createVideoJob({
+      tenantId,
+      userId: req.user.userId,
+      title: `${preset.product?.name ?? 'Product'} — превью`,
+      productId: preset.productId,
+      presetId: preset.id,
+      scriptPrompt: preset.customPrompt ?? '',
+      avatarId: preset.heygenAvatarId,
+      voiceId: preset.heygenVoiceId,
+      settings: {
+        durationSec: preset.targetDurationSec,
+        editStyle: preset.editStyle === 'random' ? 'dynamic' : preset.editStyle,
+        bgm_enabled: true,
       },
+      videoMetadata: { presetId: preset.id, isPreview: true },
+      reserveDescription: `Reserve for preset preview "${preset.name}"`,
     });
 
-    // Create Job with preset settings
-    const job = await db.job.create({
-      data: {
-        tenantId,
-        videoId: video.id,
-        status: 'pending',
-        payload: {
-          scriptPrompt: preset.customPrompt ?? '',
-          productId: preset.productId,
-          presetId: preset.id,
-          settings: {
-            avatar_id: preset.heygenAvatarId,
-            voice_id: preset.heygenVoiceId,
-            durationSec: preset.targetDurationSec,
-            editStyle: preset.editStyle === 'random' ? 'dynamic' : preset.editStyle,
-            bgm_enabled: true,
-          },
-        },
-      },
-    });
+    if (!result.ok) {
+      if (result.reason === 'insufficient_credits') {
+        return reply.code(402).send({
+          error: 'InsufficientCredits',
+          message: 'Недостаточно кредитов для генерации превью.',
+          available: result.available,
+          required: result.required,
+        });
+      }
+      return reply.code(503).send({ error: 'ServiceUnavailable', message: 'Очередь задач недоступна. Попробуйте позже.' });
+    }
+    const { video, job } = result;
 
     // Link preview video to preset
     await db.videoPreset.update({
       where: { id: preset.id },
       data: { previewVideoId: video.id, status: 'preview' },
     });
-
-    // Enqueue pipeline
-    await pipelineQueue.add(
-      `preview:${preset.id}:${job.id}`,
-      { jobId: job.id, tenantId } satisfies PipelineJobPayload,
-      { attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
-    );
 
     logger.info({ presetId: preset.id, videoId: video.id, jobId: job.id, tenantId }, 'Preview generation started');
     return reply.code(202).send({ video, jobId: job.id });
@@ -307,6 +307,14 @@ export async function presetRoutes(app: FastifyInstance) {
 
     if (preset.status === 'active') {
       return reply.code(409).send({ error: 'Preset is already active' });
+    }
+
+    // Factory presets run unattended and spend credits: no more often than once an hour.
+    if (!isAtLeastHourlyCron(preset.cronExpression)) {
+      return reply.code(400).send({
+        error: 'BadRequest',
+        message: 'Фабрика не может запускаться чаще раза в час. В поле «минуты» cron-выражения укажите одно число (например "0 10 * * *" или "30 */2 * * *").',
+      });
     }
 
     // Compute next run time (immediate = now)

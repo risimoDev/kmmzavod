@@ -7,7 +7,7 @@
  * and flips the project to `ready` for the user to review/edit before render.
  */
 
-import { Worker, type ConnectionOptions } from 'bullmq';
+import { Worker, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type EditorAnalyzeJobPayload } from '@kmmzavod/queue';
 import { Prisma, type PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
@@ -175,7 +175,21 @@ export function createEditorAnalyzeWorker(deps: Deps): Worker {
         const errorMsg = err && typeof err === 'object' && 'isAxiosError' in err
           ? describeEditorError(err)
           : err instanceof Error ? err.message : String(err);
-        logger.error({ projectId, err: errorMsg }, 'Editor-analyze: failed');
+        const maxAttempts = job.opts?.attempts ?? 1;
+        // UnrecoverableError: BullMQ will not retry it regardless of attempts left.
+        const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
+        logger.error({ projectId, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Editor-analyze: failed');
+
+        if (!isFinal) {
+          // BullMQ will retry: keep the project in-progress so nothing downstream
+          // (autopilot loop) treats this attempt as terminal. The retry resets `error`.
+          await db.editProject.update({
+            where: { id: projectId },
+            data: { status: 'analyzing', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) },
+          }).catch(() => {});
+          throw err;
+        }
+
         await db.editProject.update({ where: { id: projectId }, data: { status: 'failed', error: errorMsg } });
 
         await db.notification.create({

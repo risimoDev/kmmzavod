@@ -14,6 +14,7 @@ import { FISH_VOICES, VOICE_ID_RE, fishGetVoice, voiceById } from '@kmmzavod/ai'
 import { aiStatus, getFishConfig } from '../lib/ai';
 import { logger } from '../logger';
 import { config } from '../config';
+import { assertOwnStorageKey } from '../lib/storage-keys';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
 const SCRIPT_STYLES = ['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal'] as const;
@@ -183,16 +184,41 @@ async function sourceStats(tenantId: string, projectId: string, autopilotId?: st
   return { total: pool.length, fresh };
 }
 
+/**
+ * Copies the state worker flagged as weak (≈ source re-encode / ≈ sibling) are never
+ * published. Same filter as NOT_WEAK in apps/orchestrator/src/autopilot/loop.ts —
+ * keep in sync so the UI count matches what the loop thinks is in stock.
+ */
+const NOT_WEAK = { NOT: { transforms: { path: ['uniqueness', 'ok'], equals: false } } } as const;
+
+/** Unpublished, non-weak completed variants per autopilot — two queries for any number of autopilots. */
+async function readyVariantsMap(autopilotIds: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>(autopilotIds.map((id) => [id, 0]));
+  if (!autopilotIds.length) return result;
+  const batches = await db.autopilotBatch.findMany({
+    where: { autopilotId: { in: autopilotIds }, status: 'ready', uniquifyJobId: { not: null } },
+    select: { autopilotId: true, uniquifyJobId: true },
+  });
+  const jobToAutopilot = new Map<string, string>();
+  for (const b of batches) if (b.uniquifyJobId) jobToAutopilot.set(b.uniquifyJobId, b.autopilotId);
+  if (!jobToAutopilot.size) return result;
+  const counts = await db.uniqueVariant.groupBy({
+    by: ['uniquifyJobId'],
+    where: {
+      uniquifyJobId: { in: [...jobToAutopilot.keys()] },
+      status: 'completed', outputKey: { not: null }, distributeItems: { none: {} }, ...NOT_WEAK,
+    },
+    _count: { _all: true },
+  });
+  for (const c of counts) {
+    const apId = jobToAutopilot.get(c.uniquifyJobId);
+    if (apId) result.set(apId, (result.get(apId) ?? 0) + c._count._all);
+  }
+  return result;
+}
+
 async function readyVariants(autopilotId: string): Promise<number> {
-  const jobs = await db.autopilotBatch.findMany({
-    where: { autopilotId, status: 'ready', uniquifyJobId: { not: null } },
-    select: { uniquifyJobId: true },
-  });
-  const ids = jobs.map((j) => j.uniquifyJobId!).filter(Boolean);
-  if (!ids.length) return 0;
-  return db.uniqueVariant.count({
-    where: { uniquifyJobId: { in: ids }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} } },
-  });
+  return (await readyVariantsMap([autopilotId])).get(autopilotId) ?? 0;
 }
 
 /** «openrouter» = any LLM provider (OpenRouter or GPTunnel) is configured. */
@@ -217,6 +243,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       const n = await db.socialAccount.count({ where: { id: { in: b.socialAccountIds }, tenantId } });
       if (n !== b.socialAccountIds.length) return 'Часть аккаунтов не принадлежит вам';
     }
+    b.bgmKeys?.forEach((k) => assertOwnStorageKey(tenantId, k, 'bgmKeys'));
     if (b.timezone && !isValidTz(b.timezone)) return `Неизвестный часовой пояс: ${b.timezone}`;
     return null;
   }
@@ -338,11 +365,12 @@ export async function autopilotRoutes(app: FastifyInstance) {
       where: { autopilotId: { in: rows.map((r) => r.id) }, status: { in: ['pending', 'scripting', 'analyzing', 'rendering', 'uniquifying'] } },
       _count: { _all: true },
     });
-    const autopilots = await Promise.all(rows.map(async (r) => ({
+    const ready = await readyVariantsMap(rows.map((r) => r.id));
+    const autopilots = rows.map((r) => ({
       ...r,
       inFlight: inflight.find((i) => i.autopilotId === r.id)?._count._all ?? 0,
-      readyVariants: await readyVariants(r.id),
-    })));
+      readyVariants: ready.get(r.id) ?? 0,
+    }));
     return { autopilots };
   });
 

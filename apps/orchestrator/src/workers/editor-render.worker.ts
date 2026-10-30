@@ -8,7 +8,7 @@
  * immediately selectable in the uniquification pipeline.
  */
 
-import { Worker, type ConnectionOptions } from 'bullmq';
+import { Worker, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type EditorRenderJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
@@ -109,21 +109,28 @@ export function createEditorRenderWorker(deps: Deps): Worker {
           if (!row) continue;
 
           // Create a ready SourceVideo for each master clip linked to the workspace project
-          const sv = await db.sourceVideo.create({
-            data: {
-              tenantId,
-              projectId: isAutopilot ? null : workspaceProjectId,
-              origin: isAutopilot ? 'autopilot' : 'editor',
-              title: out.title || `${project.name} (Мастер #${i + 1})`,
-              status: 'ready',
-              storageKey: out.output_key,
-              mimeType: 'video/mp4',
-              fileSizeBytes: BigInt(out.file_size_bytes ?? 0),
-              durationSec: out.duration_sec,
-              width: out.width,
-              height: out.height,
-            },
-          });
+          // Idempotent: the editor writes to a deterministic key (<prefix>/clip_NNN.mp4), so a
+          // retry (or re-render) of this project reuses the SourceVideo of that file instead
+          // of piling up duplicates.
+          const svData = {
+            projectId: isAutopilot ? null : workspaceProjectId,
+            origin: isAutopilot ? 'autopilot' : 'editor',
+            title: out.title || `${project.name} (Мастер #${i + 1})`,
+            status: 'ready' as const,
+            mimeType: 'video/mp4',
+            fileSizeBytes: BigInt(out.file_size_bytes ?? 0),
+            durationSec: out.duration_sec,
+            width: out.width,
+            height: out.height,
+            error: null,
+          };
+          const existingSv = (row.outputSourceVideoId
+            ? await db.sourceVideo.findFirst({ where: { id: row.outputSourceVideoId, tenantId, storageKey: out.output_key }, select: { id: true } })
+            : null)
+            ?? await db.sourceVideo.findFirst({ where: { tenantId, storageKey: out.output_key }, select: { id: true } });
+          const sv = existingSv
+            ? await db.sourceVideo.update({ where: { id: existingSv.id }, data: svData })
+            : await db.sourceVideo.create({ data: { ...svData, tenantId, storageKey: out.output_key } });
 
           await db.editClip.update({
             where: { id: row.id },
@@ -153,7 +160,21 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         const errorMsg = err && typeof err === 'object' && 'isAxiosError' in err
           ? describeEditorError(err)
           : err instanceof Error ? err.message : String(err);
-        logger.error({ projectId, err: errorMsg }, 'Editor-render: failed');
+        const maxAttempts = job.opts?.attempts ?? 1;
+        // UnrecoverableError: BullMQ will not retry it regardless of attempts left.
+        const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
+        logger.error({ projectId, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Editor-render: failed');
+
+        if (!isFinal) {
+          // BullMQ will retry: keep the project in-progress so nothing downstream
+          // (autopilot loop) treats this attempt as terminal. The retry resets `error`.
+          await db.editProject.update({
+            where: { id: projectId },
+            data: { status: 'rendering', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) },
+          }).catch(() => {});
+          throw err;
+        }
+
         await db.editProject.update({ where: { id: projectId }, data: { status: 'failed', error: errorMsg } });
 
         await db.notification.create({

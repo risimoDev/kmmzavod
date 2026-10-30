@@ -943,6 +943,8 @@ model PublishJob {
   @@index([videoId])
   @@index([tenantId, status])
   @@index([scheduledAt])
+  @@index([uniqueVariantId])
+  @@index([socialAccountId, status, publishedAt])
   @@map("publish_jobs")
 }
 
@@ -1104,6 +1106,7 @@ model UniqueVariant {
   @@unique([uniquifyJobId, variantIndex])
   @@index([uniquifyJobId, status])
   @@index([tenantId, status])
+  @@index([pHash])
   @@map("unique_variants")
 }
 
@@ -1189,6 +1192,8 @@ model DistributeItem {
   @@unique([distributeJobId, uniqueVariantId, socialAccountId])
   @@index([distributeJobId, status])
   @@index([scheduledAt])
+  @@index([uniqueVariantId])
+  @@index([socialAccountId, status])
   @@map("distribute_items")
 }
 
@@ -1440,6 +1445,7 @@ model EditSource {
   project EditProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
+  @@index([storageKey])
   @@map("edit_sources")
 }
 

@@ -32,7 +32,7 @@
  *
  * ─── Platform ─────────────────────────────────────────────────────────────
  * GET    /stats                     Platform KPI overview
- * GET    /queue-stats               BullMQ queue counts for all 7 queues
+ * GET    /queue-stats               BullMQ queue counts for all monitored queues (ALL_QUEUES)
  * GET    /usage                     Daily usage aggregates (last 30 days)
  * GET    /generations               AI generation records (cost breakdown)
  * GET    /settings                  All AdminSettings
@@ -45,12 +45,13 @@ import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { pipelineQueue, videoComposeQueue, gptScriptQueue, heygenQueue, imageGenQueue, runwayQueue, pipelineStateQueue, ALL_QUEUES } from '../lib/queues';
-import { QUEUE_DEFS } from '@kmmzavod/queue';
+import { QUEUE_DEFS, addOrReplace } from '@kmmzavod/queue';
 import { logger } from '../logger';
 import { config } from '../config';
 import { getProxyUrl, proxyFetch, proxyFetchStrict } from '../lib/proxy';
 import { Pagination, audit } from './admin/shared';
 import { pipelineTestRoutes } from './admin/pipeline-test.routes';
+import { ACTIVE_JOB_STATUSES, cancelJobAndRelease } from '../lib/video-job';
 
 // ── Zod schemas ───────────────────────────────────────────────────────────────
 // Pagination & audit are imported from ./admin/shared
@@ -132,7 +133,7 @@ export async function adminRoutes(app: FastifyInstance) {
       db.video.count(),
       db.video.count({ where: { status: 'completed', updatedAt: { gte: todayStart } } }),
       db.video.count({ where: { status: 'failed',    updatedAt: { gte: todayStart } } }),
-      db.job.count({ where: { status: { in: ['running', 'processing', 'composing'] } } }),
+      db.job.count({ where: { status: { in: [...ACTIVE_JOB_STATUSES] } } }),
       db.job.count({ where: { status: 'failed' } }),
       db.tenant.aggregate({ _sum: { credits: true } }),
       db.generation.aggregate({
@@ -141,7 +142,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
     ]);
 
-    // Queue health: all 7 queues
+    // Queue health: all monitored queues (ALL_QUEUES)
     const queueCounts = await Promise.all(
       Object.entries(ALL_QUEUES).map(async ([name, q]) => ({
         name,
@@ -560,7 +561,8 @@ export async function adminRoutes(app: FastifyInstance) {
         db.job.update({ where: { id }, data: { status: 'pending', error: null } }),
         ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'pending' } })] : []),
       ]);
-      await pipelineQueue.add(`pipeline:retry:${id}`, { jobId: id, tenantId: job.tenantId });
+      // jobId = Job.id (same as POST /videos) so cancel finds it; a finished earlier run is replaced
+      await addOrReplace(pipelineQueue, `pipeline:retry:${id}`, { jobId: id, tenantId: job.tenantId }, { jobId: id });
       await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
       logger.info({ jobId: id, adminId: req.user.userId, mode: 'full-restart' }, 'Job retried (full restart) by admin');
       return reply.send({ jobId: id, status: 'pending', mode: 'full-restart' });
@@ -574,10 +576,11 @@ export async function adminRoutes(app: FastifyInstance) {
         db.job.update({ where: { id }, data: { status: 'composing', error: null } }),
         ...(job.videoId ? [db.video.update({ where: { id: job.videoId }, data: { status: 'composing' } })] : []),
       ]);
-      await videoComposeQueue.add(
+      await addOrReplace(
+        videoComposeQueue,
         `compose:retry:${id}`,
         { jobId: id, tenantId: job.tenantId },
-        QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions,
+        { ...QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions, jobId: `compose-${id}` },
       );
       await audit(req.user.userId, 'job.retry', 'job', id, req.ip);
       logger.info({ jobId: id, adminId: req.user.userId, mode: 'resume-compose' }, 'Job retried (resume compose) by admin');
@@ -633,7 +636,8 @@ export async function adminRoutes(app: FastifyInstance) {
           data:  { avatarUrl: combinedAvatarUrlExisting, avatarDone: true, status: 'completed' },
         });
         for (const s of failedAvatarScenes) {
-          await pipelineStateQueue.add(
+          await addOrReplace(
+            pipelineStateQueue,
             `state-${s.id}`,
             { jobId: id, sceneId: s.id, tenantId: job.tenantId, completedStage: 'avatar' },
             { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${s.id}-avatar` },
@@ -673,7 +677,8 @@ export async function adminRoutes(app: FastifyInstance) {
           where: { id: scene.id },
           data:  { status: 'completed' },
         });
-        await pipelineStateQueue.add(
+        await addOrReplace(
+          pipelineStateQueue,
           `state-${scene.id}`,
           { jobId: id, sceneId: scene.id, tenantId: job.tenantId, completedStage: 'clip' },
           { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${scene.id}-clip` },
@@ -687,7 +692,8 @@ export async function adminRoutes(app: FastifyInstance) {
         const motionPrompt = scene.bRollPrompt!.includes(SEPARATOR)
           ? scene.bRollPrompt!.split(SEPARATOR)[1]?.trim() ?? scene.bRollPrompt!
           : scene.bRollPrompt!;
-        await runwayQueue.add(
+        await addOrReplace(
+          runwayQueue,
           `runway-resume:${scene.id}`,
           {
             jobId: id, sceneId: scene.id, tenantId: job.tenantId,
@@ -723,7 +729,8 @@ export async function adminRoutes(app: FastifyInstance) {
           where: { id: scene.id },
           data:  { status: 'completed' },
         });
-        await pipelineStateQueue.add(
+        await addOrReplace(
+          pipelineStateQueue,
           `state-${scene.id}`,
           { jobId: id, sceneId: scene.id, tenantId: job.tenantId, completedStage: 'image' },
           { ...QUEUE_DEFS.PIPELINE_STATE.defaultJobOptions, jobId: `state-${scene.id}-image` },
@@ -824,10 +831,11 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
 
-    await videoComposeQueue.add(
+    await addOrReplace(
+      videoComposeQueue,
       `compose:recompose:${id}`,
       { jobId: id, tenantId: job.tenantId },
-      QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions,
+      { ...QUEUE_DEFS.VIDEO_COMPOSE.defaultJobOptions, jobId: `compose-${id}` },
     );
 
     await audit(req.user.userId, 'job.recompose', 'job', id, req.ip);
@@ -840,22 +848,30 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
 
     const job = await db.job.findUniqueOrThrow({ where: { id },
-      select: { videoId: true, status: true } });
+      select: { id: true, tenantId: true, videoId: true, status: true, payload: true } });
 
     if (job.status === 'completed' || job.status === 'cancelled') {
       return reply.code(409).send({ error: 'Conflict',
         message: `Job is already "${job.status}"` });
     }
 
-    await db.$transaction([
-      db.job.update({ where: { id }, data: { status: 'cancelled' } }),
-      ...(job.videoId ? [
-        db.video.update({ where: { id: job.videoId }, data: { status: 'cancelled' } }),
-      ] : []),
-    ]);
-
-    const bullJob = await pipelineQueue.getJob(id);
-    if (bullJob) await bullJob.discard();
+    // Active job: mark cancelled, remove the queued pipeline task (jobId = Job.id) and release
+    // the credit reserve once. The coordinator also refuses to start a cancelled job.
+    const isActive = (ACTIVE_JOB_STATUSES as readonly string[]).includes(job.status);
+    if (isActive) {
+      const cancelled = await cancelJobAndRelease(job, 'Refund: job cancelled by admin');
+      if (!cancelled) {
+        return reply.code(409).send({ error: 'Conflict', message: 'Job changed state concurrently — retry' });
+      }
+    } else {
+      // Failed job: the reserve was already released by the failure handler — just mark it
+      await db.$transaction([
+        db.job.update({ where: { id }, data: { status: 'cancelled' } }),
+        ...(job.videoId ? [
+          db.video.update({ where: { id: job.videoId }, data: { status: 'cancelled' } }),
+        ] : []),
+      ]);
+    }
 
     await audit(req.user.userId, 'job.cancel', 'job', id, req.ip);
     return reply.send({ jobId: id, status: 'cancelled' });

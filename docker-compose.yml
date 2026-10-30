@@ -109,6 +109,9 @@ services:
       DEVICE_AGENT_ACCESSIBLE_API_URL: ${DEVICE_AGENT_ACCESSIBLE_API_URL:-}
       # Tenants allowed to drive the phone farm besides super_admins (comma-separated UUIDs)
       FARM_TENANT_IDS: ${FARM_TENANT_IDS:-}
+      # Optional shared secrets; enforced only when set on both sides (see .env.example)
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
+      DEVICE_AGENT_TOKEN: ${DEVICE_AGENT_TOKEN:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -125,6 +128,8 @@ services:
       context: .
       dockerfile: apps/orchestrator/Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -173,6 +178,8 @@ services:
       # Home-PC bridge to the native ADB phone farm, reached over AmneziaWG (not a
       # docker-compose service — see infra/amneziawg/README.md).
       DEVICE_AGENT_URL: ${DEVICE_AGENT_URL:-http://10.66.66.2:8300}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
+      DEVICE_AGENT_TOKEN: ${DEVICE_AGENT_TOKEN:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -204,6 +211,8 @@ services:
       context: apps/publisher
       dockerfile: Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     shm_size: "1gb"  # headless Chromium needs more than the 64MB default
     logging:
       driver: "json-file"
@@ -214,6 +223,7 @@ services:
       LOG_LEVEL: ${PUBLISHER_LOG_LEVEL:-INFO}
       MAX_CONCURRENT: ${PUBLISHER_MAX_CONCURRENT:-2}
       MAX_DOWNLOAD_MB: ${PUBLISHER_MAX_DOWNLOAD_MB:-300}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -233,6 +243,8 @@ services:
       context: apps/video-processor
       dockerfile: Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -248,6 +260,7 @@ services:
       MINIO_REGION: ${MINIO_REGION:-us-east-1}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
       WORKERS: 2
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     networks:
       - backend
     deploy:
@@ -276,6 +289,8 @@ services:
         WHISPER_PRELOAD: ${EDITOR_WHISPER_MODEL:-small}
         HF_ENDPOINT: ${HF_ENDPOINT:-}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -297,6 +312,7 @@ services:
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       LOG_LEVEL: ${EDITOR_LOG_LEVEL:-INFO}
       MAX_CONCURRENT_JOBS: ${EDITOR_MAX_CONCURRENT_JOBS:-2}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -329,7 +345,6 @@ services:
       NODE_ENV: production
       HOSTNAME: "0.0.0.0"
       NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000}
-      NEXTAUTH_SECRET: ${JWT_SECRET}
     networks:
       - frontend
     depends_on:

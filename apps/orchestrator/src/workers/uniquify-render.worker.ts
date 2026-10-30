@@ -7,7 +7,7 @@
  * No AI calls happen here — producing N variants is N FFmpeg renders, 0 tokens.
  */
 
-import { Worker, Queue, type ConnectionOptions } from 'bullmq';
+import { Worker, Queue, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
 import {
   QUEUES,
@@ -129,6 +129,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
           where: { id: variantId },
           data: {
             status: 'completed',
+            error: null,
             outputKey: result.output_key,
             outputUrl: result.output_key,
             thumbnailKey: result.thumbnail_key,
@@ -161,7 +162,21 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         );
       } catch (err: unknown) {
         const errorMsg = describeAxios(err);
-        logger.error({ variantId, uniquifyJobId, err: errorMsg }, 'Uniquify-render: variant failed');
+        const maxAttempts = job.opts?.attempts ?? 1;
+        // UnrecoverableError: BullMQ will not retry it regardless of attempts left.
+        const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
+        logger.error({ variantId, uniquifyJobId, err: errorMsg, attempt: job.attemptsMade + 1, maxAttempts }, 'Uniquify-render: variant failed');
+
+        if (!isFinal) {
+          // BullMQ will retry: keep the variant in-progress and emit no state event, so
+          // uniquify-state (which counts variant rows) does not finalize the job early.
+          await db.uniqueVariant.update({
+            where: { id: variantId },
+            data: { status: 'rendering', error: `Попытка ${job.attemptsMade + 1}/${maxAttempts}: ${errorMsg}`.slice(0, 2000) },
+          }).catch(() => {});
+          throw err;
+        }
+
         await db.uniqueVariant.update({
           where: { id: variantId },
           data: { status: 'failed', error: errorMsg },

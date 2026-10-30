@@ -6,16 +6,21 @@ import { db } from '../lib/db';
 import { config } from '../config';
 import { logger } from '../logger';
 
+// bcrypt cost factor for password hashes (also used for the timing-equalising dummy hash)
+const BCRYPT_ROUNDS = 12;
+// Compared against when the login email is unknown, so response time doesn't reveal existence
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), BCRYPT_ROUNDS);
+
 const RegisterBody = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
+  email: z.string().trim().toLowerCase().email(),
+  password: z.string().min(8).max(128),
   displayName: z.string().min(2).max(100).optional(),
   tenantName: z.string().min(2).max(100),
 });
 
 const LoginBody = z.object({
-  email: z.string().email(),
-  password: z.string(),
+  email: z.string().trim().email(),
+  password: z.string().max(128),
 });
 
 const RefreshBody = z.object({
@@ -38,7 +43,10 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/register', authRateLimit, async (req, reply) => {
     const body = RegisterBody.parse(req.body);
 
-    const existing = await db.user.findUnique({ where: { email: body.email } });
+    const existing = await db.user.findFirst({
+      where: { email: { equals: body.email, mode: 'insensitive' } },
+      select: { id: true },
+    });
     if (existing) {
       return reply.code(409).send({ error: 'Conflict', message: 'Email уже используется' });
     }
@@ -51,7 +59,7 @@ export async function authRoutes(app: FastifyInstance) {
 
     const uniqueSlug = `${slug}-${Date.now().toString(36)}`;
 
-    const passwordHash = await bcrypt.hash(body.password, 12);
+    const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
 
     const tenant = await db.tenant.create({
       data: {
@@ -89,26 +97,29 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/login', authRateLimit, async (req, reply) => {
     const body = LoginBody.parse(req.body);
 
-    const user = await db.user.findUnique({
-      where: { email: body.email },
+    // Existing users may have mixed-case emails stored, so match case-insensitively
+    const user = await db.user.findFirst({
+      where: { email: { equals: body.email, mode: 'insensitive' } },
       include: { tenant: { select: { id: true, slug: true, plan: true, isActive: true } } },
     });
 
     if (!user || !user.passwordHash) {
+      await bcrypt.compare(body.password, DUMMY_PASSWORD_HASH);
       return reply.code(401).send({ error: 'Unauthorized', message: 'Неверный email или пароль' });
     }
 
+    const valid = await bcrypt.compare(body.password, user.passwordHash);
+    if (!valid) {
+      return reply.code(401).send({ error: 'Unauthorized', message: 'Неверный email или пароль' });
+    }
+
+    // Blocked status is revealed only to someone who knows the password
     if (!user.isActive) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
     }
 
     if (!user.tenant.isActive) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Организация заблокирована' });
-    }
-
-    const valid = await bcrypt.compare(body.password, user.passwordHash);
-    if (!valid) {
-      return reply.code(401).send({ error: 'Unauthorized', message: 'Неверный email или пароль' });
     }
 
     await db.user.update({

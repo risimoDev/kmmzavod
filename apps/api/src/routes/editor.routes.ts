@@ -17,6 +17,7 @@ import { db } from '../lib/db';
 import { editorAnalyzeQueue, editorRenderQueue, uniquifyAnalyzeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
+import { assertOwnStorageKey, StorageKeyError } from '../lib/storage-keys';
 import type { EditorAnalyzeJobPayload, EditorRenderJobPayload, UniquifyAnalyzeJobPayload } from '@kmmzavod/queue';
 import {
   writeScript, fishTts, fishSearchVoices, paceFor, voiceGender, voiceById, stripEmotionTags,
@@ -57,6 +58,40 @@ const PACES = ['calm', 'normal', 'fast'] as const;
 
 function randomSeed(): number {
   return Math.floor(Math.random() * 1_000_000_000);
+}
+
+/** Config fields only the server writes (generate-voice); a client must not inject them. */
+const SERVER_ONLY_CONFIG_KEYS = ['voiceoverKey'] as const;
+
+/**
+ * Client-supplied project config is merged into EditProject.config, which the render
+ * worker reads for storage keys (bgmKey, ...) and the workspace project to attach
+ * outputs to. Drop server-managed keys and verify every other `*Key`/`*Keys` storage
+ * key and `workspaceProjectId` belong to the caller's tenant.
+ */
+async function sanitizeClientConfig(
+  tenantId: string,
+  input: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown>> {
+  const cfg: Record<string, unknown> = { ...(input ?? {}) };
+  for (const k of SERVER_ONLY_CONFIG_KEYS) delete cfg[k];
+  for (const [k, v] of Object.entries(cfg)) {
+    if (!/Keys?$/.test(k)) continue;
+    const keys = Array.isArray(v) ? v : [v];
+    for (const key of keys) {
+      if (typeof key !== 'string') throw new StorageKeyError(`Недопустимый ключ файла (${k})`);
+      assertOwnStorageKey(tenantId, key, k);
+    }
+  }
+  if (cfg.workspaceProjectId == null) delete cfg.workspaceProjectId;
+  else await assertWorkspaceProject(tenantId, cfg.workspaceProjectId);
+  return cfg;
+}
+
+async function assertWorkspaceProject(tenantId: string, id: unknown): Promise<void> {
+  const ok = typeof id === 'string' && z.string().uuid().safeParse(id).success
+    && (await db.project.findFirst({ where: { id, tenantId }, select: { id: true } }));
+  if (!ok) throw new StorageKeyError('Проект не найден (workspaceProjectId)');
 }
 
 const createProjectSchema = z.object({
@@ -206,8 +241,10 @@ export async function editorRoutes(app: FastifyInstance) {
   app.post('/projects', async (req, reply) => {
     const { tenantId, userId } = req.user;
     const body = createProjectSchema.parse(req.body);
+    const clientConfig = await sanitizeClientConfig(tenantId, body.config);
 
-        const wsProjectId = body.workspaceProjectId || ((body.config as any)?.workspaceProjectId as string | undefined);
+        const wsProjectId = body.workspaceProjectId || (clientConfig.workspaceProjectId as string | undefined);
+        if (body.workspaceProjectId) await assertWorkspaceProject(tenantId, body.workspaceProjectId);
         // Uniquify products are always mixes of raw material (mode/geometry are
         // implied by the product, not left to the client).
         const isUniquifyProduct = body.product === 'uniquify_one' || body.product === 'uniquify_multi';
@@ -234,7 +271,7 @@ export async function editorRoutes(app: FastifyInstance) {
             targetClipCount: body.targetClipCount,
             targetClipSeconds: body.targetClipSeconds,
             config: ({
-              ...(body.config ?? {}),
+              ...clientConfig,
               ...montageOptions,
               ...(wsProjectId ? { workspaceProjectId: wsProjectId } : {}),
             }) as object,
@@ -703,6 +740,7 @@ export async function editorRoutes(app: FastifyInstance) {
     const { tenantId } = req.user;
     const { id } = req.params as { id: string };
     const body = patchProjectSchema.parse(req.body);
+    const clientConfig = await sanitizeClientConfig(tenantId, body.config);
 
     const project = await db.editProject.findFirst({ where: { id, tenantId } });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
@@ -722,7 +760,7 @@ export async function editorRoutes(app: FastifyInstance) {
         ...(body.targetClipSeconds !== undefined ? { targetClipSeconds: body.targetClipSeconds } : {}),
         config: {
           ...currentConfig,
-          ...(body.config ?? {}),
+          ...clientConfig,
           ...(body.voiceId !== undefined ? { voiceId: body.voiceId } : {}),
           ...(body.productInfo !== undefined ? { productInfo: body.productInfo } : {}),
           ...(body.ctaType !== undefined ? { ctaType: body.ctaType } : {}),

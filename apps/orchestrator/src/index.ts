@@ -100,24 +100,24 @@ async function main() {
   const gptunnelService = new GptunnelService(storage);
 
   // ── Очереди для fan-out ───────────────────────────────────────────────────
-  const gptScriptQueue = new Queue<GptScriptJobPayload>(QUEUES['gpt-script'].name, { connection });
-  const heygenQueue = new Queue<HeygenRenderJobPayload>(QUEUES['heygen-render'].name, { connection });
-  const runwayQueue = new Queue<RunwayClipJobPayload>(QUEUES['runway-clip'].name, { connection });
-  const imageGenQueue = new Queue<ImageGenJobPayload>(QUEUES['image-gen'].name, { connection });
-  const videoComposeQueue = new Queue<VideoComposeJobPayload>(QUEUES['video-compose'].name, { connection });
-  const pipelineStateQueue = new Queue<PipelineStateJobPayload>(QUEUES['pipeline-state'].name, { connection });
-  const publishQueue = new Queue<PublishJobPayload>(QUEUES['publish'].name, { connection });
-  const pipelineQueue = new Queue<PipelineJobPayload>(QUEUES['pipeline'].name, { connection });
-  const schedulerQueue = new Queue(QUEUES['scheduler'].name, { connection });
-  const uniquifyAnalyzeQueue = new Queue<UniquifyAnalyzeJobPayload>(QUEUES['uniquify-analyze'].name, { connection });
-  const uniquifyRenderQueue = new Queue<UniquifyRenderJobPayload>(QUEUES['uniquify-render'].name, { connection });
-  const uniquifyStateQueue = new Queue<UniquifyStateJobPayload>(QUEUES['uniquify-state'].name, { connection });
-  const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection });
-  const shadowBanCheckQueue = new Queue<ShadowBanCheckPayload>(QUEUES['shadow-ban-check'].name, { connection });
-  const accountWarmupQueue = new Queue<AccountWarmupPayload>(QUEUES['account-warmup'].name, { connection });
-  const editorAnalyzeQueue = new Queue<EditorAnalyzeJobPayload>(QUEUES['editor-analyze'].name, { connection });
-  const editorRenderQueue = new Queue<EditorRenderJobPayload>(QUEUES['editor-render'].name, { connection });
-  const autopilotProduceQueue = new Queue<AutopilotProducePayload>(QUEUES['autopilot-produce'].name, { connection });
+  const gptScriptQueue = new Queue<GptScriptJobPayload>(QUEUES['gpt-script'].name, { connection, defaultJobOptions: QUEUES['gpt-script'].defaultJobOptions });
+  const heygenQueue = new Queue<HeygenRenderJobPayload>(QUEUES['heygen-render'].name, { connection, defaultJobOptions: QUEUES['heygen-render'].defaultJobOptions });
+  const runwayQueue = new Queue<RunwayClipJobPayload>(QUEUES['runway-clip'].name, { connection, defaultJobOptions: QUEUES['runway-clip'].defaultJobOptions });
+  const imageGenQueue = new Queue<ImageGenJobPayload>(QUEUES['image-gen'].name, { connection, defaultJobOptions: QUEUES['image-gen'].defaultJobOptions });
+  const videoComposeQueue = new Queue<VideoComposeJobPayload>(QUEUES['video-compose'].name, { connection, defaultJobOptions: QUEUES['video-compose'].defaultJobOptions });
+  const pipelineStateQueue = new Queue<PipelineStateJobPayload>(QUEUES['pipeline-state'].name, { connection, defaultJobOptions: QUEUES['pipeline-state'].defaultJobOptions });
+  const publishQueue = new Queue<PublishJobPayload>(QUEUES['publish'].name, { connection, defaultJobOptions: QUEUES['publish'].defaultJobOptions });
+  const pipelineQueue = new Queue<PipelineJobPayload>(QUEUES['pipeline'].name, { connection, defaultJobOptions: QUEUES['pipeline'].defaultJobOptions });
+  const schedulerQueue = new Queue(QUEUES['scheduler'].name, { connection, defaultJobOptions: QUEUES['scheduler'].defaultJobOptions });
+  const uniquifyAnalyzeQueue = new Queue<UniquifyAnalyzeJobPayload>(QUEUES['uniquify-analyze'].name, { connection, defaultJobOptions: QUEUES['uniquify-analyze'].defaultJobOptions });
+  const uniquifyRenderQueue = new Queue<UniquifyRenderJobPayload>(QUEUES['uniquify-render'].name, { connection, defaultJobOptions: QUEUES['uniquify-render'].defaultJobOptions });
+  const uniquifyStateQueue = new Queue<UniquifyStateJobPayload>(QUEUES['uniquify-state'].name, { connection, defaultJobOptions: QUEUES['uniquify-state'].defaultJobOptions });
+  const distributeQueue = new Queue<DistributeJobPayload>(QUEUES['uniquify-distribute'].name, { connection, defaultJobOptions: QUEUES['uniquify-distribute'].defaultJobOptions });
+  const shadowBanCheckQueue = new Queue<ShadowBanCheckPayload>(QUEUES['shadow-ban-check'].name, { connection, defaultJobOptions: QUEUES['shadow-ban-check'].defaultJobOptions });
+  const accountWarmupQueue = new Queue<AccountWarmupPayload>(QUEUES['account-warmup'].name, { connection, defaultJobOptions: QUEUES['account-warmup'].defaultJobOptions });
+  const editorAnalyzeQueue = new Queue<EditorAnalyzeJobPayload>(QUEUES['editor-analyze'].name, { connection, defaultJobOptions: QUEUES['editor-analyze'].defaultJobOptions });
+  const editorRenderQueue = new Queue<EditorRenderJobPayload>(QUEUES['editor-render'].name, { connection, defaultJobOptions: QUEUES['editor-render'].defaultJobOptions });
+  const autopilotProduceQueue = new Queue<AutopilotProducePayload>(QUEUES['autopilot-produce'].name, { connection, defaultJobOptions: QUEUES['autopilot-produce'].defaultJobOptions });
 
   // ── Workers ───────────────────────────────────────────────────────────────
   const gptWorker = createGptScriptWorker({
@@ -249,7 +249,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler(
     'scheduler-tick',
     { every: 60_000 },
-    { data: { tick: Date.now() } },
+    { data: { tick: Date.now() }, opts: QUEUES['scheduler'].defaultJobOptions },
   );
 
   // Pipeline-worker — точка входа пайплайна (enqueue из API)

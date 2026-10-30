@@ -14,6 +14,9 @@ import { axiosProxyConfig } from '../lib/proxy';
 
 export type ImageGenProvider = 'runway' | 'fal' | 'replicate' | 'comfyui' | 'gemini' | 'gptunnel';
 
+/** Cap for images downloaded from vendor URLs (bounded memory). */
+export const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+
 interface GenerateImageOpts {
   prompt: string;
   negativePrompt?: string;
@@ -63,15 +66,16 @@ export class ImageGenClient {
 
   /**
    * Generate with automatic fallback to Gemini if primary provider fails.
+   * The result says which provider actually produced the image (for billing/audit).
    */
-  async generateWithFallback(opts: GenerateImageOpts): Promise<ImageResult> {
+  async generateWithFallback(opts: GenerateImageOpts): Promise<ImageResult & { provider: ImageGenProvider }> {
     try {
-      return await this.generate(opts);
+      return { ...(await this.generate(opts)), provider: this.provider };
     } catch (primaryErr) {
       const key = this.geminiApiKey ?? (this.provider === 'gemini' ? this.apiKey : undefined);
       if (!key || this.provider === 'gemini') throw primaryErr;
       logger.warn({ provider: this.provider, err: (primaryErr as Error).message }, 'Primary image gen failed, falling back to Gemini');
-      return this.generateGemini(opts, key);
+      return { ...(await this.generateGemini(opts, key)), provider: 'gemini' };
     }
   }
 
@@ -115,6 +119,8 @@ export class ImageGenClient {
         const imgRes = await axios.get<ArrayBuffer>(url, {
           responseType: 'arraybuffer',
           timeout: 30_000,
+          maxContentLength: MAX_DOWNLOAD_BYTES,
+          maxBodyLength: MAX_DOWNLOAD_BYTES,
           ...axiosProxyConfig(),
         });
         const mimeType = (imgRes.headers['content-type'] as string | undefined)
@@ -238,6 +244,8 @@ export class ImageGenClient {
         const dlRes = await axios.get<ArrayBuffer>(url, {
           responseType: 'arraybuffer',
           timeout: 60_000,
+          maxContentLength: MAX_DOWNLOAD_BYTES,
+          maxBodyLength: MAX_DOWNLOAD_BYTES,
           ...axiosProxyConfig(),
         });
         const buffer = Buffer.from(dlRes.data);

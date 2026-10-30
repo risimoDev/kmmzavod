@@ -4,10 +4,9 @@ import { isAccessTokenPayload } from '../plugins/auth.plugin';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { sseSubscriber } from '../lib/sse-subscriber';
-import { pipelineQueue } from '../lib/queues';
 import { logger } from '../logger';
 import { config } from '../config';
-import type { PipelineJobPayload } from '@kmmzavod/queue';
+import { ACTIVE_JOB_STATUSES, cancelJobAndRelease, createVideoJob } from '../lib/video-job';
 
 const CreateVideoBody = z.object({
   title: z.string().min(1).max(200),
@@ -275,24 +274,6 @@ async function authedVideoRoutes(app: FastifyInstance) {
     const body = CreateVideoBody.parse(req.body);
     const { tenantId, userId } = req.user;
 
-    // ── Оценка стоимости и проверка кредитов ────────────────────────────────
-    const DEFAULT_AVG_CREDITS = 15; // fallback если настройка не задана
-    const DEFAULT_SCENES_COUNT = 5; // типичное кол-во сцен
-
-    let avgCreditsPerScene = DEFAULT_AVG_CREDITS;
-    try {
-      const setting = await db.adminSetting.findUnique({
-        where: { key: 'avg_credits_per_scene' },
-        select: { value: true },
-      });
-      if (setting?.value != null) {
-        const parsed = Number(typeof setting.value === 'object' ? (setting.value as any).value : setting.value);
-        if (parsed > 0) avgCreditsPerScene = parsed;
-      }
-    } catch { /* use default */ }
-
-    const estimatedCredits = DEFAULT_SCENES_COUNT * avgCreditsPerScene;
-
     // Проверяем projectId если передан
     if (body.projectId) {
       const project = await db.project.findFirst({
@@ -336,113 +317,43 @@ async function authedVideoRoutes(app: FastifyInstance) {
       enrichedPrompt = `${productContext}\n\nЗадача: ${body.scriptPrompt}`;
     }
 
-    // Создаём видео + задачу + soft reserve кредитов в одной транзакции
-    // Serializable isolation prevents double-spending race conditions
-    const result = await db.$transaction(async (tx) => {
-      // Atomic credit check under Serializable isolation prevents double-spending
-      const tenant = await tx.tenant.findUniqueOrThrow({
-        where: { id: tenantId },
-        select: { credits: true },
-      });
+    // Резерв кредитов + Video + Job + постановка в очередь (см. lib/video-job.ts)
+    const result = await createVideoJob({
+      tenantId,
+      userId,
+      title: body.title,
+      description: body.description,
+      projectId: body.projectId,
+      productId: body.productId,
+      presetId: body.presetId,
+      scriptPrompt: enrichedPrompt,
+      avatarId: body.avatarId,
+      voiceId: body.voiceId,
+      settings: {
+        ...body.settings,
+        durationSec: body.durationSec,
+        audio_track: body.audioTrack ? {
+          storage_key: body.audioTrack.storage_key,
+          volume: body.audioTrack.volume,
+          fade_in_sec: 1.5,
+          fade_out_sec: 2.0,
+        } : undefined,
+      },
+      videoMetadata: body.settings,
+    });
 
-      if (tenant.credits < estimatedCredits) {
-        throw Object.assign(new Error('InsufficientCredits'), {
-          statusCode: 402,
-          available: tenant.credits,
-          required: estimatedCredits,
-        });
-      }
-
-      const video = await tx.video.create({
-        data: {
-          tenantId,
-          projectId: body.projectId ?? null,
-          productId: body.productId ?? null,
-          presetId: body.presetId ?? null,
-          createdBy: userId,
-          title: body.title,
-          description: body.description ?? null,
-          status: 'pending',
-          metadata: body.settings,
-        },
-      });
-
-      const job = await tx.job.create({
-        data: {
-          tenantId,
-          videoId: video.id,
-          projectId: body.projectId ?? null,
-          createdBy: userId,
-          status: 'pending',
-          payload: {
-            script_prompt: enrichedPrompt,
-            avatar_id: body.avatarId,
-            voice_id: body.voiceId,
-            settings: {
-              ...body.settings,
-              durationSec: body.durationSec,
-              audio_track: body.audioTrack ? {
-                storage_key: body.audioTrack.storage_key,
-                volume: body.audioTrack.volume,
-                fade_in_sec: 1.5,
-                fade_out_sec: 2.0,
-              } : undefined,
-            },
-            estimatedCredits,
-          },
-        },
-      });
-
-      // Soft reserve: списываем estimated credits заранее
-      const updated = await tx.tenant.update({
-        where: { id: tenantId },
-        data: { credits: { decrement: estimatedCredits } },
-        select: { credits: true },
-      });
-
-      await tx.creditTransaction.create({
-        data: {
-          tenantId,
-          type: 'reserve',
-          amount: -estimatedCredits,
-          balanceAfter: Math.max(0, updated.credits),
-          description: `Reserve for video "${body.title}"`,
-          jobId: job.id,
-        },
-      });
-
-      return { video, job };
-    }, { isolationLevel: 'Serializable' }).catch((err: any) => {
-      if (err.message === 'InsufficientCredits') {
+    if (!result.ok) {
+      if (result.reason === 'insufficient_credits') {
         return reply.code(402).send({
           error: 'InsufficientCredits',
           message: 'Недостаточно кредитов для запуска генерации.',
-          available: err.available,
-          required: err.required,
+          available: result.available,
+          required: result.required,
         });
       }
-      throw err;
-    });
-
-    // If reply was already sent (insufficient credits), return
-    if (!result || reply.sent) return;
-    const { video, job } = result;
-
-    // Ставим задачу в очередь BullMQ
-    const payload: PipelineJobPayload = { jobId: job.id, tenantId };
-    try {
-      await pipelineQueue.add(`pipeline:${job.id}`, payload);
-    } catch (queueErr: any) {
-      // Queue add failed — mark records as failed to avoid orphaned/zombie jobs
-      try {
-        await db.$transaction([
-          db.job.update({ where: { id: job.id }, data: { status: 'failed', error: 'Queue unavailable' } }),
-          db.video.update({ where: { id: video.id }, data: { status: 'failed' } }),
-        ]);
-      } catch { /* best-effort cleanup */ }
-      logger.error({ jobId: job.id, err: queueErr.message }, 'Failed to enqueue pipeline job — records marked failed');
       return reply.code(503).send({ error: 'ServiceUnavailable', message: 'Очередь задач недоступна. Попробуйте позже.' });
     }
+    const { video, job } = result;
 
     logger.info({ videoId: video.id, jobId: job.id, tenantId }, 'Video job enqueued');
 
@@ -462,9 +373,10 @@ async function authedVideoRoutes(app: FastifyInstance) {
     const query = ListVideosQuery.parse(req.query);
     const { tenantId } = req.user;
 
+    // Cancelled (soft-deleted) videos are hidden unless explicitly requested via ?status=cancelled
     const where = {
       tenantId,
-      ...(query.status && { status: query.status }),
+      status: query.status ?? { not: 'cancelled' as const },
       ...(query.projectId && { projectId: query.projectId }),
     };
 
@@ -579,7 +491,18 @@ async function authedVideoRoutes(app: FastifyInstance) {
       });
     }
 
-    await db.video.update({ where: { id }, data: { status: 'cancelled' } });
+    // If the pipeline job is still active, cancel it too: removes the queued task and
+    // releases the credit reserve (once). Otherwise just soft-delete the video.
+    const job = await db.job.findFirst({
+      where: { videoId: id },
+      select: { id: true, tenantId: true, videoId: true, payload: true },
+    });
+    const jobCancelled = job
+      ? await cancelJobAndRelease(job, 'Refund: video cancelled by user')
+      : false;
+    if (!jobCancelled) {
+      await db.video.update({ where: { id }, data: { status: 'cancelled' } });
+    }
 
     logger.info({ videoId: id, tenantId }, 'Video cancelled');
     return reply.code(204).send();
@@ -689,15 +612,15 @@ async function authedVideoRoutes(app: FastifyInstance) {
       recentVideos,
       chartData,
     ] = await Promise.all([
-      db.video.count({ where: { tenantId } }),
-      db.video.count({ where: { tenantId, createdAt: { gte: weekAgo } } }),
-      db.job.count({ where: { tenantId, status: { in: ['pending', 'processing', 'composing'] } } }),
+      db.video.count({ where: { tenantId, status: { not: 'cancelled' } } }),
+      db.video.count({ where: { tenantId, status: { not: 'cancelled' }, createdAt: { gte: weekAgo } } }),
+      db.job.count({ where: { tenantId, status: { in: [...ACTIVE_JOB_STATUSES] } } }),
       db.tenant.findUniqueOrThrow({
         where: { id: tenantId },
         select: { credits: true, plan: true },
       }),
       db.video.findMany({
-        where: { tenantId },
+        where: { tenantId, status: { not: 'cancelled' } },
         orderBy: { createdAt: 'desc' },
         take: 6,
         select: {
@@ -718,6 +641,7 @@ async function authedVideoRoutes(app: FastifyInstance) {
           FROM "videos"
           WHERE "tenant_id" = ${tenantId}::uuid
             AND "created_at" >= (NOW() - INTERVAL '6 days')::date
+            AND "status" <> 'cancelled'
           GROUP BY DATE("created_at")
         ) c ON c.dt = d::date
         ORDER BY d
@@ -725,7 +649,7 @@ async function authedVideoRoutes(app: FastifyInstance) {
     ]);
 
     const activeJobsList = await db.job.findMany({
-      where: { tenantId, status: { in: ['pending', 'processing', 'composing'] } },
+      where: { tenantId, status: { in: [...ACTIVE_JOB_STATUSES] } },
       orderBy: { createdAt: 'desc' },
       take: 5,
       include: {

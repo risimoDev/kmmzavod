@@ -6,6 +6,7 @@ import { db } from '../lib/db';
 import { uniquifyAnalyzeQueue, uniquifyRenderQueue, distributeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
+import { assertOwnStorageKey, isOwnStorageKey } from '../lib/storage-keys';
 import { config } from '../config';
 import { QUEUES, type UniquifyAnalyzeJobPayload, type UniquifyRenderJobPayload, type DistributeJobPayload } from '@kmmzavod/queue';
 
@@ -129,6 +130,11 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const body = UploadSourceVideoBody.parse(req.body);
     const { tenantId, userId } = req.user;
 
+    if (body.projectId) {
+      const project = await db.project.findFirst({ where: { id: body.projectId, tenantId }, select: { id: true } });
+      if (!project) return reply.code(404).send({ error: 'NotFound', message: 'Проект не найден' });
+    }
+
     // Create SourceVideo record
     const sourceVideo = await db.sourceVideo.create({
       data: {
@@ -186,6 +192,13 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const title = fields.title?.value?.trim() || data.filename || `source_${Date.now()}`;
     const description = fields.description?.value?.trim() || undefined;
     const projectId = fields.projectId?.value?.trim() || undefined;
+    if (projectId) {
+      if (!z.string().uuid().safeParse(projectId).success) {
+        return reply.code(400).send({ error: 'BadRequest', message: 'Некорректный projectId' });
+      }
+      const project = await db.project.findFirst({ where: { id: projectId, tenantId }, select: { id: true } });
+      if (!project) return reply.code(404).send({ error: 'NotFound', message: 'Проект не найден' });
+    }
 
     // Create the record first to get an id for the storage key.
     const sourceVideo = await db.sourceVideo.create({
@@ -247,6 +260,11 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'BadRequest', message: 'Video is not in uploading state' });
     }
 
+    // Never mark a record ready unless the object really landed in storage.
+    if (!sourceVideo.storageKey || !(await app.storage.exists(sourceVideo.storageKey).catch(() => false))) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'Файл ещё не загружен в хранилище' });
+    }
+
     await db.sourceVideo.update({
       where: { id },
       data: { status: 'ready' },
@@ -293,6 +311,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       page: query.page,
       limit: query.limit,
       totalPages: Math.ceil(total / query.limit),
+      pagination: { page: query.page, limit: query.limit, total, pages: Math.ceil(total / query.limit) },
     });
   });
 
@@ -438,7 +457,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const { key } = z.object({ key: z.string().min(1) }).parse(req.query);
 
     // Tenant isolation: a tenant may only delete keys under its own prefix.
-    if (!key.startsWith(StoragePaths.bgmTenantPrefix(tenantId))) {
+    if (!key.startsWith(StoragePaths.bgmTenantPrefix(tenantId)) || !isOwnStorageKey(tenantId, key)) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Нет доступа к этому файлу' });
     }
 
@@ -468,6 +487,8 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     if (sourceVideo.status !== 'ready') {
       return reply.code(400).send({ error: 'BadRequest', message: 'Source video is not ready for uniquification' });
     }
+
+    body.config.bgmTrackKeys?.forEach((k) => assertOwnStorageKey(tenantId, k, 'bgmTrackKeys'));
 
     // Verify additional source video IDs belong to tenant and are ready
     if (body.config?.additionalSourceVideoIds && body.config.additionalSourceVideoIds.length > 0) {
@@ -549,6 +570,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       page: query.page,
       limit: query.limit,
       totalPages: Math.ceil(total / query.limit),
+      pagination: { page: query.page, limit: query.limit, total, pages: Math.ceil(total / query.limit) },
     });
   });
 
@@ -771,6 +793,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       page: query.page,
       limit: query.limit,
       totalPages: Math.ceil(total / query.limit),
+      pagination: { page: query.page, limit: query.limit, total, pages: Math.ceil(total / query.limit) },
     });
   });
 

@@ -4,6 +4,8 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'crypto';
+import { isIP } from 'net';
+import { lookup as dnsLookup } from 'dns/promises';
 import { db } from '../lib/db';
 import { encrypt, decrypt } from '../lib/crypto';
 import { computeReadiness } from '../lib/publish-readiness';
@@ -16,6 +18,18 @@ import { config } from '../config';
 import { farmControlRateLimit } from '../plugins/rate-limit.plugin';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
+
+/** Android package name as accepted by the device-agent (no shell metacharacters). */
+const PackageName = z.string().regex(/^[A-Za-z0-9._]{1,200}$/, 'Invalid package name');
+
+/** Plain http(s) URL (zod's .url() also accepts javascript:, file:, ftp: …). */
+const isHttpUrl = (v: string) => /^https?:\/\//i.test(v);
+const HttpUrl = z.string().trim().url().refine(isHttpUrl, 'Only http(s) URLs are allowed');
+const OptionalHttpUrl = z.string().trim().url().refine(isHttpUrl, 'Only http(s) URLs are allowed')
+  .optional().or(z.literal('')).transform((v) => v || undefined);
+
+const MAX_SCRIPT_JS_CODE = 100 * 1024;
+const MAX_SCRIPT_STEPS = 500;
 
 const CreateAccountGroupBody = z.object({
   name: z.string().min(1).max(200),
@@ -107,7 +121,7 @@ const ProxySourceFields = {
   username: z.string().optional(),
   password: z.string().optional(),
   type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
+  rotateUrl: OptionalHttpUrl,
 };
 
 const hasProxySource = (data: { proxyId?: string; host?: string; port?: number }) =>
@@ -126,7 +140,7 @@ const TestProxyBody = z.object(ProxySourceFields).refine(hasProxySource, {
 });
 
 const RotateDeviceIpBody = z.object({
-  rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
+  rotateUrl: OptionalHttpUrl,
   cooldownMs: z.number().int().min(0).max(30000).optional(),
 });
 
@@ -144,7 +158,7 @@ const BatchSetDeviceProxyBody = z.object({
     username: z.string().optional(),
     password: z.string().optional(),
     type: z.enum(['http', 'https', 'socks5', 'residential', 'mobile']).optional(),
-    rotateUrl: z.string().trim().url().optional().or(z.literal('')).transform((v) => v || undefined),
+    rotateUrl: OptionalHttpUrl,
   })).min(1),
 });
 
@@ -153,7 +167,7 @@ const BatchCheckIpBody = z.object({
 });
 
 const InstallApkBody = z.object({
-  apkUrl: z.string().url(),
+  apkUrl: HttpUrl,
   targetDeviceIds: z.array(z.string()).min(1),
   reinstall: z.boolean().default(true),
   grantPermissions: z.boolean().default(true),
@@ -161,14 +175,14 @@ const InstallApkBody = z.object({
 
 const BatchAppActionBody = z.object({
   action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
-  packageName: z.string().min(1),
+  packageName: PackageName,
   targetDeviceIds: z.array(z.string()).min(1),
 });
 
 const RunScriptDispatchBody = z.object({
   engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
-  steps: z.array(z.any()).optional(),
-  jsCode: z.string().optional(),
+  steps: z.array(z.any()).max(MAX_SCRIPT_STEPS).optional(),
+  jsCode: z.string().max(MAX_SCRIPT_JS_CODE).optional(),
   targetDeviceIds: z.array(z.string()).min(1),
   variables: z.record(z.string()).optional(),
   scriptName: z.string().optional(),
@@ -184,7 +198,7 @@ const DeviceAcceptDialogBody = z.object({
 });
 
 const DeviceGrantPermissionsBody = z.object({
-  packageName: z.string().optional(),
+  packageName: PackageName.optional(),
   targetDeviceIds: z.array(z.string()).optional(),
 });
 
@@ -332,6 +346,128 @@ function buildProxyUrl(proxy: {
     ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password ? decrypt(proxy.password) : '')}@`
     : '';
   return `${scheme}://${auth}${proxy.host}:${proxy.port}`;
+}
+
+/**
+ * Strip userinfo (username:password) from a proxy URL so it is safe to return to API clients.
+ * Returns `scheme://host:port`, or null when absent / unparseable.
+ */
+export function maskProxyUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
+}
+
+// ── Proxy host validation (anti-SSRF / blind port-scan) ─────────────────────
+
+function ipv4ToParts(ip: string): number[] | null {
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  return parts.every((n) => n <= 255) ? parts : null;
+}
+
+function isPrivateIPv4(p: number[]): boolean {
+  const [a, b] = p;
+  return (
+    a === 0 ||                              // 0.0.0.0/8
+    a === 10 ||                             // 10/8
+    a === 127 ||                            // loopback
+    (a === 100 && b >= 64 && b <= 127) ||   // CGNAT 100.64/10
+    (a === 169 && b === 254) ||             // link-local
+    (a === 172 && b >= 16 && b <= 31) ||    // 172.16/12
+    (a === 192 && b === 168) ||             // 192.168/16
+    a >= 224                                // multicast / reserved / broadcast
+  );
+}
+
+/** Expand an IPv6 literal to 8 hextets (handles `::` and an embedded IPv4 tail). */
+function ipv6ToHextets(ip: string): number[] | null {
+  let s = ip.split('%')[0].toLowerCase();
+  const tail = s.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (tail) {
+    const v4 = ipv4ToParts(tail[1]);
+    if (!v4) return null;
+    s = s.slice(0, -tail[1].length) + ((v4[0] << 8) | v4[1]).toString(16) + ':' + ((v4[2] << 8) | v4[3]).toString(16);
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - rest.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return null;
+  const groups = [...head, ...Array(fill).fill('0'), ...rest].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? groups : null;
+}
+
+/** True for loopback / private / link-local / CGNAT / unspecified / multicast IP literals. Unparseable → true. */
+export function isPrivateIp(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) {
+    const p = ipv4ToParts(ip);
+    return !p || isPrivateIPv4(p);
+  }
+  if (v === 6) {
+    const h = ipv6ToHextets(ip);
+    if (!h) return true;
+    if (h.every((x) => x === 0)) return true;                        // ::
+    if (h.slice(0, 7).every((x) => x === 0) && h[7] === 1) return true; // ::1
+    if ((h[0] & 0xfe00) === 0xfc00) return true;                     // fc00::/7
+    if ((h[0] & 0xffc0) === 0xfe80) return true;                     // fe80::/10
+    if ((h[0] & 0xff00) === 0xff00) return true;                     // multicast
+    // IPv4-mapped (::ffff:a.b.c.d) / IPv4-compatible (::a.b.c.d) → judge by the embedded v4
+    if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0)) {
+      return isPrivateIPv4([h[6] >> 8, h[6] & 0xff, h[7] >> 8, h[7] & 0xff]);
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Static check of a proxy host (no DNS): rejects private IP literals, bare single-label
+ * names (docker service names: postgres, redis, minio …) and non-canonical numeric IPs.
+ * Returns an error message, or null when the host looks acceptable.
+ */
+export function checkProxyHostStatic(rawHost: string): string | null {
+  const host = rawHost.trim().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!host) return 'Proxy host is empty';
+  if (isIP(host)) {
+    return isPrivateIp(host) ? `Proxy host ${host} is a private/internal address` : null;
+  }
+  if (!host.includes('.')) return `Proxy host "${host}" is a single-label (internal) hostname`;
+  // 2130706433, 0x7f.1, 127.1 … — numeric forms that resolvers turn into IPs
+  if (/^(0x[0-9a-f]+|\d+)(\.(0x[0-9a-f]+|\d+))*$/i.test(host)) {
+    return `Proxy host "${host}" is not a valid public address`;
+  }
+  return null;
+}
+
+/**
+ * Full check for outbound connects from the API container: static rules plus DNS resolution
+ * of ALL addresses (any private result rejects). Returns the address to connect to so the
+ * socket can't be re-pointed by a second (rebinding) lookup.
+ */
+export async function resolvePublicProxyHost(
+  rawHost: string,
+): Promise<{ ok: true; address: string } | { ok: false; error: string }> {
+  const staticErr = checkProxyHostStatic(rawHost);
+  if (staticErr) return { ok: false, error: staticErr };
+  const host = rawHost.trim().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (isIP(host)) return { ok: true, address: host };
+  try {
+    const addrs = await dnsLookup(host, { all: true });
+    if (addrs.length === 0) return { ok: false, error: `Proxy host "${host}" does not resolve` };
+    const bad = addrs.find((a) => isPrivateIp(a.address));
+    if (bad) return { ok: false, error: `Proxy host "${host}" resolves to a private/internal address` };
+    return { ok: true, address: addrs[0].address };
+  } catch {
+    return { ok: false, error: `Proxy host "${host}" does not resolve` };
+  }
 }
 
 type ProxyRow = { id: string; type: string; host: string; port: number; username: string | null; password: string | null };
@@ -511,6 +647,16 @@ function hasFarmAccess(user: { tenantId: string; platformRole: string }): boolea
   return user.platformRole === 'super_admin' || config.FARM_TENANT_IDS.includes(user.tenantId);
 }
 
+/** First deviceId (of `deviceIds`) already bound to a SocialAccount of ANOTHER tenant, if any. */
+async function findForeignDeviceBinding(tenantId: string, deviceIds: string[]): Promise<string | null> {
+  if (deviceIds.length === 0) return null;
+  const taken = await db.socialAccount.findFirst({
+    where: { deviceId: { in: deviceIds }, tenantId: { not: tenantId } },
+    select: { deviceId: true },
+  });
+  return taken?.deviceId ?? null;
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 export async function accountFarmRoutes(app: FastifyInstance) {
@@ -579,6 +725,20 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   app.post('/proxies/bulk', async (request, reply) => {
     const { tenantId } = request.user;
     const { proxies } = BulkProxyBody.parse(request.body);
+    // Farm operators (trusted) may use LAN proxies; everyone else gets only public hosts.
+    if (!hasFarmAccess(request.user)) {
+      const bad: string[] = [];
+      for (const p of proxies) {
+        const err = checkProxyHostStatic(p.host);
+        if (err) bad.push(err);
+      }
+      if (bad.length > 0) {
+        return reply.status(400).send({
+          error: 'Invalid proxy host',
+          message: `${bad.length} proxy host(s) rejected: ${[...new Set(bad)].slice(0, 5).join('; ')}`,
+        });
+      }
+    }
     const created = await db.proxy.createMany({
       data: proxies.map((p) => ({
         ...p,
@@ -593,9 +753,10 @@ export async function accountFarmRoutes(app: FastifyInstance) {
 
   app.get('/proxies', async (request, reply) => {
     const { tenantId } = request.user;
-    const { isActive, country } = z.object({
+    const { isActive, country, limit } = z.object({
       isActive: z.enum(['true', 'false']).optional(),
       country: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(2000).default(500),
     }).parse(request.query);
 
     const proxies = await db.proxy.findMany({
@@ -606,6 +767,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       },
       include: { _count: { select: { accounts: true } } },
       orderBy: [{ isActive: 'desc' }, { assignedAccounts: 'asc' }],
+      take: limit,
     });
     // Never expose proxy passwords
     return reply.send(proxies.map((p: any) => { const { password: _pw, ...rest } = p; return rest; }));
@@ -617,6 +779,18 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const proxy = await db.proxy.findFirst({ where: { id, tenantId } });
     if (!proxy) return reply.status(404).send({ error: 'Proxy not found' });
 
+    // The connect originates from the API container: never let it reach internal services.
+    // Farm operators (trusted) may check LAN proxies.
+    let target = proxy.host;
+    if (!hasFarmAccess(request.user)) {
+      const resolved = await resolvePublicProxyHost(proxy.host);
+      if (!resolved.ok) {
+        await db.proxy.update({ where: { id }, data: { healthCheckAt: new Date(), lastError: resolved.error.slice(0, 500) } });
+        return reply.send({ id, ok: false, error: resolved.error });
+      }
+      target = resolved.address;
+    }
+
     // Simple TCP connectivity check
     const net = await import('net');
     const ok = await new Promise<boolean>((resolve) => {
@@ -625,7 +799,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       socket.once('connect', () => { socket.destroy(); resolve(true); });
       socket.once('error', () => resolve(false));
       socket.once('timeout', () => { socket.destroy(); resolve(false); });
-      socket.connect(proxy.port, proxy.host);
+      socket.connect(proxy.port, target);
     });
 
     await db.proxy.update({
@@ -686,6 +860,28 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { tenantId } = request.user;
     const { accounts, autoAssign } = BulkSocialAccountBody.parse(request.body);
 
+    // Binding an account to a physical phone is a farm operation: workers will drive that device.
+    const deviceIds = [...new Set(accounts.map((a) => a.deviceId?.trim()).filter((d): d is string => !!d))];
+    if (accounts.some((a) => a.authMethod === 'device') || deviceIds.length > 0) {
+      if (!hasFarmAccess(request.user)) {
+        return reply.code(403).send({ error: 'Forbidden', message: 'Нет доступа к телефонной ферме' });
+      }
+      const conflict = await findForeignDeviceBinding(tenantId, deviceIds);
+      if (conflict) return reply.status(409).send({ error: 'Conflict', message: `Устройство ${conflict} уже привязано к аккаунту другого тенанта` });
+    }
+
+    // Reject unknown / foreign account groups up front instead of storing a dangling id.
+    const groupIds = [...new Set(accounts.map((a) => a.accountGroupId).filter((g): g is string => !!g))];
+    const groupsById = new Map<string, any>();
+    if (groupIds.length > 0) {
+      const groups = await db.accountGroup.findMany({ where: { id: { in: groupIds }, tenantId } });
+      for (const g of groups) groupsById.set(g.id, g);
+      const missing = groupIds.filter((g) => !groupsById.has(g));
+      if (missing.length > 0) {
+        return reply.status(400).send({ error: 'Invalid accountGroupId', message: `Группа аккаунтов не найдена: ${missing.slice(0, 5).join(', ')}` });
+      }
+    }
+
     const results: Array<{ accountName: string; status: 'created' | 'failed'; error?: string; note?: string }> = [];
 
     for (const acc of accounts) {
@@ -700,9 +896,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         let proxyUrl: string | null = null;
 
         if (accountGroupId) {
-          groupRecord = await db.accountGroup.findFirst({
-            where: { id: accountGroupId, tenantId },
-          });
+          groupRecord = groupsById.get(accountGroupId) ?? null;
           if (groupRecord) timezone = groupRecord.timezone;
         }
         // Auto-assign a proxy per the "1 account per platform per proxy" rule
@@ -749,7 +943,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
             platform: acc.platform,
             accountName: acc.accountName,
             authMethod: acc.authMethod,
-            deviceId: acc.deviceId,
+            deviceId: acc.deviceId?.trim() || undefined,
             accessToken: accessTokenEnc,
             sessionData: sessionDataEnc,
             refreshToken: acc.refreshToken ? encrypt(acc.refreshToken) : undefined,
@@ -791,6 +985,18 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = SetCredentialsBody.parse(request.body);
 
+    // Binding an account to a physical phone is a farm operation: workers will drive that device.
+    const bodyDeviceId = body.deviceId?.trim() || undefined;
+    if (body.authMethod === 'device' || bodyDeviceId) {
+      if (!hasFarmAccess(request.user)) {
+        return reply.code(403).send({ error: 'Forbidden', message: 'Нет доступа к телефонной ферме' });
+      }
+      if (bodyDeviceId) {
+        const conflict = await findForeignDeviceBinding(tenantId, [bodyDeviceId]);
+        if (conflict) return reply.status(409).send({ error: 'Conflict', message: `Устройство ${conflict} уже привязано к аккаунту другого тенанта` });
+      }
+    }
+
     const account = await db.socialAccount.findFirst({
       where: { id, tenantId },
       select: { id: true, platform: true },
@@ -809,8 +1015,8 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: err instanceof Error ? err.message : 'Invalid credentials' });
       }
     } else if (body.authMethod === 'device') {
-      if (!body.deviceId) return reply.status(400).send({ error: 'Device account needs deviceId (ADB device serial)' });
-      data.deviceId = body.deviceId;
+      if (!bodyDeviceId) return reply.status(400).send({ error: 'Device account needs deviceId (ADB device serial)' });
+      data.deviceId = bodyDeviceId;
       data.accessToken = encrypt('device');
 
       // Preserve existing credentials if partially updated
@@ -1093,6 +1299,9 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       }
       return {
         ...a,
+        // proxyUrl embeds the decrypted proxy password — expose host:port only.
+        proxyUrl: maskProxyUrl(a.proxyUrl),
+        hasProxy: !!a.proxyUrl,
         deviceCredentials: devCreds ? {
           username: devCreds.username,
           hasPassword: Boolean(devCreds.password),
@@ -1137,17 +1346,28 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
 
     // 2. Accounts breakdown by readiness (the same logic the workers apply).
+    // Only the fields the checklist needs — never load tokens / sessionData blobs here.
     const rows = await db.socialAccount.findMany({
       where: { tenantId },
-      include: { accountGroup: { select: { enforceWarmup: true } } },
+      select: {
+        id: true, isActive: true, authMethod: true, healthScore: true, warmupStatus: true,
+        shadowBanDetected: true, proxyUrl: true, expiresAt: true, deviceId: true,
+        accountGroup: { select: { enforceWarmup: true } },
+      },
     });
+    const withSession = new Set(
+      (await db.socialAccount.findMany({
+        where: { tenantId, sessionData: { not: null } },
+        select: { id: true },
+      })).map((r) => r.id),
+    );
     const blockerCounts: Record<string, number> = {};
     let canPublish = 0;
     for (const a of rows) {
       const r = computeReadiness({
         isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
         warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,
-        hasSession: !!a.sessionData, hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
+        hasSession: withSession.has(a.id), hasProxy: !!a.proxyUrl, expiresAt: a.expiresAt,
         enforceWarmup: a.accountGroup?.enforceWarmup ?? false, hasDeviceId: !!a.deviceId,
       });
       if (r.canPublish) canPublish++;
@@ -1880,7 +2100,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   });
 
   const DeviceOpenAppBody = z.object({
-    packageName: z.string().min(1),
+    packageName: PackageName,
     targetDeviceIds: z.array(z.string()).optional(),
   });
 
@@ -2165,8 +2385,8 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     category: z.string().max(100).default('Пользовательские'),
     description: z.string().max(1000).optional(),
     engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
-    steps: z.array(z.any()).optional(),
-    jsCode: z.string().optional(),
+    steps: z.array(z.any()).max(MAX_SCRIPT_STEPS).optional(),
+    jsCode: z.string().max(MAX_SCRIPT_JS_CODE).optional(),
     variables: z.array(z.object({
       key: z.string(),
       label: z.string(),
@@ -2248,8 +2468,8 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     jitterMinutes: z.number().int().min(0).max(120).default(10),
     engine: z.enum(['adb_flow', 'autojs']).default('adb_flow'),
     presetId: z.string().optional(),
-    steps: z.array(z.any()).optional(),
-    jsCode: z.string().optional(),
+    steps: z.array(z.any()).max(MAX_SCRIPT_STEPS).optional(),
+    jsCode: z.string().max(MAX_SCRIPT_JS_CODE).optional(),
     variables: z.record(z.string()).optional(),
     targetMode: z.enum(['all', 'custom']).default('all'),
     targetDeviceIds: z.array(z.string()).optional(),

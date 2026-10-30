@@ -1,0 +1,18 @@
+# Root build context (api, orchestrator, web). Nothing here is COPYed by those Dockerfiles.
+.git
+.claude
+.kilo
+.github
+.vscode
+docs
+.env
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/__pycache__
+**/*.pyc
+**/.venv

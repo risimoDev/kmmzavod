@@ -70,7 +70,11 @@ async function toError(res: Response): Promise<Error> {
   return new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * Authenticated fetch against the API (path relative to BASE) with 401 → refresh → retry.
+ * Exported so admin-api and pages share the same single-flight refresh flow.
+ */
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
   const sentToken = getAccessToken();
 
@@ -82,9 +86,10 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   // Token expired — try refresh. If another request already rotated the tokens while
   // this one was in flight, just retry with the new access token.
   if (res.status === 401 && getRefreshToken()) {
+    // refreshTokens() throws on network/5xx — tokens are kept and the request just fails
     const refreshed = getAccessToken() !== sentToken || await refreshTokens();
     if (!refreshed) {
-      // The refresh itself failed — the session is gone
+      // The refresh was rejected (401/403) — the session is gone
       clearTokens();
       if (typeof window !== 'undefined') {
         window.location.href = '/login';
@@ -109,7 +114,7 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
  */
 let refreshInFlight: Promise<boolean> | null = null;
 
-function refreshTokens(): Promise<boolean> {
+export function refreshTokens(): Promise<boolean> {
   if (!refreshInFlight) {
     refreshInFlight = doRefreshTokens().finally(() => {
       refreshInFlight = null;
@@ -118,20 +123,28 @@ function refreshTokens(): Promise<boolean> {
   return refreshInFlight;
 }
 
+/**
+ * true  — tokens refreshed;
+ * false — the server rejected the refresh token (401/403): the session is gone;
+ * throws — network error / 5xx (e.g. API restarting): the session may still be valid, keep tokens.
+ */
 async function doRefreshTokens(): Promise<boolean> {
+  let res: Response;
   try {
-    const res = await fetch(`${BASE}/api/v1/auth/refresh`, {
+    res = await fetch(`${BASE}/api/v1/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken: getRefreshToken() }),
     });
-    if (!res.ok) return false;
-    const data = await res.json();
-    setTokens(data.accessToken, data.refreshToken);
-    return true;
   } catch {
-    return false;
+    throw new Error('Network error while refreshing session');
   }
+  if (res.status === 401 || res.status === 403) return false;
+  if (!res.ok) throw new Error(`Session refresh failed (HTTP ${res.status})`);
+  const data = await res.json().catch(() => null);
+  if (!data?.accessToken || !data?.refreshToken) throw new Error('Session refresh returned an invalid response');
+  setTokens(data.accessToken, data.refreshToken);
+  return true;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -333,6 +346,15 @@ export const videosApi = {
   },
 
   get: (id: string) => apiFetch<VideoDetail>(`/api/v1/videos/${id}`),
+
+  dashboardStats: <T = unknown>() => apiFetch<T>('/api/v1/videos/dashboard/stats'),
+
+  /**
+   * Sets the httpOnly `sse_token` cookie used by EventSource (which can't send headers).
+   * credentials:'include' so the cookie is stored when API and web are on different origins.
+   */
+  issueSseToken: () =>
+    apiFetch<{ ok: boolean }>('/api/v1/auth/sse-token', { method: 'POST', credentials: 'include' }),
 
   avatars: () =>
     apiFetch<{
@@ -1297,16 +1319,10 @@ export const projectsApi = {
   uploadSourceVideo: async (projectId: string, file: File): Promise<SourceVideo & { url: string | null }> => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${BASE}/api/v1/projects/${projectId}/source-videos/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getAccessToken()}` },
-      body: form,
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      throw new Error((b as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json();
+    return apiFetch<SourceVideo & { url: string | null }>(
+      `/api/v1/projects/${projectId}/source-videos/upload`,
+      { method: 'POST', body: form },
+    );
   },
 
   deleteSourceVideo: (projectId: string, videoId: string) =>
@@ -1398,16 +1414,7 @@ export const productsApi = {
   uploadImage: async (file: File): Promise<{ key: string; url: string }> => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${BASE}/api/v1/products/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getAccessToken()}` },
-      body: form,
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error((body as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json();
+    return apiFetch<{ key: string; url: string }>('/api/v1/products/upload', { method: 'POST', body: form });
   },
 
   scrapeWb: (url: string) =>
@@ -1695,16 +1702,7 @@ export const uniquifyApi = {
     if (body.title) form.append('title', body.title);
     if (body.description) form.append('description', body.description);
     if (body.projectId) form.append('projectId', body.projectId);
-    const res = await fetch(`${BASE}/api/v1/uniquify/source-videos/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getAccessToken()}` },
-      body: form,
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error((body as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json() as Promise<SourceVideo>;
+    return apiFetch<SourceVideo>('/api/v1/uniquify/source-videos/upload', { method: 'POST', body: form });
   },
 
   confirmUpload: (id: string) =>
@@ -1751,16 +1749,7 @@ export const uniquifyApi = {
   uploadBgm: async (file: File) => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${BASE}/api/v1/uniquify/bgm/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getAccessToken()}` },
-      body: form,
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      throw new Error((b as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json() as Promise<BgmTrack>;
+    return apiFetch<BgmTrack>('/api/v1/uniquify/bgm/upload', { method: 'POST', body: form });
   },
 
   listBgm: () => apiFetch<{ items: BgmTrack[] }>(`/api/v1/uniquify/bgm`),
@@ -2137,16 +2126,7 @@ export const editorApi = {
   uploadSource: async (projectId: string, file: File) => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${BASE}/api/v1/editor/projects/${projectId}/sources/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getAccessToken()}` },
-      body: form,
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      throw new Error((b as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json() as Promise<EditSource>;
+    return apiFetch<EditSource>(`/api/v1/editor/projects/${projectId}/sources/upload`, { method: 'POST', body: form });
   },
 
   importSourcesFromWorkspaceVideo: (id: string, sourceVideoIds: string[]) =>

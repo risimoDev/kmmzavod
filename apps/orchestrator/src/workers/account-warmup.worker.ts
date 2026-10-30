@@ -15,15 +15,52 @@
  *
  * Задачи ставит scheduler.worker (~раз в сутки на аккаунт, с джиттером).
  */
-import { Worker, type ConnectionOptions } from 'bullmq';
+import { Worker, DelayedError, UnrecoverableError, type ConnectionOptions, type Job } from 'bullmq';
 import { QUEUES, type AccountWarmupPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
+import { getRedisConnection } from '../lib/redis';
 import { publisherService, describePublisherError } from '../services/publisher';
 import { deviceAgentService, describeDeviceAgentError } from '../services/device-agent';
+import { acquireDeviceLock, releaseDeviceLock, isInfrastructureError } from './publish.worker';
 
 const logger = rootLogger.child({ worker: 'account-warmup' });
+
+/** A busy phone re-queues the warmup after this delay without burning an attempt. */
+const DEVICE_BUSY_RETRY_MS = 90_000;
+
+/**
+ * Records a failed warmup on the account. healthScore is lowered only once per job
+ * (final attempt) and only for account/platform-side failures — a farm/publisher outage
+ * must not sink every account below the 30-point floor.
+ */
+async function recordWarmupFailure(
+  db: PrismaClient,
+  job: Job<AccountWarmupPayload>,
+  err: unknown,
+  socialAccountId: string,
+  lastError: string,
+  rawMessage: string,
+): Promise<void> {
+  const maxAttempts = job.opts?.attempts ?? 1;
+  const isFinal = err instanceof UnrecoverableError || job.attemptsMade + 1 >= maxAttempts;
+  const penalize = isFinal && !isInfrastructureError(rawMessage);
+
+  await db.socialAccount.update({
+    where: { id: socialAccountId },
+    data: {
+      lastError: lastError.slice(0, 1000),
+      ...(penalize ? { healthScore: { decrement: 5 } } : {}),
+    },
+  });
+  if (penalize) {
+    await db.socialAccount.updateMany({
+      where: { id: socialAccountId, healthScore: { lt: 0 } },
+      data: { healthScore: 0 },
+    });
+  }
+}
 
 /** Minimum successful warmup sessions before an account can become warm. */
 const WARM_MIN_ACTIONS = 5;
@@ -40,7 +77,7 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
 
   return new Worker<AccountWarmupPayload>(
     QUEUES['account-warmup'].name,
-    async (job) => {
+    async (job, token) => {
       const { socialAccountId, tenantId } = job.data;
 
       const account = await db.socialAccount.findUnique({
@@ -70,6 +107,17 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
         // Determine target username from niche or fallback
         const targetUsername = account.niche || account.accountGroup?.niche || (account.platform === 'tiktok' ? 'tiktok' : 'instagram');
         logger.info({ socialAccountId, deviceId: account.deviceId, platform: account.platform, targetUsername }, 'Warmup: executing physical board Smart View');
+
+        // One phone, one task at a time (same lock as the publish worker). TTL covers the
+        // whole view-target call (660s timeout) plus margin.
+        const redis = getRedisConnection();
+        const lockOwner = await acquireDeviceLock(redis, account.deviceId, Math.ceil(660_000 / 1000) + 120);
+        if (!lockOwner) {
+          // Busy phone is not the account's fault: re-queue later, no attempt used, no penalty.
+          logger.info({ socialAccountId, deviceId: account.deviceId }, 'Warmup: phone busy, delaying');
+          await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+          throw new DelayedError();
+        }
 
         try {
           const result = await deviceAgentService.viewTarget({
@@ -120,19 +168,11 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
           return;
         } catch (err: unknown) {
           const errorMsg = describeDeviceAgentError(err);
-          await db.socialAccount.update({
-            where: { id: socialAccountId },
-            data: {
-              lastError: `warmup-device: ${errorMsg}`.slice(0, 1000),
-              healthScore: { decrement: 5 },
-            },
-          });
-          await db.socialAccount.updateMany({
-            where: { id: socialAccountId, healthScore: { lt: 0 } },
-            data: { healthScore: 0 },
-          });
+          await recordWarmupFailure(db, job, err, socialAccountId, `warmup-device: ${errorMsg}`, errorMsg);
           logger.error({ socialAccountId, deviceId: account.deviceId, err: errorMsg }, 'Warmup: physical board session failed');
           throw new Error(`warmup-device: ${errorMsg}`);
+        } finally {
+          await releaseDeviceLock(redis, account.deviceId, lockOwner);
         }
       }
 
@@ -194,17 +234,7 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
       } catch (err: unknown) {
         const errorMsg = describePublisherError(err);
         // Login challenges / blocks during warmup are an early health signal.
-        await db.socialAccount.update({
-          where: { id: socialAccountId },
-          data: {
-            lastError: `warmup: ${errorMsg}`.slice(0, 1000),
-            healthScore: { decrement: 5 },
-          },
-        });
-        await db.socialAccount.updateMany({
-          where: { id: socialAccountId, healthScore: { lt: 0 } },
-          data: { healthScore: 0 },
-        });
+        await recordWarmupFailure(db, job, err, socialAccountId, `warmup: ${errorMsg}`, errorMsg);
         logger.error({ socialAccountId, err: errorMsg }, 'Warmup: failed');
         throw new Error(`warmup-instagram: ${errorMsg}`);
       }

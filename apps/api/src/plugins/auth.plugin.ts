@@ -49,18 +49,17 @@ async function authPlugin(app: FastifyInstance) {
         reply.code(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
         return;
       }
-      if (
-        req.user.role === 'viewer' &&
-        !READ_METHODS.has(req.method) &&
-        !VIEWER_WRITE_ALLOWED.test(req.routeOptions.url ?? '')
-      ) {
-        reply.code(403).send({ error: 'Forbidden', message: 'Роль «наблюдатель» — только просмотр' });
-        return;
-      }
-      // Verify user and tenant are still active (token may outlive a ban)
+      // Verify user and tenant are still active (token may outlive a ban) and take
+      // role/tenant from the DB so demotions apply immediately, not at token expiry.
       const user = await db.user.findUnique({
         where: { id: req.user.userId },
-        select: { isActive: true, tenant: { select: { isActive: true } } },
+        select: {
+          isActive: true,
+          role: true,
+          platformRole: true,
+          tenantId: true,
+          tenant: { select: { isActive: true } },
+        },
       });
       if (!user || !user.isActive) {
         reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
@@ -68,6 +67,15 @@ async function authPlugin(app: FastifyInstance) {
       }
       if (!user.tenant.isActive) {
         reply.code(403).send({ error: 'Forbidden', message: 'Организация заблокирована' });
+        return;
+      }
+      req.user = { ...req.user, role: user.role, platformRole: user.platformRole, tenantId: user.tenantId };
+      if (
+        req.user.role === 'viewer' &&
+        !READ_METHODS.has(req.method) &&
+        !VIEWER_WRITE_ALLOWED.test(req.routeOptions.url ?? '')
+      ) {
+        reply.code(403).send({ error: 'Forbidden', message: 'Роль «наблюдатель» — только просмотр' });
         return;
       }
     }
@@ -88,19 +96,26 @@ async function authPlugin(app: FastifyInstance) {
         return;
       }
       const payload = req.user;
-      if (payload.platformRole !== 'super_admin') {
-        reply.code(403).send({ error: 'Forbidden', message: 'Недостаточно прав' });
-        return;
-      }
-      // Verify user is still active
+      // Verify user is still active; super_admin is checked against the DB, not the token
       const user = await db.user.findUnique({
         where: { id: payload.userId },
-        select: { isActive: true, tenant: { select: { isActive: true } } },
+        select: {
+          isActive: true,
+          role: true,
+          platformRole: true,
+          tenantId: true,
+          tenant: { select: { isActive: true } },
+        },
       });
       if (!user || !user.isActive || !user.tenant.isActive) {
         reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
         return;
       }
+      if (user.platformRole !== 'super_admin') {
+        reply.code(403).send({ error: 'Forbidden', message: 'Недостаточно прав' });
+        return;
+      }
+      req.user = { ...payload, role: user.role, platformRole: user.platformRole, tenantId: user.tenantId };
     }
   );
 }

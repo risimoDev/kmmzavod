@@ -81,5 +81,20 @@ if (parsed.data.NODE_ENV === 'production' && !parsed.data.ENCRYPTION_KEY) {
   process.exit(1);
 }
 
+// Placeholder secrets shipped in .env.example. A known JWT secret lets anyone forge tokens,
+// so refuse to start; the internal-only ones just warn (failing the API would be an outage).
+if (parsed.data.NODE_ENV === 'production') {
+  const isPlaceholder = (v?: string) => !!v && v.toLowerCase().startsWith('change_me');
+  if (isPlaceholder(parsed.data.JWT_SECRET)) {
+    console.error('❌ JWT_SECRET is the .env.example placeholder — set a random secret');
+    process.exit(1);
+  }
+  const weak = Object.entries({
+    MINIO_SECRET_KEY: parsed.data.MINIO_SECRET_KEY,
+    REDIS_PASSWORD: parsed.data.REDIS_PASSWORD,
+  }).filter(([, v]) => isPlaceholder(v)).map(([k]) => k);
+  if (weak.length) console.warn(`⚠️  Placeholder secret(s) from .env.example in production: ${weak.join(', ')}`);
+}
+
 export const config = parsed.data;
 export type Config = typeof config;

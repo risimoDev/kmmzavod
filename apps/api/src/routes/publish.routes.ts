@@ -9,6 +9,7 @@ import { createOAuthState, verifyOAuthState } from '../lib/oauth-state';
 import { publishQueue } from '../lib/queues';
 import { computeReadiness } from '../lib/publish-readiness';
 import { logger } from '../logger';
+import { maskProxyUrl } from './account-farm.routes';
 import { config } from '../config';
 import type { PublishJobPayload } from '@kmmzavod/queue';
 
@@ -297,6 +298,9 @@ async function protectedPublishRoutes(app: FastifyInstance) {
     // Attach publish-readiness; never leak sessionData (only its presence).
     const data = rows.map(({ sessionData, accountGroup, ...a }) => ({
       ...a,
+      // proxyUrl may embed the proxy password — expose scheme://host:port only.
+      proxyUrl: maskProxyUrl(a.proxyUrl),
+      hasProxy: !!a.proxyUrl,
       readiness: computeReadiness({
         isActive: a.isActive, authMethod: a.authMethod, healthScore: a.healthScore,
         warmupStatus: a.warmupStatus, shadowBanDetected: a.shadowBanDetected,

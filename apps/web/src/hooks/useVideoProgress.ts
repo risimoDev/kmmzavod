@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getAccessToken } from "@/lib/api";
+import { getAccessToken, videosApi } from "@/lib/api";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
 
@@ -21,11 +21,15 @@ export interface VideoProgress {
   isComplete: boolean;
   isFailed: boolean;
   events: ProgressEvent[];
+  /** true once SSE gave up after max reconnects — the page should fall back to polling */
+  stale: boolean;
 }
 
 interface UseVideoProgressOptions {
   enabled?: boolean;
   onComplete?: (finalStatus: string) => void;
+  /** Called once when the stream gave up reconnecting (use to start polling) */
+  onGiveUp?: () => void;
 }
 
 const INITIAL: VideoProgress = {
@@ -35,6 +39,7 @@ const INITIAL: VideoProgress = {
   isComplete: false,
   isFailed: false,
   events: [],
+  stale: false,
 };
 
 const MIN_RETRY_DELAY = 1_000;
@@ -45,9 +50,11 @@ const MAX_RETRIES = 15;
  * SSE hook for tracking video generation progress in real-time.
  * Connects to GET /api/v1/videos/:id/progress via EventSource.
  *
- * - Exponential backoff on connection errors (1s → 30s)
+ * - Auth via httpOnly `sse_token` cookie (POST /auth/sse-token, refresh-aware) so the JWT
+ *   stays out of URLs/logs; falls back to `?token=` if the cookie can't be issued/delivered
+ * - Exponential backoff on connection errors (1s → 30s); the cookie is re-issued on each retry
  * - Auto-closes on isComplete / isFailed
- * - Optional onComplete callback
+ * - Optional onComplete callback; `stale` / onGiveUp when reconnects are exhausted
  */
 export function useVideoProgress(
   videoId: string,
@@ -61,8 +68,13 @@ export function useVideoProgress(
   const retryRef = useRef(MIN_RETRY_DELAY);
   const retryCountRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onGiveUp = typeof opts === "boolean" ? undefined : opts.onGiveUp;
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  const onGiveUpRef = useRef(onGiveUp);
+  onGiveUpRef.current = onGiveUp;
+  // "cookie" until a cookie-authed connection fails before ever opening, then "query"
+  const authModeRef = useRef<"cookie" | "query">("cookie");
 
   const cleanup = useCallback(() => {
     if (timerRef.current) {
@@ -80,20 +92,38 @@ export function useVideoProgress(
 
     let cancelled = false;
 
-    const connect = () => {
+    const connect = async () => {
+      if (cancelled) return;
+      if (!getAccessToken()) return;
+
+      let useCookie = authModeRef.current === "cookie";
+      if (useCookie) {
+        try {
+          // refresh-aware (apiFetch); re-issues the 15-min cookie on every (re)connect
+          await videosApi.issueSseToken();
+        } catch {
+          useCookie = false;
+        }
+      }
       if (cancelled) return;
 
+      // Read after the await: sse-token may have refreshed the access token
       const token = getAccessToken();
-      if (!token) return;
+      if (!useCookie && !token) return;
 
-      const url = `${BASE}/api/v1/videos/${videoId}/progress?token=${encodeURIComponent(token)}`;
-      const es = new EventSource(url);
+      const base = `${BASE}/api/v1/videos/${videoId}/progress`;
+      const es = useCookie
+        ? new EventSource(base, { withCredentials: true })
+        : new EventSource(`${base}?token=${encodeURIComponent(token)}`);
       esRef.current = es;
+      let opened = false;
 
       es.onopen = () => {
+        opened = true;
         // Reset retry state on successful connection
         retryRef.current = MIN_RETRY_DELAY;
         retryCountRef.current = 0;
+        setState((prev) => (prev.stale ? { ...prev, stale: false } : prev));
       };
 
       es.onmessage = (e) => {
@@ -112,6 +142,7 @@ export function useVideoProgress(
             isComplete,
             isFailed,
             events: [...prev.events, data],
+            stale: false,
           }));
 
           if (isComplete || isFailed) {
@@ -132,8 +163,15 @@ export function useVideoProgress(
 
         if (cancelled) return;
 
+        // Cookie never made it (cross-site / Secure on http / rejected) — use ?token= next time
+        if (useCookie && !opened) authModeRef.current = "query";
+
         retryCountRef.current += 1;
-        if (retryCountRef.current > MAX_RETRIES) return;
+        if (retryCountRef.current > MAX_RETRIES) {
+          setState((prev) => ({ ...prev, stale: true }));
+          onGiveUpRef.current?.();
+          return;
+        }
 
         // Exponential backoff with jitter
         const jitter = Math.random() * 500;
@@ -143,7 +181,8 @@ export function useVideoProgress(
       };
     };
 
-    connect();
+    authModeRef.current = "cookie";
+    void connect();
 
     return () => {
       cancelled = true;

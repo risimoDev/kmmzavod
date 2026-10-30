@@ -37,7 +37,9 @@ import { notificationRoutes } from './routes/notifications.routes';
 
 export async function buildApp() {
   const app = Fastify({
-    bodyLimit: 1024 * 1024 * 1024, // 1 GB for large APK uploads
+    // Applies to buffered bodies (JSON/text). Multipart uploads stream through
+    // @fastify/multipart and are bounded by its own limits.fileSize below.
+    bodyLimit: 10 * 1024 * 1024,
     logger: {
       level: config.NODE_ENV === 'production' ? 'info' : 'debug',
       ...(config.NODE_ENV !== 'production' && {
@@ -48,7 +50,9 @@ export async function buildApp() {
       }),
       redact: ['req.headers.authorization'],
     },
-    trustProxy: true, // behind nginx
+    // Exactly one proxy hop (nginx) in front of the API. `true` would trust the leftmost,
+    // client-supplied X-Forwarded-For entry and let attackers spoof req.ip (rate limits).
+    trustProxy: 1,
     ajv: {
       customOptions: { coerceTypes: 'array', removeAdditional: true },
     },
@@ -56,7 +60,6 @@ export async function buildApp() {
 
   // ── Plugins ──────────────────────────────────────────────────────────────
   const corsOrigins: (string | RegExp)[] = [
-    /\.kmmzavod\.ru$/,
     /^https?:\/\/localhost(:\d+)?$/,
   ];
   if (config.CORS_ORIGIN) {

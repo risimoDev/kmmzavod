@@ -5,69 +5,12 @@
  * Base URL is read from NEXT_PUBLIC_API_URL env var.
  */
 
-import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './api';
+import { apiFetch as baseApiFetch } from './api';
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
-
-async function refreshTokens(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BASE}/api/v1/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken: getRefreshToken() }),
-    });
-    if (!res.ok) return false;
-    const data = await res.json();
-    setTokens(data.accessToken, data.refreshToken);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${getAccessToken()}`,
-    ...(init.headers as Record<string, string> ?? {}),
-  };
-  if (init.body) headers['Content-Type'] = 'application/json';
-
-  const res = await fetch(`${BASE}/api/v1/admin${path}`, {
-    ...init,
-    headers,
-  });
-
-  // Token expired — try refresh
-  if (res.status === 401 && getRefreshToken()) {
-    const refreshed = await refreshTokens();
-    if (refreshed) {
-      const retryHeaders: Record<string, string> = {
-        Authorization: `Bearer ${getAccessToken()}`,
-        ...(init.headers as Record<string, string> ?? {}),
-      };
-      if (init.body) retryHeaders['Content-Type'] = 'application/json';
-
-      const retry = await fetch(`${BASE}/api/v1/admin${path}`, {
-        ...init,
-        headers: retryHeaders,
-      });
-      if (retry.ok) {
-        if (retry.status === 204) return undefined as T;
-        return retry.json() as Promise<T>;
-      }
-    }
-    clearTokens();
-    if (typeof window !== 'undefined') window.location.href = '/login';
-    throw new Error('Session expired');
-  }
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const msg = (body as any).message;
-    throw new Error(typeof msg === 'string' ? msg : (msg ? JSON.stringify(msg) : `HTTP ${res.status}`));
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+// Shares api.ts's fetch wrapper: single-flight refresh (refresh tokens rotate on use),
+// "already rotated by another request" check, and 401/403-only logout.
+function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return baseApiFetch<T>(`/api/v1/admin${path}`, init);
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -476,32 +419,10 @@ export const adminApi = {
     const form = new FormData();
     form.append('file', file);
 
-    const doUpload = (token: string) =>
-      fetch(`${BASE}/api/v1/admin/pipeline-test/upload-scene`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      });
-
-    let res = await doUpload(getAccessToken());
-
-    // Token expired — try refresh
-    if (res.status === 401 && getRefreshToken()) {
-      const refreshed = await refreshTokens();
-      if (refreshed) {
-        res = await doUpload(getAccessToken());
-      } else {
-        clearTokens();
-        if (typeof window !== 'undefined') window.location.href = '/login';
-        throw new Error('Session expired');
-      }
-    }
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error((body as any).message ?? `HTTP ${res.status}`);
-    }
-    return res.json();
+    return apiFetch<{ key: string; url: string; size: number; mimetype: string }>(
+      '/pipeline-test/upload-scene',
+      { method: 'POST', body: form },
+    );
   },
 
   pipelineTestCompose: (params: {

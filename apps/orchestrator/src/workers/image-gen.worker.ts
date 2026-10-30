@@ -21,7 +21,7 @@ import { logger } from '../logger';
 import { StoragePaths } from '@kmmzavod/storage';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { Queue } from 'bullmq';
-import type { ImageGenClient } from '../clients/image-gen.client';
+import { MAX_DOWNLOAD_BYTES, type ImageGenClient } from '../clients/image-gen.client';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { imageGenCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
@@ -37,7 +37,9 @@ interface Deps {
 }
 
 export function createImageGenWorker(deps: Deps) {
-  const { db, imageGen, storage, pipelineStateQueue, runwayQueue, connection, provider } = deps;
+  // deps.provider is the configured (primary) provider; billing uses the one that actually
+  // produced the image (result.provider — may be the Gemini fallback).
+  const { db, imageGen, storage, pipelineStateQueue, runwayQueue, connection } = deps;
 
   return new Worker<ImageGenJobPayload>(
     QUEUES['image-gen'].name,
@@ -58,6 +60,17 @@ export function createImageGenWorker(deps: Deps) {
         : prompt;
 
       log.info('Начало генерации изображения');
+
+      // Don't spend money on a job that was already failed/cancelled (e.g. a sibling scene
+      // failed, or the user cancelled) while this task waited in the queue.
+      const isJobDead = async (): Promise<boolean> => {
+        const parent = await db.job.findUnique({ where: { id: jobId }, select: { status: true } });
+        return !parent || parent.status === 'failed' || parent.status === 'cancelled';
+      };
+      if (await isJobDead()) {
+        log.info('Image-gen: родительская задача failed/cancelled/удалена — пропускаем без генерации и списания');
+        return;
+      }
 
       // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
       // Skip image generation if asset already exists in MinIO from a previous run.
@@ -117,6 +130,11 @@ export function createImageGenWorker(deps: Deps) {
       });
 
       // ─── 1. Генерируем изображение ────────────────────────────────────────
+      // Re-check right before the paid call (the status may have changed since job start).
+      if (await isJobDead()) {
+        log.info('Image-gen: родительская задача failed/cancelled/удалена — пропускаем платную генерацию');
+        return;
+      }
       const result = await imageGen.generateWithFallback({
         prompt: imagePrompt,
         negativePrompt: 'ugly, blurry, distorted, lowres, people, person, human, face, hands',
@@ -125,7 +143,9 @@ export function createImageGenWorker(deps: Deps) {
         referenceImageUrls: referenceImageKeys,
       });
       const { url: imageUrl, contentType } = result;
-      log.info({ imageUrl: imageUrl.slice(0, 120) }, 'Изображение сгенерировано');
+      // Provider that actually produced the image (may be the Gemini fallback, not the configured one).
+      const usedProvider = result.provider;
+      log.info({ imageUrl: imageUrl.slice(0, 120), provider: usedProvider }, 'Изображение сгенерировано');
 
       // ─── 2. Скачиваем → MinIO ─────────────────────────────────────────────
       const storageKey = isFrame
@@ -139,6 +159,8 @@ export function createImageGenWorker(deps: Deps) {
         const dlResponse = await axios.get<ArrayBuffer>(imageUrl, {
           responseType: 'arraybuffer',
           timeout: 60_000,
+          maxContentLength: MAX_DOWNLOAD_BYTES,
+          maxBodyLength: MAX_DOWNLOAD_BYTES,
         });
         imageBuffer = Buffer.from(dlResponse.data);
       }
@@ -146,7 +168,7 @@ export function createImageGenWorker(deps: Deps) {
       log.info({ storageKey }, 'Изображение загружено в MinIO');
 
       // ─── 3. Обновляем Scene ───────────────────────────────────────────────
-      const costUsd        = imageGenCostUsd(provider as 'fal' | 'replicate' | 'comfyui' | 'runway' | 'gemini' | 'gptunnel');
+      const costUsd        = imageGenCostUsd(usedProvider);
       const creditsCharged = creditsFromUsd(costUsd);
 
       if (isFrame) {
@@ -167,8 +189,8 @@ export function createImageGenWorker(deps: Deps) {
       await db.generation.create({
         data: {
           tenantId, jobId, sceneId,
-          provider: provider === 'runway' ? 'runway' : provider === 'replicate' ? 'replicate' : provider === 'comfyui' ? 'comfyui' : provider === 'gemini' ? 'gemini' as any : provider === 'gptunnel' ? 'gptunnel' as any : 'fal',
-          model:           provider,
+          provider: usedProvider === 'runway' ? 'runway' : usedProvider === 'replicate' ? 'replicate' : usedProvider === 'comfyui' ? 'comfyui' : usedProvider === 'gemini' ? 'gemini' as any : usedProvider === 'gptunnel' ? 'gptunnel' as any : 'fal',
+          model:           usedProvider,
           status:          'completed',
           requestPayload:  { prompt: imagePrompt, motionPrompt, purpose: purpose ?? 'scene-image' },
           responsePayload: { storageKey, contentType },
@@ -183,7 +205,7 @@ export function createImageGenWorker(deps: Deps) {
       // ─── 5. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
         tenantId, jobId, credits: creditsCharged,
-        description: `Image gen (${provider}) — ${isFrame ? 'frame' : 'image'} ${sceneId.slice(0, 8)}`,
+        description: `Image gen (${usedProvider}) — ${isFrame ? 'frame' : 'image'} ${sceneId.slice(0, 8)}`,
       });
       await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
