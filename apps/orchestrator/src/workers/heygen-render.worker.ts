@@ -23,6 +23,7 @@ import type { HeyGenClient } from '../clients/heygen.client';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { heygenCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
+import { createTaskOrUnrecoverable, isParentJobDead, isProviderTaskGone } from '../lib/provider-errors';
 
 interface Deps {
   db:                 PrismaClient;
@@ -43,6 +44,12 @@ export function createHeygenRenderWorker(deps: Deps) {
       const startMs = Date.now();
 
       log.info('HeyGen: начало генерации аватара');
+
+      // Parent job already failed/cancelled — don't spend provider money on it.
+      if (await isParentJobDead(db, jobId)) {
+        log.warn('HeyGen: родительский job failed/cancelled — пропускаем без вызова провайдера');
+        return;
+      }
 
       // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
       // Skip HeyGen API call if avatar video was already generated for this job/scene.
@@ -98,19 +105,67 @@ export function createHeygenRenderWorker(deps: Deps) {
         },
       });
 
-      // ─── 1. Создаём задачу в HeyGen ──────────────────────────────────────
-      const heygenVideoId = await heygen.createAvatarVideo({ avatarId, voiceId, script });
-      log.info({ heygenVideoId }, 'HeyGen: задача создана, ожидаем рендер');
+      // ─── 1. Задача в HeyGen: возобновляем сохранённую или создаём новую ───
+      // The HeyGen video id is persisted right after create (on ALL scenes of a combined
+      // render, read back from the primary one). A retry polls the same, already paid task
+      // instead of creating a new one.
+      const idScenes = isCombined && combinedSceneIds && combinedSceneIds.length > 0
+        ? combinedSceneIds
+        : [sceneId];
+      const primarySceneId = idScenes[0];
 
-      if (!isCombined) {
-        await db.scene.update({
-          where: { id: sceneId },
-          data:  { heygenVideoId, status: 'processing' },
-        });
+      const saveVideoId = async (id: string | null) => {
+        try {
+          await db.scene.updateMany({
+            where: { id: { in: idScenes } },
+            data:  id
+              ? { heygenVideoId: id, ...(isCombined ? {} : { status: 'processing' as const }) }
+              : { heygenVideoId: null },
+          });
+        } catch (err) {
+          // Task is already created (and paid): don't fail the attempt, the id is in the log.
+          log.error({ heygenVideoId: id, err: (err as Error).message }, 'HeyGen: не удалось сохранить heygenVideoId');
+        }
+      };
+
+      const createTask = async (): Promise<string | null> => {
+        if (await isParentJobDead(db, jobId)) {
+          log.warn('HeyGen: родительский job failed/cancelled — задачу не создаём');
+          return null;
+        }
+        const id = await createTaskOrUnrecoverable(() => heygen.createAvatarVideo({ avatarId, voiceId, script }));
+        log.info({ heygenVideoId: id }, 'HeyGen: задача создана, ожидаем рендер');
+        await saveVideoId(id);
+        return id;
+      };
+
+      const stored = await db.scene.findUnique({
+        where:  { id: primarySceneId },
+        select: { heygenVideoId: true },
+      });
+      const resumed = !!stored?.heygenVideoId;
+      let heygenVideoId: string | null = stored?.heygenVideoId ?? null;
+      if (heygenVideoId) {
+        log.info({ heygenVideoId }, 'HeyGen: возобновляем сохранённую задачу (без повторного create)');
+      } else {
+        heygenVideoId = await createTask();
+        if (!heygenVideoId) return;
       }
 
       // ─── 2. Polling ───────────────────────────────────────────────────────
-      const { videoUrl, duration } = await heygen.pollUntilDone(heygenVideoId);
+      let polled: { videoUrl: string; duration: number };
+      try {
+        polled = await heygen.pollUntilDone(heygenVideoId);
+      } catch (err) {
+        // Only a RESUMED task that the provider reports failed/expired is replaced by a new one.
+        if (!resumed || !isProviderTaskGone(err)) throw err;
+        log.warn({ heygenVideoId, err: (err as Error).message }, 'HeyGen: сохранённая задача недоступна у провайдера — создаём новую');
+        await saveVideoId(null);
+        heygenVideoId = await createTask();
+        if (!heygenVideoId) return;
+        polled = await heygen.pollUntilDone(heygenVideoId);
+      }
+      const { videoUrl, duration } = polled;
 
       let durationSec = duration > 0 ? duration : 0;
       if (durationSec === 0 && !isCombined) {

@@ -281,32 +281,37 @@ export async function eligibleAccounts(db: PrismaClient, ap: Autopilot): Promise
 
   const warmupFiltered = rows.filter((a) => !(a.warmupStatus === 'cold' && a.accountGroup?.enforceWarmup === true));
 
-  // Check if target phone has the platform application actually installed
+  // Check that each phone actually has the platform app. Checks run in parallel and are
+  // cached per device: this runs on every 60s tick, and a slow or unreachable farm must not
+  // hold up the whole scheduler (one sequential 15s call per account did).
+  const checks = await mapLimit(warmupFiltered, APPS_CHECK_CONCURRENCY, async (a) =>
+    a.deviceId ? cachedAppsCheck(a.deviceId) : null);
+
   const result: EligibleAccount[] = [];
-  for (const a of warmupFiltered) {
+  for (const [i, a] of warmupFiltered.entries()) {
     if (!a.deviceId) continue;
-    try {
-      const check = await deviceAgentService.checkApps(a.deviceId).catch(() => null);
-      if (check && check.ok && check.apps) {
-        const platKey = a.platform.toLowerCase();
-        const appInfo = check.apps[platKey];
-        if (appInfo && !appInfo.installed) {
-          logger.warn(
-            { autopilotId: ap.id, deviceId: a.deviceId, platform: a.platform, accountName: a.accountName },
-            'Autopilot: device lacks target platform application, skipping account',
-          );
-          await journal(
-            db,
-            ap,
-            'info',
-            `Плата ${a.deviceId} (@${a.accountName}): не установлено приложение ${a.platform} (${appInfo.error || 'требуется установка APK'}). Аккаунт временно исключён из автопилота.`,
-          ).catch(() => {});
-          continue;
-        }
+    const check = checks[i];
+    // Unknown (agent unreachable) → keep the account; the publish step reports real failures.
+    const appInfo = check?.ok && check.apps ? check.apps[a.platform.toLowerCase()] : undefined;
+    const missing = !!appInfo && !appInfo.installed;
+    const flagKey = `${ap.id}:${a.id}`;
+    if (missing) {
+      if (!missingAppFlagged.has(flagKey)) {
+        missingAppFlagged.add(flagKey);
+        logger.warn(
+          { autopilotId: ap.id, deviceId: a.deviceId, platform: a.platform, accountName: a.accountName },
+          'Autopilot: device lacks target platform application, skipping account',
+        );
+        await journal(
+          db,
+          ap,
+          'info',
+          `Плата ${a.deviceId} (@${a.accountName}): не установлено приложение ${a.platform} (${appInfo!.error || 'требуется установка APK'}). Аккаунт временно исключён из автопилота.`,
+        ).catch(() => {});
       }
-    } catch {
-      // Non-fatal if device-agent is unreachable during check
+      continue;
     }
+    missingAppFlagged.delete(flagKey);
     result.push({
       id: a.id,
       platform: a.platform,
@@ -593,4 +598,37 @@ function shuffle<T>(arr: T[]): T[] {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+
+// ── Phone app check cache ───────────────────────────────────────────────────
+
+type AppsCheck = Awaited<ReturnType<typeof deviceAgentService.checkApps>>;
+
+const APPS_CHECK_TTL_MS = 5 * 60_000;
+/** Shorter TTL for "agent unreachable", so a recovered farm is picked up quickly. */
+const APPS_CHECK_FAIL_TTL_MS = 60_000;
+const APPS_CHECK_CONCURRENCY = 5;
+const appsCheckCache = new Map<string, { at: number; ttl: number; value: AppsCheck | null }>();
+/** `${autopilotId}:${accountId}` already journaled as "app missing" — journal again only after it recovers. */
+const missingAppFlagged = new Set<string>();
+
+async function cachedAppsCheck(deviceId: string): Promise<AppsCheck | null> {
+  const hit = appsCheckCache.get(deviceId);
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
+  const value = await deviceAgentService.checkApps(deviceId).catch(() => null);
+  appsCheckCache.set(deviceId, { at: Date.now(), ttl: value ? APPS_CHECK_TTL_MS : APPS_CHECK_FAIL_TTL_MS, value });
+  return value;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const run = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  return out;
 }

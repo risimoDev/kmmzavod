@@ -14,6 +14,8 @@ import { collectProfileStats } from './profile-stats';
 import { PackageResolver } from './package-resolver';
 import { runDeviceAccountLogin, submitVerificationCodeOnDevice } from './account-login';
 import { testImapConnection, pollVerificationCode } from './imap-client';
+import { deviceMutex } from './lib/device-mutex';
+import crypto from 'node:crypto';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const adb = new AdbClient(logger, config.ADB_PATH);
@@ -22,6 +24,11 @@ const autoHeal = new AutoHealManager(adb, logger);
 const apkManager = new ApkManager(logger);
 const scriptEngine = new ScriptEngine(logger);
 const packageResolver = new PackageResolver(adb, logger);
+
+/** How long a request waits for the phone to be free before answering "busy" (see lib/device-mutex). */
+const DEVICE_WAIT_MS = 120_000;
+/** Android package names go into shell command lines — allow only what a package name can contain. */
+const PackageNameSchema = z.string().min(1).regex(/^[A-Za-z0-9_.]+$/, 'Некорректное имя пакета');
 
 const app = Fastify({
   logger: false,
@@ -50,15 +57,32 @@ app.get('/health', async () => ({
   driver: 'Native ADB Controller (Open-Source, 0$)',
 }));
 
+const DEVICES_APPS_CONCURRENCY = 5;
+const DEVICES_APPS_TIMEOUT_MS = 4_000;
+const lastAppsBySerial = new Map<string, unknown>();
+
 app.get('/devices', async (_req, reply) => {
   try {
     const rawDevices = await adb.listDevices();
     const appsMap: Record<string, any> = {};
-    for (const d of rawDevices) {
-      if (d.state === 'device') {
-        appsMap[d.serial] = await packageResolver.checkAllPlatforms(d.serial).catch(() => ({}));
+    // Phones are probed in parallel with a per-phone deadline: one stuck board must not push
+    // the whole list past the API's timeout. On timeout/failure the last known value (or {}) is used.
+    const online = rawDevices.filter((d) => d.state === 'device');
+    let next = 0;
+    const worker = async () => {
+      while (next < online.length) {
+        const serial = online[next++].serial;
+        let timer: NodeJS.Timeout | undefined;
+        const fresh = await Promise.race([
+          packageResolver.checkAllPlatforms(serial).catch(() => undefined),
+          new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), DEVICES_APPS_TIMEOUT_MS); }),
+        ]);
+        clearTimeout(timer);
+        if (fresh) lastAppsBySerial.set(serial, fresh);
+        appsMap[serial] = fresh ?? lastAppsBySerial.get(serial) ?? {};
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(DEVICES_APPS_CONCURRENCY, online.length) }, worker));
     return {
       ok: true,
       raw: rawDevices,
@@ -341,7 +365,9 @@ app.post('/view-target', async (req, reply) => {
   }
 
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
+    unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await runViewTarget(parsed.data, adb, proxyManager, logger);
     if (!result.ok) reply.code(502);
@@ -352,6 +378,7 @@ app.post('/view-target', async (req, reply) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 });
 
@@ -375,7 +402,9 @@ app.post('/wb/warmup', async (req, reply) => {
   }
 
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
+    unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await runWbWarmup(parsed.data, adb, proxyManager, logger);
     if (!result.ok) reply.code(502);
@@ -386,6 +415,7 @@ app.post('/wb/warmup', async (req, reply) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 });
 
@@ -419,8 +449,10 @@ app.post('/publish', async (req, reply) => {
 
   const { checkIpFirst, ...publishReq } = parsed.data;
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
     // shared_sequential: wait for the shared proxy and move it to this phone for the whole upload
+    unlock = await deviceMutex.acquire(publishReq.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(publishReq.deviceId);
     if (checkIpFirst) {
       const guard = await proxyManager.preflight(publishReq.deviceId);
@@ -444,6 +476,7 @@ app.post('/publish', async (req, reply) => {
     return { ok: false, stage: 'prepare', posted: 'no', retryable: true, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 });
 
@@ -462,8 +495,10 @@ app.post('/stats/profile', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
     // Reading the profile is network traffic of this account → same proxy lease as publishing.
+    unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await collectProfileStats(parsed.data, adb, logger);
     if (!result.ok) reply.code(502);
@@ -473,6 +508,7 @@ app.post('/stats/profile', async (req, reply) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 });
 
@@ -497,7 +533,9 @@ const accountLoginHandler = async (req: any, reply: any) => {
   }
 
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
+    unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await runDeviceAccountLogin(parsed.data, adb, packageResolver, logger);
     if (!result.ok) reply.code(502);
@@ -508,6 +546,7 @@ const accountLoginHandler = async (req: any, reply: any) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 };
 
@@ -572,7 +611,9 @@ const accountSubmitCodeHandler = async (req: any, reply: any) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   let release: (() => void) | undefined;
+  let unlock: (() => void) | undefined;
   try {
+    unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
     const result = await submitVerificationCodeOnDevice(parsed.data, adb, logger);
     if (!result.ok) reply.code(400);
@@ -583,6 +624,7 @@ const accountSubmitCodeHandler = async (req: any, reply: any) => {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     release?.();
+    unlock?.();
   }
 };
 
@@ -944,7 +986,7 @@ app.post('/device/control/text', async (req, reply) => {
 
 const OpenAppControlBody = z.object({
   deviceId: z.string().min(1),
-  packageName: z.string().min(1),
+  packageName: PackageNameSchema,
   targetDeviceIds: z.array(z.string()).optional(),
 });
 
@@ -1036,7 +1078,7 @@ app.post('/device/control/accept-dialog', async (req, reply) => {
 
 const GrantPermissionsControlBody = z.object({
   deviceId: z.string().min(1),
-  packageName: z.string().optional(),
+  packageName: PackageNameSchema.optional(),
   targetDeviceIds: z.array(z.string()).optional(),
 });
 
@@ -1189,7 +1231,7 @@ app.post('/device/apps/upload-and-install', async (req, reply) => {
 
 const BatchAppActionBody = z.object({
   action: z.enum(['uninstall', 'clear-data', 'force-stop', 'launch']),
-  packageName: z.string().min(1),
+  packageName: PackageNameSchema,
   targetDeviceIds: z.array(z.string()).min(1),
 });
 
@@ -1266,7 +1308,28 @@ app.post('/device/scripts/run', async (req, reply) => {
   }
 });
 
-app.listen({ host: config.HOST, port: config.PORT }).then(async () => {
+/**
+ * Bind to the AmneziaWG interface IP. At boot that interface may not be up yet (EADDRNOTAVAIL),
+ * so retry for a few minutes before giving up instead of dying on the first attempt.
+ */
+const LISTEN_RETRY_MS = 5_000;
+const LISTEN_RETRY_TOTAL_MS = 5 * 60_000;
+
+async function listenWithRetry(): Promise<void> {
+  const deadline = Date.now() + LISTEN_RETRY_TOTAL_MS;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await app.listen({ host: config.HOST, port: config.PORT });
+      return;
+    } catch (err) {
+      if (Date.now() + LISTEN_RETRY_MS > deadline) throw err;
+      logger.warn({ host: config.HOST, port: config.PORT, attempt, err: String(err) }, 'device-agent: listen failed (tunnel interface not up yet?) — retrying');
+      await new Promise((r) => setTimeout(r, LISTEN_RETRY_MS));
+    }
+  }
+}
+
+listenWithRetry().then(async () => {
   logger.info({ host: config.HOST, port: config.PORT }, 'device-agent: listening (Native ADB Controller over AmneziaWG)');
   await proxyManager.init().catch((err) => {
     logger.warn({ err: String(err) }, 'device-agent: proxy forwarder restoration failed on startup');

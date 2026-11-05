@@ -31,6 +31,7 @@ import {
   extractIp,
   isBypassedHost,
   isWildberriesHost,
+  isBlackholeHost,
   upstreamKey,
   type ListenerStats,
   type ProxyType,
@@ -344,6 +345,11 @@ export class ProxyManager {
   private routeFor(deviceId: string, targetHost?: string): RouteDecision {
     const entry = this.devices.get(deviceId);
     if (!entry) return { kind: 'direct' };
+
+    // Drop dead vendor telemetry immediately without attempting direct connects
+    if (targetHost && isBlackholeHost(targetHost)) {
+      return { kind: 'block', reason: 'telemetry blackhole' };
+    }
 
     // Bypass OS telemetry, captive portal checks, Google Play downloads, local network directly
     if (targetHost && isBypassedHost(targetHost, config.PROXY_BYPASS_LIST)) {

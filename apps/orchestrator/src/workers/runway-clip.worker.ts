@@ -28,6 +28,7 @@ import type { IStorageClient } from '@kmmzavod/storage';
 import { runwayCostUsd, creditsFromUsd } from '../lib/costs';
 import { chargeCredits } from '../lib/credits';
 import { axiosProxyConfig } from '../lib/proxy';
+import { createTaskOrUnrecoverable, isParentJobDead, isProviderTaskGone } from '../lib/provider-errors';
 
 interface Deps {
   db:                 PrismaClient;
@@ -58,12 +59,18 @@ export function createRunwayClipWorker(deps: Deps) {
 
       log.info({ referenceImageUrl: referenceImageUrl?.slice(0, 80) }, 'Runway: начало генерации клипа');
 
+      // Parent job already failed/cancelled — don't spend provider money on it.
+      if (await isParentJobDead(db, jobId)) {
+        log.warn('Runway: родительский job failed/cancelled — пропускаем без вызова провайдера');
+        return;
+      }
+
       // ─── 0. IDEMPOTENCY CHECK ─────────────────────────────────────────────
       // Skip Runway API call if clip was already generated for this scene.
       // Saves Runway credits on retries — clip generation is the second-most expensive step.
       const existingScene = await db.scene.findUnique({
         where:  { id: sceneId },
-        select: { clipUrl: true, clipDone: true },
+        select: { clipUrl: true, clipDone: true, runwayTaskId: true },
       });
       if (existingScene?.clipUrl && existingScene.clipDone) {
         log.info({ existingUrl: existingScene.clipUrl }, 'Runway: clip already generated — skipping API call');
@@ -106,30 +113,64 @@ export function createRunwayClipWorker(deps: Deps) {
       const mode       = useImageToVideoFinal ? 'image-to-video' : 'text-to-video';
       const finalModel: RunwayVideoModel = defaultModel;
 
-      let taskId: string;
-      if (useImageToVideoFinal) {
-        taskId = await runway.createImageToVideo({
-          promptImage: promptImageUri!,
-          prompt: runwayPrompt,
-          durationSec: durationSec ?? 5,
-          model: finalModel,
-        });
-      } else {
-        taskId = await runway.createClip({
-          prompt: runwayPrompt,
-          durationSec: durationSec ?? 5,
-          model: finalModel,
-        });
-      }
-      log.info({ taskId, mode }, 'Runway: задача создана, ожидаем клип');
+      const saveTaskId = async (id: string | null) => {
+        try {
+          await db.scene.update({
+            where: { id: sceneId },
+            data:  id ? { runwayTaskId: id, status: 'processing' } : { runwayTaskId: null },
+          });
+        } catch (err) {
+          // Task is already created (and paid): don't fail the attempt, the id is in the log.
+          log.error({ taskId: id, err: (err as Error).message }, 'Runway: не удалось сохранить runwayTaskId');
+        }
+      };
 
-      await db.scene.update({
-        where: { id: sceneId },
-        data:  { runwayTaskId: taskId, status: 'processing' },
-      });
+      const createTask = async (): Promise<string | null> => {
+        if (await isParentJobDead(db, jobId)) {
+          log.warn('Runway: родительский job failed/cancelled — задачу не создаём');
+          return null;
+        }
+        const id = await createTaskOrUnrecoverable(() => useImageToVideoFinal
+          ? runway.createImageToVideo({
+              promptImage: promptImageUri!,
+              prompt: runwayPrompt,
+              durationSec: durationSec ?? 5,
+              model: finalModel,
+            })
+          : runway.createClip({
+              prompt: runwayPrompt,
+              durationSec: durationSec ?? 5,
+              model: finalModel,
+            }));
+        log.info({ taskId: id, mode }, 'Runway: задача создана, ожидаем клип');
+        await saveTaskId(id);
+        return id;
+      };
+
+      // A retry polls the task saved by a previous attempt instead of paying for a new one.
+      const resumed = !!existingScene?.runwayTaskId;
+      let taskId: string | null = existingScene?.runwayTaskId ?? null;
+      if (taskId) {
+        log.info({ taskId }, 'Runway: возобновляем сохранённую задачу (без повторного create)');
+      } else {
+        taskId = await createTask();
+        if (!taskId) return;
+      }
 
       // ─── 2. Polling ───────────────────────────────────────────────────
-      const { outputUrl, duration } = await runway.pollUntilDone(taskId);
+      let polled: { outputUrl: string; duration: number };
+      try {
+        polled = await runway.pollUntilDone(taskId);
+      } catch (err) {
+        // Only a RESUMED task that the provider reports failed/expired is replaced by a new one.
+        if (!resumed || !isProviderTaskGone(err)) throw err;
+        log.warn({ taskId, err: (err as Error).message }, 'Runway: сохранённая задача недоступна у провайдера — создаём новую');
+        await saveTaskId(null);
+        taskId = await createTask();
+        if (!taskId) return;
+        polled = await runway.pollUntilDone(taskId);
+      }
+      const { outputUrl, duration } = polled;
       const actualDuration = duration > 0 ? duration : (durationSec ?? 5);
       log.info({ outputUrl, actualDuration, mode }, 'Runway: клип готов');
 

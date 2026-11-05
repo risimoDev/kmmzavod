@@ -42,20 +42,23 @@ export async function failBatch(
   const batch = await db.autopilotBatch.update({
     where: { id: batchId },
     data: { status: 'failed', error: reason.slice(0, 2000), completedAt: new Date() },
-    include: { autopilot: { select: { id: true, tenantId: true, name: true, consecutiveFailures: true, status: true } } },
+    select: { autopilotId: true },
   });
-  const ap = batch.autopilot;
-  const failures = ap.consecutiveFailures + 1;
-  const stop = failures >= MAX_CONSECUTIVE_FAILURES && ap.status === 'active';
-
-  await db.autopilot.update({
-    where: { id: ap.id },
+  // Atomic increment, then read the post-increment value from the same statement:
+  // concurrent failures (parallel batches) each see their own count, never a stale one.
+  const ap = await db.autopilot.update({
+    where: { id: batch.autopilotId },
     data: {
-      consecutiveFailures: failures,
+      consecutiveFailures: { increment: 1 },
       lastError: reason.slice(0, 1000),
-      ...(stop ? { status: 'error' } : {}),
     },
+    select: { id: true, tenantId: true, name: true, consecutiveFailures: true, status: true },
   });
+  const failures = ap.consecutiveFailures;
+  // Compare-and-set on status so exactly one failing batch stops the autopilot and notifies.
+  const stop = failures >= MAX_CONSECUTIVE_FAILURES && ap.status === 'active' &&
+    (await db.autopilot.updateMany({ where: { id: ap.id, status: 'active' }, data: { status: 'error' } })).count === 1;
+
   await journal(db, ap, 'error', `Монтаж #${batchId.slice(0, 8)} не удался`, { error: reason });
 
   if (stop) {

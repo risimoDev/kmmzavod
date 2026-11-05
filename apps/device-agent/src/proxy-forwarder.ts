@@ -307,6 +307,9 @@ function parseVia(via?: string): { host: string; port: number } | undefined {
   return { host: u.hostname, port: Number(u.port) || 3129 };
 }
 
+/** test() fails fast: a 403/whitelist error must reach the caller, not hide behind the IP-switch retry window. */
+const TEST_RETRY_WINDOW_MS = 3_000;
+
 const IP_ECHO_ENDPOINTS = [
   { host: 'api.ipify.org', path: '/' },
   { host: 'ifconfig.me', path: '/ip' },
@@ -429,12 +432,13 @@ export class UpstreamProxy {
    * a mobile proxy refuses every connection for 5–25 s while its modem switches IP (seen
    * on the farm every 2 min). Riding that window out turns an app-visible "Network error"
    * — which made TikTok abandon uploads at 58% — into a few seconds of a slow connect.
+   * `retryWindowMs` overrides the window for one call (the pre-flight test() uses a short one).
    */
-  async openTunnel(host: string, port: number): Promise<net.Socket> {
+  async openTunnel(host: string, port: number, retryWindowMs?: number): Promise<net.Socket> {
     const release = await this.limiter.acquire(this.queueTimeoutMs);
     try {
       const protocol = await this.resolveProtocol();
-      const deadline = Date.now() + this.retryWindowMs;
+      const deadline = Date.now() + (retryWindowMs ?? this.retryWindowMs);
       let lastErr: ProxyError | undefined;
       for (let attempt = 1; ; attempt++) {
         try {
@@ -629,7 +633,7 @@ export class UpstreamProxy {
     }
     for (const endpoint of IP_ECHO_ENDPOINTS) {
       try {
-        const raw = await this.openTunnel(endpoint.host, 443);
+        const raw = await this.openTunnel(endpoint.host, 443, TEST_RETRY_WINDOW_MS);
         const body = await httpsGetOverSocket(raw, endpoint.host, endpoint.path, timeoutMs);
         const ip = extractIp(body);
         if (!ip) throw new ProxyError(`Сервис ${endpoint.host} вернул неожиданный ответ: ${body.slice(0, 80)}`, 'target_failed');
@@ -718,6 +722,19 @@ export type RouteDecision =
   | { kind: 'proxy'; upstream: UpstreamProxy }
   | { kind: 'direct' }
   | { kind: 'block'; reason: string };
+
+export function isBlackholeHost(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().trim();
+  return (
+    h.includes('ssp.samsung.com') ||
+    h.includes('secb2b.com') ||
+    h.includes('samqaicongen.com') ||
+    h.includes('3g.qq.com') ||
+    h.includes('baidu.com') ||
+    h.includes('samsungqbe.com')
+  );
+}
 
 export function isWildberriesHost(host: string): boolean {
   const h = (host || '').toLowerCase().trim();

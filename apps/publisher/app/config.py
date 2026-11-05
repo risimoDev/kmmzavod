@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # Temp dir base for downloaded videos (defaults to OS temp).
     work_dir_base: str = ""
+    # Shared secret for service-to-service calls. Empty = auth disabled.
+    # When set, every request except /health must send X-Internal-Token.
+    internal_service_token: str = ""
     # Cap simultaneous publishes (each TikTok upload spins a headless browser).
     max_concurrent: int = 2
     # Reject videos larger than this when downloading the presigned URL.

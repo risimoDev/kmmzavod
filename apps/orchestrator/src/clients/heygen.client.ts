@@ -5,6 +5,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../logger';
 import { axiosProxyConfig } from '../lib/proxy';
+import { PollFailureTracker, ProviderTaskFailedError, retryAfterMs } from '../lib/provider-errors';
 
 interface HeyGenScene {
   avatarId: string;
@@ -88,15 +89,39 @@ export class HeyGenClient {
   /**
    * Опрос статуса задачи с экспоненциальной задержкой.
    * Возвращает URL готового видео или бросает ошибку.
+   *
+   * Временные сбои запроса статуса (сеть, 5xx, 429) НЕ прерывают опрос: задача уже оплачена,
+   * а ретрай воркера пересоздал бы её. Сдаёмся после maxConsecutiveErrors подряд.
    */
   async pollUntilDone(
     videoId: string,
-    opts = { maxAttempts: 80, baseDelayMs: 15_000 }
+    opts: {
+      maxAttempts?: number;
+      baseDelayMs?: number;
+      maxConsecutiveErrors?: number;
+      errorBackoffMs?: number;
+    } = {},
   ): Promise<{ videoUrl: string; duration: number }> {
-    for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
-      const res = await this.httpV1.get<VideoStatusResponse>('/video_status.get', {
-        params: { video_id: videoId },
-      });
+    const maxAttempts = opts.maxAttempts ?? 80;
+    const baseDelayMs = opts.baseDelayMs ?? 15_000;
+    const failures = new PollFailureTracker(opts.maxConsecutiveErrors ?? 8, opts.errorBackoffMs ?? 5_000);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res;
+      try {
+        res = await this.httpV1.get<VideoStatusResponse>('/video_status.get', {
+          params: { video_id: videoId },
+        });
+        failures.onSuccess();
+      } catch (err) {
+        const waitMs = failures.onError(err); // rethrows non-transient / exhausted
+        logger.warn(
+          { videoId, attempt, consecutiveErrors: failures.failures, waitMs, err: (err as Error).message, retryAfterMs: retryAfterMs(err) },
+          'HeyGen: сбой запроса статуса, повторяем',
+        );
+        await sleep(waitMs);
+        continue;
+      }
 
       if (res.data.error) {
         const errMsg = typeof res.data.error === 'string'
@@ -113,20 +138,20 @@ export class HeyGenClient {
 
       if (status === 'failed') {
         const errMsg = typeof error === 'string' ? error : (error != null ? JSON.stringify(error) : 'unknown');
-        throw new Error(`HeyGen video failed: ${errMsg}`);
+        throw new ProviderTaskFailedError(`HeyGen video failed: ${errMsg}`);
       }
 
       logger.debug(
-        { videoId, status, attempt, maxAttempts: opts.maxAttempts },
+        { videoId, status, attempt, maxAttempts },
         'HeyGen: ожидаем видео'
       );
 
       // Ждём: 15s, 15s, 30s, 30s, 60s... без бесконечного роста
-      const delay = Math.min(opts.baseDelayMs * Math.ceil(attempt / 2), 60_000);
+      const delay = Math.min(baseDelayMs * Math.ceil(attempt / 2), 60_000);
       await sleep(delay);
     }
 
-    throw new Error(`HeyGen timeout: видео ${videoId} не готово после ${opts.maxAttempts} попыток`);
+    throw new Error(`HeyGen timeout: видео ${videoId} не готово после ${maxAttempts} попыток`);
   }
 }
 

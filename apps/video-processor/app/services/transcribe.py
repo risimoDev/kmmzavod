@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -54,20 +55,44 @@ def extract_audio(video_path: str, audio_path: str) -> None:
         raise RuntimeError(f"FFmpeg audio extraction failed: {result.stderr[:500]}")
 
 
-def transcribe_audio(audio_path: str, language: str = "ru") -> list[WordTimestamp]:
-    """
-    Run faster-whisper on a WAV file and return word-level timestamps.
+_model = None
+_model_key: tuple[str, str] | None = None
+_model_lock = threading.Lock()
 
-    Uses the 'base' model for speed (~150 MB download, fast on CPU).
-    """
+
+def _get_model():
+    """Load the Whisper model once per process (lazy, thread-safe)."""
+    global _model, _model_key
     from faster_whisper import WhisperModel
 
     model_size = os.environ.get("WHISPER_MODEL_SIZE", "base")
     device = os.environ.get("WHISPER_DEVICE", "cpu")
-    compute_type = "int8" if device == "cpu" else "float16"
+    key = (model_size, device)
+    with _model_lock:
+        if _model is None or _model_key != key:
+            compute_type = "int8" if device == "cpu" else "float16"
+            # Prefer the model baked into the image (see Dockerfile / download_model.py).
+            source = model_size
+            try:
+                from download_model import is_ready, model_dir
+                if is_ready(model_size):
+                    source = model_dir(model_size)
+            except Exception:  # noqa: BLE001 — helper is optional, fall back to HF download
+                pass
+            logger.info("Loading Whisper model=%s device=%s compute=%s", source, device, compute_type)
+            _model = WhisperModel(source, device=device, compute_type=compute_type)
+            _model_key = key
+        return _model
 
-    logger.info("Loading Whisper model=%s device=%s compute=%s", model_size, device, compute_type)
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+def transcribe_audio(audio_path: str, language: str = "ru") -> list[WordTimestamp]:
+    """
+    Run faster-whisper on a WAV file and return word-level timestamps.
+
+    Uses the 'base' model for speed (~150 MB download, fast on CPU). The model
+    is cached for the process lifetime.
+    """
+    model = _get_model()
 
     segments, info = model.transcribe(
         audio_path,

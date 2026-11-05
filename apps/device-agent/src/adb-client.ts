@@ -14,7 +14,9 @@ import { promisify } from 'node:util';
 import type { Logger } from 'pino';
 import { config } from './config';
 import { encodeFrameJpeg } from './lib/jpeg-pool';
-import { PersistentShell } from './lib/persistent-shell';
+import { PersistentShell, shQuote } from './lib/persistent-shell';
+import { buildInputTextCommand } from './lib/input-text';
+import { isPlainAscii, typeText } from './ui-automation';
 
 const execFileAsync = promisify(execFile);
 
@@ -284,7 +286,7 @@ export class AdbClient {
   async openApp(serial: string, packageName: string): Promise<void> {
     // 1. First try monkey runner
     try {
-      const res = await this.shell(serial, `monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`);
+      const res = await this.shell(serial, `monkey -p ${shQuote(packageName)} -c android.intent.category.LAUNCHER 1`);
       if (!res.includes('No activities found') && !res.includes('monkey aborted') && !res.includes('** Error')) {
         return;
       }
@@ -294,10 +296,10 @@ export class AdbClient {
 
     // 2. Try resolving main launchable activity via cmd package resolve-activity
     try {
-      const actRaw = await this.shell(serial, `cmd package resolve-activity --brief ${packageName}`);
+      const actRaw = await this.shell(serial, `cmd package resolve-activity --brief ${shQuote(packageName)}`);
       const match = actRaw.match(/([a-zA-Z0-9_.]+\/[a-zA-Z0-9_.]+)/);
       if (match && !match[1].includes('ResolverActivity')) {
-        await this.shell(serial, `am start -n ${match[1]}`);
+        await this.shell(serial, `am start -n ${shQuote(match[1])}`);
         return;
       }
     } catch {
@@ -305,13 +307,13 @@ export class AdbClient {
     }
 
     // 3. Standard am start intent action MAIN category LAUNCHER
-    await this.shell(serial, `am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${packageName}`);
+    await this.shell(serial, `am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${shQuote(packageName)}`);
   }
 
   /** Open deep link or URL via Android Intent. */
   async openUrl(serial: string, url: string, packageName?: string): Promise<void> {
-    const pkgArg = packageName ? ` ${packageName}` : '';
-    await this.shell(serial, `am start -a android.intent.action.VIEW -d "${url}"${pkgArg}`);
+    const pkgArg = packageName ? ` ${shQuote(packageName)}` : '';
+    await this.shell(serial, `am start -a android.intent.action.VIEW -d ${shQuote(url)}${pkgArg}`);
   }
 
   /** Tap screen at (x, y). */
@@ -326,10 +328,14 @@ export class AdbClient {
 
   /** Input text string. */
   async inputText(serial: string, text: string): Promise<void> {
-    // Newlines would split the shell command (and `input text` cannot type them anyway),
-    // then escape shell-sensitive characters.
-    const escaped = text.replace(/[\r\n]+/g, ' ').replace(/([ "$\\`'()|&;<>*?~])/g, '\\$1');
-    await this.fastShell(serial, `input text ${escaped}`);
+    // Newlines would split the shell command (and `input text` cannot type them anyway).
+    const oneLine = text.replace(/[\r\n]+/g, ' ');
+    // `input text` only types printable ASCII — anything else goes through ADBKeyboard.
+    if (!isPlainAscii(oneLine)) {
+      await typeText(this, serial, oneLine);
+      return;
+    }
+    await this.fastShell(serial, buildInputTextCommand(oneLine));
   }
 
   /** Send keyevent (e.g. 3 = HOME, 4 = BACK, 224 = WAKEUP, 26 = POWER). */
@@ -443,7 +449,7 @@ export class AdbClient {
     let grantedCount = 0;
     for (const perm of permissions) {
       try {
-        await this.shell(serial, `pm grant ${pkg} ${perm}`);
+        await this.shell(serial, `pm grant ${shQuote(pkg)} ${perm}`);
         grantedCount++;
       } catch {
         // Not all apps declare all permissions, ignore failed grants
@@ -451,7 +457,7 @@ export class AdbClient {
     }
 
     try {
-      await this.shell(serial, `appops set ${pkg} SYSTEM_ALERT_WINDOW allow`);
+      await this.shell(serial, `appops set ${shQuote(pkg)} SYSTEM_ALERT_WINDOW allow`);
     } catch {}
 
     this.logger.info({ serial, pkg, grantedCount }, 'adb: auto-granted runtime permissions');
@@ -607,7 +613,7 @@ export class AdbClient {
   /** Clear application data and cache (pm clear). Instantly resets app state and sessions. */
   async clearAppData(serial: string, packageName: string): Promise<{ ok: boolean; output: string }> {
     try {
-      const output = await this.shell(serial, `pm clear ${packageName}`);
+      const output = await this.shell(serial, `pm clear ${shQuote(packageName)}`);
       const isSuccess = output.includes('Success');
       return { ok: isSuccess, output };
     } catch (err: any) {
@@ -618,7 +624,7 @@ export class AdbClient {
   /** Force stop application (am force-stop). */
   async stopApp(serial: string, packageName: string): Promise<{ ok: boolean; output: string }> {
     try {
-      const output = await this.shell(serial, `am force-stop ${packageName}`);
+      const output = await this.shell(serial, `am force-stop ${shQuote(packageName)}`);
       return { ok: true, output };
     } catch (err: any) {
       return { ok: false, output: err.message };

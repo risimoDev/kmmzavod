@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     max_concurrent_jobs: int = 2
     # Temp dir base; defaults to OS temp
     work_dir_base: str = ""
+    # Shared secret for service-to-service calls. Empty = auth disabled.
+    # When set, every request except /health must send X-Internal-Token.
+    internal_service_token: str = ""
 
     model_config = SettingsConfigDict(
         env_file=(".env", str(_root_env)),

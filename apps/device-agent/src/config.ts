@@ -45,7 +45,8 @@ function resolveAdbPath(): string {
 export const config = {
   // Bind to the AmneziaWG interface IP only — never 0.0.0.0. See infra/amneziawg/README.md.
   // (Phones reach their proxy gateways via `adb reverse`, which is unaffected by this.)
-  HOST: detectTunnelHost(),
+  // Getter: re-detected on every read, so a listen retry at boot picks up the tunnel IP once it appears.
+  get HOST(): string { return detectTunnelHost(); },
   PORT: Number(env('DEVICE_AGENT_PORT', '8300')),
   // Path to Google adb executable (prioritizes local platform-tools)
   ADB_PATH: resolveAdbPath(),
@@ -54,6 +55,9 @@ export const config = {
   // Target folder on Android device for videos
   DOWNLOAD_DIR: env('DEVICE_AGENT_DOWNLOAD_DIR', '/sdcard/DCIM/Camera'),
   ADB_TIMEOUT_MS: Number(env('DEVICE_AGENT_ADB_TIMEOUT_MS', '60000')),
+
+  // Optional shared secret: when set, every request except GET /health must carry it in `x-agent-token`.
+  AGENT_TOKEN: env('DEVICE_AGENT_TOKEN', ''),
 
   // ── Proxy gateway (see src/proxy-manager.ts) ──
   // Where device proxy configs are persisted (contains proxy passwords — keep it out of git).

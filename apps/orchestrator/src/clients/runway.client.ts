@@ -13,6 +13,7 @@
 import axios, { type AxiosInstance } from 'axios';
 import { logger } from '../logger';
 import { axiosProxyConfig } from '../lib/proxy';
+import { PollFailureTracker, ProviderTaskFailedError, retryAfterMs } from '../lib/provider-errors';
 
 const RUNWAY_BASE_URL = 'https://api.dev.runwayml.com/v1';
 const RUNWAY_API_VERSION = '2024-11-06';
@@ -134,21 +135,41 @@ export class RunwayClient {
    * @param opts.maxAttempts  — max poll iterations (default 60 ≈ 10–15 min)
    * @param opts.baseDelayMs  — initial delay between polls
    * @param opts.requestedDurationSec — fallback duration if API doesn't report one
+   * @param opts.maxConsecutiveErrors — transient status-request failures (network, 5xx, 429)
+   *        tolerated in a row before giving up (default 8); the task is already paid for
    * @returns `{ outputUrl, duration }` — presigned URL + clip length in seconds
    *
    * @see https://docs.dev.runwayml.com/reference/retrieve-task
    */
   async pollUntilDone(
     taskId: string,
-    opts: { maxAttempts?: number; baseDelayMs?: number; requestedDurationSec?: number } = {},
+    opts: {
+      maxAttempts?: number;
+      baseDelayMs?: number;
+      requestedDurationSec?: number;
+      maxConsecutiveErrors?: number;
+      errorBackoffMs?: number;
+    } = {},
   ): Promise<{ outputUrl: string; duration: number }> {
     const maxAttempts = opts.maxAttempts ?? 60;
     const baseDelayMs = opts.baseDelayMs ?? 10_000;
     const fallbackDuration = opts.requestedDurationSec ?? 5;
+    const failures = new PollFailureTracker(opts.maxConsecutiveErrors ?? 8, opts.errorBackoffMs ?? 5_000);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = await this.http.get<RunwayTaskResponse>(`/tasks/${taskId}`);
-      const task = res.data;
+      let task: RunwayTaskResponse;
+      try {
+        task = (await this.http.get<RunwayTaskResponse>(`/tasks/${taskId}`)).data;
+        failures.onSuccess();
+      } catch (err) {
+        const waitMs = failures.onError(err); // rethrows non-transient / exhausted
+        logger.warn(
+          { taskId, attempt, consecutiveErrors: failures.failures, waitMs, err: (err as Error).message, retryAfterMs: retryAfterMs(err) },
+          'Runway: сбой запроса статуса, повторяем',
+        );
+        await sleep(waitMs);
+        continue;
+      }
 
       if (task.status === 'SUCCEEDED') {
         const outputUrl = task.output?.[0];
@@ -158,7 +179,7 @@ export class RunwayClient {
       }
 
       if (task.status === 'FAILED' || task.status === 'CANCELLED') {
-        throw new Error(`Runway task ${task.status}: ${task.failure ?? 'unknown error'}`);
+        throw new ProviderTaskFailedError(`Runway task ${task.status}: ${task.failure ?? 'unknown error'}`);
       }
 
       logger.debug(
