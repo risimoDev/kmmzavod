@@ -1109,9 +1109,16 @@ export class ProxyManager {
     let statusCode: number | undefined;
     let rotateResponse = '';
     try {
-      const res = await axios.get(url, { timeout: 15_000, headers: { 'User-Agent': 'KMMZavod-ProxyManager/2.0' } });
+      const res = await axios.get(url, {
+        timeout: 15_000,
+        headers: { 'User-Agent': 'KMMZavod-ProxyManager/2.0' },
+        validateStatus: (status) => status < 500,
+      });
       statusCode = res.status;
       rotateResponse = typeof res.data === 'string' ? res.data.slice(0, 500) : JSON.stringify(res.data).slice(0, 500);
+      if (res.status >= 400) {
+        this.logger.warn({ deviceId, statusCode, rotateResponse }, 'proxy-manager: IP rotation returned non-200 (possible cooldown)');
+      }
     } catch (err) {
       throw new Error(`Ошибка вызова ссылки ротации: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -771,6 +771,27 @@ export const accountFarmApi = {
 
   getProxyMode: () => apiFetch<ProxyModeState>('/api/v1/farm/devices/proxy/mode'),
 
+  getAstroProxyStatus: () =>
+    apiFetch<AstroProxyStatusResponse>('/api/v1/farm/astroproxy/status'),
+
+  saveAstroProxyToken: (token: string) =>
+    apiFetch<{ ok: boolean; balance?: number; currency?: string; ports?: AstroProxyPortItem[]; error?: string }>(
+      '/api/v1/farm/astroproxy/token',
+      { method: 'POST', body: JSON.stringify({ token }) }
+    ),
+
+  rotateAstroProxy: (portId?: string | number) =>
+    apiFetch<{ ok: boolean; msg: string; newIp?: string; cooldown?: boolean }>(
+      '/api/v1/farm/astroproxy/rotate',
+      { method: 'POST', body: JSON.stringify({ portId }) }
+    ),
+
+  applyAstroProxyToFarm: (opts?: { portId?: string | number; deviceIds?: string[] }) =>
+    apiFetch<{ ok: boolean; appliedPort: string | number; host: string; port: number; deviceCount: number }>(
+      '/api/v1/farm/astroproxy/apply-to-farm',
+      { method: 'POST', body: JSON.stringify(opts || {}) }
+    ),
+
   setProxyMode: (mode: 'shared_sequential' | 'private_parallel', inactivePolicy?: 'direct' | 'block') =>
     apiFetch<ProxyModeState>('/api/v1/farm/devices/proxy/mode', {
       method: 'POST',
@@ -1231,6 +1252,29 @@ export interface ProxyModeState {
   activeDeviceId: string | null;
   busyDeviceId?: string | null;
   hasSharedProxy: boolean;
+}
+
+export interface AstroProxyPortItem {
+  id: number | string;
+  name?: string;
+  host: string;
+  port: number;
+  socksPort?: number;
+  username?: string;
+  password?: string;
+  country?: string;
+  city?: string;
+  networkType?: string;
+  status?: string;
+  changeIpUrl?: string;
+}
+
+export interface AstroProxyStatusResponse {
+  configured: boolean;
+  balance?: number;
+  currency?: string;
+  ports?: AstroProxyPortItem[];
+  error?: string;
 }
 
 export interface DeviceIpCheck {

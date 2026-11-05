@@ -33,6 +33,8 @@ import {
   type RunScriptBatchResult,
   type FarmSchedule,
   type FarmScheduleRunLog,
+  type AstroProxyStatusResponse,
+  type AstroProxyPortItem,
 } from "@/lib/api";
 
 const TABS = [
@@ -2087,17 +2089,28 @@ function DevicesTab() {
   const [switchingProxyId, setSwitchingProxyId] = useState<string | null>(null);
   const [togglingProxyMode, setTogglingProxyMode] = useState(false);
 
+  // AstroProxy API state
+  const [astroStatus, setAstroStatus] = useState<AstroProxyStatusResponse | null>(null);
+  const [showAstroTokenInput, setShowAstroTokenInput] = useState(false);
+  const [astroTokenInput, setAstroTokenInput] = useState('');
+  const [savingAstroToken, setSavingAstroToken] = useState(false);
+  const [rotatingAstro, setRotatingAstro] = useState(false);
+  const [applyingAstroToFarm, setApplyingAstroToFarm] = useState(false);
+  const [astroFeedback, setAstroFeedback] = useState<string | null>(null);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [devRes, proxyRes, accRes, modeRes] = await Promise.allSettled([
+      const [devRes, proxyRes, accRes, modeRes, astroRes] = await Promise.allSettled([
         accountFarmApi.listDevices(),
         accountFarmApi.listProxies(),
         accountFarmApi.listAccounts({ limit: 100 }),
         accountFarmApi.getProxyMode(),
+        accountFarmApi.getAstroProxyStatus(),
       ]);
 
+      if (astroRes.status === 'fulfilled') setAstroStatus(astroRes.value);
       if (proxyRes.status === 'fulfilled') setProxies(proxyRes.value);
       if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
       if (modeRes.status === 'fulfilled' && modeRes.value?.ok) {
@@ -3232,6 +3245,59 @@ function DevicesTab() {
     }
   };
 
+  const handleSaveAstroToken = async () => {
+    if (!astroTokenInput.trim()) return;
+    setSavingAstroToken(true);
+    setAstroFeedback(null);
+    try {
+      const res = await accountFarmApi.saveAstroProxyToken(astroTokenInput.trim());
+      if (res.ok) {
+        setShowAstroTokenInput(false);
+        setAstroTokenInput('');
+        setAstroFeedback(`AstroProxy успешно подключен! Баланс: $${res.balance?.toFixed(2) ?? '0.00'}`);
+        await loadData();
+      }
+    } catch (err: any) {
+      alert(`Ошибка подключения AstroProxy: ${err.message}`);
+    } finally {
+      setSavingAstroToken(false);
+    }
+  };
+
+  const handleRotateAstro = async () => {
+    setRotatingAstro(true);
+    setAstroFeedback(null);
+    try {
+      const res = await accountFarmApi.rotateAstroProxy();
+      if (res.ok) {
+        setAstroFeedback(res.newIp ? `IP успешно изменен на: ${res.newIp}` : res.msg);
+        await loadData();
+      } else {
+        setAstroFeedback(res.msg);
+      }
+    } catch (err: any) {
+      alert(`Ошибка ротации AstroProxy: ${err.message}`);
+    } finally {
+      setRotatingAstro(false);
+    }
+  };
+
+  const handleApplyAstroToFarm = async () => {
+    setApplyingAstroToFarm(true);
+    setAstroFeedback(null);
+    try {
+      const res = await accountFarmApi.applyAstroProxyToFarm();
+      if (res.ok) {
+        setAstroFeedback(`Прокси AstroProxy успешно применен на ${res.deviceCount} плат фермы!`);
+        await loadData();
+      }
+    } catch (err: any) {
+      alert(`Ошибка применения прокси: ${err.message}`);
+    } finally {
+      setApplyingAstroToFarm(false);
+    }
+  };
+
   const handleToggleProxyMode = () =>
     applyProxyMode(proxyMode === 'shared_sequential' ? 'private_parallel' : 'shared_sequential', inactivePolicy);
 
@@ -3588,6 +3654,150 @@ function DevicesTab() {
           </Button>
           <Button size="sm" variant="ghost" onClick={loadData}>🔄 Обновить</Button>
         </div>
+      </div>
+
+      {/* ── AstroProxy API Integration Card ── */}
+      <div className="p-4 bg-surface-2/90 border border-brand-500/30 rounded-xl shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-brand-500/20 border border-brand-500/40 flex items-center justify-center text-lg shadow-sm">
+              🛰️
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-text-primary">AstroProxy API Hub</span>
+                {astroStatus?.configured ? (
+                  <Badge variant="success" className="text-2xs font-semibold">
+                    ✓ API подключен
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="text-2xs text-amber-300 border-amber-500/40">
+                    Не настроен
+                  </Badge>
+                )}
+                {astroStatus?.balance !== undefined && (
+                  <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded">
+                    Баланс: ${astroStatus.balance.toFixed(2)} {astroStatus.currency || 'USD'}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-text-secondary mt-0.5">
+                Автоматическая ротация IP перед каждой публикацией TikTok и мониторинг баланса прокси.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {astroStatus?.configured ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={rotatingAstro}
+                  onClick={handleRotateAstro}
+                  className="text-xs border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 font-semibold"
+                  title="Запросить новый IP адрес у AstroProxy по API"
+                >
+                  🔄 Сменить IP (Ротация)
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={applyingAstroToFarm}
+                  onClick={handleApplyAstroToFarm}
+                  className="text-xs font-semibold"
+                  title="Привязать порт AstroProxy ко всем платам фермы"
+                >
+                  ⚡ Применить на все платы
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => setShowAstroTokenInput(!showAstroTokenInput)}
+                  className="text-text-tertiary"
+                  title="Настройки токена"
+                >
+                  ⚙️
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => setShowAstroTokenInput(!showAstroTokenInput)}
+                className="text-xs font-semibold"
+              >
+                🔑 Подключить API Токен
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Port info if configured */}
+        {astroStatus?.configured && astroStatus.ports && astroStatus.ports.length > 0 && (
+          <div className="p-2.5 rounded-lg bg-surface-1 border border-border/80 flex flex-wrap items-center justify-between text-xs gap-2">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-text-primary">
+                Порт #{astroStatus.ports[0].id} ({astroStatus.ports[0].name || 'kmmzavod'}):
+              </span>
+              <code className="text-brand-400 font-mono">
+                {astroStatus.ports[0].host}:{astroStatus.ports[0].port}
+              </code>
+              <Badge variant="outline" className="text-2xs">
+                {astroStatus.ports[0].country || 'Kazakhstan'} ({astroStatus.ports[0].networkType || 'Residential'})
+              </Badge>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
+              <span>Логин: <strong className="text-text-secondary">{astroStatus.ports[0].username || 'LevrurisimoiY7'}</strong></span>
+              <span>•</span>
+              <span>Ротация по API активна</span>
+            </div>
+          </div>
+        )}
+
+        {/* Token Input Form */}
+        {(showAstroTokenInput || !astroStatus?.configured) && (
+          <div className="p-3 bg-surface-1 border border-border rounded-lg space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-text-primary">API Токен AstroProxy</span>
+              <a
+                href="https://astroproxy.com/settings/api"
+                target="_blank"
+                rel="noreferrer"
+                className="text-[11px] text-brand-400 hover:underline"
+              >
+                Где взять токен в кабинете AstroProxy ↗
+              </a>
+            </div>
+            <div className="flex gap-2">
+              <Input
+                placeholder="Вставьте токен AstroProxy..."
+                value={astroTokenInput}
+                onChange={(e) => setAstroTokenInput(e.target.value)}
+                className="text-xs font-mono"
+              />
+              <Button
+                size="sm"
+                variant="primary"
+                loading={savingAstroToken}
+                onClick={handleSaveAstroToken}
+                disabled={!astroTokenInput.trim()}
+              >
+                Сохранить
+              </Button>
+            </div>
+            <p className="text-[11px] text-text-tertiary">
+              Токен позволит системе проверять баланс и автоматически менять IP адрес фермы перед выкладкой видео.
+            </p>
+          </div>
+        )}
+
+        {astroFeedback && (
+          <div className="p-2.5 rounded bg-brand-500/10 border border-brand-500/30 text-xs text-brand-300 flex items-center justify-between">
+            <span>{astroFeedback}</span>
+            <button onClick={() => setAstroFeedback(null)} className="text-text-tertiary hover:text-text-primary">✕</button>
+          </div>
+        )}
       </div>
 
       {/* ── Proxy Allocation Mode Banner ── */}

@@ -16,6 +16,13 @@ import { farmScheduler } from '../lib/farm-scheduler';
 import { signValue, verifySignedValue } from '../lib/signed-url';
 import { config } from '../config';
 import { farmControlRateLimit } from '../plugins/rate-limit.plugin';
+import {
+  getAstroProxyToken,
+  setAstroProxyToken,
+  fetchAstroProxyBalance,
+  fetchAstroProxyPorts,
+  rotateAstroProxyPort,
+} from '../lib/astroproxy';
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -1705,6 +1712,131 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       return reply.send(await deviceAgentClient.getProxyStatus());
     } catch (err) {
       return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  // ── AstroProxy API Integration ──────────────────────────────────────────
+  app.get('/astroproxy/status', async (_request, reply) => {
+    try {
+      const token = await getAstroProxyToken();
+      if (!token) {
+        return reply.send({ configured: false });
+      }
+      try {
+        const balance = await fetchAstroProxyBalance(token);
+        const ports = await fetchAstroProxyPorts(token);
+        return reply.send({
+          configured: true,
+          balance: balance.balance,
+          currency: balance.currency,
+          ports,
+        });
+      } catch (err: any) {
+        return reply.send({
+          configured: true,
+          error: err.message || 'Ошибка связи с AstroProxy API',
+        });
+      }
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message || 'Internal server error' });
+    }
+  });
+
+  app.post('/astroproxy/token', async (request: any, reply) => {
+    const { token } = z.object({ token: z.string().trim().min(5) }).parse(request.body);
+    try {
+      const balance = await fetchAstroProxyBalance(token);
+      const ports = await fetchAstroProxyPorts(token);
+      await setAstroProxyToken(token);
+      return reply.send({
+        ok: true,
+        balance: balance.balance,
+        currency: balance.currency,
+        ports,
+      });
+    } catch (err: any) {
+      return reply.status(400).send({ error: `Неверный токен AstroProxy: ${err.message}` });
+    }
+  });
+
+  app.post('/astroproxy/rotate', async (request: any, reply) => {
+    const body = z.object({ portId: z.union([z.string(), z.number()]).optional() }).parse(request.body || {});
+    try {
+      const token = await getAstroProxyToken();
+      if (!token) {
+        return reply.status(400).send({ error: 'AstroProxy токен не настроен' });
+      }
+      let portId = body.portId;
+      if (!portId) {
+        const ports = await fetchAstroProxyPorts(token);
+        if (ports.length === 0) {
+          return reply.status(400).send({ error: 'В аккаунте AstroProxy не найдено портов' });
+        }
+        portId = ports[0].id;
+      }
+      const result = await rotateAstroProxyPort(portId, token);
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  app.post('/astroproxy/apply-to-farm', async (request: any, reply) => {
+    const body = z.object({
+      portId: z.union([z.string(), z.number()]).optional(),
+      deviceIds: z.array(z.string()).optional(),
+    }).parse(request.body || {});
+
+    try {
+      const token = await getAstroProxyToken();
+      if (!token) {
+        return reply.status(400).send({ error: 'AstroProxy токен не настроен' });
+      }
+      const ports = await fetchAstroProxyPorts(token);
+      if (ports.length === 0) {
+        return reply.status(400).send({ error: 'В AstroProxy нет доступных портов' });
+      }
+      const targetPort = body.portId
+        ? ports.find((p) => String(p.id) === String(body.portId)) || ports[0]
+        : ports[0];
+
+      let targetDeviceIds = body.deviceIds;
+      if (!targetDeviceIds || targetDeviceIds.length === 0) {
+        const devList = await deviceAgentClient.listDevices();
+        const raw = (devList as any).devices || (devList as any).raw || [];
+        targetDeviceIds = Array.isArray(raw)
+          ? raw.map((d: any) => typeof d === 'string' ? d : d.serial || d.deviceId || d.id).filter(Boolean)
+          : Object.keys(devList.proxies || {});
+      }
+
+      if (!targetDeviceIds || targetDeviceIds.length === 0) {
+        return reply.status(400).send({ error: 'Не найдены подключенные платы фермы' });
+      }
+
+      const rotateUrl = targetPort.changeIpUrl || `https://astroproxy.com/api/v1/ports/${targetPort.id}/newip?token=${encodeURIComponent(token)}`;
+
+      const assignments = targetDeviceIds.map((deviceId) => ({
+        deviceId,
+        host: targetPort.host,
+        port: targetPort.port,
+        username: targetPort.username || undefined,
+        password: targetPort.password || undefined,
+        type: 'residential' as const,
+        country: targetPort.country || 'KZ',
+        rotateUrl,
+      }));
+
+      const res = await deviceAgentClient.batchSetProxy(assignments);
+      return reply.send({
+        ok: true,
+        appliedPort: targetPort.id,
+        host: targetPort.host,
+        port: targetPort.port,
+        deviceCount: targetDeviceIds.length,
+        res,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({ error: describeDeviceAgentError(err) });
     }
   });
 
