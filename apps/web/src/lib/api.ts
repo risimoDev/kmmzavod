@@ -2346,6 +2346,8 @@ export interface AutopilotAccount {
   group: string | null;
   ok: boolean;
   blockers: string[];
+  proxyUrl?: string | null;
+  proxyHost?: string | null;
 }
 
 export interface AutopilotBatch {
@@ -2399,6 +2401,15 @@ export interface AutopilotDetail {
   readyVariants: number;
   posts: AutopilotPost[];
   aiKeys: { openrouter: boolean; fishAudio: boolean };
+  farmProxy?: {
+    configured: boolean;
+    balance?: number;
+    currency?: string;
+    portId?: string | number;
+    country?: string;
+    host?: string;
+    port?: number;
+  };
 }
 
 export interface AutopilotMeta {

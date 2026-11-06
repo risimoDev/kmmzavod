@@ -287,3 +287,35 @@ export async function rotateAstroProxyPort(
     cooldown: isCooldown,
   };
 }
+
+/** Get quick status summary of AstroProxy for autopilot and dashboard display */
+export async function getAstroProxySummary(): Promise<{
+  configured: boolean;
+  balance?: number;
+  currency?: string;
+  portId?: string | number;
+  country?: string;
+  host?: string;
+  port?: number;
+}> {
+  const token = await getAstroProxyToken();
+  if (!token) return { configured: false };
+  try {
+    const [balanceRes, ports] = await Promise.all([
+      fetchAstroProxyBalance(token).catch(() => null),
+      fetchAstroProxyPorts(token).catch(() => []),
+    ]);
+    const firstPort = ports && ports.length > 0 ? ports[0] : undefined;
+    return {
+      configured: Boolean(firstPort),
+      balance: balanceRes?.balance,
+      currency: balanceRes?.currency,
+      portId: firstPort?.id,
+      country: firstPort?.country,
+      host: firstPort?.host,
+      port: firstPort?.port,
+    };
+  } catch {
+    return { configured: false };
+  }
+}

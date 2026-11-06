@@ -65,7 +65,7 @@ export default function AutopilotDetailPage() {
     );
   }
 
-  const { autopilot: ap, batches, runs, accounts, sources, readyVariants, posts, aiKeys } = data;
+  const { autopilot: ap, batches, runs, accounts, sources, readyVariants, posts, aiKeys, farmProxy } = data;
   const okPhones = accounts.filter((a) => a.ok).length;
   const inFlight = batches.filter((b) => !["ready", "failed"].includes(b.status));
   const published = posts.filter((p) => p.status === "published").length;
@@ -115,6 +115,12 @@ export default function AutopilotDetailPage() {
             Админ → Настройки → «Провайдеры AI».
           </p>
         )}
+        {farmProxy && !farmProxy.configured && (
+          <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
+            AstroProxy не подключен в Стойке плат — публикации могут быть заблокированы без мобильного прокси.{" "}
+            <Link href="/farm" className="underline hover:text-warning/80">Настроить AstroProxy</Link>.
+          </p>
+        )}
 
         {editing ? (
           <AutopilotForm
@@ -131,11 +137,13 @@ export default function AutopilotDetailPage() {
         ) : (
           <>
             {/* ── Pipeline strip ───────────────────────────────────────────── */}
-            <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
               <Flow label="Исходники" value={sources.total} sub={`${sources.fresh} ещё не использованы`} tone={sources.total ? undefined : "bad"} />
               <Flow label="В производстве" value={inFlight.length} sub={inFlight.length ? stageSummary(inFlight) : "ожидает спроса"} />
               <Flow label="Копий готово" value={readyVariants} sub="в буфере к публикации" tone={readyVariants ? "ok" : undefined} />
               <Flow label="Телефоны" value={`${okPhones}/${accounts.length}`} sub="готовы публиковать" tone={okPhones ? "ok" : "bad"} />
+              <Flow label="Прокси стойки" value={farmProxy?.configured ? `${farmProxy.balance != null ? `$${farmProxy.balance.toFixed(2)}` : "Подключен"}` : "Не настроен"}
+                sub={farmProxy?.configured ? `AstroProxy (${farmProxy.country || "KZ"}) · ротация` : "Требуется в /farm"} tone={farmProxy?.configured ? "ok" : "bad"} />
               <Flow label="Следующее окно" value={ap.status === "active" && ap.nextWindowAt ? new Date(ap.nextWindowAt).toLocaleTimeString("ru-RU", { timeZone: ap.timezone, hour: "2-digit", minute: "2-digit" }) : "—"}
                 sub={ap.status === "active" && ap.nextWindowAt ? formatWindow(ap.nextWindowAt, ap.timezone) : ap.status === "active" ? "вычисляется…" : "автопилот не запущен"} />
             </div>
@@ -201,8 +209,15 @@ export default function AutopilotDetailPage() {
                       {accounts.length === 0 && <p className="text-xs text-text-tertiary">Нет аккаунтов с методом «телефон» в охвате.</p>}
                       {accounts.map((a) => (
                         <div key={a.id} className="flex items-center justify-between gap-2 text-xs">
-                          <span className="truncate text-text-secondary">{a.accountName} <span className="text-text-tertiary">· {a.platform}</span></span>
-                          {a.ok ? <Badge variant="success">готов</Badge> : <span className="truncate text-2xs text-danger" title={a.blockers.join(", ")}>{a.blockers.join(", ")}</span>}
+                          <span className="truncate text-text-secondary" title={a.accountName}>
+                            {a.accountName} <span className="text-text-tertiary">· {a.platform}</span>
+                            {a.deviceId && <span className="text-text-tertiary"> · {a.deviceId.slice(0, 8)}</span>}
+                          </span>
+                          {a.ok ? (
+                            <Badge variant="success">готов{a.proxyHost ? ` · ${a.proxyHost}` : ""}</Badge>
+                          ) : (
+                            <span className="truncate text-2xs text-danger" title={a.blockers.join(", ")}>{a.blockers.join(", ")}</span>
+                          )}
                         </div>
                       ))}
                     </CardContent>

@@ -850,17 +850,21 @@ export class ProxyManager {
 
   /** Device whose task last got a fresh IP (consecutive tasks of one phone keep its IP). */
   private lastRotatedFor: string | null = null;
+  private lastRotatedAt = 0;
 
   /**
    * shared_sequential: before the shared proxy serves another phone's task, switch its IP
    * via the provider's rotation link (when one is configured), so every account works from
    * its own fresh IP — and the IP is changed only BETWEEN tasks, never mid-upload.
+   * If >60s have passed since last rotation on the same phone, rotate again for the new task.
    * A failed rotation is logged and the task goes on with the current IP.
    */
   private async freshIpForTask(deviceId: string): Promise<void> {
-    if (this.mode !== 'shared_sequential' || this.lastRotatedFor === deviceId) return;
+    const isRecentSameDevice = this.lastRotatedFor === deviceId && Date.now() - this.lastRotatedAt < 60_000;
+    if (this.mode !== 'shared_sequential' || isRecentSameDevice) return;
     if (!this.devices.get(deviceId)?.proxy.rotateUrl) return;
     this.lastRotatedFor = deviceId;
+    this.lastRotatedAt = Date.now();
     try {
       // Mobile modems take 5–25 s to come back; the gateway rides out the rest.
       const r = await this.rotateProxyIp(deviceId, undefined, 10_000);

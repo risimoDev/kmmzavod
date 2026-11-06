@@ -534,7 +534,7 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
           uniquifyJobId,
           autopilotId: ap.id,
           status: 'pending',
-          staggerMinutes: ap.staggerMinutes,
+          staggerMinutes: Math.max(3, ap.staggerMinutes || 5),
           captionTemplate: ap.captionTemplate,
           hashtags: ap.hashtags,
           totalItems: items.length,
@@ -558,7 +558,7 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
     data: { postsScheduled: { increment: assignments.length } },
   });
   await journal(db, ap, 'distribute',
-    `Окно ${fmtTime(now, ap.timezone)}: ${assignments.length} постов поставлено в очередь телефонов` +
+    `Окно ${fmtTime(now, ap.timezone)}: ${assignments.length} постов поставлено в очередь телефонов (ротация AstroProxy, пауза ${Math.max(3, ap.staggerMinutes || 5)} мин)` +
       (Object.keys(skipped).length ? ` (пропущено: ${Object.entries(skipped).map(([k, n]) => `${k} ×${n}`).join(', ')})` : ''),
     { summary: { scheduled: assignments.length, skipped, montages: byJob.size } });
 }

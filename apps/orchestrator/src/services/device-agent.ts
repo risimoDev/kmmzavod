@@ -21,6 +21,8 @@ export interface DevicePublishResult {
   verified?: { app: boolean; profile: boolean | null };
   captionTyped?: boolean;
   debugSnapshot?: string;
+  exitIp?: string;
+  country?: string;
 }
 
 /**

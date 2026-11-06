@@ -15,6 +15,7 @@ import { aiStatus, getFishConfig } from '../lib/ai';
 import { logger } from '../logger';
 import { config } from '../config';
 import { assertOwnStorageKey } from '../lib/storage-keys';
+import { getAstroProxySummary } from '../lib/astroproxy';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
 const SCRIPT_STYLES = ['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal'] as const;
@@ -65,7 +66,7 @@ const Shape = z.object({
   publishTimes: z.array(z.string().regex(HHMM, 'Формат HH:MM')).min(1).max(12),
   timezone: z.string().max(50).default('Europe/Moscow'),
   jitterMinutes: z.number().int().min(0).max(60).default(20),
-  staggerMinutes: z.number().int().min(1).max(120).default(7),
+  staggerMinutes: z.number().int().min(3).max(120).default(7),
   minHealth: z.number().int().min(0).max(100).default(30),
   captionTemplate: z.string().max(2000).nullish(),
   hashtags: z.array(z.string().max(100)).max(30).default([]),
@@ -147,6 +148,7 @@ async function scopeAccounts(t: Targets) {
     select: {
       id: true, platform: true, accountName: true, deviceId: true, isActive: true,
       healthScore: true, shadowBanDetected: true, warmupStatus: true,
+      proxyUrl: true, proxyId: true,
       accountGroup: { select: { name: true, enforceWarmup: true } },
     },
     orderBy: { accountName: 'asc' },
@@ -159,9 +161,20 @@ async function scopeAccounts(t: Targets) {
     if (a.shadowBanDetected) blockers.push('теневой бан');
     if (a.healthScore < minHealth) blockers.push(`health ${a.healthScore} < ${minHealth}`);
     if (a.warmupStatus === 'cold' && a.accountGroup?.enforceWarmup) blockers.push('не прогрет');
+    let proxyHost: string | null = null;
+    if (a.proxyUrl) {
+      try {
+        const u = new URL(a.proxyUrl.startsWith('http') ? a.proxyUrl : `http://${a.proxyUrl}`);
+        proxyHost = `${u.hostname}:${u.port}`;
+      } catch {
+        proxyHost = a.proxyUrl.replace(/.*@/, '');
+      }
+    }
     return {
       id: a.id, platform: a.platform, accountName: a.accountName, deviceId: a.deviceId,
       group: a.accountGroup?.name ?? null, ok: blockers.length === 0, blockers,
+      proxyUrl: a.proxyUrl,
+      proxyHost,
     };
   });
 }
@@ -384,7 +397,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     });
     if (!ap) return reply.code(404).send({ error: 'NotFound' });
 
-    const [batches, runs, accounts, sources, ready, posts] = await Promise.all([
+    const [batches, runs, accounts, sources, ready, posts, farmProxy] = await Promise.all([
       db.autopilotBatch.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 30 }),
       db.autopilotRun.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 80 }),
       scopeAccounts({ ...ap, tenantId }),
@@ -401,6 +414,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
+      getAstroProxySummary().catch(() => ({ configured: false })),
     ]);
 
     // Enrich batches with child-entity progress for the timeline.
@@ -436,6 +450,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
         thumbnailUrl: await presign(p.uniqueVariant.thumbnailKey),
       }))),
       aiKeys: await aiKeyStatus(),
+      farmProxy,
     };
   });
 
@@ -498,6 +513,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     }
     const accounts = await scopeAccounts({ ...ap, tenantId });
     const eligible = accounts.filter((a) => a.ok).length;
+    const proxySummary = await getAstroProxySummary().catch(() => ({ configured: false }));
 
     const updated = await db.autopilot.update({
       where: { id },
@@ -511,6 +527,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       warnings: [
         ...(eligible === 0 ? ['Нет готовых телефонов — монтаж начнётся, как только появится хотя бы один'] : []),
         ...(!keys.openrouter ? ['Ключ OpenRouter не задан — сценарии будут шаблонными'] : []),
+        ...(!proxySummary.configured ? ['AstroProxy не подключен в Стойке плат — настройте прокси для безопасной ротации IP'] : []),
       ],
     };
   });

@@ -1782,6 +1782,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   });
 
   app.post('/astroproxy/apply-to-farm', async (request: any, reply) => {
+    const { tenantId } = request.user;
     const body = z.object({
       portId: z.union([z.string(), z.number()]).optional(),
       deviceIds: z.array(z.string()).optional(),
@@ -1830,17 +1831,41 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         username: targetPort.username || undefined,
         password: targetPort.password || undefined,
         type: 'residential' as const,
-        country: targetPort.country || 'KZ',
         rotateUrl,
       }));
 
       const res = await deviceAgentClient.batchSetProxy(assignments);
+
+      // Sync into DB: upsert Proxy record and link all device accounts
+      let linkedAccounts = 0;
+      try {
+        const record = await upsertProxyRecord(
+          tenantId,
+          {
+            host: targetPort.host,
+            port: targetPort.port,
+            username: targetPort.username || undefined,
+            password: targetPort.password || undefined,
+            type: 'residential',
+            rotateUrl,
+          },
+          'http',
+        );
+
+        for (const devId of targetDeviceIds) {
+          linkedAccounts += await linkDeviceAccountsToProxy(tenantId, devId, record);
+        }
+      } catch (syncErr) {
+        logger.warn({ err: String(syncErr) }, 'AstroProxy: failed to sync proxy to DB and accounts');
+      }
+
       return reply.send({
         ok: true,
         appliedPort: targetPort.id,
         host: targetPort.host,
         port: targetPort.port,
         deviceCount: targetDeviceIds.length,
+        linkedAccounts,
         res,
       });
     } catch (err: any) {

@@ -95,7 +95,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotInput = {
   publishTimes: ["09:30", "14:00", "19:30"],
   timezone: "Europe/Moscow",
   jitterMinutes: 20,
-  staggerMinutes: 7,
+  staggerMinutes: 5,
   minHealth: 30,
   captionTemplate: "",
   hashtags: [],
@@ -560,8 +560,8 @@ export function AutopilotForm({
             <Field label="Случайный сдвиг окна">
               <Range value={v.jitterMinutes} min={0} max={60} step={5} onChange={(n) => set("jitterMinutes", n)} suffix="м" />
             </Field>
-            <Field label="Пауза между телефонами">
-              <Range value={v.staggerMinutes} min={1} max={60} onChange={(n) => set("staggerMinutes", n)} suffix="м" />
+            <Field label="Пауза между телефонами" hint="от 3 мин при общем прокси AstroProxy">
+              <Range value={v.staggerMinutes} min={3} max={60} onChange={(n) => set("staggerMinutes", n)} suffix="м" />
             </Field>
           </div>
 

@@ -382,6 +382,18 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new DelayedError();
           }
 
+          // Shared farm proxy lock: prevents concurrent HTTP requests to the PC farm when in shared proxy mode
+          const farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 2_000);
+          if (!farmProxyLockOwner) {
+            await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
+            await db.publishJob.update({
+              where: { id: publishJobId },
+              data: { status: 'pending', error: `Общий прокси фермы занят другой платой — повтор через ~60 с` },
+            });
+            await job.moveToDelayed(Date.now() + 60_000, token);
+            throw new DelayedError();
+          }
+
           let result: DevicePublishResult;
           try {
             result = await deviceAgentService.publish({
@@ -392,13 +404,23 @@ export function createPublishWorker(deps: Deps): Worker {
               username: deviceUsername(accountRaw.sessionData, accountRaw.accountName),
             });
           } catch (err: unknown) {
-            // Transport failure. A timeout means the agent may still be mid-upload → not safe to retry.
             const msg = describeDeviceAgentError(err);
+            // If the shared proxy or lease queue was busy, delay and re-queue without burning attempts
+            if (/общий прокси занят/i.test(msg) || /занят задачей/i.test(msg) || /превышено время ожидания очереди/i.test(msg)) {
+              await db.publishJob.update({
+                where: { id: publishJobId },
+                data: { status: 'pending', error: `Общий прокси занят — повтор через ~${Math.round(DEVICE_BUSY_RETRY_MS / 1000)} с` },
+              });
+              await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+              throw new DelayedError();
+            }
+            // Transport failure. A timeout means the agent may still be mid-upload → not safe to retry.
             if (/did not answer in time/i.test(msg) || isOutcomeUnknown(err, true)) {
               throw new UnrecoverableError(`device-${platform}: ${msg}. Публикация не подтверждена — проверьте профиль вручную`);
             }
             throw new Error(`device-${platform}: ${msg}`);
           } finally {
+            if (farmProxyLockOwner) await releaseDeviceLock(redis, 'farm:shared-proxy', farmProxyLockOwner);
             await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
 
@@ -414,6 +436,10 @@ export function createPublishWorker(deps: Deps): Worker {
           // The agent re-read the profile and found the new post.
           if (result.verified?.profile) verifiedAt = new Date();
           if (result.detail) publishNote = result.detail; // e.g. caption could not be checked
+          if (result.exitIp) {
+            logger.info({ deviceId: accountRaw.deviceId, platform, exitIp: result.exitIp, country: result.country }, 'Publish: phone upload confirmed with rotated proxy IP');
+            publishNote = publishNote ? `${publishNote} (IP: ${result.exitIp})` : `Опубликовано с IP: ${result.exitIp}`;
+          }
           // No external post id available from real-app UI automation.
         } else
         switch (platform) {

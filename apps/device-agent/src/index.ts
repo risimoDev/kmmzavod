@@ -454,8 +454,12 @@ app.post('/publish', async (req, reply) => {
     // shared_sequential: wait for the shared proxy and move it to this phone for the whole upload
     unlock = await deviceMutex.acquire(publishReq.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(publishReq.deviceId);
+    let exitIp: string | undefined;
+    let country: string | undefined;
     if (checkIpFirst) {
       const guard = await proxyManager.preflight(publishReq.deviceId);
+      exitIp = guard.ipCheck?.ip;
+      country = guard.ipCheck?.country;
       if (!guard.ok) {
         return {
           ok: false, stage: 'prepare', posted: 'no', retryable: true, ipCheck: guard.ipCheck,
@@ -469,7 +473,11 @@ app.post('/publish', async (req, reply) => {
       release = undefined;
       setTimeout(hold, PUBLISH_PROXY_HOLD_MS).unref();
     }
-    return result;
+    return {
+      ...result,
+      exitIp,
+      country,
+    };
   } catch (err) {
     logger.error({ err }, 'device-agent: publish failed');
     // Only reachable before publishToDevice ran (lease / preflight) — nothing was posted.
