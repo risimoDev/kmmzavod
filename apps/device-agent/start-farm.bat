@@ -125,20 +125,18 @@ if not defined DEVICE_AGENT_UPSTREAM_VIA (
     )
 )
 
-:: 4b. Автоматическое обновление конфигурации прокси на AstroProxy (Казахстан)
-if exist "%~dp0devices-proxy-state.json" (
-    findstr /m "37.27.123.90" "%~dp0devices-proxy-state.json" >nul 2>nul
-    if not errorlevel 1 (
-        echo [PROXIES] Обнаружен устаревший прокси 37.27.123.90!
-        if exist "%~dp0devices-proxy-state.astroproxy.json" (
-            copy /y "%~dp0devices-proxy-state.astroproxy.json" "%~dp0devices-proxy-state.json" >nul
-            echo [OK] Конфигурация прокси обновлена на AstroProxy (45.81.32.208:10018).
-        )
-    )
-) else (
-    if exist "%~dp0devices-proxy-state.astroproxy.json" (
+:: 4b. Автоматическое обновление конфигурации прокси на AstroProxy Казахстан
+if exist "%~dp0devices-proxy-state.astroproxy.json" (
+    if not exist "%~dp0devices-proxy-state.json" (
         copy /y "%~dp0devices-proxy-state.astroproxy.json" "%~dp0devices-proxy-state.json" >nul
         echo [OK] Создана конфигурация AstroProxy для всех 20 плат.
+    )
+    if exist "%~dp0devices-proxy-state.json" (
+        findstr /m "37.27.123.90" "%~dp0devices-proxy-state.json" >nul 2>nul
+        if not errorlevel 1 (
+            copy /y "%~dp0devices-proxy-state.astroproxy.json" "%~dp0devices-proxy-state.json" >nul
+            echo [OK] Обновлен устаревший прокси на AstroProxy Казахстан.
+        )
     )
 )
 

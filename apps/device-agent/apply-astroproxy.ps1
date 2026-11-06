@@ -15,6 +15,13 @@ Write-Host "  Логин: LevrurisimoiY7"
 Write-Host "  Гео: Казахстан (Residential, JSC Kazakhtelecom)"
 Write-Host ""
 
+$astroStateFile = Join-Path $ScriptDir "devices-proxy-state.astroproxy.json"
+$proxyStateFile = Join-Path $ScriptDir "devices-proxy-state.json"
+if (Test-Path $astroStateFile) {
+    Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
+    Write-Host "[OK] Конфиг devices-proxy-state.json обновлен на AstroProxy." -ForegroundColor Green
+}
+
 Write-Host "[2/3] Отправка команды переподключения в device-agent (порт 8300)..." -ForegroundColor Yellow
 try {
     $res = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/reapply" -Method Post -TimeoutSec 5 -ErrorAction Stop
