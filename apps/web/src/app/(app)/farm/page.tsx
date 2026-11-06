@@ -3286,7 +3286,8 @@ function DevicesTab() {
     setApplyingAstroToFarm(true);
     setAstroFeedback(null);
     try {
-      const res = await accountFarmApi.applyAstroProxyToFarm();
+      const portId = astroStatus?.ports?.[0]?.id;
+      const res = await accountFarmApi.applyAstroProxyToFarm({ portId });
       if (res.ok) {
         setAstroFeedback(`Прокси AstroProxy успешно применен на ${res.deviceCount} плат фермы!`);
         await loadData();
