@@ -125,7 +125,24 @@ if not defined DEVICE_AGENT_UPSTREAM_VIA (
     )
 )
 
-:: 4b. Проверка правила Брандмауэра Windows для порта 8300 (AmneziaWG -> device-agent)
+:: 4b. Автоматическое обновление конфигурации прокси на AstroProxy (Казахстан)
+if exist "%~dp0devices-proxy-state.json" (
+    findstr /m "37.27.123.90" "%~dp0devices-proxy-state.json" >nul 2>nul
+    if not errorlevel 1 (
+        echo [PROXIES] Обнаружен устаревший прокси 37.27.123.90!
+        if exist "%~dp0devices-proxy-state.astroproxy.json" (
+            copy /y "%~dp0devices-proxy-state.astroproxy.json" "%~dp0devices-proxy-state.json" >nul
+            echo [OK] Конфигурация прокси обновлена на AstroProxy (45.81.32.208:10018).
+        )
+    )
+) else (
+    if exist "%~dp0devices-proxy-state.astroproxy.json" (
+        copy /y "%~dp0devices-proxy-state.astroproxy.json" "%~dp0devices-proxy-state.json" >nul
+        echo [OK] Создана конфигурация AstroProxy для всех 20 плат.
+    )
+)
+
+:: 4c. Проверка правила Брандмауэра Windows для порта 8300 (AmneziaWG -> device-agent)
 netsh advfirewall firewall show rule name="DeviceAgent 8300" >nul 2>nul
 if errorlevel 1 (
     echo Настройка Брандмауэра Windows: открытие порта 8300 для запросов с сервера...

@@ -120,6 +120,25 @@ if (-not $env:DEVICE_AGENT_UPSTREAM_VIA) {
     }
 }
 
+# 4b. Автоматическое обновление конфигурации прокси на AstroProxy
+$proxyStateFile = Join-Path $PSScriptRoot "devices-proxy-state.json"
+$astroStateFile = Join-Path $PSScriptRoot "devices-proxy-state.astroproxy.json"
+if (Test-Path $proxyStateFile) {
+    $content = Get-Content $proxyStateFile -Raw -ErrorAction SilentlyContinue
+    if ($content -and $content.Contains("37.27.123.90")) {
+        Write-Host "[PROXIES] Обнаружен устаревший прокси 37.27.123.90!" -ForegroundColor Yellow
+        if (Test-Path $astroStateFile) {
+            Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
+            Write-Host "[OK] Конфигурация прокси обновлена на AstroProxy (45.81.32.208:10018)." -ForegroundColor Green
+        }
+    }
+} else {
+    if (Test-Path $astroStateFile) {
+        Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
+        Write-Host "[OK] Создана конфигурация AstroProxy для всех 20 плат." -ForegroundColor Green
+    }
+}
+
 # 5. Определение пакетного менеджера (pnpm / npm)
 $pkgManager = if (Get-Command pnpm -ErrorAction SilentlyContinue) { "pnpm" } else { "npm" }
 

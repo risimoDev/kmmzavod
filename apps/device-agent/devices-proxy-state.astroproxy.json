@@ -1,0 +1,257 @@
+{
+  "version": 2,
+  "mode": "shared_sequential",
+  "inactivePolicy": "direct",
+  "activeDeviceId": "98891a37534e534d32",
+  "sharedProxy": {
+    "host": "45.81.32.208",
+    "port": 10018,
+    "username": "LevrurisimoiY7",
+    "password": "e59326cB1",
+    "type": "residential",
+    "country": "Kazakhstan",
+    "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+  },
+  "devices": {
+    "98891a37534e534d32": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18800
+    },
+    "9889543657374c5a44": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18801
+    },
+    "98895444505a4a5945": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18802
+    },
+    "98895a36533756304e": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18803
+    },
+    "98895a384c38554c54": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18804
+    },
+    "98895a4357324b3950": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18805
+    },
+    "9889953851324c4646": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18806
+    },
+    "98899a334132555550": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18807
+    },
+    "98899a344f4331584c": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18808
+    },
+    "98899a45464e4b5855": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18809
+    },
+    "9889d6444652475448": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18810
+    },
+    "9889db3356364c3930": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18811
+    },
+    "9889db374a4a355142": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18812
+    },
+    "9889db3932354f534d": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18813
+    },
+    "988a1b335850334a52": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18814
+    },
+    "988a57384e305a4e4c": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18815
+    },
+    "988a5c305253374f54": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18816
+    },
+    "988e5035364c58324c": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18817
+    },
+    "ce041714d383c0b70d": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18818
+    },
+    "ce051715421ac81403": {
+      "proxy": {
+        "host": "45.81.32.208",
+        "port": 10018,
+        "username": "LevrurisimoiY7",
+        "password": "e59326cB1",
+        "type": "residential",
+        "country": "Kazakhstan",
+        "rotateUrl": "https://astroproxy.com/api/v1/ports/6743293/newip"
+      },
+      "listenPort": 18819
+    }
+  }
+}
