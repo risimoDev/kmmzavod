@@ -94,7 +94,7 @@ if (Test-Path $gnirehtetExe) {
     Write-Host ""
     Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
     Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun"
+    Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", "77.88.8.8,1.1.1.1"
     Write-Host "[OK] Служба Gnirehtet запущена для всех USB-плат." -ForegroundColor Green
 }
 

@@ -13,6 +13,7 @@
  *
  * Zero external dependencies: native `net`, `http`, `https`, `tls`.
  */
+import dns from 'node:dns';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -158,6 +159,34 @@ function socksAddress(host: string, port: number): Buffer {
   if (kind === 6) return Buffer.concat([Buffer.from([0x04]), ipv6ToBuffer(host), portBuf]);
   const dom = Buffer.from(host);
   return Buffer.concat([Buffer.from([0x03, dom.length]), dom, portBuf]);
+}
+
+const ipHostnameCache = new Map<string, { hostname: string; expires: number }>();
+
+/**
+ * AstroProxy and some restrictive residential providers reject connections to raw IP addresses
+ * (HTTP 403 / SOCKS5 error 2: "connection not allowed by ruleset").
+ * When a target is a numeric IP, resolve its PTR hostname so the upstream proxy accepts it.
+ */
+export async function resolveHostForUpstream(host: string): Promise<string> {
+  const clean = host.replace(/^\[|\]$/g, '').trim();
+  if (!net.isIP(clean)) return host;
+
+  const now = Date.now();
+  const cached = ipHostnameCache.get(clean);
+  if (cached && cached.expires > now) return cached.hostname;
+
+  try {
+    const timer = new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500));
+    const names = await Promise.race([dns.promises.reverse(clean), timer]);
+    if (Array.isArray(names) && names.length > 0 && names[0]) {
+      ipHostnameCache.set(clean, { hostname: names[0], expires: now + 3600_000 });
+      return names[0];
+    }
+  } catch {
+    // Reverse DNS timeout or unresolvable: fallback to original host
+  }
+  return host;
 }
 
 // ── Connection limiter ──────────────────────────────────────────────────────
@@ -437,13 +466,14 @@ export class UpstreamProxy {
   async openTunnel(host: string, port: number, retryWindowMs?: number): Promise<net.Socket> {
     const release = await this.limiter.acquire(this.queueTimeoutMs);
     try {
+      const targetHost = await resolveHostForUpstream(host);
       const protocol = await this.resolveProtocol();
       const deadline = Date.now() + (retryWindowMs ?? this.retryWindowMs);
       let lastErr: ProxyError | undefined;
       for (let attempt = 1; ; attempt++) {
         try {
           const sock =
-            protocol === 'socks5' ? await this.socks5Connect(host, port) : await this.httpConnect(host, port);
+            protocol === 'socks5' ? await this.socks5Connect(targetHost, port) : await this.httpConnect(targetHost, port);
           sock.once('close', release);
           return sock;
         } catch (err) {

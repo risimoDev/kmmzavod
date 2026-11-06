@@ -142,7 +142,15 @@ function singBoxConfig(gatewayPort: number): string {
       log: { level: 'warn', timestamp: true },
       inbounds: [{ type: 'redirect', tag: 'redirect-in', listen: '127.0.0.1', listen_port: REDIRECT_PORT }],
       outbounds: [{ type: 'http', tag: 'farm-gateway', server: '127.0.0.1', server_port: gatewayPort }],
-      route: { final: 'farm-gateway' },
+      route: {
+        rules: [
+          {
+            action: 'sniff',
+            sniffer: ['http', 'tls'],
+          },
+        ],
+        final: 'farm-gateway',
+      },
     },
     null,
     2,

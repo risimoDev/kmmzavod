@@ -86,7 +86,7 @@ echo.
 if exist "%~dp0platform-tools\gnirehtet.exe" (
     echo [GNIREHTET] Запуск службы раздачи интернета по USB...
     taskkill /F /IM gnirehtet.exe >nul 2>nul
-    start "KMMZAVOD - Gnirehtet USB Reverse Tethering" "%~dp0platform-tools\gnirehtet.exe" autorun
+    start "KMMZAVOD - Gnirehtet USB Reverse Tethering" "%~dp0platform-tools\gnirehtet.exe" autorun -d 77.88.8.8,1.1.1.1
     echo [OK] Служба Gnirehtet активна.
     echo.
 )

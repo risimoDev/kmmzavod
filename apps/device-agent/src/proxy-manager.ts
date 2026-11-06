@@ -1003,9 +1003,15 @@ export class ProxyManager {
     let lastOutput = '';
     for (const ep of endpoints) {
       try {
-        const out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, viaGateway, 10), 30_000);
-        const body = ProxyManager.responseBody(out);
+        let out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, viaGateway, 10), 30_000);
+        let body = ProxyManager.responseBody(out);
         ip = extractIp(body);
+        if (!ip && !viaGateway) {
+          // If transparent mode failed (e.g. DNS timeout on phone), fallback to explicit gateway
+          out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, true, 10), 30_000);
+          body = ProxyManager.responseBody(out);
+          ip = extractIp(body);
+        }
         if (ip) break;
         lastOutput = body;
       } catch (err) {
