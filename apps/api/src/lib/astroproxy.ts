@@ -81,9 +81,16 @@ export async function fetchAstroProxyBalance(tokenOverride?: string): Promise<As
   }
 
   const data: any = await res.json();
-  // AstroProxy returns { status: "ok", balance: 2.50, currency: "USD" } or similar
-  const balance = typeof data.balance === 'number' ? data.balance : parseFloat(data.balance || data.amount || '0');
-  const currency = data.currency || 'USD';
+  if (data.status && data.status !== 'ok' && data.status !== 'success') {
+    throw new Error(data.message || data.msg || 'Ошибка получения баланса AstroProxy');
+  }
+
+  // AstroProxy returns { status: "ok", data: { balance: 2.50, currency: "USD" } } or { status: "ok", balance: 2.50, currency: "USD" }
+  const balanceData = data.data && typeof data.data === 'object' ? data.data : data;
+  const balance = typeof balanceData.balance === 'number'
+    ? balanceData.balance
+    : parseFloat(balanceData.balance || balanceData.amount || data.balance || '0');
+  const currency = balanceData.currency || data.currency || 'USD';
 
   return { balance, currency };
 }
@@ -104,20 +111,45 @@ export async function fetchAstroProxyPorts(tokenOverride?: string): Promise<Astr
   }
 
   const data: any = await res.json();
-  const rawPorts: any[] = Array.isArray(data) ? data : data.ports || data.data || [];
+  if (data.status && data.status !== 'ok' && data.status !== 'success') {
+    throw new Error(data.message || data.msg || 'Ошибка получения портов AstroProxy');
+  }
+
+  // Handle all possible wrappers: data.data.ports, data.ports, data.data, or direct array/object
+  let rawPorts: any[] = [];
+  if (Array.isArray(data)) {
+    rawPorts = data;
+  } else if (data.data && Array.isArray(data.data.ports)) {
+    rawPorts = data.data.ports;
+  } else if (Array.isArray(data.ports)) {
+    rawPorts = data.ports;
+  } else if (Array.isArray(data.data)) {
+    rawPorts = data.data;
+  } else if (data.data?.ports && typeof data.data.ports === 'object') {
+    rawPorts = Object.values(data.data.ports);
+  } else if (data.ports && typeof data.ports === 'object') {
+    rawPorts = Object.values(data.ports);
+  } else if (data.data && typeof data.data === 'object') {
+    rawPorts = Object.values(data.data);
+  }
 
   return rawPorts.map((p) => {
     const id = p.id || p.port_id;
-    const host = p.ip || p.host || p.server || (p.connection && p.connection.ip) || '';
-    const port = Number(p.port || (p.ports && p.ports.http) || (p.connection && p.connection.http_port) || 0);
-    const socksPort = Number((p.ports && p.ports.socks) || (p.connection && p.connection.socks_port) || port);
-    const username = p.login || p.username || (p.auth && p.auth.login) || '';
-    const password = p.password || (p.auth && p.auth.password) || '';
+    const node = p.node || {};
+    const portsObj = p.ports || {};
+    const access = p.access || {};
+    const connection = p.connection || {};
+
+    const host = node.ip || node.address || p.ip || p.host || p.server || connection.ip || '';
+    const port = Number(portsObj.http || p.port || connection.http_port || 0);
+    const socksPort = Number(portsObj.socks || connection.socks_port || port);
+    const username = access.login || p.login || p.username || (p.auth && p.auth.login) || '';
+    const password = access.password || p.password || (p.auth && p.auth.password) || '';
     const country = p.country || p.country_name || '';
     const city = p.city || '';
-    const networkType = p.type || p.network_type || '';
+    const networkType = p.network || p.type || p.network_type || '';
     const status = p.status || p.state || 'active';
-    const changeIpUrl = p.change_ip_url || p.link_change_ip || `${ASTROPROXY_BASE_URL}/ports/${id}/newip?token=${encodeURIComponent(token)}`;
+    const changeIpUrl = p.change_ip_url || p.link_change_ip || (p.changeIpUrl ? String(p.changeIpUrl) : undefined) || `${ASTROPROXY_BASE_URL}/ports/${id}/newip?token=${encodeURIComponent(token)}`;
 
     return {
       id,
@@ -160,18 +192,20 @@ export async function rotateAstroProxyPort(
   // Check cooldown or errors
   const isCooldown =
     res.status === 429 ||
-    String(data.msg || text).toLowerCase().includes('cooldown') ||
+    String(data.msg || data.message || text).toLowerCase().includes('cooldown') ||
     String(data.error || '').toLowerCase().includes('cooldown') ||
-    String(data.msg || text).toLowerCase().includes('wait');
+    String(data.msg || data.message || text).toLowerCase().includes('wait');
 
   if (!res.ok && !isCooldown) {
-    throw new Error(`AstroProxy rotation error (${res.status}): ${data.msg || data.error || text.slice(0, 200)}`);
+    throw new Error(`AstroProxy rotation error (${res.status}): ${data.message || data.msg || data.error || text.slice(0, 200)}`);
   }
+
+  const newIp = data.data?.ip || data.new_ip || data.ip;
 
   return {
     ok: res.ok,
-    msg: data.msg || data.message || (isCooldown ? 'Кулдаун ротации (подождите 30 сек)' : 'IP успешно изменен'),
-    newIp: data.new_ip || data.ip,
+    msg: data.message || data.msg || (isCooldown ? 'Кулдаун ротации (подождите 30 сек)' : 'IP успешно изменен'),
+    newIp,
     cooldown: isCooldown,
   };
 }

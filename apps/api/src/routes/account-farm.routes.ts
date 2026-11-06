@@ -1803,10 +1803,18 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       let targetDeviceIds = body.deviceIds;
       if (!targetDeviceIds || targetDeviceIds.length === 0) {
         const devList = await deviceAgentClient.listDevices();
-        const raw = (devList as any).devices || (devList as any).raw || [];
-        targetDeviceIds = Array.isArray(raw)
-          ? raw.map((d: any) => typeof d === 'string' ? d : d.serial || d.deviceId || d.id).filter(Boolean)
-          : Object.keys(devList.proxies || {});
+        let rawList: any[] = [];
+        if (Array.isArray(devList.raw)) {
+          rawList = devList.raw;
+        } else if (devList.raw && typeof devList.raw === 'object') {
+          const obj = devList.raw as any;
+          rawList = Array.isArray(obj.data) ? obj.data : (Array.isArray(obj.devices) ? obj.devices : []);
+        } else if (devList.proxies) {
+          rawList = Object.keys(devList.proxies);
+        }
+        targetDeviceIds = rawList
+          .map((d: any) => (typeof d === 'string' ? d.trim() : (d.serial || d.deviceId || d.id || '').trim()))
+          .filter(Boolean);
       }
 
       if (!targetDeviceIds || targetDeviceIds.length === 0) {
