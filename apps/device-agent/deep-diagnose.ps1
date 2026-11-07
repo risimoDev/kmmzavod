@@ -84,7 +84,7 @@ if ($agentRunning) {
 Write-Host "  [ТЕСТ ASTROPROXY С ПК] Проверка связи с казахстанским шлюзом 45.81.32.208:10018..." -ForegroundColor Yellow
 $pcProxyTest = ""
 try {
-    $pcProxyTest = (& curl.exe --noproxy "" -s -S -m 12 -x "http://LevrurisimoiY7:e59326cB1@45.81.32.208:10018" "https://api.ipify.org" 2>&1) -join " "
+    $pcProxyTest = (& curl.exe --ssl-no-revoke --noproxy "" -s -S -m 12 -x "http://LevrurisimoiY7:e59326cB1@45.81.32.208:10018" "https://api.ipify.org" 2>&1) -join " "
 } catch {}
 
 if ($pcProxyTest -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
@@ -93,6 +93,13 @@ if ($pcProxyTest -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
     Write-Host "  --> [ПРЕДУПРЕЖДЕНИЕ] AstroProxy с ПК вернул: $pcProxyTest" -ForegroundColor Yellow
     Write-Host "      (Возможно временная ротация IP на стороне мобильного оператора Казахстана)" -ForegroundColor Gray
 }
+if ($agentStatus -and $agentStatus.upstreams) {
+    foreach ($up in $agentStatus.upstreams) {
+        $upErr = if ($up.lastError) { " | Ошибка: $($up.lastError)" } else { "" }
+        Write-Host "    [СТАТУС UPSTREAM В АГЕНТЕ] $($up.upstream) ($($up.protocol)) | Активных: $($up.activeConnections)$upErr" -ForegroundColor Gray
+    }
+}
+
 
 # 4. Определение списка проверяемых плат
 Write-Host ""
@@ -322,11 +329,13 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест B: Явный HTTPS CONNECT прокси (-x)
-    $ipExplHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 -x http://127.0.0.1:8888 https://api.ipify.org 2>&1")").Trim()
+    $ipExplHttps = ("$(& adb -s $s shell "$curlCmd -s -S -k -m 12 -x http://127.0.0.1:8888 https://api.ipify.org 2>&1")").Trim()
     if ($ipExplHttps -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [B] Явный HTTPS CONNECT (-x):       [OK] IP: $ipExplHttps" -ForegroundColor Green
     } else {
         Write-Host "    [B] Явный HTTPS CONNECT (-x):       [ОШИБКА] $ipExplHttps" -ForegroundColor Red
+        $dbgB = (& adb -s $s shell "$curlCmd -v -k -m 5 -x http://127.0.0.1:8888 https://api.ipify.org 2>&1") -join " "
+        Write-Host "         [DEBUG-B] $($dbgB.Substring(0, [Math]::Min(200, $dbgB.Length)))" -ForegroundColor DarkGray
     }
 
     # Тест C: Прозрачный HTTP без -x (как ходят приложения)
@@ -338,7 +347,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест D: Прозрачный HTTPS без -x (как ходит TikTok и Chrome)
-    $ipTransHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 https://api.ipify.org 2>&1")").Trim()
+    $ipTransHttps = ("$(& adb -s $s shell "$curlCmd -s -S -k -m 12 https://api.ipify.org 2>&1")").Trim()
     if ($ipTransHttps -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [D] Прозрачный HTTPS (БЕЗ -x):       [OK] IP: $ipTransHttps" -ForegroundColor Green
     } else {
@@ -346,8 +355,8 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест E: Серверы TikTok API
-    $ttCode = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")").Trim()
-    if ($ttCode -match "(200|403|404|301|302)") {
+    $ttCode = ("$(& adb -s $s shell "$curlCmd -s -S -k -m 12 -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")").Trim()
+    if ($ttCode -match "^(200|403|404|301|302)$") {
         Write-Host "    [E] Серверы TikTok (api.tiktokv.com):[OK] HTTP $ttCode" -ForegroundColor Green
     } else {
         Write-Host "    [E] Серверы TikTok (api.tiktokv.com):[ОШИБКА] Код: '$ttCode'" -ForegroundColor Red

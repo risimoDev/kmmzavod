@@ -151,7 +151,6 @@ function singBoxConfig(gatewayPort: number): string {
       outbounds: [{ type: 'http', tag: 'farm-gateway', server: '127.0.0.1', server_port: gatewayPort }],
       route: {
         auto_detect_interface: false,
-        default_interface: 'tun0',
         rules: [
           {
             action: 'sniff',

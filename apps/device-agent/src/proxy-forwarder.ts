@@ -518,6 +518,9 @@ export class UpstreamProxy {
           return sock;
         } catch (err) {
           lastErr = toProxyError(err);
+          this.lastError = lastErr.message;
+          this.lastErrorAt = Date.now();
+          this.logger.warn({ upstream: this.label, target: `${targetHost}:${port}`, attempt, err: lastErr.message }, 'proxy: upstream connect attempt failed');
           if (lastErr.code === 'protocol') this.protocol = null;
           const backoff = Math.min(3_000, 400 * attempt);
           if (!lastErr.retryable || Date.now() + backoff > deadline) break;
@@ -1207,6 +1210,10 @@ export class DeviceProxyListener {
     });
     client.pipe(upstream);
     upstream.pipe(client);
+    setImmediate(() => {
+      client.resume();
+      upstream.resume();
+    });
   }
 
   private replyError(res: http.ServerResponse, status: number, message: string): void {
