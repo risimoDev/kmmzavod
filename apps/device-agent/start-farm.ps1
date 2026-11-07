@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Запуск агента стойки телефонной фермы (Native ADB Device-Agent)
 .DESCRIPTION

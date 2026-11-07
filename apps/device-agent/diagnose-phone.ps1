@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Глубокая диагностика сети платы стойки (PowerShell)
 #>

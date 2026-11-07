@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Полная диагностика всех плат стойки (Все уровни: USB, DNS, Root, Шлюз, Sing-box, TikTok)
 #>

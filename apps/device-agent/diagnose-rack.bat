@@ -10,6 +10,8 @@ title KMMZAVOD - Полная диагностика всех плат стой�
 where powershell >nul 2>nul
 if not errorlevel 1 (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0diagnose-rack.ps1"
+    echo.
+    pause
     goto :end
 )
 

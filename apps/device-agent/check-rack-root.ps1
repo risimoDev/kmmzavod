@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Проверка Root и Magisk на платах стойки (PowerShell)
 #>

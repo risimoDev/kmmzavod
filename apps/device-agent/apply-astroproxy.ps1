@@ -1,4 +1,4 @@
-# KMMZAVOD - Применение AstroProxy на все платы стойки
+﻿# KMMZAVOD - Применение AstroProxy на все платы стойки
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "================================================================" -ForegroundColor Cyan

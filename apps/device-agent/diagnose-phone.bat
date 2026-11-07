@@ -12,3 +12,5 @@ if not defined SERIAL (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0diagnose-phone.ps1" "%SERIAL%"
+echo.
+pause
