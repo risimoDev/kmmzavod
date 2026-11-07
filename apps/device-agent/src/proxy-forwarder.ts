@@ -1027,6 +1027,7 @@ export class DeviceProxyListener {
     }
     const route = this.route(target.host, target.port);
     if (route.kind === 'block') {
+      this.logger.debug({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, reason: route.reason }, 'proxy: blocked connection');
       this.rejectSocket(client, 403, route.reason);
       return;
     }
@@ -1042,6 +1043,7 @@ export class DeviceProxyListener {
       },
       (err) => {
         const e = toProxyError(err);
+        this.logger.warn({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, err: e.message }, 'proxy: tunnel failed');
         this.recordError(`${target.host}:${target.port} — ${e.message}`);
         this.rejectSocket(client, e.code === 'busy' ? 503 : 502, e.message);
       },
