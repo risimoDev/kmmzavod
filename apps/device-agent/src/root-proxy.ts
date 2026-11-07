@@ -38,6 +38,8 @@ LOG=${REMOTE_DIR}/kmm-singbox.log
 PORT=${REDIRECT_PORT}
 
 stop_rules() {
+  iptables -w 3 -t nat -D OUTPUT -p udp --dport 53 -d 8.8.8.8 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null
+  iptables -w 3 -t nat -D OUTPUT -p udp --dport 53 -d 8.8.4.4 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null
   iptables -w 3 -t nat -D OUTPUT -p tcp -j KMM_PROXY 2>/dev/null
   iptables -w 3 -t nat -F KMM_PROXY 2>/dev/null
   iptables -w 3 -t nat -X KMM_PROXY 2>/dev/null
@@ -68,6 +70,10 @@ start_rules() {
   done
   iptables -w 3 -t nat -A KMM_PROXY -p tcp -j REDIRECT --to-ports "$PORT" || return 1
   iptables -w 3 -t nat -A OUTPUT -p tcp -j KMM_PROXY || return 1
+
+  # Redirect blocked Google DNS to Yandex DNS so apps never hang on DNS in Russia
+  iptables -w 3 -t nat -A OUTPUT -p udp --dport 53 -d 8.8.8.8 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null || true
+  iptables -w 3 -t nat -A OUTPUT -p udp --dport 53 -d 8.8.4.4 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null || true
 
   if iptables -w 3 -N KMM_UDP 2>/dev/null; then
     for net in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do

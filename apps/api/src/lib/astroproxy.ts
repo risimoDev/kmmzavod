@@ -38,8 +38,8 @@ interface CachedData<T> {
 // In-memory cache to strictly avoid AstroProxy 429 rate limit (AstroProxy limits /ports to 1 req/min)
 let cachedPorts: CachedData<AstroProxyPort[]> | null = null;
 let cachedBalance: CachedData<AstroProxyBalance> | null = null;
-const PORTS_CACHE_TTL_MS = 90_000; // 90 seconds
-const BALANCE_CACHE_TTL_MS = 30_000; // 30 seconds
+const PORTS_CACHE_TTL_MS = 120_000; // 120 seconds (AstroProxy limits to 1 req/min)
+const BALANCE_CACHE_TTL_MS = 60_000; // 60 seconds
 
 /** Get the configured AstroProxy token from AdminSetting or process.env */
 export async function getAstroProxyToken(): Promise<string | null> {
@@ -110,6 +110,43 @@ async function saveStoredCachedPorts(ports: AstroProxyPort[]): Promise<void> {
   }
 }
 
+async function getStoredCachedBalance(): Promise<AstroProxyBalance | null> {
+  try {
+    const setting = await db.adminSetting.findUnique({
+      where: { key: 'ASTROPROXY_CACHED_BALANCE' },
+    });
+    if (setting?.value && typeof setting.value === 'object') {
+      const val = setting.value as any;
+      if (typeof val.balance === 'number') {
+        return { balance: val.balance, currency: val.currency || 'USD' };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function saveStoredCachedBalance(balance: AstroProxyBalance): Promise<void> {
+  if (!balance) return;
+  try {
+    await db.adminSetting.upsert({
+      where: { key: 'ASTROPROXY_CACHED_BALANCE' },
+      create: {
+        key: 'ASTROPROXY_CACHED_BALANCE',
+        value: balance as any,
+        description: 'Cached AstroProxy balance',
+        isPublic: false,
+      },
+      update: {
+        value: balance as any,
+      },
+    });
+  } catch {
+    // ignore
+  }
+}
+
 /** Fetch account balance from AstroProxy with caching */
 export async function fetchAstroProxyBalance(tokenOverride?: string, forceRefresh = false): Promise<AstroProxyBalance> {
   const token = tokenOverride || (await getAstroProxyToken());
@@ -121,31 +158,45 @@ export async function fetchAstroProxyBalance(tokenOverride?: string, forceRefres
     return cachedBalance.data;
   }
 
-  const url = `${ASTROPROXY_BASE_URL}/balance?token=${encodeURIComponent(token)}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'KMMZavod-AstroProxy/1.0' } });
+  try {
+    const url = `${ASTROPROXY_BASE_URL}/balance?token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'KMMZavod-AstroProxy/1.0' } });
 
-  if (!res.ok) {
-    if (res.status === 429 && cachedBalance?.data) {
-      return cachedBalance.data;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      if (res.status === 429 || text.includes('1 minutes') || text.includes('rate limit')) {
+        if (cachedBalance?.data) return cachedBalance.data;
+        const dbBal = await getStoredCachedBalance();
+        if (dbBal) {
+          cachedBalance = { data: dbBal, timestamp: Date.now() };
+          return dbBal;
+        }
+        return { balance: 0, currency: 'USD' };
+      }
+      throw new Error(`AstroProxy API error (${res.status}): ${text.slice(0, 200) || res.statusText}`);
     }
-    const text = await res.text().catch(() => '');
-    throw new Error(`AstroProxy API error (${res.status}): ${text.slice(0, 200) || res.statusText}`);
+
+    const data: any = await res.json();
+    if (data.status && data.status !== 'ok' && data.status !== 'success') {
+      throw new Error(data.message || data.msg || 'Ошибка получения баланса AstroProxy');
+    }
+
+    const balanceData = data.data && typeof data.data === 'object' ? data.data : data;
+    const balance = typeof balanceData.balance === 'number'
+      ? balanceData.balance
+      : parseFloat(balanceData.balance || balanceData.amount || data.balance || '0');
+    const currency = balanceData.currency || data.currency || 'USD';
+
+    const result = { balance, currency };
+    cachedBalance = { data: result, timestamp: Date.now() };
+    saveStoredCachedBalance(result).catch(() => {});
+    return result;
+  } catch (err: any) {
+    if (cachedBalance?.data) return cachedBalance.data;
+    const dbBal = await getStoredCachedBalance();
+    if (dbBal) return dbBal;
+    throw err;
   }
-
-  const data: any = await res.json();
-  if (data.status && data.status !== 'ok' && data.status !== 'success') {
-    throw new Error(data.message || data.msg || 'Ошибка получения баланса AstroProxy');
-  }
-
-  const balanceData = data.data && typeof data.data === 'object' ? data.data : data;
-  const balance = typeof balanceData.balance === 'number'
-    ? balanceData.balance
-    : parseFloat(balanceData.balance || balanceData.amount || data.balance || '0');
-  const currency = balanceData.currency || data.currency || 'USD';
-
-  const result = { balance, currency };
-  cachedBalance = { data: result, timestamp: Date.now() };
-  return result;
 }
 
 /** Fetch list of ports from AstroProxy with caching and rate limit fallback */
@@ -160,91 +211,105 @@ export async function fetchAstroProxyPorts(tokenOverride?: string, forceRefresh 
     return cachedPorts.data;
   }
 
-  const url = `${ASTROPROXY_BASE_URL}/ports?token=${encodeURIComponent(token)}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'KMMZavod-AstroProxy/1.0' } });
+  try {
+    const url = `${ASTROPROXY_BASE_URL}/ports?token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'KMMZavod-AstroProxy/1.0' } });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
 
-    // 2. On 429 rate limit: fall back to in-memory or DB cached ports immediately
-    if (res.status === 429 || text.includes('1 minutes') || text.includes('rate limit')) {
-      if (cachedPorts?.data && cachedPorts.data.length > 0) {
-        logger.info('AstroProxy 429 rate limit hit — using in-memory cached ports');
-        return cachedPorts.data;
+      // 2. On 429 rate limit: fall back to in-memory or DB cached ports immediately
+      if (res.status === 429 || text.includes('1 minutes') || text.includes('rate limit')) {
+        if (cachedPorts?.data && cachedPorts.data.length > 0) {
+          logger.info('AstroProxy 429 rate limit hit — using in-memory cached ports');
+          return cachedPorts.data;
+        }
+        const dbPorts = await getStoredCachedPorts();
+        if (dbPorts && dbPorts.length > 0) {
+          logger.info('AstroProxy 429 rate limit hit — using DB cached ports');
+          cachedPorts = { data: dbPorts, timestamp: Date.now() };
+          return dbPorts;
+        }
+        throw new Error('AstroProxy ограничивает частоту запросов портов (1 раз в минуту). Подождите 30-40 секунд и повторите.');
       }
-      const dbPorts = await getStoredCachedPorts();
-      if (dbPorts && dbPorts.length > 0) {
-        logger.info('AstroProxy 429 rate limit hit — using DB cached ports');
-        cachedPorts = { data: dbPorts, timestamp: Date.now() };
-        return dbPorts;
-      }
-      throw new Error('AstroProxy ограничивает частоту запросов портов (1 раз в минуту). Подождите 30-40 секунд и повторите.');
+
+      throw new Error(`AstroProxy API error (${res.status}): ${text.slice(0, 200) || res.statusText}`);
     }
 
-    throw new Error(`AstroProxy API error (${res.status}): ${text.slice(0, 200) || res.statusText}`);
+    const data: any = await res.json();
+    if (data.status && data.status !== 'ok' && data.status !== 'success') {
+      throw new Error(data.message || data.msg || 'Ошибка получения портов AstroProxy');
+    }
+
+    let rawPorts: any[] = [];
+    if (Array.isArray(data)) {
+      rawPorts = data;
+    } else if (data.data && Array.isArray(data.data.ports)) {
+      rawPorts = data.data.ports;
+    } else if (Array.isArray(data.ports)) {
+      rawPorts = data.ports;
+    } else if (Array.isArray(data.data)) {
+      rawPorts = data.data;
+    } else if (data.data?.ports && typeof data.data.ports === 'object') {
+      rawPorts = Object.values(data.data.ports);
+    } else if (data.ports && typeof data.ports === 'object') {
+      rawPorts = Object.values(data.ports);
+    } else if (data.data && typeof data.data === 'object') {
+      rawPorts = Object.values(data.data);
+    }
+
+    const ports: AstroProxyPort[] = rawPorts.map((p) => {
+      const id = p.id || p.port_id;
+      const node = p.node || {};
+      const portsObj = p.ports || {};
+      const access = p.access || {};
+      const connection = p.connection || {};
+
+      const host = node.ip || node.address || p.ip || p.host || p.server || connection.ip || '';
+      const port = Number(portsObj.http || p.port || connection.http_port || 0);
+      const socksPort = Number(portsObj.socks || connection.socks_port || port);
+      const username = access.login || p.login || p.username || (p.auth && p.auth.login) || '';
+      const password = access.password || p.password || (p.auth && p.auth.password) || '';
+      const country = p.country || p.country_name || '';
+      const city = p.city || '';
+      const networkType = p.network || p.type || p.network_type || '';
+      const status = p.status || p.state || 'active';
+      const changeIpUrl = p.change_ip_url || p.link_change_ip || (p.changeIpUrl ? String(p.changeIpUrl) : undefined) || `${ASTROPROXY_BASE_URL}/ports/${id}/newip?token=${encodeURIComponent(token)}`;
+
+      return {
+        id,
+        name: p.name || `Port #${id}`,
+        host,
+        port,
+        socksPort,
+        username,
+        password,
+        country,
+        city,
+        networkType,
+        status,
+        changeIpUrl,
+      };
+    });
+
+    cachedPorts = { data: ports, timestamp: Date.now() };
+    // Save to DB in background
+    saveStoredCachedPorts(ports).catch(() => {});
+
+    return ports;
+  } catch (err: any) {
+    if (cachedPorts?.data && cachedPorts.data.length > 0) {
+      logger.info('AstroProxy request failed — using in-memory cached ports');
+      return cachedPorts.data;
+    }
+    const dbPorts = await getStoredCachedPorts();
+    if (dbPorts && dbPorts.length > 0) {
+      logger.info('AstroProxy request failed — using DB cached ports');
+      cachedPorts = { data: dbPorts, timestamp: Date.now() };
+      return dbPorts;
+    }
+    throw err;
   }
-
-  const data: any = await res.json();
-  if (data.status && data.status !== 'ok' && data.status !== 'success') {
-    throw new Error(data.message || data.msg || 'Ошибка получения портов AstroProxy');
-  }
-
-  let rawPorts: any[] = [];
-  if (Array.isArray(data)) {
-    rawPorts = data;
-  } else if (data.data && Array.isArray(data.data.ports)) {
-    rawPorts = data.data.ports;
-  } else if (Array.isArray(data.ports)) {
-    rawPorts = data.ports;
-  } else if (Array.isArray(data.data)) {
-    rawPorts = data.data;
-  } else if (data.data?.ports && typeof data.data.ports === 'object') {
-    rawPorts = Object.values(data.data.ports);
-  } else if (data.ports && typeof data.ports === 'object') {
-    rawPorts = Object.values(data.ports);
-  } else if (data.data && typeof data.data === 'object') {
-    rawPorts = Object.values(data.data);
-  }
-
-  const ports: AstroProxyPort[] = rawPorts.map((p) => {
-    const id = p.id || p.port_id;
-    const node = p.node || {};
-    const portsObj = p.ports || {};
-    const access = p.access || {};
-    const connection = p.connection || {};
-
-    const host = node.ip || node.address || p.ip || p.host || p.server || connection.ip || '';
-    const port = Number(portsObj.http || p.port || connection.http_port || 0);
-    const socksPort = Number(portsObj.socks || connection.socks_port || port);
-    const username = access.login || p.login || p.username || (p.auth && p.auth.login) || '';
-    const password = access.password || p.password || (p.auth && p.auth.password) || '';
-    const country = p.country || p.country_name || '';
-    const city = p.city || '';
-    const networkType = p.network || p.type || p.network_type || '';
-    const status = p.status || p.state || 'active';
-    const changeIpUrl = p.change_ip_url || p.link_change_ip || (p.changeIpUrl ? String(p.changeIpUrl) : undefined) || `${ASTROPROXY_BASE_URL}/ports/${id}/newip?token=${encodeURIComponent(token)}`;
-
-    return {
-      id,
-      name: p.name || `Port #${id}`,
-      host,
-      port,
-      socksPort,
-      username,
-      password,
-      country,
-      city,
-      networkType,
-      status,
-      changeIpUrl,
-    };
-  });
-
-  cachedPorts = { data: ports, timestamp: Date.now() };
-  // Save to DB in background
-  saveStoredCachedPorts(ports).catch(() => {});
-
-  return ports;
 }
 
 /** Trigger IP rotation for an AstroProxy port */

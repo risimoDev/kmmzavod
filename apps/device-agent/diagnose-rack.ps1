@@ -32,13 +32,30 @@ if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
 
 # 2. Проверка запущен ли start-farm.bat / device-agent
 $agentRunning = $false
+$agentStatus = $null
 try {
     $tcp = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue
-    if ($tcp) { $agentRunning = $true }
+    if ($tcp) {
+        $agentRunning = $true
+        try {
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
+            if ($resp) { $agentStatus = $resp }
+        } catch {}
+    }
 } catch {}
 
 if ($agentRunning) {
     Write-Host "[OK] Служба farm-agent активна (порт 8300 отвечает)." -ForegroundColor Green
+    if ($agentStatus) {
+        $modeDesc = if ($agentStatus.mode -eq "shared_sequential") { "Shared (Поочередный: 1 активная плата)" } else { "Private (Параллельный: все платы)" }
+        $activeDev = if ($agentStatus.activeDeviceId) { $agentStatus.activeDeviceId } else { "не выбрана" }
+        Write-Host "  Режим прокси стойки: $modeDesc" -ForegroundColor Cyan
+        Write-Host "  Текущая активная плата с прокси: $activeDev" -ForegroundColor Cyan
+        if ($agentStatus.mode -eq "shared_sequential") {
+            Write-Host "  [ВАЖНО] В режиме Shared прокси работает только на ОДНОЙ активной плате ($activeDev)." -ForegroundColor Yellow
+            Write-Host "  Остальные 19 плат выходят с IP фермы или заблокированы от утечек." -ForegroundColor Yellow
+        }
+    }
 } else {
     Write-Host "[ВНИМАНИЕ] Служба farm-agent (start-farm.bat) НЕ обнаружена на порту 8300!" -ForegroundColor Yellow
     Write-Host "  Для полноценной проверки шлюза, прокси и перехвата sing-box" -ForegroundColor Yellow
@@ -161,7 +178,7 @@ foreach ($dev in $devices) {
     # [6] Проверка выхода через прокси-шлюз (curl -x 127.0.0.1:8888)
     $proxyIp = "Нет ответа"
     $proxyOk = $false
-    $rawProxyIp = (& adb -s $serial shell "curl -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
+    $rawProxyIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org; else (printf 'GET http://api.ipify.org/ HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n'; sleep 3) | toybox nc 127.0.0.1 8888; fi; } 2>&1") -join " "
     if ($rawProxyIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
         $proxyIp = $matches[0]
         $proxyOk = $true
@@ -197,7 +214,7 @@ foreach ($dev in $devices) {
     # [9] Прозрачный выход в интернет БЕЗ -x (как ходят приложения TikTok и Chrome)
     $transIp = "Нет ответа"
     $transOk = $false
-    $rawTransIp = (& adb -s $serial shell "curl -s -m 7 http://api.ipify.org 2>&1") -join " "
+    $rawTransIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 7 http://api.ipify.org; else (printf 'GET / HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n'; sleep 3) | toybox nc api.ipify.org 80; fi; } 2>&1") -join " "
     if ($rawTransIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
         $transIp = $matches[0]
         $transOk = $true

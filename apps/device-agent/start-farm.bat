@@ -84,8 +84,12 @@ echo.
 
 :: 3b. Автозапуск Gnirehtet (раздача интернета по USB для стоек без Wi-Fi)
 if exist "%~dp0platform-tools\gnirehtet.exe" (
-    echo [GNIREHTET] Запуск службы раздачи интернета по USB...
+    echo [GNIREHTET] Очистка старых сессий Gnirehtet на телефонах...
     taskkill /F /IM gnirehtet.exe >nul 2>nul
+    for /f "tokens=1" %%i in ('adb devices ^| findstr /v "List of" ^| findstr /r "[a-zA-Z0-9]"') do (
+        adb -s %%i shell am force-stop com.genymobile.gnirehtet >nul 2>&1
+    )
+    echo [GNIREHTET] Запуск службы раздачи интернета по USB (DNS 77.88.8.8)...
     start "KMMZAVOD - Gnirehtet USB Reverse Tethering" "%~dp0platform-tools\gnirehtet.exe" autorun -d 77.88.8.8,1.1.1.1
     echo [OK] Служба Gnirehtet активна.
     echo.

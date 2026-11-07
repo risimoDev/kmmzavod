@@ -94,6 +94,13 @@ if (Test-Path $gnirehtetExe) {
     Write-Host ""
     Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
     Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Сброс старой службы Gnirehtet на всех телефонах стойки для применения DNS 77.88.8.8
+    $rawDevs = & adb devices
+    foreach ($line in $rawDevs) {
+        if ($line -match "^([^\s]+)\s+device\b") {
+            & adb -s $matches[1] shell am force-stop com.genymobile.gnirehtet 2>$null | Out-Null
+        }
+    }
     Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", "77.88.8.8,1.1.1.1"
     Write-Host "[OK] Служба Gnirehtet запущена для всех USB-плат." -ForegroundColor Green
 }
