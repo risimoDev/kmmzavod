@@ -237,6 +237,24 @@ app.post('/proxy/reapply', async () => {
   return { ok: true, ...result };
 });
 
+const ApplyDeviceBody = z.object({
+  deviceId: z.string().min(1),
+});
+
+app.post('/proxy/apply-device', async (req, reply) => {
+  const parsed = ApplyDeviceBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  try {
+    const status = await proxyManager.reapplyDevice(parsed.data.deviceId);
+    return { ok: true, status };
+  } catch (err) {
+    return sendError(reply, err);
+  }
+});
+
 // ── Proxy Mode (Shared Sequential vs Private Parallel) ─────────────────────
 
 app.get('/proxy/mode', async () => {

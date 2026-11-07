@@ -172,20 +172,46 @@ export class RootTransparentProxy {
   }
 
   /**
-   * `su -c id` — cached, because each call may pop a Magisk grant toast/prompt on the board.
+   * Check if root (su) is available on the device.
+   * `su -c id` — cached, failure cached only for 15s to allow fast recovery after user grants root in Magisk.
    */
-  async isRooted(deviceId: string): Promise<boolean> {
+  async isRooted(deviceId: string, force = false): Promise<boolean> {
     const cached = this.rootCache.get(deviceId);
-    const ttl = cached?.rooted ? 30 * 60_000 : 5 * 60_000;
-    if (cached && Date.now() - cached.at < ttl) return cached.rooted;
+    const ttl = cached?.rooted ? 30 * 60_000 : 15_000;
+    if (!force && cached && Date.now() - cached.at < ttl) return cached.rooted;
+
     let rooted = false;
+    let reason = '';
+
     try {
-      const out = await this.adb.shell(deviceId, 'su -c id 2>/dev/null', 15_000);
-      rooted = out.includes('uid=0(');
-    } catch {
-      rooted = false;
+      // 1. Direct check: is shell already root (adbd running as root)?
+      const direct = await this.adb.shell(deviceId, 'id 2>&1 || true', 5_000).catch(() => '');
+      if (direct.includes('uid=0(')) {
+        rooted = true;
+      } else {
+        // 2. Try su -c 'id' and su 0 id
+        const out = await this.adb.shell(deviceId, "su -c 'id' 2>&1 || su 0 id 2>&1 || true", 15_000);
+        if (out.includes('uid=0(')) {
+          rooted = true;
+        } else {
+          reason = out.trim().replace(/\r?\n/g, ' ').slice(0, 200);
+        }
+      }
+    } catch (err) {
+      reason = err instanceof Error ? err.message : String(err);
     }
+
     this.rootCache.set(deviceId, { rooted, at: Date.now() });
+
+    if (rooted) {
+      this.logger.info({ deviceId }, 'root-proxy: root access confirmed (uid=0)');
+    } else {
+      this.logger.warn(
+        { deviceId, reason: reason || 'empty response' },
+        'root-proxy: board root check failed — phone will use system_proxy (TikTok requires transparent mode with root)',
+      );
+    }
+
     return rooted;
   }
 
@@ -198,7 +224,11 @@ export class RootTransparentProxy {
     await this.pushText(deviceId, singBoxConfig(gatewayPort), REMOTE_CFG);
     await this.pushText(deviceId, controlScript(), REMOTE_SCRIPT);
     // `; echo` keeps the exit code 0 so the script's own error text (KMM_FAIL ...) reaches us.
-    const out = await this.adb.shell(deviceId, `su -c 'sh ${REMOTE_SCRIPT} start' 2>&1; echo "KMM_EXIT=$?"`, 40_000);
+    const out = await this.adb.shell(
+      deviceId,
+      `{ su -c 'sh ${REMOTE_SCRIPT} start' 2>&1 || su 0 sh ${REMOTE_SCRIPT} start 2>&1; } ; echo "KMM_EXIT=$?"`,
+      40_000,
+    );
     if (!out.includes('KMM_OK')) {
       const reason = out.replace(/KMM_EXIT=\d+\s*$/, '').trim();
       throw new Error(`sing-box не запустился: ${reason.slice(-400) || `нет вывода (${out.trim()}) — разрешён ли root для Shell в Magisk?`}`);
@@ -208,7 +238,9 @@ export class RootTransparentProxy {
 
   async stop(deviceId: string): Promise<void> {
     await this.pushText(deviceId, controlScript(), REMOTE_SCRIPT).catch(() => {});
-    await this.adb.shell(deviceId, `su -c 'sh ${REMOTE_SCRIPT} stop' 2>&1`, 20_000).catch(() => {});
+    await this.adb
+      .shell(deviceId, `{ su -c 'sh ${REMOTE_SCRIPT} stop' 2>&1 || su 0 sh ${REMOTE_SCRIPT} stop 2>&1; } ; true`, 20_000)
+      .catch(() => {});
   }
 
   private async pushText(deviceId: string, content: string, remotePath: string): Promise<void> {

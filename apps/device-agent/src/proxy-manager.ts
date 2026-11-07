@@ -205,9 +205,18 @@ export class ProxyManager {
         if (this.locks.has(deviceId) || this.listenerStarts.has(deviceId)) continue;
         const rt = this.runtime(deviceId);
         if (rt.nextRetryAt && Date.now() < rt.nextRetryAt) continue;
-        if (await this.isWiringHealthy(deviceId)) continue;
+        const healthy = await this.isWiringHealthy(deviceId);
+        if (healthy && rt.method === 'transparent') continue;
+        // If healthy in system_proxy mode, check if board now has root to upgrade to transparent mode
+        if (healthy && rt.method === 'system_proxy') {
+          if (config.PROXY_ROOT_MODE === 'off') continue;
+          const isRoot = await this.root.isRooted(deviceId);
+          if (!isRoot) continue;
+          this.logger.info({ deviceId }, 'proxy-manager: board root detected — upgrading from system_proxy to transparent mode');
+        } else {
+          this.logger.warn({ deviceId }, 'proxy-manager: phone lost its proxy wiring (reboot/USB re-plug?) — re-applying');
+        }
         if (this.locks.has(deviceId)) continue;
-        this.logger.warn({ deviceId }, 'proxy-manager: phone lost its proxy wiring (reboot/USB re-plug?) — re-applying');
         await this.applyDevice(deviceId).catch(() => {});
       }
     } finally {
@@ -342,13 +351,19 @@ export class ProxyManager {
     }
   }
 
-  private routeFor(deviceId: string, targetHost?: string): RouteDecision {
+  private routeFor(deviceId: string, targetHost?: string, targetPort?: number): RouteDecision {
     const entry = this.devices.get(deviceId);
     if (!entry) return { kind: 'direct' };
 
     // Drop dead vendor telemetry immediately without attempting direct connects
     if (targetHost && isBlackholeHost(targetHost)) {
       return { kind: 'block', reason: 'telemetry blackhole' };
+    }
+
+    // Bypass non-web background services (Google FCM push 5228-5230, Apple push 5223)
+    // AstroProxy and mobile proxies strictly forbid non-HTTP/HTTPS ports
+    if (targetPort && [5228, 5229, 5230, 5223].includes(targetPort)) {
+      return { kind: 'direct' };
     }
 
     // Bypass OS telemetry, captive portal checks, Google Play downloads, local network directly
@@ -395,10 +410,15 @@ export class ProxyManager {
     else this.reservedPorts.add(preferredPort);
 
     const start = (async () => {
-      const listener = new DeviceProxyListener(deviceId, (targetHost) => this.routeFor(deviceId, targetHost), this.logger, {
-        bindHost: config.PROXY_BIND_HOST,
-        idleTimeoutMs: config.PROXY_IDLE_TIMEOUT_MS,
-      });
+      const listener = new DeviceProxyListener(
+        deviceId,
+        (targetHost, targetPort) => this.routeFor(deviceId, targetHost, targetPort),
+        this.logger,
+        {
+          bindHost: config.PROXY_BIND_HOST,
+          idleTimeoutMs: config.PROXY_IDLE_TIMEOUT_MS,
+        },
+      );
       const port = await listener.start(preferredPort).finally(() => this.reservedPorts.delete(preferredPort));
       this.listeners.set(deviceId, listener);
       if (entry && (!hadPort || entry.listenPort !== port)) {
@@ -431,7 +451,8 @@ export class ProxyManager {
       await this.adb.exec(['-s', deviceId, 'reverse', `tcp:${devicePort}`, `tcp:${listener.port}`], 15_000);
 
       let method: CaptureMethod = 'system_proxy';
-      if (config.PROXY_ROOT_MODE !== 'off' && (await this.root.isRooted(deviceId))) {
+      const isRoot = config.PROXY_ROOT_MODE !== 'off' && (await this.root.isRooted(deviceId, true));
+      if (isRoot) {
         try {
           await this.root.start(deviceId, devicePort);
           method = 'transparent';
@@ -444,6 +465,8 @@ export class ProxyManager {
           );
           await this.root.stop(deviceId);
         }
+      } else if (config.PROXY_ROOT_MODE !== 'off') {
+        rt.transparentError = 'Root не обнаружен или не разрешён в Magisk для Shell (UID 2000)';
       }
 
       await this.adb.shell(
@@ -468,6 +491,12 @@ export class ProxyManager {
       this.logger.warn({ deviceId, err: rt.applyError }, 'proxy-manager: failed to wire phone to gateway');
       throw err;
     });
+  }
+
+  /** Re-applies proxy and transparent sing-box to a single device (e.g. from API or manual trigger). */
+  async reapplyDevice(deviceId: string): Promise<DeviceProxyStatus> {
+    await this.applyDevice(deviceId);
+    return this.getDeviceStatus(deviceId);
   }
 
   /** Remove every trace of our proxy from the phone. */
@@ -797,6 +826,14 @@ export class ProxyManager {
       if (!proxy) throw new Error('Нет сохранённой конфигурации прокси для передачи');
       this.devices.set(targetDeviceId, { proxy });
       await this.applyDevice(targetDeviceId);
+    } else {
+      // Ensure the activated phone is wired with root/transparent mode active
+      const rt = this.runtimes.get(targetDeviceId);
+      if (!rt || rt.method !== 'transparent') {
+        await this.applyDevice(targetDeviceId).catch((err) => {
+          this.logger.warn({ deviceId: targetDeviceId, err: String(err) }, 'proxy-manager: active phone transparent upgrade warning');
+        });
+      }
     }
     this.setActive(targetDeviceId);
     this.saveState();

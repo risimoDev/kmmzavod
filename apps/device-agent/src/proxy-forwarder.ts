@@ -904,7 +904,7 @@ export class DeviceProxyListener {
 
   constructor(
     readonly deviceId: string,
-    private readonly resolveRoute: (targetHost?: string) => RouteDecision,
+    private readonly resolveRoute: (targetHost?: string, targetPort?: number) => RouteDecision,
     private readonly logger: Logger,
     private readonly opts: ListenerOptions,
   ) {}
@@ -980,9 +980,9 @@ export class DeviceProxyListener {
     return n;
   }
 
-  private route(targetHost?: string): RouteDecision {
+  private route(targetHost?: string, targetPort?: number): RouteDecision {
     try {
-      return this.resolveRoute(targetHost);
+      return this.resolveRoute(targetHost, targetPort);
     } catch (err) {
       return { kind: 'block', reason: err instanceof Error ? err.message : String(err) };
     }
@@ -1025,7 +1025,7 @@ export class DeviceProxyListener {
       this.rejectSocket(client, 400, `Некорректная цель CONNECT: ${req.url}`);
       return;
     }
-    const route = this.route(target.host);
+    const route = this.route(target.host, target.port);
     if (route.kind === 'block') {
       this.rejectSocket(client, 403, route.reason);
       return;
@@ -1108,12 +1108,12 @@ export class DeviceProxyListener {
     this.counters.total++;
     this.lastActivityAt = Date.now();
     const host = url.hostname.replace(/^\[|\]$/g, '');
-    const route = this.route(host);
+    const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
+    const route = this.route(host, port);
     if (route.kind === 'block') {
       this.replyError(res, 403, route.reason);
       return;
     }
-    const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
     const headers: http.OutgoingHttpHeaders = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (v !== undefined && !HOP_HEADERS.has(k.toLowerCase())) headers[k] = v;
