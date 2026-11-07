@@ -30,13 +30,22 @@ try {
 } catch {}
 
 # Доставка curl если отсутствует
-$hasCurl = ("$(& adb -s $Serial shell '{ if command -v curl >/dev/null 2>&1 || [ -x /data/local/tmp/curl ]; then echo YES; else echo NO; fi; } 2>/dev/null')").Trim()
+$hasCurl = ("$(& adb -s $Serial shell 'command -v curl 2>/dev/null || [ -x /data/local/tmp/curl ] && echo YES || echo NO')").Trim()
 if ($hasCurl -ne "YES") {
     $tempCurl = Join-Path $env:TEMP "kmm_curl_arm64"
     if (Test-Path $tempCurl) {
         & adb -s $Serial push $tempCurl /data/local/tmp/curl 2>$null | Out-Null
         & adb -s $Serial shell "chmod 755 /data/local/tmp/curl" 2>$null | Out-Null
     }
+}
+
+# Определение команды curl на данной плате
+$curlCmd = "curl"
+$checkCurl = ("$(& adb -s $Serial shell 'if command -v curl >/dev/null 2>&1; then echo curl; elif [ -x /data/local/tmp/curl ]; then echo /data/local/tmp/curl; fi')").Trim()
+if ($checkCurl -match "/data/local/tmp/curl") {
+    $curlCmd = "/data/local/tmp/curl"
+} elseif ($checkCurl -eq "curl") {
+    $curlCmd = "curl"
 }
 
 Write-Host "[1/7] Проверка интерфейса tun0 (Gnirehtet USB)..." -ForegroundColor Yellow
@@ -52,7 +61,7 @@ if ($tunCheck -match "10\.0\.0\.2") {
 
 Write-Host ""
 Write-Host "[2/7] DNS на телефоне (разрешение ya.ru)..." -ForegroundColor Yellow
-$dnsCheck = (& adb -s $Serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
+$dnsCheck = (& adb -s $Serial shell "$curlCmd -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
 if ($dnsCheck -match "(200|301|302|400|403|404|HTTP)" -or $dnsCheck -match "^[1-5]\d\d$") {
     Write-Host "  --> [OK] DNS работает исправно (ya.ru разрешен)" -ForegroundColor Green
 } else {
@@ -66,14 +75,14 @@ if ($rootCheck -match "uid=0\(") {
     Write-Host "  --> [OK] Root активен (uid=0)" -ForegroundColor Green
 } else {
     Write-Host "  --> [ОШИБКА] Нет прав root: $rootCheck" -ForegroundColor Red
-    Write-Host "      Открываем Magisk на экране..." -ForegroundColor Yellow
+    Write-Host "      В Magisk внизу нажмите на ЩИТ (Суперпользователь) -> Shell -> ВКЛ!" -ForegroundColor Yellow
+    Write-Host "      Либо в Настройках Magisk -> 'Автоматический ответ' -> 'Предоставить'" -ForegroundColor Yellow
     & adb -s $Serial shell "monkey -p com.topjohnwu.magisk 1 >/dev/null 2>&1; am start -n com.topjohnwu.magisk/.ui.MainActivity >/dev/null 2>&1" 2>$null | Out-Null
-    Write-Host "      Включите: Настройки (шестеренка) -> 'Доступ суперпользователя' -> 'Приложения и ADB'" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "[4/7] Связь с шлюзом агента на ПК (127.0.0.1:8888)..." -ForegroundColor Yellow
-$gwPing = (& adb -s $Serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 4 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
+$gwPing = (& adb -s $Serial shell "$curlCmd -s -m 3 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
 if ($gwPing -match "KMM_GATEWAY_OK") {
     Write-Host "  --> [OK] Шлюз агента отвечает: $gwPing" -ForegroundColor Green
 } else {
@@ -85,18 +94,19 @@ if ($gwPing -match "KMM_GATEWAY_OK") {
 
 Write-Host ""
 Write-Host "[5/7] Внешний IP через шлюз (curl -x 127.0.0.1:8888)..." -ForegroundColor Yellow
-$rawProxyIp = (& adb -s $Serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
+$rawProxyIp = (& adb -s $Serial shell "$curlCmd -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
 Write-Host "  --> IP: $rawProxyIp" -ForegroundColor White
 
 Write-Host ""
 Write-Host "[6/7] Прозрачный перехват sing-box (curl БЕЗ -x)..." -ForegroundColor Yellow
-$rawTransIp = (& adb -s $Serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 http://api.ipify.org 2>&1") -join " "
+$rawTransIp = (& adb -s $Serial shell "$curlCmd -s -m 7 http://api.ipify.org 2>&1") -join " "
 Write-Host "  --> IP: $rawTransIp" -ForegroundColor White
 
 Write-Host ""
 Write-Host "[7/7] Связь с серверами TikTok..." -ForegroundColor Yellow
-$ttPing = ([string](& adb -s $Serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")).Trim()
-if ($ttPing -match "^(200|403|404|301|302)$") {
+$rawTtPing = (& adb -s $Serial shell "$curlCmd -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1") -join " "
+$ttPing = ("$rawTtPing").Trim()
+if ($ttPing -match "(200|403|404|301|302)") {
     Write-Host "  --> [OK] TikTok доступен (HTTP $ttPing)" -ForegroundColor Green
 } else {
     Write-Host "  --> [ОШИБКА] TikTok недоступен: $ttPing" -ForegroundColor Red

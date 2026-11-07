@@ -115,7 +115,7 @@ Write-Host "Обнаружено плат: $($devices.Count)" -ForegroundColor G
 Write-Host "Начинаем диагностику и автоматическое исправление неполадок..." -ForegroundColor Cyan
 Write-Host ""
 
-# Подготовка ARM64 бинарника curl
+# Подготовка ARM64 бинарника curl для плат без встроенного curl
 $tempCurl = Join-Path $env:TEMP "kmm_curl_arm64"
 if (-not (Test-Path $tempCurl)) {
     foreach ($srcDev in $devices) {
@@ -146,12 +146,21 @@ foreach ($dev in $devices) {
     Write-Host "  [1/9] Система: Android $androidVer, модель $model" -ForegroundColor Gray
 
     # [АВТО-ИСПРАВЛЕНИЕ 1] Доставка curl для корейских плат (SM-G955N)
-    $hasCurl = ("$(& adb -s $serial shell '{ if command -v curl >/dev/null 2>&1 || [ -x /data/local/tmp/curl ]; then echo YES; else echo NO; fi; } 2>/dev/null')").Trim()
+    $hasCurl = ("$(& adb -s $serial shell 'command -v curl 2>/dev/null || [ -x /data/local/tmp/curl ] && echo YES || echo NO')").Trim()
     if ($hasCurl -ne "YES" -and (Test-Path $tempCurl)) {
         & adb -s $serial push $tempCurl /data/local/tmp/curl 2>$null | Out-Null
         & adb -s $serial shell "chmod 755 /data/local/tmp/curl" 2>$null | Out-Null
         $repairedList += "Установлен curl"
         Write-Host "  [АВТО-ИСПРАВЛЕНИЕ] Скопирован curl ARM64 на плату" -ForegroundColor Yellow
+    }
+
+    # Определение команды curl на данной плате
+    $curlCmd = "curl"
+    $checkCurl = ("$(& adb -s $serial shell 'if command -v curl >/dev/null 2>&1; then echo curl; elif [ -x /data/local/tmp/curl ]; then echo /data/local/tmp/curl; fi')").Trim()
+    if ($checkCurl -match "/data/local/tmp/curl") {
+        $curlCmd = "/data/local/tmp/curl"
+    } elseif ($checkCurl -eq "curl") {
+        $curlCmd = "curl"
     }
 
     # [2] Проверка интерфейса tun0 (Gnirehtet)
@@ -178,7 +187,7 @@ foreach ($dev in $devices) {
 
     # [3] Проверка DNS
     $dnsOk = $false
-    $dnsCheck = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
+    $dnsCheck = (& adb -s $serial shell "$curlCmd -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
     if ($dnsCheck -match "(200|301|302|400|403|404|HTTP)" -or $dnsCheck -match "^[1-5]\d\d$") {
         $dnsOk = $true
         Write-Host "  [3/9] DNS-резолвер: [OK] Домен ya.ru успешно разрешен" -ForegroundColor Green
@@ -200,12 +209,11 @@ foreach ($dev in $devices) {
         Write-Host "  [4/9] Root (Magisk): [OK] Суперпользователь АКТИВЕН (uid=0)" -ForegroundColor Green
     } else {
         $rootErr = ($rootCheck -replace "\r?\n", " ").Trim()
-        Write-Host "  [4/9] Root (Magisk): [ОШИБКА] Отказ доступа: $rootErr" -ForegroundColor Red
-        Write-Host "        --> ВНИМАНИЕ: Приложение TikTok игнорирует системный прокси!" -ForegroundColor Yellow
-        Write-Host "        --> Без Root плата выходит через интернет РФ и TikTok НЕ РАБОТАЕТ." -ForegroundColor Yellow
-        # Автоматически открываем приложение Magisk на экране этой платы
+        Write-Host "  [4/9] Root (Magisk): [ОШИБКА] Shell получил отказ ($rootErr)" -ForegroundColor Red
+        Write-Host "        --> В Magisk на телефоне: Вкладка ЩИТ (Суперпользователь) внизу -> Shell -> ВКЛ!" -ForegroundColor Yellow
+        Write-Host "        --> Либо в Настройках Magisk (шестеренка): 'Автоматический ответ' -> 'Предоставить'" -ForegroundColor Yellow
+        # Открываем экран Magisk на этой плате
         & adb -s $serial shell "monkey -p com.topjohnwu.magisk 1 >/dev/null 2>&1; am start -n com.topjohnwu.magisk/.ui.MainActivity >/dev/null 2>&1" 2>$null | Out-Null
-        Write-Host "        [ДЕЙСТВИЕ] Magisk открыт на плате $serial! Включите: Шестеренка -> Доступ суперпользователя -> 'Приложения и ADB'" -ForegroundColor Cyan
     }
 
     # [5] Шлюз агента и adb reverse (порт 8888)
@@ -225,7 +233,7 @@ foreach ($dev in $devices) {
         } catch {}
     }
 
-    $gwPing = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 3 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
+    $gwPing = (& adb -s $serial shell "$curlCmd -s -m 3 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
     if ($gwPing -match "KMM_GATEWAY_OK") {
         $gatewayOk = $true
         if ($gwPing -match "proxy") { $gwRoute = "proxy" }
@@ -239,7 +247,7 @@ foreach ($dev in $devices) {
     # [6] Выход через шлюз (curl -x)
     $proxyIp = "Нет ответа"
     $proxyOk = $false
-    $rawProxyIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
+    $rawProxyIp = (& adb -s $serial shell "$curlCmd -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
     if ($rawProxyIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
         $proxyIp = $matches[0]
         $proxyOk = $true
@@ -301,7 +309,7 @@ foreach ($dev in $devices) {
     # [9] Прозрачный выход в интернет БЕЗ -x (как ходят приложения TikTok и Chrome)
     $transIp = "Нет ответа"
     $transOk = $false
-    $rawTransIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 http://api.ipify.org 2>&1") -join " "
+    $rawTransIp = (& adb -s $serial shell "$curlCmd -s -m 7 http://api.ipify.org 2>&1") -join " "
     if ($rawTransIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
         $transIp = $matches[0]
         $transOk = $true
@@ -317,8 +325,9 @@ foreach ($dev in $devices) {
 
     # [TIKTOK] Проверка связи с TikTok и сброс зависших сокетов
     $tiktokOk = $false
-    $ttPing = ([string](& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")).Trim()
-    if ($ttPing -match "^(200|403|404|301|302)$") {
+    $rawTtPing = (& adb -s $serial shell "$curlCmd -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1") -join " "
+    $ttPing = ("$rawTtPing").Trim()
+    if ($ttPing -match "(200|403|404|301|302)") {
         $tiktokOk = $true
         Write-Host "  [TIKTOK] Связь с серверами TikTok: [OK] HTTP $ttPing" -ForegroundColor Green
     } else {
@@ -401,11 +410,14 @@ Write-Host "  Требуют включения Root в Magisk: $($noRootDevices
 Write-Host ""
 
 if ($noRootDevices.Count -gt 0) {
-    Write-Host "ИНСТРУКЦИЯ ДЛЯ ПЛАТ БЕЗ ROOT:" -ForegroundColor Red
-    Write-Host "На платах без Root приложение TikTok НЕ МОЖЕТ ходить через прокси и блокируется!" -ForegroundColor Yellow
-    Write-Host "Для каждой проблемной платы запустите open-magisk.bat <Serial> или переключите на телефоне:" -ForegroundColor White
-    Write-Host "  1) В Magisk нажмите на ШЕСТЕРЕНКУ (справа вверху)" -ForegroundColor White
-    Write-Host "  2) Выберите 'Доступ суперпользователя' -> 'Приложения и ADB'" -ForegroundColor White
+    Write-Host "ИНСТРУКЦИЯ ДЛЯ 5 ПЛАТ БЕЗ ROOT (сообщение 'Shell was denied superuser rights'):" -ForegroundColor Red
+    Write-Host "В Magisk вверху включен глобальный пункт 'Приложения и ADB', НО во вкладке ЩИТ" -ForegroundColor Yellow
+    Write-Host "компонент Shell сейчас заблокирован индивидуально!" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "КАК РАЗРЕШИТЬ ROOT (2 клика на телефоне):" -ForegroundColor White
+    Write-Host "  1) Внизу приложения Magisk нажмите на иконку ЩИТА (Суперпользователь)." -ForegroundColor White
+    Write-Host "  2) В списке приложений найдите 'Shell' (или com.android.shell) и включите тумблер (зелёный)!" -ForegroundColor Green
+    Write-Host "  ЛИБО: Нажмите Шестерёнку вверху справа -> 'Автоматический ответ' -> выберите 'Предоставить'." -ForegroundColor Cyan
     Write-Host ""
 }
 
