@@ -1343,13 +1343,14 @@ const LISTEN_RETRY_TOTAL_MS = 5 * 60_000;
 
 async function listenWithRetry(): Promise<void> {
   const deadline = Date.now() + LISTEN_RETRY_TOTAL_MS;
+  const listenHost = '0.0.0.0';
   for (let attempt = 1; ; attempt++) {
     try {
-      await app.listen({ host: config.HOST, port: config.PORT });
+      await app.listen({ host: listenHost, port: config.PORT });
       return;
     } catch (err) {
       if (Date.now() + LISTEN_RETRY_MS > deadline) throw err;
-      logger.warn({ host: config.HOST, port: config.PORT, attempt, err: String(err) }, 'device-agent: listen failed (tunnel interface not up yet?) — retrying');
+      logger.warn({ host: listenHost, port: config.PORT, attempt, err: String(err) }, 'device-agent: listen failed — retrying');
       await new Promise((r) => setTimeout(r, LISTEN_RETRY_MS));
     }
   }

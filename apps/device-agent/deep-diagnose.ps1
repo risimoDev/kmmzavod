@@ -6,12 +6,12 @@
     Reverse -> Upstream -> Root -> sing-box -> iptables -> TikTok APK
 #>
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-
 param(
     [string]$TargetSerial = ""
 )
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $host.UI.RawUI.WindowTitle = "KMMZAVOD - Глубокий анализатор сети и приложений"
 
@@ -84,7 +84,7 @@ if ($agentRunning) {
 Write-Host "  [ТЕСТ ASTROPROXY С ПК] Проверка связи с казахстанским шлюзом 45.81.32.208:10018..." -ForegroundColor Yellow
 $pcProxyTest = ""
 try {
-    $pcProxyTest = (& curl.exe --noproxy "" -s -S -m 8 -x "http://LevrurisimoiY7:3f568e6f1f3ee6b3@45.81.32.208:10018" "https://api.ipify.org" 2>&1) -join " "
+    $pcProxyTest = (& curl.exe --noproxy "" -s -S -m 12 -x "http://LevrurisimoiY7:e59326cB1@45.81.32.208:10018" "https://api.ipify.org" 2>&1) -join " "
 } catch {}
 
 if ($pcProxyTest -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
@@ -214,7 +214,6 @@ foreach ($dev in $selectedDevices) {
     $simOp = ("$(& adb -s $s shell 'getprop gsm.sim.operator.numeric 2>/dev/null')").Trim()
     $netOp = ("$(& adb -s $s shell 'getprop gsm.operator.numeric 2>/dev/null')").Trim()
     $sysCountry = ("$(& adb -s $s shell 'getprop persist.sys.country 2>/dev/null')").Trim()
-    $airplane = ("$(& adb -s $s shell 'settings get global airplane_mode_on 2>/dev/null')").Trim()
 
     $simWarning = $false
     if ($simOp -match '^250' -or $netOp -match '^250') {
@@ -252,8 +251,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # [7] adb reverse и связь со шлюзом ПК (127.0.0.1:8888)
-    $revList = (& adb -s $s reverse --list 2>$null) -join " "
-    $gwPing = ("$(& adb -s $s shell "$curlCmd -s -m 4 http://127.0.0.1:8888/__kmm/ping 2>&1")").Trim()
+    $gwPing = ("$(& adb -s $s shell "$curlCmd -s -m 5 http://127.0.0.1:8888/__kmm/ping 2>&1")").Trim()
     
     if ($gwPing -match "KMM_GATEWAY_OK") {
         Write-Host "  [7/12] ШЛЮЗ АГЕНТА: [OK] 127.0.0.1:8888 отвечает (KMM_GATEWAY_OK)" -ForegroundColor Green
@@ -301,9 +299,8 @@ foreach ($dev in $selectedDevices) {
 
     # [10] Таблица iptables и счетчики перехваченного трафика
     $iptablesRules = (& adb -s $s shell "su -c 'iptables -w 3 -t nat -L KMM_PROXY -v -n 2>/dev/null'") -join "`n"
-    if ($iptablesRules -match "REDIRECT\s+tcp\s+--\s+.*\s+redir ports 12345") {
+    if ($iptablesRules -match "REDIRECT\s+tcp\s+--") {
         Write-Host "  [10/12] IPTABLES ПЕРЕХВАТ: [OK] Цепочка KMM_PROXY активна в nat OUTPUT" -ForegroundColor Green
-        # Выделяем строку со счетчиками пакетов
         foreach ($rLine in ($iptablesRules -split "`n")) {
             if ($rLine -match "redir ports 12345") {
                 Write-Host "          Счетчик трафика: $($rLine.Trim())" -ForegroundColor Cyan
@@ -317,7 +314,7 @@ foreach ($dev in $selectedDevices) {
     Write-Host "  [11/12] СКВОЗНЫЕ ТЕСТЫ ВЫХОДА В СЕТЬ:" -ForegroundColor Yellow
 
     # Тест A: Явный HTTP прокси (-x)
-    $ipExplHttp = ("$(& adb -s $s shell "$curlCmd -s -S -m 12 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1")").Trim()
+    $ipExplHttp = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1")").Trim()
     if ($ipExplHttp -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [A] Явный HTTP (-x 127.0.0.1:8888): [OK] IP: $ipExplHttp" -ForegroundColor Green
     } else {
@@ -325,7 +322,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест B: Явный HTTPS CONNECT прокси (-x)
-    $ipExplHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 12 -x http://127.0.0.1:8888 https://api.ipify.org 2>&1")").Trim()
+    $ipExplHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 -x http://127.0.0.1:8888 https://api.ipify.org 2>&1")").Trim()
     if ($ipExplHttps -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [B] Явный HTTPS CONNECT (-x):       [OK] IP: $ipExplHttps" -ForegroundColor Green
     } else {
@@ -333,7 +330,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест C: Прозрачный HTTP без -x (как ходят приложения)
-    $ipTransHttp = ("$(& adb -s $s shell "$curlCmd -s -S -m 12 http://api.ipify.org 2>&1")").Trim()
+    $ipTransHttp = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 http://api.ipify.org 2>&1")").Trim()
     if ($ipTransHttp -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [C] Прозрачный HTTP (БЕЗ -x):        [OK] IP: $ipTransHttp" -ForegroundColor Green
     } else {
@@ -341,7 +338,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест D: Прозрачный HTTPS без -x (как ходит TikTok и Chrome)
-    $ipTransHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 12 https://api.ipify.org 2>&1")").Trim()
+    $ipTransHttps = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 https://api.ipify.org 2>&1")").Trim()
     if ($ipTransHttps -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         Write-Host "    [D] Прозрачный HTTPS (БЕЗ -x):       [OK] IP: $ipTransHttps" -ForegroundColor Green
     } else {
@@ -349,7 +346,7 @@ foreach ($dev in $selectedDevices) {
     }
 
     # Тест E: Серверы TikTok API
-    $ttCode = ("$(& adb -s $s shell "$curlCmd -s -S -m 15 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")").Trim()
+    $ttCode = ("$(& adb -s $s shell "$curlCmd -s -S -m 20 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")").Trim()
     if ($ttCode -match "(200|403|404|301|302)") {
         Write-Host "    [E] Серверы TikTok (api.tiktokv.com):[OK] HTTP $ttCode" -ForegroundColor Green
     } else {

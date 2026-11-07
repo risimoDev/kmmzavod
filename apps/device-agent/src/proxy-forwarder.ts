@@ -365,7 +365,7 @@ export class UpstreamProxy {
   ) {
     this.key = upstreamKey(config);
     this.limiter = new ConnectionLimiter(opts.maxConnections);
-    this.connectTimeoutMs = opts.connectTimeoutMs ?? 12_000;
+    this.connectTimeoutMs = opts.connectTimeoutMs ?? 20_000;
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 20_000;
     this.retryWindowMs = opts.retryWindowMs ?? 25_000;
     this.via = parseVia(opts.via);

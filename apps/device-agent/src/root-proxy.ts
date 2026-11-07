@@ -68,7 +68,8 @@ start_rules() {
   for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
     iptables -w 3 -t nat -A KMM_PROXY -d "$net" -j RETURN || return 1
   done
-  iptables -w 3 -t nat -A KMM_PROXY -p tcp -j REDIRECT --to-ports "$PORT" || return 1
+  iptables -w 3 -t nat -A KMM_PROXY -p tcp --dport 80 -j REDIRECT --to-ports "$PORT" || return 1
+  iptables -w 3 -t nat -A KMM_PROXY -p tcp --dport 443 -j REDIRECT --to-ports "$PORT" || return 1
   iptables -w 3 -t nat -A OUTPUT -p tcp -j KMM_PROXY || return 1
 
   # Redirect blocked Google DNS to Yandex DNS so apps never hang on DNS in Russia
@@ -149,6 +150,8 @@ function singBoxConfig(gatewayPort: number): string {
       inbounds: [{ type: 'redirect', tag: 'redirect-in', listen: '127.0.0.1', listen_port: REDIRECT_PORT }],
       outbounds: [{ type: 'http', tag: 'farm-gateway', server: '127.0.0.1', server_port: gatewayPort }],
       route: {
+        auto_detect_interface: false,
+        default_interface: 'tun0',
         rules: [
           {
             action: 'sniff',
