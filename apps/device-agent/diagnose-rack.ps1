@@ -118,6 +118,26 @@ foreach ($dev in $devices) {
     if (-not $androidVer) { $androidVer = "9" }
     Write-Host "  [1/9] Система: Android $androidVer, модель $model" -ForegroundColor Gray
 
+    # Авто-подготовка curl для плат без встроенного curl (например, корейские SM-G955N)
+    $hasCurl = ("$(& adb -s $serial shell '{ if command -v curl >/dev/null 2>&1 || [ -x /data/local/tmp/curl ]; then echo YES; else echo NO; fi; } 2>/dev/null')").Trim()
+    if ($hasCurl -ne "YES") {
+        $tempCurl = Join-Path $env:TEMP "kmm_curl_arm64"
+        if (-not (Test-Path $tempCurl)) {
+            foreach ($srcDev in $devices) {
+                $srcCheck = ("$(& adb -s $srcDev.Serial shell 'command -v curl 2>/dev/null')").Trim()
+                if ($srcCheck -and $srcCheck -match "^/") {
+                    & adb -s $srcDev.Serial pull $srcCheck $tempCurl 2>$null | Out-Null
+                    if (Test-Path $tempCurl) { break }
+                }
+            }
+        }
+        if (Test-Path $tempCurl) {
+            & adb -s $serial push $tempCurl /data/local/tmp/curl 2>$null | Out-Null
+            & adb -s $serial shell "chmod 755 /data/local/tmp/curl" 2>$null | Out-Null
+        }
+    }
+
+
     # [2] Проверка интерфейса tun0 и выхода в сеть по USB (Gnirehtet)
     # Gnirehtet туннелирует TCP и UDP (не ICMP-пинг). Проверяем наличие интерфейса и TCP-доступ.
     $hasTun0 = $false
@@ -138,7 +158,7 @@ Host: 77.88.8.8
 
     # [3] Проверка DNS (резолвинг доменов)
     $dnsOk = $false
-    $dnsCheck = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru; else (printf 'HEAD / HTTP/1.0
+    $dnsCheck = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then { if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru; else (printf 'HEAD / HTTP/1.0
 Host: ya.ru
 
 '; sleep 1) | toybox nc ya.ru 80; fi; } 2>&1") -join " "
@@ -174,7 +194,7 @@ Host: ya.ru
     $reverseList = (& adb -s $serial reverse --list 2>$null) -join " "
     $hasReverse = $reverseList -match "tcp:8888"
 
-    $gwPing = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 3 http://127.0.0.1:8888/__kmm/ping; else echo NOCURL; fi; } 2>&1") -join " "
+    $gwPing = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then { if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 3 http://127.0.0.1:8888/__kmm/ping; else echo NOCURL; fi; } 2>&1") -join " "
     if ($gwPing -match "KMM_GATEWAY_OK") {
         $gatewayOk = $true
         if ($gwPing -match "proxy") { $gwRoute = "proxy" }
@@ -188,7 +208,7 @@ Host: ya.ru
     # [6] Проверка выхода через шлюз (curl -x 127.0.0.1:8888)
     $proxyIp = "Нет ответа"
     $proxyOk = $false
-    $rawProxyIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org; else (printf 'GET http://api.ipify.org/ HTTP/1.0
+    $rawProxyIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then { if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org; else (printf 'GET http://api.ipify.org/ HTTP/1.0
 Host: api.ipify.org
 
 '; sleep 3) | toybox nc 127.0.0.1 8888; fi; } 2>&1") -join " "
@@ -204,7 +224,7 @@ Host: api.ipify.org
 
     # [7] Проверка sing-box на плате
     $singboxOk = $false
-    $sbPid = ([string](& adb -s $serial shell "pidof sing-box 2>/dev/null")).Trim()
+    $sbPid = ("$(& adb -s $serial shell 'pidof sing-box 2>/dev/null')").Trim()
     $sbTcp = (& adb -s $serial shell "grep '0100007F:3039' /proc/net/tcp 2>/dev/null") -join " "
     if ($sbPid -and $sbTcp) {
         $singboxOk = $true
@@ -229,7 +249,7 @@ Host: api.ipify.org
     # [9] Прозрачный выход в интернет БЕЗ -x (как ходят приложения TikTok и Chrome)
     $transIp = "Нет ответа"
     $transOk = $false
-    $rawTransIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl -s -m 7 http://api.ipify.org; else (printf 'GET / HTTP/1.0
+    $rawTransIp = (& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then { if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 7 http://api.ipify.org; else (printf 'GET / HTTP/1.0
 Host: api.ipify.org
 
 '; sleep 3) | toybox nc api.ipify.org 80; fi; } 2>&1") -join " "
@@ -244,7 +264,7 @@ Host: api.ipify.org
 
     # Проверка доступности серверов TikTok
     $tiktokOk = $false
-    $ttPing = ([string](& adb -s $serial shell "curl -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")).Trim()
+    $ttPing = ([string](& adb -s $serial shell "{ if command -v curl >/dev/null 2>&1; then curl; else /data/local/tmp/curl; fi; } -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1")).Trim()
     if ($ttPing -match "^(200|403|404|301|302)$") {
         $tiktokOk = $true
         Write-Host "  [TIKTOK] Связь с серверами TikTok: [OK] HTTP $ttPing" -ForegroundColor Green
