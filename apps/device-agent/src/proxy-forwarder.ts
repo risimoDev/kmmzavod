@@ -164,6 +164,46 @@ function socksAddress(host: string, port: number): Buffer {
 const ipHostnameCache = new Map<string, { hostname: string; expires: number }>();
 
 /**
+ * Extract Server Name Indication (SNI) hostname from a TLS ClientHello byte buffer.
+ * RFC 6066: Extension Type 0x0000 (server_name).
+ */
+export function parseSni(buf: Buffer): string | null {
+  try {
+    if (!buf || buf.length < 44 || buf[0] !== 0x16 || buf[5] !== 0x01) return null;
+    let pos = 43; // Skip TLS record header (5) + type (1) + len (3) + version (2) + random (32)
+    if (pos >= buf.length) return null;
+    const sessLen = buf[pos];
+    pos += 1 + sessLen;
+    if (pos + 2 > buf.length) return null;
+    const cipherLen = buf.readUInt16BE(pos);
+    pos += 2 + cipherLen;
+    if (pos + 1 > buf.length) return null;
+    const compLen = buf[pos];
+    pos += 1 + compLen;
+    if (pos + 2 > buf.length) return null;
+    const extTotalLen = buf.readUInt16BE(pos);
+    pos += 2;
+    const end = Math.min(pos + extTotalLen, buf.length);
+    while (pos + 4 <= end) {
+      const extType = buf.readUInt16BE(pos);
+      const extLen = buf.readUInt16BE(pos + 2);
+      pos += 4;
+      if (extType === 0 && pos + 5 <= end) {
+        const nameType = buf[pos + 2];
+        const nameLen = buf.readUInt16BE(pos + 3);
+        if (nameType === 0 && pos + 5 + nameLen <= end) {
+          return buf.toString('utf8', pos + 5, pos + 5 + nameLen);
+        }
+      }
+      pos += extLen;
+    }
+  } catch {
+    // Malformed packet or non-TLS
+  }
+  return null;
+}
+
+/**
  * AstroProxy and some restrictive residential providers reject connections to raw IP addresses
  * (HTTP 403 / SOCKS5 error 2: "connection not allowed by ruleset").
  * When a target is a numeric IP, resolve its PTR hostname so the upstream proxy accepts it.
@@ -1025,29 +1065,124 @@ export class DeviceProxyListener {
       this.rejectSocket(client, 400, `Некорректная цель CONNECT: ${req.url}`);
       return;
     }
-    const route = this.route(target.host, target.port);
-    if (route.kind === 'block') {
-      this.logger.debug({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, reason: route.reason }, 'proxy: blocked connection');
-      this.rejectSocket(client, 403, route.reason);
+
+    const isRawIp = !!net.isIP(target.host);
+    const initialRoute = this.route(target.host, target.port);
+    if (initialRoute.kind === 'block') {
+      this.logger.debug({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, reason: initialRoute.reason }, 'proxy: blocked connection');
+      this.rejectSocket(client, 403, initialRoute.reason);
       return;
     }
-    this.open(route, target.host, target.port).then(
-      (upstream) => {
-        if (client.destroyed) {
-          upstream.destroy();
-          return;
+
+    // Direct connections do not go through upstream proxy rulesets, and domain-named targets already have a domain.
+    if (!isRawIp || initialRoute.kind === 'direct') {
+      this.open(initialRoute, target.host, target.port).then(
+        (upstream) => {
+          if (client.destroyed) {
+            upstream.destroy();
+            return;
+          }
+          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          if (head?.length) upstream.write(head);
+          this.splice(client, upstream);
+        },
+        (err) => {
+          const e = toProxyError(err);
+          this.logger.warn({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, err: e.message }, 'proxy: tunnel failed');
+          this.recordError(`${target.host}:${target.port} — ${e.message}`);
+          this.rejectSocket(client, e.code === 'busy' ? 503 : 502, e.message);
+        },
+      );
+      return;
+    }
+
+    // Target host is a raw IP and route is 'proxy' (e.g. AstroProxy or mobile proxy).
+    // Residential/mobile proxies reject raw IPs (SOCKS5 0x02 "connection not allowed by ruleset").
+    // We reply 200 Connection Established immediately, read the first packet (TLS SNI or HTTP Host),
+    // and connect to upstream with the resolved domain name.
+    const handleFirstPayload = (firstChunk: Buffer) => {
+      let resolvedDomain = target.host;
+      if (target.port === 443) {
+        const sni = parseSni(firstChunk);
+        if (sni) {
+          resolvedDomain = sni;
+          ipHostnameCache.set(target.host, { hostname: sni, expires: Date.now() + 3600_000 });
+        } else {
+          const cached = ipHostnameCache.get(target.host);
+          if (cached && cached.expires > Date.now()) {
+            resolvedDomain = cached.hostname;
+          }
         }
-        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        if (head?.length) upstream.write(head);
-        this.splice(client, upstream);
-      },
-      (err) => {
-        const e = toProxyError(err);
-        this.logger.warn({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, err: e.message }, 'proxy: tunnel failed');
-        this.recordError(`${target.host}:${target.port} — ${e.message}`);
-        this.rejectSocket(client, e.code === 'busy' ? 503 : 502, e.message);
-      },
-    );
+      } else if (target.port === 80) {
+        const hostMatch = firstChunk.toString('latin1').match(/(?:^|\r\n)Host:\s*([^\r\n:]+)/i);
+        if (hostMatch && hostMatch[1] && !net.isIP(hostMatch[1].trim())) {
+          resolvedDomain = hostMatch[1].trim();
+          ipHostnameCache.set(target.host, { hostname: resolvedDomain, expires: Date.now() + 3600_000 });
+        } else {
+          const cached = ipHostnameCache.get(target.host);
+          if (cached && cached.expires > Date.now()) {
+            resolvedDomain = cached.hostname;
+          }
+        }
+      }
+
+      const activeRoute = this.route(resolvedDomain, target.port);
+      if (activeRoute.kind === 'block') {
+        client.destroy();
+        return;
+      }
+
+      // Buffer incoming data while upstream proxy connects
+      const buffered: Buffer[] = [firstChunk];
+      let upstreamConnected = false;
+      const onAdditionalData = (d: Buffer) => {
+        if (!upstreamConnected) {
+          buffered.push(d);
+        }
+      };
+      client.on('data', onAdditionalData);
+
+      this.open(activeRoute, resolvedDomain, target.port).then(
+        (upstream) => {
+          upstreamConnected = true;
+          client.removeListener('data', onAdditionalData);
+          if (client.destroyed) {
+            upstream.destroy();
+            return;
+          }
+          for (const b of buffered) {
+            upstream.write(b);
+          }
+          this.splice(client, upstream);
+        },
+        (err) => {
+          upstreamConnected = true;
+          client.removeListener('data', onAdditionalData);
+          client.destroy();
+          const e = toProxyError(err);
+          this.logger.warn(
+            { deviceId: this.deviceId, target: `${resolvedDomain}:${target.port}`, originalIp: target.host, err: e.message },
+            'proxy: peeked tunnel failed',
+          );
+          this.recordError(`${resolvedDomain}:${target.port} — ${e.message}`);
+        },
+      );
+    };
+
+    client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    if (head && head.length > 0) {
+      handleFirstPayload(head);
+    } else {
+      const sniTimer = setTimeout(() => {
+        client.destroy();
+      }, 15_000);
+
+      client.once('data', (chunk: Buffer) => {
+        clearTimeout(sniTimer);
+        handleFirstPayload(chunk);
+      });
+      client.resume();
+    }
   }
 
   private splice(client: net.Socket, upstream: net.Socket): void {
@@ -1088,7 +1223,7 @@ export class DeviceProxyListener {
   }
 
   private onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const rawUrl = req.url ?? '/';
+    let rawUrl = req.url ?? '/';
     if (!/^https?:\/\//i.test(rawUrl)) {
       if (rawUrl.startsWith('/__kmm/ping')) {
         const route = this.route();
@@ -1096,8 +1231,12 @@ export class DeviceProxyListener {
         res.end(`KMM_GATEWAY_OK ${this.deviceId} ${route.kind}\n`);
         return;
       }
-      this.replyError(res, 400, 'Это прокси-шлюз фермы: используйте его как HTTP-прокси');
-      return;
+      if (req.headers.host) {
+        rawUrl = `http://${req.headers.host}${rawUrl}`;
+      } else {
+        this.replyError(res, 400, 'Это прокси-шлюз фермы: используйте его как HTTP-прокси');
+        return;
+      }
     }
 
     let url: URL;
@@ -1109,8 +1248,18 @@ export class DeviceProxyListener {
     }
     this.counters.total++;
     this.lastActivityAt = Date.now();
-    const host = url.hostname.replace(/^\[|\]$/g, '');
+    let host = url.hostname.replace(/^\[|\]$/g, '');
     const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
+
+    // If host is raw numeric IP but Host header specifies domain name, resolve and cache it
+    if (net.isIP(host) && req.headers.host) {
+      const headerDomain = req.headers.host.split(':')[0].replace(/^\[|\]$/g, '').trim();
+      if (headerDomain && !net.isIP(headerDomain)) {
+        ipHostnameCache.set(host, { hostname: headerDomain, expires: Date.now() + 3600_000 });
+        host = headerDomain;
+      }
+    }
+
     const route = this.route(host, port);
     if (route.kind === 'block') {
       this.replyError(res, 403, route.reason);
