@@ -115,18 +115,9 @@ if errorlevel 1 (
     echo [OK] Интерфейс AmneziaWG активен.
 )
 
-:: 4a. Relay мобильных прокси через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
-if not defined DEVICE_AGENT_UPSTREAM_VIA (
-    curl.exe -s -m 4 -o nul http://10.66.66.1:3129/health
-    if not errorlevel 1 (
-        set "DEVICE_AGENT_UPSTREAM_VIA=http://10.66.66.1:3129"
-        echo [OK] Прокси плат будут подключаться через сервер: http://10.66.66.1:3129
-    ) else (
-        echo [ВНИМАНИЕ] Relay прокси на сервере 10.66.66.1:3129 недоступен - прокси подключаются напрямую.
-        echo            Если провайдер блокирует Instagram/TikTok, запустите farm-proxy-relay на сервере.
-    )
-)
-
+:: 4a. Прямое подключение к AstroProxy (без промежуточного relay сервера)
+set "DEVICE_AGENT_UPSTREAM_VIA="
+echo [OK] Режим подключения: Прямой канал к AstroProxy (без задержек relay).
 :: 4b. Автоматическое обновление конфигурации прокси на AstroProxy Казахстан
 if exist "%~dp0devices-proxy-state.astroproxy.json" (
     if not exist "%~dp0devices-proxy-state.json" (

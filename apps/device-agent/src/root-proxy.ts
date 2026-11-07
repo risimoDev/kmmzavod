@@ -65,6 +65,7 @@ listening() {
 
 start_rules() {
   iptables -w 3 -t nat -N KMM_PROXY || return 1
+  iptables -w 3 -t nat -A KMM_PROXY -m owner --uid-owner 0 -j RETURN 2>/dev/null || true
   for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
     iptables -w 3 -t nat -A KMM_PROXY -d "$net" -j RETURN || return 1
   done
@@ -72,7 +73,9 @@ start_rules() {
   iptables -w 3 -t nat -A KMM_PROXY -p tcp --dport 443 -j REDIRECT --to-ports "$PORT" || return 1
   iptables -w 3 -t nat -A OUTPUT -p tcp -j KMM_PROXY || return 1
 
-  # Redirect blocked Google DNS to Yandex DNS so apps never hang on DNS in Russia
+  # Ensure DNS properties are populated and Google DNS is redirected
+  setprop net.dns1 77.88.8.8 2>/dev/null || true
+  setprop net.dns2 1.1.1.1 2>/dev/null || true
   iptables -w 3 -t nat -A OUTPUT -p udp --dport 53 -d 8.8.8.8 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null || true
   iptables -w 3 -t nat -A OUTPUT -p udp --dport 53 -d 8.8.4.4 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null || true
 
