@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "mode": "shared_sequential",
+  "mode": "private_parallel",
   "inactivePolicy": "direct",
   "activeDeviceId": "98891a37534e534d32",
   "sharedProxy": {

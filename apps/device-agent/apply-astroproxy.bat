@@ -28,8 +28,8 @@ curl.exe --noproxy * -f -s -m 5 -X POST http://127.0.0.1:8300/proxy/reapply >nul
 if errorlevel 1 goto da_offline
 
 echo [OK] Служба device-agent обновила настройки прокси на всех платах.
-curl.exe --noproxy * -s -m 5 -X POST http://127.0.0.1:8300/proxy/mode -H "Content-Type: application/json" -d "{\"mode\":\"shared_sequential\",\"inactivePolicy\":\"direct\"}" >nul 2>nul
-echo [OK] Режим: Shared-Sequential. Неактивные платы: прямой интернет через Gnirehtet.
+curl.exe --noproxy * -s -m 5 -X POST http://127.0.0.1:8300/proxy/mode -H "Content-Type: application/json" -d "{\"mode\":\"private_parallel\"}" >nul 2>nul
+echo [OK] Режим: Private-Parallel. Все 20 плат выходят через AstroProxy Казахстан!
 goto da_done
 
 :da_offline

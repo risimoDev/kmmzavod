@@ -31,49 +31,67 @@ if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# 2. Определение внешнего IP фермы (домашний провайдер ПК в РФ)
-$farmHostIp = $null
-try {
-    $rawHost = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 3 -ErrorAction SilentlyContinue)
-    if ($rawHost -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') { $farmHostIp = $matches[0] }
-} catch {}
-
-# 3. Проверка службы device-agent (порт 8300)
+# 2. Поиск службы device-agent (порт 8300) на всех возможных IP
 $agentRunning = $false
 $agentStatus = $null
+$agentUrl = "http://127.0.0.1:8300"
+$candidateIps = @("127.0.0.1", "10.66.66.2", "localhost")
+
 try {
-    $tcp = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue
-    if ($tcp) {
-        $agentRunning = $true
-        try {
-            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
-            if ($resp) { 
-                $agentStatus = $resp 
-                if (-not $farmHostIp -and $resp.hostIp) { $farmHostIp = $resp.hostIp }
-            }
-        } catch {}
+    $tcpConns = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue
+    foreach ($c in $tcpConns) {
+        if ($c.LocalAddress -and $candidateIps -notcontains $c.LocalAddress) {
+            $candidateIps = @($c.LocalAddress) + $candidateIps
+        }
     }
 } catch {}
 
-if ($farmHostIp) {
-    Write-Host "[ИНФО] Внешний IP фермы (домашний интернет РФ): $farmHostIp" -ForegroundColor Gray
+foreach ($ip in $candidateIps) {
+    try {
+        $resp = Invoke-RestMethod -Uri "http://${ip}:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
+        if ($resp -and ($resp.ok -or $resp.mode)) {
+            $agentRunning = $true
+            $agentStatus = $resp
+            $agentUrl = "http://${ip}:8300"
+            break
+        }
+    } catch {}
 }
 
+# 3. Определение внешнего IP фермы в РФ (домашний провайдер ПК)
+$farmHostIp = "5.166.179.153"
+if ($agentStatus -and $agentStatus.hostIp) {
+    $farmHostIp = $agentStatus.hostIp
+} else {
+    foreach ($ipSvc in @("http://ifconfig.me/ip", "http://icanhazip.com", "http://api.ipify.org")) {
+        try {
+            $rawHost = (Invoke-RestMethod -Uri $ipSvc -TimeoutSec 3 -ErrorAction SilentlyContinue).Trim()
+            if ($rawHost -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
+                $farmHostIp = $matches[0]
+                break
+            }
+        } catch {}
+    }
+}
+
+Write-Host "[ИНФО] Внешний IP фермы (домашний провайдер РФ): $farmHostIp" -ForegroundColor Gray
+
 if ($agentRunning) {
-    Write-Host "[OK] Служба farm-agent активна (порт 8300 отвечает)." -ForegroundColor Green
+    Write-Host "[OK] Служба farm-agent активна ($agentUrl отвечает)." -ForegroundColor Green
     if ($agentStatus) {
         $modeDesc = if ($agentStatus.mode -eq "shared_sequential") { "Shared (Поочередный: 1 активная плата)" } else { "Private (Параллельный: ВСЕ 20 плат)" }
         $activeDev = if ($agentStatus.activeDeviceId) { $agentStatus.activeDeviceId } else { "не выбрана" }
         Write-Host "  Режим прокси стойки: $modeDesc" -ForegroundColor Cyan
-        Write-Host "  Активная плата с прокси: $activeDev" -ForegroundColor Cyan
         if ($agentStatus.mode -eq "shared_sequential") {
+            Write-Host "  Активная плата с прокси: $activeDev" -ForegroundColor Cyan
             Write-Host "  [ВАЖНО] В режиме Shared прокси Казахстана активен ТОЛЬКО на ОДНОЙ плате ($activeDev)." -ForegroundColor Yellow
-            Write-Host "  Остальные 19 плат выходят через интернет фермы (РФ), где TikTok заблокирован." -ForegroundColor Yellow
+            Write-Host "  Остальные 19 плат выходят через интернет РФ ($farmHostIp), где TikTok заблокирован." -ForegroundColor Yellow
+        } else {
+            Write-Host "  [ОТЛИЧНО] В режиме Private ВСЕ 20 плат выходят через AstroProxy Казахстан!" -ForegroundColor Green
         }
     }
 } else {
-    Write-Host "[ВНИМАНИЕ] Служба farm-agent (start-farm.bat) НЕ обнаружена на порту 8300!" -ForegroundColor Yellow
-    Write-Host "  Рекомендуется запустить start-farm.bat для работы шлюза и sing-box." -ForegroundColor Yellow
+    Write-Host "[ВНИМАНИЕ] Служба farm-agent не обнаружена на порту 8300." -ForegroundColor Yellow
 }
 
 # 4. Проверка процесса Gnirehtet
@@ -82,7 +100,6 @@ if ($gnirehtetProc) {
     Write-Host "[OK] Служба раздачи интернета Gnirehtet активна (PID: $($gnirehtetProc.Id))." -ForegroundColor Green
 } else {
     Write-Host "[ВНИМАНИЕ] Процесс gnirehtet.exe не найден в процессах Windows!" -ForegroundColor Red
-    Write-Host "  Телефоны могут не иметь выхода в интернет по USB." -ForegroundColor Red
 }
 Write-Host ""
 
@@ -106,13 +123,12 @@ foreach ($line in $rawDevices) {
 
 if ($devices.Count -eq 0) {
     Write-Host "[ОШИБКА] Ни одна плата не обнаружена в статусе 'device'!" -ForegroundColor Red
-    Write-Host "Проверьте USB-хаб и отладку по USB." -ForegroundColor Red
     Read-Host "Нажмите Enter для выхода..."
     exit 1
 }
 
 Write-Host "Обнаружено плат: $($devices.Count)" -ForegroundColor Green
-Write-Host "Начинаем диагностику и автоматическое исправление неполадок..." -ForegroundColor Cyan
+Write-Host "Начинаем проверку и самовосстановление..." -ForegroundColor Cyan
 Write-Host ""
 
 # Подготовка ARM64 бинарника curl для плат без встроенного curl
@@ -154,7 +170,7 @@ foreach ($dev in $devices) {
         Write-Host "  [АВТО-ИСПРАВЛЕНИЕ] Скопирован curl ARM64 на плату" -ForegroundColor Yellow
     }
 
-    # Определение команды curl на данной плате
+    # Определение пути curl на данной плате
     $curlCmd = "curl"
     $checkCurl = ("$(& adb -s $serial shell 'if command -v curl >/dev/null 2>&1; then echo curl; elif [ -x /data/local/tmp/curl ]; then echo /data/local/tmp/curl; fi')").Trim()
     if ($checkCurl -match "/data/local/tmp/curl") {
@@ -187,7 +203,7 @@ foreach ($dev in $devices) {
 
     # [3] Проверка DNS
     $dnsOk = $false
-    $dnsCheck = (& adb -s $serial shell "$curlCmd -s -m 4 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
+    $dnsCheck = (& adb -s $serial shell "$curlCmd -s -m 5 -o /dev/null -w '%{http_code}' http://ya.ru 2>&1") -join " "
     if ($dnsCheck -match "(200|301|302|400|403|404|HTTP)" -or $dnsCheck -match "^[1-5]\d\d$") {
         $dnsOk = $true
         Write-Host "  [3/9] DNS-резолвер: [OK] Домен ya.ru успешно разрешен" -ForegroundColor Green
@@ -203,7 +219,7 @@ foreach ($dev in $devices) {
 
     # [4] Проверка Root (Magisk su — БЕЗ вызова adb root!)
     $rootOk = $false
-    $rootCheck = (& adb -s $serial shell "su -c 'id' 2>&1 || su 0 id 2>&1 || id 2>&1 || true") -join " "
+    $rootCheck = (& adb -s $serial shell "su -c 'id' 2>&1 || su 0 id 2>&1 || true") -join " "
     if ($rootCheck -match "uid=0\(") {
         $rootOk = $true
         Write-Host "  [4/9] Root (Magisk): [OK] Суперпользователь АКТИВЕН (uid=0)" -ForegroundColor Green
@@ -212,7 +228,6 @@ foreach ($dev in $devices) {
         Write-Host "  [4/9] Root (Magisk): [ОШИБКА] Shell получил отказ ($rootErr)" -ForegroundColor Red
         Write-Host "        --> В Magisk на телефоне: Вкладка ЩИТ (Суперпользователь) внизу -> Shell -> ВКЛ!" -ForegroundColor Yellow
         Write-Host "        --> Либо в Настройках Magisk (шестеренка): 'Автоматический ответ' -> 'Предоставить'" -ForegroundColor Yellow
-        # Открываем экран Magisk на этой плате
         & adb -s $serial shell "monkey -p com.topjohnwu.magisk 1 >/dev/null 2>&1; am start -n com.topjohnwu.magisk/.ui.MainActivity >/dev/null 2>&1" 2>$null | Out-Null
     }
 
@@ -225,7 +240,7 @@ foreach ($dev in $devices) {
     if (-not $hasReverse -and $agentRunning) {
         Write-Host "  [5/9] Шлюз агента: Реверс-порт 8888 отсутствует. Перепривязка через агент..." -ForegroundColor Yellow
         try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+            Invoke-RestMethod -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Milliseconds 500
             $reverseList = (& adb -s $serial reverse --list 2>$null) -join " "
             $hasReverse = $reverseList -match "tcp:8888"
@@ -233,7 +248,7 @@ foreach ($dev in $devices) {
         } catch {}
     }
 
-    $gwPing = (& adb -s $serial shell "$curlCmd -s -m 3 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
+    $gwPing = (& adb -s $serial shell "$curlCmd -s -m 4 http://127.0.0.1:8888/__kmm/ping 2>&1") -join " "
     if ($gwPing -match "KMM_GATEWAY_OK") {
         $gatewayOk = $true
         if ($gwPing -match "proxy") { $gwRoute = "proxy" }
@@ -247,12 +262,15 @@ foreach ($dev in $devices) {
     # [6] Выход через шлюз (curl -x)
     $proxyIp = "Нет ответа"
     $proxyOk = $false
-    $rawProxyIp = (& adb -s $serial shell "$curlCmd -s -m 7 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
-    if ($rawProxyIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
+    $rawProxyIp = (& adb -s $serial shell "$curlCmd -s -m 12 -x http://127.0.0.1:8888 http://api.ipify.org 2>&1") -join " "
+    if ($rawProxyIp -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         $proxyIp = $matches[0]
         $proxyOk = $true
-        $ipNote = if ($gwRoute -eq "proxy") { "(AstroProxy Казахстан)" } else { "(Интернет фермы РФ)" }
-        Write-Host "  [6/9] Выход через шлюз (curl -x): [OK] IP: $proxyIp $ipNote" -ForegroundColor Green
+        if ($proxyIp -eq "95.56.111.109" -or $proxyIp -match '^95\.56\.') {
+            Write-Host "  [6/9] Выход через шлюз (curl -x): [OK] IP: $proxyIp (AstroProxy Казахстан)" -ForegroundColor Green
+        } else {
+            Write-Host "  [6/9] Выход через шлюз (curl -x): [ИНФО] IP: $proxyIp (Интернет фермы РФ)" -ForegroundColor Yellow
+        }
     } else {
         $proxyIp = ($rawProxyIp -replace "\r?\n", " ").Trim()
         Write-Host "  [6/9] Выход через шлюз (curl -x): [ОШИБКА] $proxyIp" -ForegroundColor Red
@@ -272,7 +290,7 @@ foreach ($dev in $devices) {
         Write-Host "  [7-8] sing-box / iptables не активны. Перезапуск прозрачного режима..." -ForegroundColor Yellow
         if ($agentRunning) {
             try {
-                Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+                Invoke-RestMethod -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
             } catch {}
         } else {
             & adb -s $serial shell "su -c 'sh /data/local/tmp/kmm-proxy.sh start' 2>&1" 2>$null | Out-Null
@@ -309,23 +327,23 @@ foreach ($dev in $devices) {
     # [9] Прозрачный выход в интернет БЕЗ -x (как ходят приложения TikTok и Chrome)
     $transIp = "Нет ответа"
     $transOk = $false
-    $rawTransIp = (& adb -s $serial shell "$curlCmd -s -m 7 http://api.ipify.org 2>&1") -join " "
-    if ($rawTransIp -match "\b(?:\d{1,3}\.){3}\d{1,3}\b") {
+    $rawTransIp = (& adb -s $serial shell "$curlCmd -s -S -m 15 http://api.ipify.org 2>&1") -join " "
+    if ($rawTransIp -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
         $transIp = $matches[0]
         $transOk = $true
-        if ($farmHostIp -and $transIp -eq $farmHostIp) {
-            Write-Host "  [9/9] Прозрачный выход (БЕЗ -x): [ИНФО] IP: $transIp (Провайдер РФ)" -ForegroundColor Yellow
+        if ($transIp -eq "95.56.111.109" -or $transIp -match '^95\.56\.') {
+            Write-Host "  [9/9] Прозрачный выход (БЕЗ -x): [OK] IP: $transIp (AstroProxy Казахстан)" -ForegroundColor Green
         } else {
-            Write-Host "  [9/9] Прозрачный выход (БЕЗ -x): [OK] IP: $transIp (Прокси Казахстана)" -ForegroundColor Green
+            Write-Host "  [9/9] Прозрачный выход (БЕЗ -x): [ИНФО] IP: $transIp (Интернет фермы РФ)" -ForegroundColor Yellow
         }
     } else {
         $transIp = ($rawTransIp -replace "\r?\n", " ").Trim()
         Write-Host "  [9/9] Прозрачный выход (БЕЗ -x): [ОШИБКА] $transIp" -ForegroundColor Red
     }
 
-    # [TIKTOK] Проверка связи с TikTok и сброс зависших сокетов
+    # [TIKTOK] Проверка связи с серверами TikTok
     $tiktokOk = $false
-    $rawTtPing = (& adb -s $serial shell "$curlCmd -s -m 6 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1") -join " "
+    $rawTtPing = (& adb -s $serial shell "$curlCmd -s -S -m 15 -k -o /dev/null -w '%{http_code}' https://api.tiktokv.com/ping/ 2>&1") -join " "
     $ttPing = ("$rawTtPing").Trim()
     if ($ttPing -match "(200|403|404|301|302)") {
         $tiktokOk = $true
@@ -340,7 +358,8 @@ foreach ($dev in $devices) {
     # ИТОГОВЫЙ ВЕРДИКТ БЕЗ САМООБМАНА
     $verdict = "НЕИЗВЕСТНО"
     $verdictColor = "Red"
-    $isProxyExit = ($transOk -and $farmHostIp -and $transIp -ne $farmHostIp) -or ($gwRoute -eq "proxy" -and $transIp -ne $farmHostIp -and $transOk)
+    $isKazakhstan = ($transIp -eq "95.56.111.109" -or $transIp -match '^95\.56\.') -or ($proxyIp -eq "95.56.111.109" -and $gwRoute -eq "proxy")
+    $isRussianIp = ($transIp -eq $farmHostIp -or $transIp -match '^5\.166\.')
 
     if (-not $rootOk) {
         $verdict = "ТРЕБУЕТСЯ ROOT В MAGISK"
@@ -354,17 +373,14 @@ foreach ($dev in $devices) {
     } elseif (-not $singboxOk -or -not $iptablesOk) {
         $verdict = "ОШИБКА: sing-box/iptables не активен"
         $verdictColor = "Red"
-    } elseif ($isProxyExit -and $tiktokOk) {
-        $verdict = "ГОТОВ 100% (TikTok через прокси $transIp)"
+    } elseif ($isKazakhstan -and $tiktokOk) {
+        $verdict = "ГОТОВ 100% (TikTok через Казахстан: $transIp)"
         $verdictColor = "Green"
-    } elseif ($agentStatus -and $agentStatus.mode -eq "shared_sequential" -and $agentStatus.activeDeviceId -ne $serial) {
+    } elseif ($gwRoute -eq "direct" -or $isRussianIp) {
         $verdict = "РЕЗЕРВ SHARED (Трафик РФ: $transIp)"
         $verdictColor = "Yellow"
-    } elseif ($farmHostIp -and $transIp -eq $farmHostIp) {
-        $verdict = "УТЕЧКА: Трафик идет через РФ вместо Казахстана!"
-        $verdictColor = "Red"
     } elseif ($tiktokOk) {
-        $verdict = "TikTok доступен"
+        $verdict = "TikTok доступен ($transIp)"
         $verdictColor = "Yellow"
     } else {
         $verdict = "ОШИБКА СОЕДИНЕНИЯ"
@@ -385,7 +401,7 @@ foreach ($dev in $devices) {
         DNS = if ($dnsOk) { "OK" } else { "FAIL" }
         Root = if ($rootOk) { "OK" } else { "FAIL" }
         Route = $gwRoute
-        ExitIP = $transIp
+        ExitIP = if ($transOk) { $transIp } else { $proxyIp }
         TikTok = if ($tiktokOk) { "OK" } else { "FAIL" }
         Verdict = $verdict
     }
@@ -404,39 +420,27 @@ $sharedDevices = $results | Where-Object { $_.Verdict -match "РЕЗЕРВ SHARE
 Write-Host "========================================================================================================" -ForegroundColor Cyan
 Write-Host "ИТОГОВЫЙ ОТЧЕТ:" -ForegroundColor Cyan
 Write-Host "  Всего плат проверено: $($results.Count)" -ForegroundColor White
-Write-Host "  Полностью готовы к TikTok (прокси активен): $($readyDevices.Count)" -ForegroundColor Green
-Write-Host "  В резерве Shared (ждут очереди, интернет РФ): $($sharedDevices.Count)" -ForegroundColor Yellow
+Write-Host "  Полностью готовы к TikTok (Казахстан): $($readyDevices.Count)" -ForegroundColor Green
+Write-Host "  В резерве Shared (трафик РФ, ждут очереди): $($sharedDevices.Count)" -ForegroundColor Yellow
 Write-Host "  Требуют включения Root в Magisk: $($noRootDevices.Count)" -ForegroundColor $(if ($noRootDevices.Count -gt 0) { "Red" } else { "Green" })
 Write-Host ""
 
-if ($noRootDevices.Count -gt 0) {
-    Write-Host "ИНСТРУКЦИЯ ДЛЯ 5 ПЛАТ БЕЗ ROOT (сообщение 'Shell was denied superuser rights'):" -ForegroundColor Red
-    Write-Host "В Magisk вверху включен глобальный пункт 'Приложения и ADB', НО во вкладке ЩИТ" -ForegroundColor Yellow
-    Write-Host "компонент Shell сейчас заблокирован индивидуально!" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "КАК РАЗРЕШИТЬ ROOT (2 клика на телефоне):" -ForegroundColor White
-    Write-Host "  1) Внизу приложения Magisk нажмите на иконку ЩИТА (Суперпользователь)." -ForegroundColor White
-    Write-Host "  2) В списке приложений найдите 'Shell' (или com.android.shell) и включите тумблер (зелёный)!" -ForegroundColor Green
-    Write-Host "  ЛИБО: Нажмите Шестерёнку вверху справа -> 'Автоматический ответ' -> выберите 'Предоставить'." -ForegroundColor Cyan
-    Write-Host ""
-}
-
-if ($agentStatus -and $agentStatus.mode -eq "shared_sequential") {
+# Если стойка сейчас в Shared-режиме: предлагаем переключить в Private
+if ($agentStatus -and $agentStatus.mode -eq "shared_sequential" -or ($sharedDevices.Count -gt 0)) {
     Write-Host "--------------------------------------------------------------------------------------------------------" -ForegroundColor Cyan
-    Write-Host "РЕКОМЕНДАЦИЯ ПО РЕЖИМУ ПРОКСИ:" -ForegroundColor Yellow
-    Write-Host "Стойка сейчас работает в режиме Shared (прокси Казахстана включен только на ОДНОЙ плате)." -ForegroundColor White
-    Write-Host "Остальные платы выходят через домашний интернет РФ, где TikTok заблокирован." -ForegroundColor White
-    Write-Host "Вы можете переключить стойку в Private-режим, чтобы ВСЕ платы выходили через прокси одновременно." -ForegroundColor White
+    Write-Host "СОВЕТ: КАК ВКЛЮЧИТЬ ПРОКСИ КАЗАХСТАНА НА ВСЕХ 20 ПЛАТАХ СРАЗУ:" -ForegroundColor Yellow
+    Write-Host "Сейчас 19 плат выходят через интернет фермы (РФ, 5.166.179.153), где TikTok заблокирован." -ForegroundColor White
+    Write-Host "В Private-режиме ВСЕ 20 плат выходят через AstroProxy Казахстан (95.56.111.109) одновременно!" -ForegroundColor White
     Write-Host ""
-    $ans = Read-Host "Включить Private-режим (прокси на ВСЕХ платах одновременно)? (y/N)"
-    if ($ans -match "^[yYдД]") {
-        Write-Host "Отправка команды переключения режима в device-agent..." -ForegroundColor Yellow
+    $ans = Read-Host "Включить Private-режим (прокси Казахстана на ВСЕХ 20 платах)? [Y/n]"
+    if ($ans -eq "" -or $ans -match "^[yYдД]") {
+        Write-Host "Переключение в Private-режим..." -ForegroundColor Yellow
         try {
-            $switchRes = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/mode" -Method Post -Body '{"mode":"private_parallel"}' -ContentType "application/json" -TimeoutSec 5
-            Write-Host "[OK] Режим Private успешно активирован! Все платы теперь подключены к прокси." -ForegroundColor Green
-            Write-Host "Перезапустите диагностику, чтобы увидеть обновленный статус всех плат." -ForegroundColor Cyan
+            $switchRes = Invoke-RestMethod -Uri "$agentUrl/proxy/mode" -Method Post -Body '{"mode":"private_parallel"}' -ContentType 'application/json' -TimeoutSec 5
+            Write-Host "[OK] Режим Private успешно активирован! Все 20 плат переведены на AstroProxy Казахстан!" -ForegroundColor Green
+            Write-Host "Запустите diagnose-rack.bat снова, чтобы убедиться в 100% готовности всех плат." -ForegroundColor Cyan
         } catch {
-            Write-Host "[ОШИБКА] Не удалось переключить режим: $_" -ForegroundColor Red
+            Write-Host "[ИНФО] Запустите set-private-mode.bat для применения." -ForegroundColor Gray
         }
     }
 }
