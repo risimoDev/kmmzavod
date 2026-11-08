@@ -51,6 +51,8 @@ export interface ProxyModeState {
   ok: boolean;
   mode: 'shared_sequential' | 'private_parallel';
   inactivePolicy: 'direct' | 'block';
+  trafficSaver?: 'block_media' | 'direct_media' | 'off';
+  trafficStandby?: boolean;
   activeDeviceId: string | null;
   busyDeviceId?: string | null;
   hasSharedProxy: boolean;
@@ -187,6 +189,24 @@ export const deviceAgentClient = {
 
   async setProxyMode(mode: 'shared_sequential' | 'private_parallel', inactivePolicy?: 'direct' | 'block'): Promise<ProxyModeState> {
     const res = await axios.post(`${BASE}/proxy/mode`, { mode, inactivePolicy }, { timeout: 30_000 });
+    return res.data;
+  },
+
+  async getTrafficConfig(): Promise<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }> {
+    const res = await axios.get(`${BASE}/proxy/traffic`, { timeout: 8_000 });
+    return res.data;
+  },
+
+  async setTrafficConfig(
+    trafficSaver?: 'block_media' | 'direct_media' | 'off',
+    trafficStandby?: boolean,
+  ): Promise<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }> {
+    const res = await axios.post(`${BASE}/proxy/traffic`, { trafficSaver, trafficStandby }, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async optimizeDataSaver(deviceId?: string): Promise<{ ok: boolean; total?: number; successful?: number; results?: any[] }> {
+    const res = await axios.post(`${BASE}/proxy/optimize-data-saver`, { deviceId }, { timeout: 60_000 });
     return res.data;
   },
 

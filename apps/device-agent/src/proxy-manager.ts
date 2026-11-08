@@ -32,6 +32,8 @@ import {
   isBypassedHost,
   isWildberriesHost,
   isBlackholeHost,
+  isHeavyMediaCdn,
+  isTikTokMediaCdn,
   upstreamKey,
   type ListenerStats,
   type ProxyType,
@@ -61,6 +63,8 @@ export interface MaskedProxyConfig extends Omit<DeviceProxyConfig, 'password'> {
 export type ProxyMode = 'shared_sequential' | 'private_parallel';
 /** What non-active phones do in shared_sequential mode. */
 export type InactivePolicy = 'direct' | 'block';
+/** Traffic Saver: block heavy media CDN (saves 98%), direct media (free via farm PC), or off (full proxy). */
+export type TrafficSaverMode = 'block_media' | 'direct_media' | 'off';
 /** Where a phone's proxied traffic currently goes. `none` = no proxy configured for it. */
 export type DeviceRoute = 'proxy' | 'direct' | 'block' | 'none';
 export type CaptureMethod = 'transparent' | 'system_proxy';
@@ -112,6 +116,8 @@ interface PersistedStateV2 {
   version: 2;
   mode: ProxyMode;
   inactivePolicy: InactivePolicy;
+  trafficSaver?: TrafficSaverMode;
+  trafficStandby?: boolean;
   activeDeviceId: string | null;
   sharedProxy: DeviceProxyConfig | null;
   devices: Record<string, DeviceEntry>;
@@ -131,6 +137,8 @@ export function maskProxy(p: DeviceProxyConfig): MaskedProxyConfig {
 export class ProxyManager {
   mode: ProxyMode = 'shared_sequential';
   inactivePolicy: InactivePolicy = 'direct';
+  trafficSaver: TrafficSaverMode = 'block_media';
+  trafficStandby: boolean = false;
   activeDeviceId: string | null = null;
   sharedProxy: DeviceProxyConfig | null = null;
 
@@ -259,6 +267,12 @@ export class ProxyManager {
         const s = data as PersistedStateV2;
         if (s.mode === 'shared_sequential' || s.mode === 'private_parallel') this.mode = s.mode;
         if (s.inactivePolicy === 'direct' || s.inactivePolicy === 'block') this.inactivePolicy = s.inactivePolicy;
+        if (s.trafficSaver === 'block_media' || s.trafficSaver === 'direct_media' || s.trafficSaver === 'off') {
+          this.trafficSaver = s.trafficSaver;
+        }
+        if (typeof s.trafficStandby === 'boolean') {
+          this.trafficStandby = s.trafficStandby;
+        }
         this.activeDeviceId = typeof s.activeDeviceId === 'string' ? s.activeDeviceId : null;
         this.sharedProxy = s.sharedProxy ?? null;
         for (const [id, entry] of Object.entries(s.devices ?? {})) {
@@ -292,6 +306,8 @@ export class ProxyManager {
       version: 2,
       mode: this.mode,
       inactivePolicy: this.inactivePolicy,
+      trafficSaver: this.trafficSaver,
+      trafficStandby: this.trafficStandby,
       activeDeviceId: this.activeDeviceId,
       sharedProxy: this.sharedProxy,
       devices: Object.fromEntries(this.devices),
@@ -355,6 +371,12 @@ export class ProxyManager {
     const entry = this.devices.get(deviceId);
     if (!entry) return { kind: 'direct' };
 
+    // Standby mode: pause all proxying across the farm to preserve balance when rack is idle
+    if (this.trafficStandby) {
+      if (this.inactivePolicy === 'direct') return { kind: 'direct' };
+      return { kind: 'block', reason: 'Proxy Standby: traffic paused to save balance' };
+    }
+
     // Drop dead vendor telemetry immediately without attempting direct connects
     if (targetHost && isBlackholeHost(targetHost)) {
       return { kind: 'block', reason: 'telemetry blackhole' };
@@ -375,6 +397,16 @@ export class ProxyManager {
     if (targetHost && isWildberriesHost(targetHost)) {
       if (entry.proxy.country && !['Russia', 'Russian Federation', 'RU'].includes(entry.proxy.country)) {
         this.logger.debug({ deviceId, targetHost, proxyCountry: entry.proxy.country }, 'proxy-manager: routing Wildberries direct to ensure Russian IP');
+        return { kind: 'direct' };
+      }
+    }
+
+    // Traffic Saver: eliminate heavy video CDN media streaming (-98% data usage)
+    if (targetHost && isHeavyMediaCdn(targetHost)) {
+      if (this.trafficSaver === 'block_media') {
+        return { kind: 'block', reason: 'traffic saver: heavy video CDN stream blocked (-98% bandwidth)' };
+      }
+      if (this.trafficSaver === 'direct_media') {
         return { kind: 'direct' };
       }
     }
@@ -539,6 +571,8 @@ export class ProxyManager {
   getMode(): {
     mode: ProxyMode;
     inactivePolicy: InactivePolicy;
+    trafficSaver: TrafficSaverMode;
+    trafficStandby: boolean;
     activeDeviceId: string | null;
     hasSharedProxy: boolean;
     busyDeviceId: string | null;
@@ -546,10 +580,68 @@ export class ProxyManager {
     return {
       mode: this.mode,
       inactivePolicy: this.inactivePolicy,
+      trafficSaver: this.trafficSaver,
+      trafficStandby: this.trafficStandby,
       activeDeviceId: this.activeDeviceId,
       hasSharedProxy: this.hasAnyProxy(),
       busyDeviceId: this.lease?.deviceId ?? null,
     };
+  }
+
+  getTrafficConfig(): { trafficSaver: TrafficSaverMode; trafficStandby: boolean } {
+    return {
+      trafficSaver: this.trafficSaver,
+      trafficStandby: this.trafficStandby,
+    };
+  }
+
+  setTrafficConfig(trafficSaver?: TrafficSaverMode, trafficStandby?: boolean): { trafficSaver: TrafficSaverMode; trafficStandby: boolean } {
+    if (trafficSaver && ['block_media', 'direct_media', 'off'].includes(trafficSaver)) {
+      this.trafficSaver = trafficSaver;
+    }
+    if (typeof trafficStandby === 'boolean') {
+      this.trafficStandby = trafficStandby;
+    }
+    this.saveState();
+    for (const listener of this.listeners.values()) {
+      listener.dropConnections();
+    }
+    this.logger.info({ trafficSaver: this.trafficSaver, trafficStandby: this.trafficStandby }, 'proxy-manager: traffic configuration updated');
+    return this.getTrafficConfig();
+  }
+
+  async optimizeDeviceDataSaver(deviceId: string): Promise<{ ok: boolean; log: string }> {
+    const cmds = [
+      'settings put global data_saver 1',
+      'settings put global data_saver_enabled 1',
+      'cmd netpolicy set restrict-background true',
+      'cmd netpolicy set metered-network true tun0',
+      'cmd netpolicy set metered-network true wlan0 2>/dev/null || true',
+      'settings put master sync_automatically 0',
+    ];
+    try {
+      const out = await this.adb.shell(deviceId, cmds.join('; '), 15_000);
+      return { ok: true, log: out.trim() || 'OK' };
+    } catch (err: any) {
+      return { ok: false, log: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async optimizeAllDevicesDataSaver(): Promise<{
+    ok: boolean;
+    total: number;
+    successful: number;
+    results: Array<{ deviceId: string; ok: boolean; log: string }>;
+  }> {
+    const devices = (await this.adb.listDevices()).filter((d) => d.state === 'device');
+    const results = await Promise.all(
+      devices.map(async (d) => {
+        const res = await this.optimizeDeviceDataSaver(d.serial);
+        return { deviceId: d.serial, ok: res.ok, log: res.log };
+      }),
+    );
+    const successful = results.filter((r) => r.ok).length;
+    return { ok: true, total: devices.length, successful, results };
   }
 
   hasAnyProxy(): boolean {
@@ -569,6 +661,8 @@ export class ProxyManager {
   getStatus(): {
     mode: ProxyMode;
     inactivePolicy: InactivePolicy;
+    trafficSaver: TrafficSaverMode;
+    trafficStandby: boolean;
     activeDeviceId: string | null;
     busyDeviceId: string | null;
     hostIp: string | null;
@@ -582,6 +676,8 @@ export class ProxyManager {
     return {
       mode: this.mode,
       inactivePolicy: this.inactivePolicy,
+      trafficSaver: this.trafficSaver,
+      trafficStandby: this.trafficStandby,
       activeDeviceId: this.activeDeviceId,
       busyDeviceId: this.lease?.deviceId ?? null,
       hostIp: this.hostPublicIp,

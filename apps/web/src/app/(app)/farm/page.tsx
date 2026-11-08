@@ -2089,6 +2089,13 @@ function DevicesTab() {
   const [switchingProxyId, setSwitchingProxyId] = useState<string | null>(null);
   const [togglingProxyMode, setTogglingProxyMode] = useState(false);
 
+  // Traffic Saver state ($10 / 1 GB Protection)
+  const [trafficSaver, setTrafficSaver] = useState<'block_media' | 'direct_media' | 'off'>('block_media');
+  const [trafficStandby, setTrafficStandby] = useState<boolean>(false);
+  const [savingTrafficSaver, setSavingTrafficSaver] = useState<boolean>(false);
+  const [optimizingDataSaver, setOptimizingDataSaver] = useState<boolean>(false);
+  const [dataSaverFeedback, setDataSaverFeedback] = useState<string | null>(null);
+
   // AstroProxy API state
   const [astroStatus, setAstroStatus] = useState<AstroProxyStatusResponse | null>(null);
   const [showAstroTokenInput, setShowAstroTokenInput] = useState(false);
@@ -2118,6 +2125,8 @@ function DevicesTab() {
         setActiveProxyDeviceId(modeRes.value.activeDeviceId);
         setInactivePolicy(modeRes.value.inactivePolicy ?? 'direct');
         setBusyProxyDeviceId(modeRes.value.busyDeviceId ?? null);
+        if (modeRes.value.trafficSaver) setTrafficSaver(modeRes.value.trafficSaver);
+        if (typeof modeRes.value.trafficStandby === 'boolean') setTrafficStandby(modeRes.value.trafficStandby);
       }
 
       if (devRes.status === 'fulfilled') {
@@ -3245,6 +3254,40 @@ function DevicesTab() {
     }
   };
 
+  const handleSetTrafficConfig = async (saver?: 'block_media' | 'direct_media' | 'off', standby?: boolean) => {
+    setSavingTrafficSaver(true);
+    try {
+      const res = await accountFarmApi.setTrafficConfig(saver, standby);
+      if (res.ok) {
+        if (res.trafficSaver) setTrafficSaver(res.trafficSaver as any);
+        if (typeof res.trafficStandby === 'boolean') setTrafficStandby(res.trafficStandby);
+        await loadData();
+      }
+    } catch (err: any) {
+      alert(`Ошибка настройки экономии трафика: ${err.message}`);
+    } finally {
+      setSavingTrafficSaver(false);
+    }
+  };
+
+  const handleOptimizeAllDataSaver = async () => {
+    setOptimizingDataSaver(true);
+    setDataSaverFeedback(null);
+    try {
+      const res = await accountFarmApi.optimizeDataSaver();
+      if (res.ok) {
+        setDataSaverFeedback(`Data Saver успешно активирован на ${res.successful ?? res.total ?? 20} платах!`);
+        setTimeout(() => setDataSaverFeedback(null), 8000);
+      } else {
+        setDataSaverFeedback('Не удалось применить Data Saver');
+      }
+    } catch (err: any) {
+      alert(`Ошибка оптимизации Data Saver: ${err.message}`);
+    } finally {
+      setOptimizingDataSaver(false);
+    }
+  };
+
   const handleSaveAstroToken = async () => {
     if (!astroTokenInput.trim()) return;
     setSavingAstroToken(true);
@@ -3873,6 +3916,106 @@ function DevicesTab() {
         </div>
       </div>
 
+      {/* ── Traffic & Cost Saver Control Hub ($10 / 1 GB Protection) ── */}
+      <div className="p-4 bg-surface-2/95 border border-emerald-500/30 rounded-xl shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className={cn(
+              "w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold shadow-inner flex-shrink-0",
+              trafficStandby
+                ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                : trafficSaver === 'block_media'
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                : trafficSaver === 'direct_media'
+                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+            )}>
+              {trafficStandby ? "⏸️" : "🛡️"}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-text-primary">
+                  Контроль и защита от перерасхода трафика ($10 / 1 ГБ)
+                </span>
+                <span className={cn(
+                  "text-[10px] px-2 py-0.5 rounded font-bold border",
+                  trafficStandby
+                    ? "bg-rose-500/15 text-rose-300 border-rose-500/40"
+                    : trafficSaver === 'block_media'
+                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+                    : trafficSaver === 'direct_media'
+                    ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/40"
+                    : "bg-amber-500/15 text-amber-300 border-amber-500/40"
+                )}>
+                  {trafficStandby
+                    ? "⏸️ ПРОКСИ НА ПАУЗЕ (0 БАЙТ)"
+                    : trafficSaver === 'block_media'
+                    ? "🛡️ УЛЬТРА-ЭКОНОМИЯ (-98%)"
+                    : trafficSaver === 'direct_media'
+                    ? "⚡ DIRECT-ВИДЕО (0 РУБ ЗА ПОТОК)"
+                    : "🌐 ПОЛНЫЙ ПРОКСИ"}
+                </span>
+              </div>
+              <p className="text-[11px] text-text-secondary mt-0.5">
+                {trafficStandby
+                  ? "Трафик прокси полностью заморожен. Платы отключены от платного канала до возобновления."
+                  : trafficSaver === 'block_media'
+                  ? "Видеопотоки TikTok CDN заблокированы: авторизация, логин, профили и посты работают 100%, расход падает с 40 МБ до 200 КБ!"
+                  : trafficSaver === 'direct_media'
+                  ? "Видео скачивается бесплатно через локальный интернет ПК фермы, а токены, API и геолокация идут через AstroProxy Казахстан."
+                  : "Весь трафик (включая тяжелые видео) транслируется через AstroProxy ($10/ГБ)."}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <select
+              value={trafficSaver}
+              disabled={savingTrafficSaver || trafficStandby}
+              onChange={(e) => handleSetTrafficConfig(e.target.value as any, trafficStandby)}
+              className="bg-surface-1 border border-border rounded-lg px-2.5 py-1.5 text-text-primary text-xs font-medium focus:ring-1 focus:ring-emerald-500"
+            >
+              <option value="block_media">🛡️ Ультра-экономия (Блок видео CDN: -98%)</option>
+              <option value="direct_media">⚡ Direct-видео (Бесплатный поток через ПК)</option>
+              <option value="off">🌐 Полный (Без фильтрации видео)</option>
+            </select>
+
+            <Button
+              size="sm"
+              variant="outline"
+              loading={savingTrafficSaver}
+              onClick={() => handleSetTrafficConfig(trafficSaver, !trafficStandby)}
+              className={cn(
+                "text-xs font-semibold shadow-sm",
+                trafficStandby
+                  ? "border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/15"
+                  : "border-rose-500/50 text-rose-300 hover:bg-rose-500/15"
+              )}
+            >
+              {trafficStandby ? "▶️ Возобновить прокси" : "⏸️ Заморозка (Standby)"}
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              loading={optimizingDataSaver}
+              onClick={handleOptimizeAllDataSaver}
+              className="border-purple-500/50 text-purple-300 hover:bg-purple-500/15 text-xs font-semibold"
+              title="Включает режим Android Data Saver, запрет фоновых данных и режим metered-network на всех 20 платах"
+            >
+              🚀 Data Saver на все платы
+            </Button>
+          </div>
+        </div>
+
+        {dataSaverFeedback && (
+          <div className="text-[11px] px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 flex items-center justify-between">
+            <span>✓ {dataSaverFeedback}</span>
+            <button onClick={() => setDataSaverFeedback(null)} className="text-text-tertiary hover:text-text-primary">✕</button>
+          </div>
+        )}
+      </div>
+
       {/* 20 Boards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {devices.map((device, idx) => {
@@ -3987,6 +4130,16 @@ function DevicesTab() {
                             {device.proxyStatus.method === 'transparent' ? 'root·весь трафик' : 'системный'}
                           </span>
                         )}
+                      </span>
+                    </div>
+                  )}
+
+                  {device.proxyStatus?.gateway && (
+                    <div className="flex items-center justify-between text-[11px] pt-0.5">
+                      <span className="text-text-tertiary">Шлюз (расход):</span>
+                      <span className="font-mono text-cyan-300 text-[10px] font-semibold">
+                        ↓{((device.proxyStatus.gateway.bytesDown || 0) / 1024 / 1024).toFixed(1)} МБ
+                        {' '}↑{((device.proxyStatus.gateway.bytesUp || 0) / 1024 / 1024).toFixed(1)} МБ
                       </span>
                     </div>
                   )}

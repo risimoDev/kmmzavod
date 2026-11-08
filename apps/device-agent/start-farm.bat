@@ -93,6 +93,12 @@ echo [OK] Служба Gnirehtet активна.
 echo.
 :skip_gnirehtet
 
+:: 3b2. Активация Data Saver и ограничение фонового трафика на всех платах
+echo [DATA-SAVER] Активация режима экономии трафика (Android Data Saver + Metered tun0)...
+powershell -NoProfile -Command "adb devices | ForEach-Object { if ($_ -match '^([^\s]+)\s+device\b') { adb -s $matches[1] shell 'settings put global data_saver 1; settings put global data_saver_enabled 1; cmd netpolicy set restrict-background true; cmd netpolicy set metered-network true tun0; settings put master sync_automatically 0' } }" >nul 2>nul
+echo [OK] Режим экономии трафика активирован на всех обнаруженных платах.
+echo.
+
 :: 3c. Проверка нативного движка sing-box (для прозрачного проксирования на платах)
 if not exist "%~dp0bin\sing-box" (
     echo [PROXIES] Загрузка нативного движка sing-box для Android ARM64...

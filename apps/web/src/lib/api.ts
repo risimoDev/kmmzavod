@@ -798,6 +798,29 @@ export const accountFarmApi = {
       body: JSON.stringify({ mode, inactivePolicy }),
     }),
 
+  getTrafficConfig: () =>
+    apiFetch<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }>(
+      '/api/v1/farm/devices/proxy/traffic'
+    ),
+
+  setTrafficConfig: (trafficSaver?: 'block_media' | 'direct_media' | 'off', trafficStandby?: boolean) =>
+    apiFetch<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }>(
+      '/api/v1/farm/devices/proxy/traffic',
+      {
+        method: 'POST',
+        body: JSON.stringify({ trafficSaver, trafficStandby }),
+      }
+    ),
+
+  optimizeDataSaver: (deviceId?: string) =>
+    apiFetch<{ ok: boolean; total?: number; successful?: number }>(
+      '/api/v1/farm/devices/proxy/optimize-data-saver',
+      {
+        method: 'POST',
+        body: JSON.stringify({ deviceId }),
+      }
+    ),
+
   switchActiveProxyDevice: (deviceId: string, force?: boolean) =>
     apiFetch<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }>(
       '/api/v1/farm/devices/proxy/switch-active',
@@ -1215,7 +1238,7 @@ export interface FarmDevice {
     method: 'transparent' | 'system_proxy' | null;
     applyError?: string;
     transparentError?: string;
-    gateway?: { activeConnections: number; lastError?: string };
+    gateway?: { activeConnections: number; lastError?: string; bytesDown?: number; bytesUp?: number; totalConnections?: number };
   } | null;
   /** Proxy the assigned account is linked to in the DB. */
   accountProxy?: { id: string; host: string; port: number; type: string } | null;
@@ -1249,6 +1272,8 @@ export interface ProxyModeState {
   ok: boolean;
   mode: 'shared_sequential' | 'private_parallel';
   inactivePolicy: 'direct' | 'block';
+  trafficSaver?: 'block_media' | 'direct_media' | 'off';
+  trafficStandby?: boolean;
   activeDeviceId: string | null;
   busyDeviceId?: string | null;
   hasSharedProxy: boolean;

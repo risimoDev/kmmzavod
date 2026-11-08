@@ -805,7 +805,11 @@ export function isBlackholeHost(host: string): boolean {
     h.includes('samqaicongen.com') ||
     h.includes('3g.qq.com') ||
     h.includes('baidu.com') ||
-    h.includes('samsungqbe.com')
+    h.includes('samsungqbe.com') ||
+    h.includes('fota-dn.ospserver.net') ||
+    h.includes('fus.samsungmobile.com') ||
+    h.includes('downloadcenter.samsung.com') ||
+    h.includes('update.samsung.com')
   );
 }
 
@@ -821,6 +825,57 @@ export function isWildberriesHost(host: string): boolean {
     h.includes('wildberries') ||
     h.includes('wb.ru')
   );
+}
+
+/**
+ * Returns true if the host is a heavy video CDN or static media delivery node.
+ * Crucial: API, login, passport, and upload endpoints are NEVER treated as media CDN.
+ */
+export function isTikTokMediaCdn(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().trim();
+
+  // 1. Safeguard: Critical API, passport/auth, upload endpoints must ALWAYS pass
+  if (
+    h.includes('passport') ||
+    h.includes('login') ||
+    h.includes('upload') ||
+    h.endsWith('.tiktokv.com') ||
+    h === 'tiktokv.com' ||
+    h === 'tiktok.com' ||
+    h === 'www.tiktok.com' ||
+    h === 'm.tiktok.com' ||
+    h.includes('musical.ly') ||
+    h.includes('byteoversea.com') ||
+    h.includes('byteintl.net')
+  ) {
+    return false;
+  }
+
+  // 2. Video CDN streaming and heavy chunk distribution domains (consume 98% of bandwidth)
+  return (
+    h.includes('tiktokcdn.com') ||
+    h.includes('tiktokcdn-eu.com') ||
+    h.includes('tiktokcdn-us.com') ||
+    h.includes('tiktokcdn-in.com') ||
+    h.includes('byteoversea.net') ||
+    h.includes('ibytedtos.com') ||
+    h.includes('muscdn.com') ||
+    h.includes('tlivecdn.com') ||
+    h.includes('bytegoofy.com') ||
+    h.includes('sgpstatp.com') ||
+    (h.includes('akamaized.net') && !h.includes('api'))
+  );
+}
+
+/** Check if host is any social media video CDN stream (TikTok, Instagram, YouTube) */
+export function isHeavyMediaCdn(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().trim();
+  if (isTikTokMediaCdn(h)) return true;
+  if (h.includes('cdninstagram.com') || h.includes('fbcdn.net')) return true;
+  if (h.includes('googlevideo.com')) return true;
+  return false;
 }
 
 /** Check if host is system telemetry, captive portal check or excluded from proxying. */
@@ -865,21 +920,26 @@ export function isBypassedHost(host: string, bypassList?: string): boolean {
     h.includes('samsungcloud.com') ||
     h.includes('samsungqbe.com') ||
     h.includes('ssp.samsung.com') ||
-    h.includes('secb2b.com')
+    h.includes('secb2b.com') ||
+    h.includes('ospserver.net') ||
+    h.includes('samsungmobile.com')
   ) {
     return true;
   }
 
-  // Android OS connectivity checks, time sync, and Google Play Store downloads
+  // Android OS connectivity checks, time sync, and Google Play Store downloads (never waste paid proxy on OS updates)
   if (
     h === 'connectivitycheck.gstatic.com' ||
     h === 'connectivitycheck.android.com' ||
     h === 'clients3.google.com' ||
-    h === 'play.googleapis.com' ||
-    h === 'android.apis.google.com' ||
+    h.includes('play.googleapis.com') ||
+    h.includes('android.apis.google.com') ||
+    h.includes('android.clients.google.com') ||
     h === 'time.android.com' ||
-    h.endsWith('.gvt1.com') ||
-    h.endsWith('.gvt2.com')
+    h.includes('.gvt1.com') ||
+    h.includes('.gvt2.com') ||
+    h.includes('.gvt3.com') ||
+    h.includes('1e100.net')
   ) {
     return true;
   }

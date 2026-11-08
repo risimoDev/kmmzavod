@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
-import { parseSni, DeviceProxyListener } from '../src/proxy-forwarder';
+import { parseSni, DeviceProxyListener, isTikTokMediaCdn, isHeavyMediaCdn } from '../src/proxy-forwarder';
 
 const quiet: any = { info() {}, warn() {}, error() {}, debug() {}, child() { return quiet; } };
 
@@ -98,10 +98,33 @@ async function testDeviceProxyListenerSniPeeking() {
   console.log('PASS DeviceProxyListener successfully peeks SNI and dials upstream with domain name');
 }
 
+async function testMediaCdnClassification() {
+  // 1. Critical APIs must NEVER be matched as CDN
+  assert.strictEqual(isTikTokMediaCdn('api-va.tiktokv.com'), false, 'TikTok API must not be CDN');
+  assert.strictEqual(isTikTokMediaCdn('passport.tiktokv.com'), false, 'Passport auth must not be CDN');
+  assert.strictEqual(isTikTokMediaCdn('upload-va.tiktokv.com'), false, 'Upload endpoint must not be CDN');
+  assert.strictEqual(isTikTokMediaCdn('api-h2.byteoversea.com'), false, 'Byteoversea API must not be CDN');
+  assert.strictEqual(isTikTokMediaCdn('tiktok.com'), false, 'tiktok.com must not be CDN');
+  assert.strictEqual(isTikTokMediaCdn('www.tiktok.com'), false, 'www.tiktok.com must not be CDN');
+
+  // 2. Heavy video CDN endpoints MUST be classified as CDN
+  assert.strictEqual(isTikTokMediaCdn('v16-webapp-prime.tiktokcdn.com'), true, 'Video CDN must be CDN');
+  assert.strictEqual(isTikTokMediaCdn('v19.tiktokcdn.com'), true, 'Video CDN must be CDN');
+  assert.strictEqual(isTikTokMediaCdn('p16-va.tiktokcdn.com'), true, 'p16 cdn must be CDN');
+  assert.strictEqual(isTikTokMediaCdn('sf16-va.tiktokcdn.com'), true, 'sf16 cdn must be CDN');
+  assert.strictEqual(isTikTokMediaCdn('obj.ibytedtos.com'), true, 'ByteDance storage must be CDN');
+  assert.strictEqual(isTikTokMediaCdn('v26.byteoversea.net'), true, 'Byteoversea net must be CDN');
+  assert.strictEqual(isHeavyMediaCdn('v16.tiktokcdn.com'), true, 'Heavy CDN detector must match');
+  assert.strictEqual(isHeavyMediaCdn('scontent.cdninstagram.com'), true, 'Instagram CDN must match');
+
+  console.log('PASS isTikTokMediaCdn and isHeavyMediaCdn accurately segregate API vs heavy video CDN');
+}
+
 async function main() {
   await testSniParser();
   await testDeviceProxyListenerSniPeeking();
-  console.log('\nAll SNI peeking tests PASSED successfully!');
+  await testMediaCdnClassification();
+  console.log('\nAll SNI peeking and traffic saver tests PASSED successfully!');
 }
 
 main().catch((err) => {

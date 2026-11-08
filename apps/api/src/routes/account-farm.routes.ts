@@ -1672,6 +1672,40 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     }
   });
 
+  app.get('/devices/proxy/traffic', async (_request, reply) => {
+    try {
+      const res = await deviceAgentClient.getTrafficConfig();
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(502).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/traffic', async (request, reply) => {
+    const body = z.object({
+      trafficSaver: z.enum(['block_media', 'direct_media', 'off']).optional(),
+      trafficStandby: z.boolean().optional(),
+    }).parse(request.body);
+    try {
+      const res = await deviceAgentClient.setTrafficConfig(body.trafficSaver, body.trafficStandby);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
+  app.post('/devices/proxy/optimize-data-saver', async (request, reply) => {
+    const body = z.object({
+      deviceId: z.string().optional(),
+    }).parse(request.body ?? {});
+    try {
+      const res = await deviceAgentClient.optimizeDataSaver(body.deviceId);
+      return reply.send(res);
+    } catch (err) {
+      return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
+    }
+  });
+
   app.post('/devices/proxy/switch-active', async (request, reply) => {
     const body = z.object({ deviceId: z.string().min(1), force: z.boolean().optional() }).parse(request.body);
     try {

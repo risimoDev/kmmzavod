@@ -278,6 +278,39 @@ app.post('/proxy/mode', async (req, reply) => {
   return proxyManager.setMode(parsed.data.mode, parsed.data.inactivePolicy);
 });
 
+app.get('/proxy/traffic', async () => {
+  return {
+    ok: true,
+    ...proxyManager.getTrafficConfig(),
+  };
+});
+
+const SetTrafficBody = z.object({
+  trafficSaver: z.enum(['block_media', 'direct_media', 'off']).optional(),
+  trafficStandby: z.boolean().optional(),
+});
+
+app.post('/proxy/traffic', async (req, reply) => {
+  const parsed = SetTrafficBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply.code(400);
+    return { ok: false, error: parsed.error.flatten() };
+  }
+  return {
+    ok: true,
+    ...proxyManager.setTrafficConfig(parsed.data.trafficSaver, parsed.data.trafficStandby),
+  };
+});
+
+app.post('/proxy/optimize-data-saver', async (req) => {
+  const body = req.body as { deviceId?: string } | undefined;
+  if (body?.deviceId) {
+    const res = await proxyManager.optimizeDeviceDataSaver(body.deviceId);
+    return { ok: res.ok, results: [{ deviceId: body.deviceId, ...res }] };
+  }
+  return proxyManager.optimizeAllDevicesDataSaver();
+});
+
 const SwitchActiveProxyBody = z.object({
   deviceId: z.string().min(1),
   force: z.boolean().optional(),
