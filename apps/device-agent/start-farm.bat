@@ -59,29 +59,29 @@ if "%ADB_FOUND%"=="0" (
 echo.
 echo [1/4] Освобождение портов и процессов 8300 и 5037...
 
+:: Принудительное завершение старых процессов ADB и Gnirehtet (без adb kill-server, который зависает на мертвом сокете)
+taskkill /F /T /IM gnirehtet.exe >nul 2>nul
+taskkill /F /T /IM adb.exe >nul 2>nul
+
 :: Очистка зависших процессов старого device-agent на порту 8300 через нативный netstat
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :8300') do (
     if not "%%a"=="0" taskkill /F /PID %%a >nul 2>nul
 )
-
-:: Завершение старых процессов ADB и Gnirehtet
-taskkill /F /IM gnirehtet.exe >nul 2>nul
-adb kill-server >nul 2>nul
-taskkill /F /IM adb.exe >nul 2>nul
 
 :: Очистка порта 5037 через нативный netstat, если кто-то еще удерживает порт
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :5037') do (
     if not "%%a"=="0" taskkill /F /PID %%a >nul 2>nul
 )
 ping 127.0.0.1 -n 2 >nul
+echo [OK] Порты и старые процессы очищены.
 
+echo.
 echo [2/4] Запуск чистого сервера ADB...
 adb start-server
 if errorlevel 1 (
     echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
     echo Повторный запуск...
-    adb kill-server >nul 2>nul
-    taskkill /F /IM adb.exe >nul 2>nul
+    taskkill /F /T /IM adb.exe >nul 2>nul
     ping 127.0.0.1 -n 2 >nul
     adb start-server
 )
