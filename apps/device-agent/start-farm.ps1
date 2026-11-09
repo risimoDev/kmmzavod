@@ -50,20 +50,48 @@ if (Test-Path (Join-Path $localPlatformTools "adb.exe")) {
     Write-Host "[ВНИМАНИЕ] adb.exe не найден! Поместите папку platform-tools рядом со скриптом." -ForegroundColor Yellow
 }
 
-# 3. Очистка старых зависших процессов ADB и Gnirehtet
+# 3. Очистка старых зависших процессов и проверка ADB
 Write-Host ""
-Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
-Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Write-Host "Проверка состояния ADB и портов..." -ForegroundColor Yellow
+
+# Очистка старого процесса device-agent на порту 8300 (если завис)
 try {
-    $port5037Pid = (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue).OwningProcess
-    if ($port5037Pid) { Stop-Process -Id $port5037Pid -Force -ErrorAction SilentlyContinue }
+    $port8300Connections = Get-NetTCPConnection -LocalPort 8300 -State Listen -ErrorAction SilentlyContinue
+    if ($port8300Connections) {
+        $port8300Connections | ForEach-Object {
+            Write-Host "[ОЧИСТКА] Завершение старого процесса на порту 8300 (PID $($_.OwningProcess))..." -ForegroundColor Yellow
+            Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+        }
+    }
 } catch {}
-Start-Sleep -Seconds 2
+
+$adbOk = $false
+try {
+    $test = & adb get-state 2>&1
+    if ($LASTEXITCODE -eq 0) { $adbOk = $true }
+} catch {}
+
+if ($adbOk) {
+    Write-Host "[OK] Служба ADB активна и отвечает (перезапуск не требуется)." -ForegroundColor Green
+} else {
+    Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
+    Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    try {
+        $port5037 = Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue
+        if ($port5037) {
+            $port5037 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+        }
+    } catch {}
+    Start-Sleep -Seconds 2
+
+    if ($adbBin) {
+        & $adbBin start-server
+    }
+}
 
 if ($adbBin) {
-    & $adbBin start-server
-    Write-Host "Ожидание обнаружения USB-плат в стойке (3 сек)..." -ForegroundColor Yellow
-    Start-Sleep -Seconds 3
+    Write-Host "Ожидание обнаружения USB-плат в стойке (2 сек)..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
 
     Write-Host ""
     Write-Host "Подключенные платы в стойке:" -ForegroundColor Cyan
@@ -94,13 +122,6 @@ if (Test-Path $gnirehtetExe) {
     Write-Host ""
     Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
     Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    # Сброс старой службы Gnirehtet на всех телефонах стойки для применения DNS 77.88.8.8
-    $rawDevs = & adb devices
-    foreach ($line in $rawDevs) {
-        if ($line -match "^([^\s]+)\s+device\b") {
-            & adb -s $matches[1] shell am force-stop com.genymobile.gnirehtet 2>$null | Out-Null
-        }
-    }
     Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", "77.88.8.8,1.1.1.1"
     Write-Host "[OK] Служба Gnirehtet запущена для всех USB-плат." -ForegroundColor Green
 }

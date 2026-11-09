@@ -55,27 +55,46 @@ if "%ADB_FOUND%"=="0" (
     echo.
 )
 
-:: 3. Очистка старых/зависших процессов (ADB и Gnirehtet должны перезапускаться вместе)
+:: 3. Проверка и подготовка служб (ADB, Gnirehtet, Device-Agent)
 echo.
-echo Очистка старых процессов ADB и Gnirehtet...
-taskkill /F /IM gnirehtet.exe >nul 2>nul
-taskkill /F /IM adb.exe >nul 2>nul
-powershell -NoProfile -Command "$p = (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue).OwningProcess; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }" >nul 2>nul
-ping 127.0.0.1 -n 3 >nul
+echo Проверка состояния ADB и портов...
 
-echo Запуск службы ADB...
-adb start-server
-if errorlevel 1 (
-    echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
-    echo Сброс и повторный запуск...
-    taskkill /F /IM gnirehtet.exe >nul 2>nul
-    taskkill /F /IM adb.exe >nul 2>nul
-    ping 127.0.0.1 -n 3 >nul
-    adb start-server
+:: Очистка зависших процессов старого device-agent на порту 8300 (если есть)
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr :8300 ^| findstr LISTENING') do (
+    echo [ОЧИСТКА] Завершение старого процесса device-agent на порту 8300 (PID %%a)...
+    taskkill /F /PID %%a >nul 2>nul
 )
 
-echo Ожидание обнаружения USB-плат в стойке (3 сек)...
-ping 127.0.0.1 -n 4 >nul
+:: Проверяем, отвечает ли ADB прямо сейчас
+set "ADB_ALREADY_OK=0"
+adb get-state >nul 2>nul
+if not errorlevel 1 (
+    set "ADB_ALREADY_OK=1"
+    echo [OK] Служба ADB активна и отвечает (перезапуск не требуется).
+)
+
+if "%ADB_ALREADY_OK%"=="0" (
+    echo Очистка старых процессов ADB и Gnirehtet...
+    taskkill /F /IM gnirehtet.exe >nul 2>nul
+    adb kill-server >nul 2>nul
+    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr :5037 ^| findstr LISTENING') do taskkill /F /PID %%a >nul 2>nul
+    taskkill /F /IM adb.exe >nul 2>nul
+    ping 127.0.0.1 -n 3 >nul
+
+    echo Запуск службы ADB...
+    adb start-server
+    if errorlevel 1 (
+        echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
+        echo Сброс порта 5037 и повторный запуск...
+        adb kill-server >nul 2>nul
+        taskkill /F /IM adb.exe >nul 2>nul
+        ping 127.0.0.1 -n 3 >nul
+        adb start-server
+    )
+)
+
+echo Ожидание обнаружения USB-плат в стойке (2 сек)...
+ping 127.0.0.1 -n 3 >nul
 
 echo.
 echo Подключенные платы в стойке:
@@ -84,20 +103,12 @@ echo.
 
 :: 3b. Автозапуск Gnirehtet (раздача интернета по USB для стоек без Wi-Fi)
 if not exist "%~dp0platform-tools\gnirehtet.exe" goto :skip_gnirehtet
-echo [GNIREHTET] Очистка старых сессий Gnirehtet на телефонах...
-taskkill /F /IM gnirehtet.exe >nul 2>nul
-powershell -NoProfile -Command "adb devices | ForEach-Object { if ($_ -match '^([^\s]+)\s+device\b') { adb -s $matches[1] shell am force-stop com.genymobile.gnirehtet } }" >nul 2>nul
 echo [GNIREHTET] Запуск службы раздачи интернета по USB (DNS 77.88.8.8)...
+taskkill /F /IM gnirehtet.exe >nul 2>nul
 start "KMMZAVOD - Gnirehtet USB Reverse Tethering" "%~dp0platform-tools\gnirehtet.exe" autorun -d 77.88.8.8,1.1.1.1
 echo [OK] Служба Gnirehtet активна.
 echo.
 :skip_gnirehtet
-
-:: 3b2. Активация Data Saver и ограничение фонового трафика на всех платах
-echo [DATA-SAVER] Активация режима экономии трафика (Android Data Saver + Metered tun0)...
-powershell -NoProfile -Command "adb devices | ForEach-Object { if ($_ -match '^([^\s]+)\s+device\b') { adb -s $matches[1] shell 'settings put global data_saver 1; settings put global data_saver_enabled 1; cmd netpolicy set restrict-background true; cmd netpolicy set metered-network true tun0; settings put master sync_automatically 0' } }" >nul 2>nul
-echo [OK] Режим экономии трафика активирован на всех обнаруженных платах.
-echo.
 
 :: 3c. Проверка нативного движка sing-box (для прозрачного проксирования на платах)
 if not exist "%~dp0bin\sing-box" (
