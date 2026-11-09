@@ -50,43 +50,43 @@ if (Test-Path (Join-Path $localPlatformTools "adb.exe")) {
     Write-Host "[ВНИМАНИЕ] adb.exe не найден! Поместите папку platform-tools рядом со скриптом." -ForegroundColor Yellow
 }
 
-# 3. Очистка старых зависших процессов и проверка ADB
+# 3. Очистка старых зависших процессов и подготовка ADB
 Write-Host ""
-Write-Host "Проверка состояния ADB и портов..." -ForegroundColor Yellow
+Write-Host "Проверка и освобождение портов (8300 и 5037)..." -ForegroundColor Yellow
 
-# Очистка старого процесса device-agent на порту 8300 (если завис)
+# Очистка старого процесса device-agent на порту 8300 через netstat (не зависает на VPN/TUN)
 try {
-    $port8300Connections = Get-NetTCPConnection -LocalPort 8300 -State Listen -ErrorAction SilentlyContinue
-    if ($port8300Connections) {
-        $port8300Connections | ForEach-Object {
-            Write-Host "[ОЧИСТКА] Завершение старого процесса на порту 8300 (PID $($_.OwningProcess))..." -ForegroundColor Yellow
-            Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+    $lines8300 = netstat -ano 2>$null | Select-String ":8300\s+.*LISTENING"
+    foreach ($line in $lines8300) {
+        if ($line.Line -match '\s+(\d+)\s*$') {
+            $pId = [int]$matches[1]
+            if ($pId -gt 0) {
+                Write-Host "[ОЧИСТКА] Завершение процесса на порту 8300 (PID $pId)..." -ForegroundColor Yellow
+                Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 } catch {}
 
-$adbOk = $false
+Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
+Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 try {
-    $test = & adb devices 2>&1
-    if ($LASTEXITCODE -eq 0) { $adbOk = $true }
-} catch {}
-
-if ($adbOk) {
-    Write-Host "[OK] Служба ADB активна и отвечает (перезапуск не требуется)." -ForegroundColor Green
-} else {
-    Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
-    Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    try {
-        $port5037 = Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue
-        if ($port5037) {
-            $port5037 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+    $lines5037 = netstat -ano 2>$null | Select-String ":5037\s+.*LISTENING"
+    foreach ($line in $lines5037) {
+        if ($line.Line -match '\s+(\d+)\s*$') {
+            $pId = [int]$matches[1]
+            if ($pId -gt 0) {
+                Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue
+            }
         }
-    } catch {}
-    Start-Sleep -Seconds 2
-
-    if ($adbBin) {
-        & $adbBin start-server
     }
+} catch {}
+Start-Sleep -Seconds 1
+
+if ($adbBin) {
+    Write-Host "Запуск службы ADB..." -ForegroundColor Yellow
+    & $adbBin start-server
+    Write-Host "[OK] Служба ADB активна." -ForegroundColor Green
 }
 
 if ($adbBin) {

@@ -38,10 +38,13 @@ $agentUrl = "http://127.0.0.1:8300"
 $candidateIps = @("127.0.0.1", "10.66.66.2", "10.13.13.2", "localhost")
 
 try {
-    $tcpConns = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue
-    foreach ($c in $tcpConns) {
-        if ($c.LocalAddress -and $candidateIps -notcontains $c.LocalAddress) {
-            $candidateIps = @($c.LocalAddress) + $candidateIps
+    $netstatLines = netstat -ano 2>$null | Select-String ":8300\s+.*LISTENING"
+    foreach ($line in $netstatLines) {
+        if ($line.Line -match '\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):8300\b') {
+            $foundIp = $matches[1]
+            if ($candidateIps -notcontains $foundIp) {
+                $candidateIps = @($foundIp) + $candidateIps
+            }
         }
     }
 } catch {}

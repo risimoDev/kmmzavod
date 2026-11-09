@@ -57,44 +57,44 @@ if "%ADB_FOUND%"=="0" (
 
 :: 3. Проверка и подготовка служб (ADB, Gnirehtet, Device-Agent)
 echo.
-echo Проверка состояния ADB и портов...
+echo [1/4] Освобождение портов и процессов (8300 и 5037)...
 
-:: Очистка зависших процессов старого device-agent на порту 8300 (если есть)
-powershell -NoProfile -Command "try { (Get-NetTCPConnection -LocalPort 8300 -State Listen -ErrorAction SilentlyContinue) | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } } catch {}" >nul 2>nul
-
-:: Проверяем, отвечает ли ADB прямо сейчас (adb devices возвращает 0 при живом сервере, даже если 20 плат)
-set "ADB_ALREADY_OK=0"
-adb devices >nul 2>nul
-if not errorlevel 1 (
-    set "ADB_ALREADY_OK=1"
-    echo [OK] Служба ADB активна и отвечает (перезапуск не требуется).
-)
-
-if "%ADB_ALREADY_OK%"=="0" (
-    echo Очистка старых процессов ADB и Gnirehtet...
-    taskkill /F /IM gnirehtet.exe >nul 2>nul
-    adb kill-server >nul 2>nul
-    powershell -NoProfile -Command "try { (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue) | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } } catch {}" >nul 2>nul
-    taskkill /F /IM adb.exe >nul 2>nul
-    ping 127.0.0.1 -n 3 >nul
-
-    echo Запуск службы ADB...
-    adb start-server
-    if errorlevel 1 (
-        echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
-        echo Сброс порта 5037 и повторный запуск...
-        adb kill-server >nul 2>nul
-        taskkill /F /IM adb.exe >nul 2>nul
-        ping 127.0.0.1 -n 3 >nul
-        adb start-server
+:: Очистка зависших процессов старого device-agent на порту 8300 через нативный netstat
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :8300 ^| findstr LISTENING') do (
+    if "%%a" neq "0" (
+        echo   Завершение старого процесса device-agent (PID %%a)...
+        taskkill /F /PID %%a >nul 2>nul
     )
 )
 
-echo Ожидание обнаружения USB-плат в стойке (2 сек)...
-ping 127.0.0.1 -n 3 >nul
+:: Завершение старых процессов ADB и Gnirehtet
+taskkill /F /IM gnirehtet.exe >nul 2>nul
+adb kill-server >nul 2>nul
+taskkill /F /IM adb.exe >nul 2>nul
+
+:: Очистка порта 5037 через нативный netstat, если кто-то еще удерживает порт
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :5037 ^| findstr LISTENING') do (
+    if "%%a" neq "0" (
+        echo   Завершение зависшего процесса на порту ADB 5037 (PID %%a)...
+        taskkill /F /PID %%a >nul 2>nul
+    )
+)
+ping 127.0.0.1 -n 2 >nul
+
+echo [2/4] Запуск чистого сервера ADB...
+adb start-server
+if errorlevel 1 (
+    echo [ПРЕДУПРЕЖДЕНИЕ] Первая попытка запуска ADB вернула код ошибки.
+    echo Повторный запуск...
+    adb kill-server >nul 2>nul
+    taskkill /F /IM adb.exe >nul 2>nul
+    ping 127.0.0.1 -n 2 >nul
+    adb start-server
+)
+echo [OK] Служба ADB активна.
 
 echo.
-echo Подключенные платы в стойке:
+echo [3/4] Поиск подключенных плат в стойке...
 adb devices -l
 echo.
 
@@ -111,7 +111,7 @@ echo.
 if not exist "%~dp0bin\sing-box" (
     echo [PROXIES] Проверка нативного движка sing-box для Android ARM64...
     if not exist "%~dp0bin" mkdir "%~dp0bin"
-    curl.exe -L -k --connect-timeout 8 --max-time 30 -s -o "%~dp0bin\sing-box.tar.gz" https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz >nul 2>nul
+    curl.exe -L -k --connect-timeout 4 --max-time 10 -s -o "%~dp0bin\sing-box.tar.gz" https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz >nul 2>nul
     if exist "%~dp0bin\sing-box.tar.gz" (
         tar -xzf "%~dp0bin\sing-box.tar.gz" -C "%~dp0bin" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box >nul 2>nul
         del "%~dp0bin\sing-box.tar.gz" >nul 2>nul
