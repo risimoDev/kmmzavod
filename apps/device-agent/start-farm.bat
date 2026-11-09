@@ -57,14 +57,11 @@ if "%ADB_FOUND%"=="0" (
 
 :: 3. Проверка и подготовка служб (ADB, Gnirehtet, Device-Agent)
 echo.
-echo [1/4] Освобождение портов и процессов (8300 и 5037)...
+echo [1/4] Освобождение портов и процессов 8300 и 5037...
 
 :: Очистка зависших процессов старого device-agent на порту 8300 через нативный netstat
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :8300 ^| findstr LISTENING') do (
-    if "%%a" neq "0" (
-        echo   Завершение старого процесса device-agent (PID %%a)...
-        taskkill /F /PID %%a >nul 2>nul
-    )
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :8300') do (
+    if not "%%a"=="0" taskkill /F /PID %%a >nul 2>nul
 )
 
 :: Завершение старых процессов ADB и Gnirehtet
@@ -73,11 +70,8 @@ adb kill-server >nul 2>nul
 taskkill /F /IM adb.exe >nul 2>nul
 
 :: Очистка порта 5037 через нативный netstat, если кто-то еще удерживает порт
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :5037 ^| findstr LISTENING') do (
-    if "%%a" neq "0" (
-        echo   Завершение зависшего процесса на порту ADB 5037 (PID %%a)...
-        taskkill /F /PID %%a >nul 2>nul
-    )
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr :5037') do (
+    if not "%%a"=="0" taskkill /F /PID %%a >nul 2>nul
 )
 ping 127.0.0.1 -n 2 >nul
 
@@ -119,7 +113,7 @@ if not exist "%~dp0bin\sing-box" (
     if exist "%~dp0bin\sing-box" (
         echo [OK] Нативный движок sing-box загружен в bin\sing-box.
     ) else (
-        echo [ИНФО] sing-box не загружен (DPI). Агент будет использовать нативный Android system proxy (полная поддержка).
+        echo [ИНФО] sing-box не загружен. Агент будет использовать нативный Android system proxy.
     )
 )
 
