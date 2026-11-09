@@ -144,6 +144,34 @@ const ttHomeAfterShare = screen(TT,
 a = decide('tiktok', ttHomeAfterShare, st({ shareTapped: true }), true);
 ok(a.kind === 'success', 'TikTok after share: return to home/profile bottom nav → success');
 
+// System share chooser / resolver (Samsung/Android share sheet)
+const ttSystemChooser = screen('android',
+  el({ text: 'Share via', b: [40, 1200, 500, 1260] }),
+  button('TikTok', [100, 1400, 400, 1600]),
+  button('Instagram', [500, 1400, 800, 1600]));
+a = decide('tiktok', ttSystemChooser, st(), true);
+ok(a.kind === 'tap' && a.el.text === 'TikTok', 'System chooser → tap TikTok');
+
+const ttChooserJustOnce = screen('android',
+  button('Just once', [100, 2200, 500, 2300]),
+  button('Always', [550, 2200, 950, 2300]));
+a = decide('tiktok', ttChooserJustOnce, st(), true);
+ok(a.kind === 'tap' && a.el.text === 'Just once', 'System chooser → tap Just once');
+
+// TikTok home feed navigation fallback: "+" button
+const ttHomeNav = screen(TT,
+  el({ text: 'Главная', b: [50, 2300, 200, 2380] }),
+  el({ desc: 'Создать', click: true, b: [450, 2300, 630, 2380] }),
+  el({ text: 'Профиль', b: [850, 2300, 1000, 2380] }));
+a = decide('tiktok', ttHomeNav, st(), true);
+ok(a.kind === 'tap' && /Создать/.test(a.el.desc || a.el.text), 'TikTok home feed → tap Create button');
+
+// TikTok camera screen fallback: "Загрузить"
+const ttCamera = screen(TT,
+  el({ text: 'Загрузить', click: true, b: [800, 2100, 1000, 2250] }));
+a = decide('tiktok', ttCamera, st(), true);
+ok(a.kind === 'tap' && /Загрузить/.test(a.el.text || a.el.desc), 'TikTok camera screen → tap Upload button');
+
 // ── Profile verification ─────────────────────────────────────────────────────
 ok(isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 13, tiles: [] }), 'IG: posts 12 → 13 = new post');
 ok(!isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 12, tiles: [] }), 'IG: posts unchanged = not posted');

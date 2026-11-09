@@ -35,15 +35,15 @@ export function initialFlowState(): FlowState {
 // ── Labels ────────────────────────────────────────────────────────────────────
 
 const PERMISSION_ALLOW_ID = /^permission_allow(_foreground_only|_all|_one_time)?_button$/;
-const ALLOW = /^(allow|allow all|разрешить|разрешить все|while using the app|при использовании приложения|только во время использования приложения)$/i;
+const ALLOW = /^(allow|allow all|разрешить|разрешить все|while using the app|при использовании приложения|только во время использования приложения|всегда разрешать|разрешать только при использовании приложения)$/i;
 /** Harmless "close this tip/prompt" buttons. Deliberately no "Close"/"Cancel": those discard drafts. */
 const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет, спасибо|later|позже|maybe later|dismiss)$/i;
 /** "Discard reel?" dialogs → keep editing, never discard. */
 const KEEP_EDITING = /^(keep editing|продолжить редактирование|continue editing)$/i;
 const LOGGED_OUT = /^(log in|войти|sign up|зарегистрироваться|create new account|создать новый аккаунт|log into another account)$/i;
 
-const NEXT = /^(next|далее|дальше)$/i;
-const NEXT_ID = /(^|_)next(_button)?(_textview)?$/i;
+const NEXT = /^(next|далее|дальше|продолжить)$/i;
+const NEXT_ID = /(^|_)(next|btn_next|next_btn)(_button|_btn|_textview)?$/i;
 const IG_REELS_TARGET = /^(reels?)$/i;
 const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты)$/i;
 const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+tiktok)$/i;
@@ -55,10 +55,10 @@ const IG_SHARE_ID = /share_button|(^|_)share$/i;
  * a "Post" title in its header and a "Everyone can view this post" privacy row — tapping
  * either of those leaves the video unposted.
  */
-const TT_POST = /^(post|post now|post video|опубликовать|опубликовать сейчас|опубликовать видео|publish)$/i;
+const TT_POST = /^(post|post now|post video|опубликовать|опубликовать сейчас|опубликовать видео|publish|опубликовать в ленту|поделиться в tiktok)$/i;
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
 const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|(^|_)publish$/i;
-const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить)$/i;
+const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить|подтвердить|confirm)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|интересное|inbox|входящие|profile|профиль|я|me)$/i;
 
 const CAPTION_FIELD_ID = /caption|desc|title/i;
@@ -115,6 +115,19 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     ?? (/permissioncontroller|packageinstaller/.test(s.pkg) ? byLabel(s, ALLOW) : undefined);
   if (allow) return { kind: 'tap', el: allow, why: 'разрешение доступа к медиа' };
 
+  // System share chooser / resolver (Android / Samsung share sheet)
+  if (/resolver|chooser|intentresolver|sharelive/i.test(s.pkg) || s.pkg === 'android') {
+    const targetLabel = platform === 'tiktok' ? /^(tiktok|tiktok lite)$/i : /^(instagram)$/i;
+    const target = s.els.find((e) => isVisible(e) && (targetLabel.test(e.text.trim()) || targetLabel.test(e.desc.trim())));
+    if (target) {
+      return { kind: 'tap', el: target, why: `выбор приложения ${platform} в системном меню «Поделиться»` };
+    }
+    const justOnce = byLabel(s, /^(just once|только сейчас|всегда|always|только один раз)$/i);
+    if (justOnce) {
+      return { kind: 'tap', el: justOnce, why: 'подтверждение выбора в меню «Поделиться»' };
+    }
+  }
+
   const keep = byLabel(s, KEEP_EDITING);
   if (keep) return { kind: 'tap', el: keep, why: 'не удалять черновик' };
 
@@ -140,6 +153,34 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     const feed = byLabel(s, TT_FEED_TARGET);
     if (feed && s.els.some((e) => TT_OTHER_TARGETS.test(e.text.trim()) || TT_OTHER_TARGETS.test(e.desc.trim()))) {
       return { kind: 'tap', el: feed, why: 'выбор публикации в ленту TikTok', marks: 'target' };
+    }
+  }
+
+  // TikTok main screen navigation fallback: if app opened to Feed/Home/Camera instead of compose
+  if (platform === 'tiktok' && !st.targetChosen && !st.shareTapped) {
+    const isMainFeed = s.els.some((e) => isVisible(e) && /^(home|главная|inbox|входящие|friends|друзья)$/i.test(e.text.trim() || e.desc.trim()));
+    if (isMainFeed) {
+      const createBtn = s.els.find((e) =>
+        isVisible(e) && (
+          /^(create|создать|record|\+)$/i.test(e.desc.trim()) ||
+          /^(create|создать|\+)$/i.test(e.text.trim()) ||
+          /create_btn|upload_btn|tab_publish|btn_publish|bottom_bar_create/i.test(e.resId)
+        )
+      );
+      if (createBtn) {
+        return { kind: 'tap', el: createBtn, why: 'переход к публикации через «+» в TikTok' };
+      }
+    }
+
+    const uploadBtn = s.els.find((e) =>
+      isVisible(e) && (
+        /^(upload|загрузить|галерея|gallery)$/i.test(e.text.trim()) ||
+        /^(upload|загрузить|галерея|gallery)$/i.test(e.desc.trim()) ||
+        /upload_btn|tv_upload|upload_layout/i.test(e.resId)
+      )
+    );
+    if (uploadBtn) {
+      return { kind: 'tap', el: uploadBtn, why: 'выбор «Загрузить» из галереи' };
     }
   }
 

@@ -59,8 +59,8 @@ const COMPOSE_TIMEOUT_MS = 3 * 60_000;
 const UPLOAD_TIMEOUT_MS = 8 * 60_000;
 /** After Share: no progress indicator for this long → assume the upload finished. */
 const UPLOAD_QUIET_MS = 60_000;
-/** Consecutive unrecognised screens before giving up (≈ 2 s apart). */
-const UNKNOWN_SCREEN_LIMIT = 8;
+/** Consecutive unrecognised screens before giving up (≈ 2.5 s apart). */
+const UNKNOWN_SCREEN_LIMIT = 16;
 const PROFILE_CHECKS = 3;
 /** App says "no network" and the upload percentage has not moved for this long → stop waiting. */
 const UPLOAD_STALL_MS = 90_000;
@@ -104,14 +104,19 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     stage = 'push';
     await adb.shell(deviceId, `mkdir -p "${config.DOWNLOAD_DIR}"`).catch(() => {});
     await adb.pushFile(deviceId, localFilePath, onDevicePath);
+    await adb.fastShell(deviceId, `chmod 666 "${onDevicePath}"`).catch(() => {});
     await adb.scanMediaFile(deviceId, onDevicePath).catch(() => {});
-    mediaId = await resolveMediaId(adb, deviceId, fileName);
-    const streamUri = mediaId ? `${MEDIA_URI}/${mediaId}` : `file://${onDevicePath}`;
+    mediaId = await resolveMediaId(adb, deviceId, onDevicePath, fileName);
+    const streamUri = mediaId ? `${MEDIA_URI}/${mediaId}` : `${MEDIA_URI}`;
 
     // 3. App + baseline
     stage = 'prepare';
     await adb.wakeUp(deviceId);
-    await adb.shell(deviceId, 'wm dismiss-keyguard').catch(() => {});
+    await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
+    await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
+    const { width: scrW, height: scrH } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+    await adb.swipe(deviceId, Math.round(scrW / 2), Math.round(scrH * 0.8), Math.round(scrW / 2), Math.round(scrH * 0.2), 250).catch(() => {});
+
     const resolved = await new PackageResolver(adb, logger).resolve(deviceId, platform);
     if (!resolved.installed || !resolved.packageName) {
       return result({ ok: false, retryable: false, detail: resolved.error || `Приложение ${platform} не установлено на телефоне ${deviceId}` });
@@ -142,10 +147,16 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 4. Share the video into the app
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
-    await adb.fastShell(
-      deviceId,
-      `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`,
-    );
+    const amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
+    let amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
+    logger.info({ deviceId, platform, component, amOut: (amOut || '').trim() }, 'publish: am start executed');
+
+    if (component && /ActivityNotFoundException|unable to resolve/i.test(amOut)) {
+      logger.warn({ deviceId, component }, 'publish: specific component failed, falling back to package-level intent');
+      const fallbackCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;
+      amOut = await adb.fastShell(deviceId, fallbackCmd).catch((err: Error) => err.message);
+      logger.info({ deviceId, platform, amOut: (amOut || '').trim() }, 'publish: fallback am start executed');
+    }
     await sleep(3500);
 
     // 5. Walk the screens up to Share/Post
@@ -154,13 +165,40 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let captionTyped = !caption;
     let unknown = 0;
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
+    const isLauncherOrSys = (p?: string) =>
+      !p || /launcher|nexuslauncher|trebuchet|miui\.home|touchwiz|systemui/i.test(p);
+
     while (!st.shareTapped) {
       if (Date.now() > composeDeadline) {
         const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_timeout`).catch(() => undefined);
         return result({ ok: false, retryable: true, debugSnapshot: snap, detail: 'Не удалось дойти до кнопки публикации за 3 мин' });
       }
       const screen = await dumpScreen(adb, deviceId);
-      if (!screen) { unknown++; } else {
+      if (!screen) {
+        unknown++;
+      } else if (isLauncherOrSys(screen.pkg)) {
+        unknown++;
+        logger.warn({ deviceId, platform, pkg: screen.pkg, unknown }, 'publish: phone is on launcher/lockscreen — triggering active recovery');
+        // 1. Wake and unlock
+        await adb.wakeUp(deviceId).catch(() => {});
+        await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
+        const { width: w, height: h } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+        await adb.swipe(deviceId, Math.round(w / 2), Math.round(h * 0.8), Math.round(w / 2), Math.round(h * 0.2), 250).catch(() => {});
+
+        // 2. Re-dispatch share intent or launch app
+        if (unknown <= 4) {
+          logger.info({ deviceId, attempt: unknown }, 'publish: re-dispatching share intent');
+          await adb.fastShell(deviceId, amCmd).catch(() => {});
+        } else if (unknown <= 8) {
+          logger.info({ deviceId, attempt: unknown }, 'publish: launching target app directly');
+          await adb.openApp(deviceId, pkg).catch(() => {});
+        } else {
+          logger.info({ deviceId, attempt: unknown }, 'publish: launching via monkey runner');
+          await adb.fastShell(deviceId, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`).catch(() => {});
+        }
+        await sleep(3000);
+        continue;
+      } else {
         const action = decide(flowPlatform, screen, st, !!caption);
         if (action.kind === 'error') {
           const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_error`, screen.xml).catch(() => undefined);
@@ -377,28 +415,73 @@ async function downloadWithRetry(url: string, dest: string, logger: Logger, atte
 }
 
 /** MediaStore _id of the pushed file (needed for a content:// URI). */
-async function resolveMediaId(adb: AdbClient, deviceId: string, fileName: string): Promise<string | null> {
-  const query = `content query --uri ${MEDIA_URI} --projection _id --where "_display_name='${fileName}'"`;
-  for (let i = 0; i < 6; i++) {
-    const out = await adb.fastShell(deviceId, query).catch(() => '');
-    const m = /_id=(\d+)/.exec(out);
-    if (m) return m[1];
-    // Android 11+ may ignore the legacy scan broadcast — ask MediaProvider to scan once.
-    if (i === 2) await adb.fastShell(deviceId, 'content call --uri content://media --method scan_volume --arg external_primary', 60_000).catch(() => {});
-    await sleep(1000);
+async function resolveMediaId(
+  adb: AdbClient,
+  deviceId: string,
+  onDevicePath: string,
+  fileName: string,
+): Promise<string | null> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const cleanTitle = fileName.replace(/\.[^.]+$/, '');
+
+  // 1. Direct synchronous insert into MediaStore via Android content CLI:
+  // Immediately allocates a row in MediaProvider and returns "Row: content://media/external/video/media/<id>"
+  const insertCmd = `content insert --uri ${MEDIA_URI} --bind _data:s:"${onDevicePath}" --bind mime_type:s:"video/mp4" --bind _display_name:s:"${fileName}" --bind title:s:"${cleanTitle}" --bind date_added:i:${nowSec}`;
+  const insertOut = await adb.fastShell(deviceId, insertCmd).catch(() => '');
+  const insertMatch = /(?:Row:.*\/|content:\/\/.*\/|_id=?)(\d+)/i.exec(insertOut);
+  if (insertMatch) return insertMatch[1];
+
+  // 2. Poll MediaStore with queries
+  for (let i = 0; i < 8; i++) {
+    // Exact path query
+    const pathQuery = `content query --uri ${MEDIA_URI} --projection _id --where "_data='${onDevicePath}'"`;
+    const outPath = await adb.fastShell(deviceId, pathQuery).catch(() => '');
+    const mPath = /_id=(\d+)/.exec(outPath);
+    if (mPath) return mPath[1];
+
+    // Display name query
+    const nameQuery = `content query --uri ${MEDIA_URI} --projection _id --where "_display_name='${fileName}'"`;
+    const outName = await adb.fastShell(deviceId, nameQuery).catch(() => '');
+    const mName = /_id=(\d+)/.exec(outName);
+    if (mName) return mName[1];
+
+    if (i === 1) {
+      await adb.scanMediaFile(deviceId, onDevicePath).catch(() => {});
+    } else if (i === 3) {
+      await adb.fastShell(deviceId, 'content call --uri content://media --method scan_volume --arg external_primary', 30_000).catch(() => {});
+    }
+    await sleep(800);
   }
+
+  // 3. Fallback: newest video row in MediaStore
+  const latestOut = await adb.fastShell(deviceId, `content query --uri ${MEDIA_URI} --projection _id:_data --sort "date_added DESC" --limit 1`).catch(() => '');
+  const mLatest = /_id=(\d+)/.exec(latestOut);
+  if (mLatest) return mLatest[1];
+
   return null;
 }
 
-/** The app's own share-target activity (Instagram: the Reels one) — avoids the generic chooser. */
+/** The app's own share-target activity (Instagram: the Reels one; TikTok: SystemShareActivity) — avoids the generic chooser. */
 async function pickShareComponent(adb: AdbClient, deviceId: string, pkg: string, platform: FlowPlatform): Promise<string | null> {
-  const out = await adb.fastShell(deviceId, 'cmd package query-activities --brief -a android.intent.action.SEND -t video/mp4').catch(() => '');
+  let out = await adb.fastShell(deviceId, 'cmd package query-activities --brief -a android.intent.action.SEND -t video/mp4').catch(() => '');
+  if (!out || !out.includes(pkg)) {
+    out += '\n' + await adb.fastShell(deviceId, 'pm query-activities -a android.intent.action.SEND -t video/mp4').catch(() => '');
+  }
   const escaped = pkg.replace(/\./g, '\\.');
   const comps = [...out.matchAll(new RegExp(`(${escaped}/[\\w.$]+)`, 'g'))].map((m) => m[1]);
   const usable = comps.filter((c) => !/story|direct|thread|chat|im\b|friend|message/i.test(c.split('/')[1]));
-  // Only Instagram needs an explicit component because it separates Reels/Stories/Feed.
-  if (platform === 'instagram') return usable.find((c) => /reel|clips/i.test(c)) ?? null;
-  return null;
+
+  if (platform === 'instagram') return usable.find((c) => /reel|clips/i.test(c)) ?? usable[0] ?? null;
+
+  if (platform === 'tiktok') {
+    const preferred = usable.find((c) => /systemshare|shareentry|shareactivity|upload|compose|record/i.test(c));
+    if (preferred) return preferred;
+    if (usable.length > 0) return usable[0];
+    // Known default for TikTok / Musical.ly / TikTok Lite
+    return `${pkg}/com.ss.android.ugc.aweme.share.SystemShareActivity`;
+  }
+
+  return usable[0] ?? null;
 }
 
 /** The caption field now shows (the start of) the caption. */
