@@ -147,7 +147,7 @@ export const deviceAgentClient = {
     proxyMode?: Omit<ProxyModeState, 'ok'>;
     error?: string;
   }> {
-    const res = await axios.get(`${BASE}/devices`, { timeout: 8_000 });
+    const res = await axios.get(`${BASE}/devices`, { timeout: 30_000 });
     return res.data;
   },
 

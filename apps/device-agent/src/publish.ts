@@ -107,15 +107,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     await adb.fastShell(deviceId, `chmod 666 "${onDevicePath}"`).catch(() => {});
     await adb.scanMediaFile(deviceId, onDevicePath).catch(() => {});
     mediaId = await resolveMediaId(adb, deviceId, onDevicePath, fileName);
-    const streamUri = mediaId ? `${MEDIA_URI}/${mediaId}` : `${MEDIA_URI}`;
+    const streamUri = mediaId ? `${MEDIA_URI}/${mediaId}` : `file://${onDevicePath}`;
 
     // 3. App + baseline
     stage = 'prepare';
     await adb.wakeUp(deviceId);
     await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
     await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
-    const { width: scrW, height: scrH } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-    await adb.swipe(deviceId, Math.round(scrW / 2), Math.round(scrH * 0.8), Math.round(scrW / 2), Math.round(scrH * 0.2), 250).catch(() => {});
 
     const resolved = await new PackageResolver(adb, logger).resolve(deviceId, platform);
     if (!resolved.installed || !resolved.packageName) {
@@ -147,14 +145,14 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 4. Share the video into the app
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
-    const amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
+    let amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
     let amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
     logger.info({ deviceId, platform, component, amOut: (amOut || '').trim() }, 'publish: am start executed');
 
-    if (component && /ActivityNotFoundException|unable to resolve/i.test(amOut)) {
+    if (component && /ActivityNotFoundException|unable to resolve|SecurityException|Permission Denial|not exported/i.test(amOut)) {
       logger.warn({ deviceId, component }, 'publish: specific component failed, falling back to package-level intent');
-      const fallbackCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;
-      amOut = await adb.fastShell(deviceId, fallbackCmd).catch((err: Error) => err.message);
+      amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;
+      amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
       logger.info({ deviceId, platform, amOut: (amOut || '').trim() }, 'publish: fallback am start executed');
     }
     await sleep(3500);
@@ -166,7 +164,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let unknown = 0;
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
     const isLauncherOrSys = (p?: string) =>
-      !p || /launcher|nexuslauncher|trebuchet|miui\.home|touchwiz|systemui/i.test(p);
+      !p || /launcher|galaxyfinder|finder|nexuslauncher|trebuchet|miui\.home|touchwiz|systemui/i.test(p);
 
     while (!st.shareTapped) {
       if (Date.now() > composeDeadline) {
@@ -178,12 +176,25 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         unknown++;
       } else if (isLauncherOrSys(screen.pkg)) {
         unknown++;
-        logger.warn({ deviceId, platform, pkg: screen.pkg, unknown }, 'publish: phone is on launcher/lockscreen — triggering active recovery');
+        logger.warn({ deviceId, platform, pkg: screen.pkg, unknown }, 'publish: phone is on launcher/lockscreen/finder — triggering active recovery');
+        // If Samsung Galaxy Finder or App Drawer is open, press BACK to dismiss it immediately
+        if (/galaxyfinder|finder/i.test(screen.pkg || '')) {
+          logger.info({ deviceId }, 'publish: dismissing Samsung Galaxy Finder / App Drawer');
+          await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
+          await sleep(800);
+        }
+
+        if (unknown >= UNKNOWN_SCREEN_LIMIT) {
+          const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_launcher`, screen?.xml).catch(() => undefined);
+          return result({
+            ok: false, retryable: true, debugSnapshot: snap,
+            detail: `Приложение ${platform} не удалось открыть за ${UNKNOWN_SCREEN_LIMIT} попыток — экран остаётся на рабочем столе (${screen?.pkg || 'launcher'}). Проверьте плату.`,
+          });
+        }
+
         // 1. Wake and unlock
         await adb.wakeUp(deviceId).catch(() => {});
         await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
-        const { width: w, height: h } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-        await adb.swipe(deviceId, Math.round(w / 2), Math.round(h * 0.8), Math.round(w / 2), Math.round(h * 0.2), 250).catch(() => {});
 
         // 2. Re-dispatch share intent or launch app
         if (unknown <= 4) {

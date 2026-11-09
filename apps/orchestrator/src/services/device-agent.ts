@@ -135,7 +135,7 @@ export const deviceAgentService = {
   },
 
   async listDevices(): Promise<{ ok: boolean; raw?: unknown; proxies?: Record<string, DeviceProxyConfig>; error?: string }> {
-    const res = await axios.get(`${BASE}/devices`, { timeout: 10_000 });
+    const res = await axios.get(`${BASE}/devices`, { timeout: 30_000 });
     return res.data;
   },
 

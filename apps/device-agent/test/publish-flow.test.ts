@@ -158,19 +158,13 @@ const ttChooserJustOnce = screen('android',
 a = decide('tiktok', ttChooserJustOnce, st(), true);
 ok(a.kind === 'tap' && a.el.text === 'Just once', 'System chooser → tap Just once');
 
-// TikTok home feed navigation fallback: "+" button
+// TikTok home feed without compose elements must never blindly tap Create or hijack the share intent
 const ttHomeNav = screen(TT,
   el({ text: 'Главная', b: [50, 2300, 200, 2380] }),
   el({ desc: 'Создать', click: true, b: [450, 2300, 630, 2380] }),
   el({ text: 'Профиль', b: [850, 2300, 1000, 2380] }));
 a = decide('tiktok', ttHomeNav, st(), true);
-ok(a.kind === 'tap' && /Создать/.test(a.el.desc || a.el.text), 'TikTok home feed → tap Create button');
-
-// TikTok camera screen fallback: "Загрузить"
-const ttCamera = screen(TT,
-  el({ text: 'Загрузить', click: true, b: [800, 2100, 1000, 2250] }));
-a = decide('tiktok', ttCamera, st(), true);
-ok(a.kind === 'tap' && /Загрузить/.test(a.el.text || a.el.desc), 'TikTok camera screen → tap Upload button');
+ok(a.kind === 'unknown', 'TikTok home feed → unknown (never blindly tap Create / hijack share intent)');
 
 // ── Profile verification ─────────────────────────────────────────────────────
 ok(isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 13, tiles: [] }), 'IG: posts 12 → 13 = new post');

@@ -156,34 +156,6 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     }
   }
 
-  // TikTok main screen navigation fallback: if app opened to Feed/Home/Camera instead of compose
-  if (platform === 'tiktok' && !st.targetChosen && !st.shareTapped) {
-    const isMainFeed = s.els.some((e) => isVisible(e) && /^(home|главная|inbox|входящие|friends|друзья)$/i.test(e.text.trim() || e.desc.trim()));
-    if (isMainFeed) {
-      const createBtn = s.els.find((e) =>
-        isVisible(e) && (
-          /^(create|создать|record|\+)$/i.test(e.desc.trim()) ||
-          /^(create|создать|\+)$/i.test(e.text.trim()) ||
-          /create_btn|upload_btn|tab_publish|btn_publish|bottom_bar_create/i.test(e.resId)
-        )
-      );
-      if (createBtn) {
-        return { kind: 'tap', el: createBtn, why: 'переход к публикации через «+» в TikTok' };
-      }
-    }
-
-    const uploadBtn = s.els.find((e) =>
-      isVisible(e) && (
-        /^(upload|загрузить|галерея|gallery)$/i.test(e.text.trim()) ||
-        /^(upload|загрузить|галерея|gallery)$/i.test(e.desc.trim()) ||
-        /upload_btn|tv_upload|upload_layout/i.test(e.resId)
-      )
-    );
-    if (uploadBtn) {
-      return { kind: 'tap', el: uploadBtn, why: 'выбор «Загрузить» из галереи' };
-    }
-  }
-
   const preConfirm = byLabel(s, POST_CONFIRM);
   if (preConfirm && !editTexts(s).some((e) => CAPTION_FIELD_ID.test(e.resId))) {
     return { kind: 'tap', el: preConfirm, why: `подтверждение «${preConfirm.text || preConfirm.desc}»` };

@@ -57,32 +57,36 @@ app.get('/health', async () => ({
   driver: 'Native ADB Controller (Open-Source, 0$)',
 }));
 
-const DEVICES_APPS_CONCURRENCY = 5;
-const DEVICES_APPS_TIMEOUT_MS = 4_000;
 const lastAppsBySerial = new Map<string, unknown>();
+let appsCheckInProgress = false;
 
 app.get('/devices', async (_req, reply) => {
   try {
     const rawDevices = await adb.listDevices();
     const appsMap: Record<string, any> = {};
-    // Phones are probed in parallel with a per-phone deadline: one stuck board must not push
-    // the whole list past the API's timeout. On timeout/failure the last known value (or {}) is used.
     const online = rawDevices.filter((d) => d.state === 'device');
-    let next = 0;
-    const worker = async () => {
-      while (next < online.length) {
-        const serial = online[next++].serial;
-        let timer: NodeJS.Timeout | undefined;
-        const fresh = await Promise.race([
-          packageResolver.checkAllPlatforms(serial).catch(() => undefined),
-          new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), DEVICES_APPS_TIMEOUT_MS); }),
-        ]);
-        clearTimeout(timer);
-        if (fresh) lastAppsBySerial.set(serial, fresh);
-        appsMap[serial] = fresh ?? lastAppsBySerial.get(serial) ?? {};
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(DEVICES_APPS_CONCURRENCY, online.length) }, worker));
+
+    // Return cached apps info immediately to NEVER block /devices (responds in <30ms)
+    for (const d of online) {
+      appsMap[d.serial] = lastAppsBySerial.get(d.serial) ?? {};
+    }
+
+    // Refresh packages in background asynchronously if any device is uncached
+    const needsCheck = online.filter((d) => !lastAppsBySerial.has(d.serial));
+    if (needsCheck.length > 0 && !appsCheckInProgress) {
+      appsCheckInProgress = true;
+      setImmediate(async () => {
+        try {
+          for (const d of needsCheck) {
+            const fresh = await packageResolver.checkAllPlatforms(d.serial).catch(() => undefined);
+            if (fresh) lastAppsBySerial.set(d.serial, fresh);
+          }
+        } finally {
+          appsCheckInProgress = false;
+        }
+      });
+    }
+
     return {
       ok: true,
       raw: rawDevices,
