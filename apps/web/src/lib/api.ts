@@ -2449,6 +2449,9 @@ export interface AutopilotDetail {
     country?: string;
     host?: string;
     port?: number;
+    mode?: 'shared_sequential' | 'private_parallel';
+    trafficSaver?: string;
+    activeDeviceId?: string | null;
   };
 }
 

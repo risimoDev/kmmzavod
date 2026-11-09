@@ -11,6 +11,7 @@ import { QUEUES, type DistributeJobPayload, type PublishJobPayload } from '@kmmz
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { ensureArticleInCaption } from '../lib/article';
+import { deviceAgentService } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'distribute' });
 
@@ -71,6 +72,22 @@ export function createDistributeWorker(deps: Deps): Worker {
       let itemIndex = 0;
       let skippedCount = 0;
       let newlyScheduledCount = 0;
+
+      // Detect farm proxy mode (shared_sequential vs private_parallel)
+      let isSharedMode = true;
+      try {
+        const modeState = await deviceAgentService.getProxyMode();
+        if (modeState?.mode === 'private_parallel') {
+          isSharedMode = false;
+        }
+      } catch {
+        // default to shared_sequential for traffic saving
+      }
+
+      // Track earliest available slot across all physical devices on the farm for shared mode
+      let farmNextAvailableMs = Date.now();
+      // Track per-device slots (one physical board cannot run two posts simultaneously)
+      const deviceNextAvailableMs = new Map<string, number>();
 
       // Track the earliest timestamp each account can accept the next post (ensuring >= 3 hours gap)
       const accountNextAvailableMs = new Map<string, number>();
@@ -163,12 +180,31 @@ export function createDistributeWorker(deps: Deps): Worker {
 
         // Anti-ban guard: ensure at least 3 hours gap from the account's last post or previously scheduled post
         const earliestAllowedMs = accountNextAvailableMs.get(item.socialAccount.id) ?? Date.now();
-        const effectiveTimeMs = Math.max(nominalTimeMs, earliestAllowedMs);
+        const deviceId = item.socialAccount.deviceId;
+        const deviceEarliestMs = deviceId ? (deviceNextAvailableMs.get(deviceId) ?? 0) : 0;
+
+        let targetEarliestMs = Math.max(nominalTimeMs, earliestAllowedMs, deviceEarliestMs);
+        if (isSharedMode && item.socialAccount.authMethod === 'device') {
+          targetEarliestMs = Math.max(targetEarliestMs, farmNextAvailableMs);
+        }
+
+        const effectiveTimeMs = targetEarliestMs;
         const effectiveDelayMs = Math.max(0, effectiveTimeMs - Date.now());
         const scheduledAt = new Date(effectiveTimeMs);
 
         // Advance next available slot for this account by 3 hours
         accountNextAvailableMs.set(item.socialAccount.id, effectiveTimeMs + 3 * 3600 * 1000);
+
+        // Advance slot for this physical device (at least 4 minutes to upload & verify)
+        if (deviceId) {
+          deviceNextAvailableMs.set(deviceId, effectiveTimeMs + 4 * 60 * 1000);
+        }
+
+        // In shared mode, advance the farm's shared proxy slot (at least 4-5 minutes between posts)
+        if (isSharedMode && item.socialAccount.authMethod === 'device') {
+          const stepGapMs = Math.max(staggerMs, 4 * 60 * 1000);
+          farmNextAvailableMs = effectiveTimeMs + stepGapMs;
+        }
 
         // Precedence: explicit manual assignment caption -> template with AI caption -> AI auto-generated caption
         const autoCaption = item.uniqueVariant.generatedCaption;

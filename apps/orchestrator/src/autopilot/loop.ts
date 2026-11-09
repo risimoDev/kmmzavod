@@ -557,8 +557,18 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
     where: { id: ap.id },
     data: { postsScheduled: { increment: assignments.length } },
   });
+  let proxyModeNote = 'Shared Sequential (поочередная публикация с ротацией IP AstroProxy)';
+  try {
+    const pm = await deviceAgentService.getProxyMode();
+    if (pm?.mode === 'private_parallel') {
+      proxyModeNote = 'Private Parallel (параллельная публикация)';
+    }
+  } catch {
+    // fallback
+  }
+
   await journal(db, ap, 'distribute',
-    `Окно ${fmtTime(now, ap.timezone)}: ${assignments.length} постов поставлено в очередь телефонов (ротация AstroProxy, пауза ${Math.max(3, ap.staggerMinutes || 5)} мин)` +
+    `Окно ${fmtTime(now, ap.timezone)}: ${assignments.length} постов поставлено в очередь телефонов [${proxyModeNote}, пауза ${Math.max(3, ap.staggerMinutes || 5)} мин]` +
       (Object.keys(skipped).length ? ` (пропущено: ${Object.entries(skipped).map(([k, n]) => `${k} ×${n}`).join(', ')})` : ''),
     { summary: { scheduled: assignments.length, skipped, montages: byJob.size } });
 }

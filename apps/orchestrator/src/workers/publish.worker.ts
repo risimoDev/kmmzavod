@@ -33,6 +33,7 @@ import {
   DEVICE_PUBLISH_TIMEOUT_MS,
   type DevicePublishResult,
 } from '../services/device-agent';
+import { rotateIpForFarmDevice } from '../lib/astroproxy';
 
 /** Username the device-agent opens to verify the post: from stored device credentials, else accountName. */
 function deviceUsername(sessionData: string | null, accountName: string): string | undefined {
@@ -382,16 +383,52 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new DelayedError();
           }
 
-          // Shared farm proxy lock: prevents concurrent HTTP requests to the PC farm when in shared proxy mode
-          const farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 2_000);
-          if (!farmProxyLockOwner) {
-            await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
-            await db.publishJob.update({
-              where: { id: publishJobId },
-              data: { status: 'pending', error: `Общий прокси фермы занят другой платой — повтор через ~60 с` },
-            });
-            await job.moveToDelayed(Date.now() + 60_000, token);
-            throw new DelayedError();
+          // Detect farm proxy mode (shared_sequential vs private_parallel)
+          let proxyMode: 'shared_sequential' | 'private_parallel' = 'shared_sequential';
+          try {
+            const modeState = await deviceAgentService.getProxyMode();
+            if (modeState?.mode) {
+              proxyMode = modeState.mode;
+            }
+          } catch {
+            // Keep default shared_sequential for traffic safety
+          }
+
+          let farmProxyLockOwner: string | null = null;
+          if (proxyMode === 'shared_sequential') {
+            // Shared farm proxy lock: serializes posts across phones to save expensive AstroProxy traffic
+            farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 2_000);
+            if (!farmProxyLockOwner) {
+  
+              await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
+              await db.publishJob.update({
+                where: { id: publishJobId },
+                data: { status: 'pending', error: `Общий прокси фермы занят другой платой — повтор через ~60 с` },
+              });
+              await job.moveToDelayed(Date.now() + 60_000, token);
+              throw new DelayedError();
+            }
+
+            // In shared mode: move proxy to target device
+            logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: переключение общего прокси фермы на целевую плату...');
+            try {
+              await deviceAgentService.switchActiveDevice(accountRaw.deviceId, true);
+            } catch (switchErr) {
+              logger.warn({ err: String(switchErr), deviceId: accountRaw.deviceId }, 'Publish: предупреждение switchActiveDevice');
+            }
+
+            // In shared mode: rotate IP so account receives a clean mobile IP before posting
+            logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: ротация IP AstroProxy для платы перед публикацией...');
+            try {
+              const rot = await rotateIpForFarmDevice(db, accountRaw.deviceId, accountRaw.proxyUrl);
+              if (rot.newIp) {
+                logger.info({ deviceId: accountRaw.deviceId, newIp: rot.newIp }, 'Publish: получен свежий IP AstroProxy для платы');
+              }
+            } catch (rotErr) {
+              logger.warn({ err: String(rotErr), deviceId: accountRaw.deviceId }, 'Publish: ротация IP вернула предупреждение, продолжаем с текущим IP');
+            }
+          } else {
+            logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: режим Private Parallel — параллельная публикация без блокировки стойки');
           }
 
           let result: DevicePublishResult;

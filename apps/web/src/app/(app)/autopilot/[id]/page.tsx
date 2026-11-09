@@ -143,7 +143,7 @@ export default function AutopilotDetailPage() {
               <Flow label="Копий готово" value={readyVariants} sub="в буфере к публикации" tone={readyVariants ? "ok" : undefined} />
               <Flow label="Телефоны" value={`${okPhones}/${accounts.length}`} sub="готовы публиковать" tone={okPhones ? "ok" : "bad"} />
               <Flow label="Прокси стойки" value={farmProxy?.configured ? `${farmProxy.balance != null ? `$${farmProxy.balance.toFixed(2)}` : "Подключен"}` : "Не настроен"}
-                sub={farmProxy?.configured ? `AstroProxy (${farmProxy.country || "KZ"}) · ротация` : "Требуется в /farm"} tone={farmProxy?.configured ? "ok" : "bad"} />
+                sub={farmProxy?.configured ? `${farmProxy.mode === "shared_sequential" ? "Shared Sequential (экономия)" : farmProxy.mode === "private_parallel" ? "Private Parallel" : "AstroProxy (" + (farmProxy.country || "KZ") + ")"} · ротация IP` : "Требуется в /farm"} tone={farmProxy?.configured ? "ok" : "bad"} />
               <Flow label="Следующее окно" value={ap.status === "active" && ap.nextWindowAt ? new Date(ap.nextWindowAt).toLocaleTimeString("ru-RU", { timeZone: ap.timezone, hour: "2-digit", minute: "2-digit" }) : "—"}
                 sub={ap.status === "active" && ap.nextWindowAt ? formatWindow(ap.nextWindowAt, ap.timezone) : ap.status === "active" ? "вычисляется…" : "автопилот не запущен"} />
             </div>

@@ -16,6 +16,7 @@ import { logger } from '../logger';
 import { config } from '../config';
 import { assertOwnStorageKey } from '../lib/storage-keys';
 import { getAstroProxySummary } from '../lib/astroproxy';
+import { deviceAgentClient } from '../lib/device-agent';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
 const SCRIPT_STYLES = ['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal'] as const;
@@ -397,7 +398,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     });
     if (!ap) return reply.code(404).send({ error: 'NotFound' });
 
-    const [batches, runs, accounts, sources, ready, posts, farmProxy] = await Promise.all([
+    const [batches, runs, accounts, sources, ready, posts, farmProxySummary, farmProxyMode] = await Promise.all([
       db.autopilotBatch.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 30 }),
       db.autopilotRun.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 80 }),
       scopeAccounts({ ...ap, tenantId }),
@@ -415,7 +416,15 @@ export async function autopilotRoutes(app: FastifyInstance) {
         },
       }),
       getAstroProxySummary().catch(() => ({ configured: false })),
+      deviceAgentClient.getProxyMode().catch(() => null),
     ]);
+
+    const farmProxy = {
+      ...farmProxySummary,
+      mode: farmProxyMode?.mode ?? (farmProxySummary?.configured ? 'shared_sequential' : undefined),
+      trafficSaver: farmProxyMode?.trafficSaver,
+      activeDeviceId: farmProxyMode?.activeDeviceId,
+    };
 
     // Enrich batches with child-entity progress for the timeline.
     const ujIds = batches.map((b) => b.uniquifyJobId).filter((x): x is string => Boolean(x));

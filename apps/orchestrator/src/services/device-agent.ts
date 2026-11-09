@@ -37,6 +37,18 @@ export interface DeviceProxyConfig {
   username?: string;
   password?: string;
   type?: 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
+  rotateUrl?: string;
+}
+
+export interface ProxyModeState {
+  ok: boolean;
+  mode: 'shared_sequential' | 'private_parallel';
+  inactivePolicy: 'direct' | 'block';
+  trafficSaver?: 'block_media' | 'direct_media' | 'off';
+  trafficStandby?: boolean;
+  activeDeviceId: string | null;
+  busyDeviceId?: string | null;
+  hasSharedProxy: boolean;
 }
 
 export interface DeviceIpCheckResult {
@@ -186,6 +198,29 @@ export const deviceAgentService = {
     apps: Record<string, { installed: boolean; packageName?: string; error?: string }>;
   }> {
     const res = await axios.get(`${BASE}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 });
+    return res.data;
+  },
+
+  async getProxyMode(): Promise<ProxyModeState> {
+    const res = await axios.get(`${BASE}/proxy/mode`, { timeout: 8_000 });
+    return res.data;
+  },
+
+  async switchActiveDevice(deviceId: string, force = true): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    const res = await axios.post(`${BASE}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 });
+    return res.data;
+  },
+
+  async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
+    ok: boolean;
+    deviceId: string;
+    rotateUrl: string;
+    statusCode?: number;
+    rotateResponse?: string;
+    check: DeviceIpCheckResult;
+    error?: string;
+  }> {
+    const res = await axios.post(`${BASE}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 });
     return res.data;
   },
 };

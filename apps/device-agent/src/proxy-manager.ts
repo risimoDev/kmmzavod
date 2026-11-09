@@ -995,12 +995,13 @@ export class ProxyManager {
   private async freshIpForTask(deviceId: string): Promise<void> {
     const isRecentSameDevice = this.lastRotatedFor === deviceId && Date.now() - this.lastRotatedAt < 60_000;
     if (this.mode !== 'shared_sequential' || isRecentSameDevice) return;
-    if (!this.devices.get(deviceId)?.proxy.rotateUrl) return;
+    const rotateUrl = this.devices.get(deviceId)?.proxy.rotateUrl || this.sharedProxy?.rotateUrl;
+    if (!rotateUrl) return;
     this.lastRotatedFor = deviceId;
     this.lastRotatedAt = Date.now();
     try {
       // Mobile modems take 5–25 s to come back; the gateway rides out the rest.
-      const r = await this.rotateProxyIp(deviceId, undefined, 10_000);
+      const r = await this.rotateProxyIp(deviceId, rotateUrl, 10_000);
       this.logger.info({ deviceId, ip: r.check.ip, ok: r.check.ok }, 'proxy-manager: fresh IP for the next task');
     } catch (err) {
       this.logger.warn({ deviceId, err: err instanceof Error ? err.message : String(err) }, 'proxy-manager: IP rotation before task failed — continuing with the current IP');
@@ -1231,7 +1232,7 @@ export class ProxyManager {
     error?: string;
   }> {
     const entry = this.devices.get(deviceId);
-    const url = rotateUrlOverride || entry?.proxy.rotateUrl;
+    let url = rotateUrlOverride || entry?.proxy.rotateUrl || this.sharedProxy?.rotateUrl;
     if (!url) {
       const check = await this.checkDeviceIp(deviceId);
       return {
@@ -1243,9 +1244,20 @@ export class ProxyManager {
       };
     }
 
-    if (entry && rotateUrlOverride && entry.proxy.rotateUrl !== rotateUrlOverride) {
-      entry.proxy.rotateUrl = rotateUrlOverride;
+    if (rotateUrlOverride) {
+      if (entry && entry.proxy.rotateUrl !== rotateUrlOverride) {
+        entry.proxy.rotateUrl = rotateUrlOverride;
+      }
+      if (this.sharedProxy && this.sharedProxy.rotateUrl !== rotateUrlOverride) {
+        this.sharedProxy.rotateUrl = rotateUrlOverride;
+      }
       this.saveState();
+    }
+
+    // If calling AstroProxy and token is missing in the query param, auto-append process.env.ASTROPROXY_API_TOKEN
+    if (url.includes('astroproxy.com') && !url.includes('token=') && process.env.ASTROPROXY_API_TOKEN) {
+      const sep = url.includes('?') ? '&' : '?';
+      url = `${url}${sep}token=${encodeURIComponent(process.env.ASTROPROXY_API_TOKEN)}`;
     }
 
     this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');
