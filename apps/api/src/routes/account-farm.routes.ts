@@ -1528,7 +1528,13 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         proxy: { select: { id: true, host: true, port: true, type: true, country: true } },
       },
     });
-    const accountByDeviceId = new Map(accounts.map((a) => [a.deviceId!, a]));
+    const accountsByDeviceId = new Map<string, typeof accounts>();
+    for (const a of accounts) {
+      if (!a.deviceId) continue;
+      const list = accountsByDeviceId.get(a.deviceId) ?? [];
+      list.push(a);
+      accountsByDeviceId.set(a.deviceId, list);
+    }
 
     let rawList: any[] = [];
     if (Array.isArray(farmResult.raw)) {
@@ -1542,30 +1548,41 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     const proxyStatus = farmResult.proxyStatus || {};
     const devices = rawList.map((d: any) => {
       const devId = String(d.deviceid || d.deviceId || d.id || d.serial || '');
-      const assigned = accountByDeviceId.get(devId);
+      const devAccounts = accountsByDeviceId.get(devId) ?? [];
+      const primaryAssigned = devAccounts[0] ?? null;
+      const assignedAccounts = devAccounts.map((a) => ({
+        id: a.id,
+        accountName: a.accountName,
+        platform: a.platform,
+        healthScore: a.healthScore,
+        warmupStatus: a.warmupStatus,
+        warmupCount: a.warmupCount,
+        followers: a.followers,
+      }));
       const isOnline = d.state ? d.state === 'device' : (d.status === 1 || d.is_online === true || d.online === true);
       return {
         deviceId: devId,
         name: d.name || d.device_name || `Плата ${devId.slice(-4)}`,
         model: d.model || 'Android Board',
         online: isOnline,
-        assignedAccount: assigned ? {
-          id: assigned.id,
-          accountName: assigned.accountName,
-          platform: assigned.platform,
-          healthScore: assigned.healthScore,
-          warmupStatus: assigned.warmupStatus,
-          warmupCount: assigned.warmupCount,
+        assignedAccount: primaryAssigned ? {
+          id: primaryAssigned.id,
+          accountName: primaryAssigned.accountName,
+          platform: primaryAssigned.platform,
+          healthScore: primaryAssigned.healthScore,
+          warmupStatus: primaryAssigned.warmupStatus,
+          warmupCount: primaryAssigned.warmupCount,
         } : null,
+        assignedAccounts,
         // What is actually applied on the phone (from the farm agent).
         proxy: proxies[devId] ?? null,
         proxyStatus: proxyStatus[devId] ?? null,
         // What the assigned account is linked to in the DB — differs from `proxy` only if out of sync.
-        accountProxy: assigned?.proxy ? {
-          id: assigned.proxy.id,
-          host: assigned.proxy.host,
-          port: assigned.proxy.port,
-          type: assigned.proxy.type,
+        accountProxy: primaryAssigned?.proxy ? {
+          id: primaryAssigned.proxy.id,
+          host: primaryAssigned.proxy.host,
+          port: primaryAssigned.proxy.port,
+          type: primaryAssigned.proxy.type,
         } : null,
       };
     });
@@ -2170,24 +2187,23 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     });
     if (!account) return reply.status(404).send({ error: 'Social account not found' });
 
-    // Accounts leaving this phone also leave its network: drop their device-proxy link.
-    const previous = await db.socialAccount.findMany({
-      where: { tenantId, deviceId, NOT: { id: socialAccountId } },
+    // Multi-Network rule: Only unbind a previous account of the SAME platform on this device.
+    // If the board already has an Instagram account and we are assigning a TikTok account, Instagram is KEPT!
+    const prevSamePlatform = await db.socialAccount.findMany({
+      where: { tenantId, deviceId, platform: account.platform, NOT: { id: socialAccountId } },
       select: { id: true, proxyId: true, authMethod: true },
     });
-    for (const prev of previous) {
-      if (prev.authMethod !== 'device' || !prev.proxyId) continue;
-      await db.$transaction([
-        db.proxy.updateMany({
+    for (const prev of prevSamePlatform) {
+      if (prev.authMethod === 'device' && prev.proxyId) {
+        await db.proxy.updateMany({
           where: { id: prev.proxyId, assignedAccounts: { gt: 0 } },
           data: { assignedAccounts: { decrement: 1 } },
-        }),
-        db.socialAccount.update({ where: { id: prev.id }, data: { proxyId: null, proxyUrl: null } }),
-      ]);
+        }).catch(() => {});
+      }
     }
 
     await db.socialAccount.updateMany({
-      where: { tenantId, deviceId },
+      where: { tenantId, deviceId, platform: account.platform, NOT: { id: socialAccountId } },
       data: { deviceId: null },
     });
 
@@ -2211,7 +2227,45 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       logger.warn({ err: describeDeviceAgentError(err), deviceId }, 'farm: could not link account to phone proxy');
     }
 
-    return reply.send({ ok: true, deviceId, socialAccountId, proxyLinked });
+    return reply.send({ ok: true, deviceId, socialAccountId, platform: account.platform, proxyLinked });
+  });
+
+  app.post('/devices/:deviceId/unassign-account', async (request, reply) => {
+    const { tenantId } = request.user;
+    const { deviceId } = z.object({ deviceId: z.string().min(1) }).parse(request.params);
+    const body = z.object({
+      socialAccountId: z.string().uuid().optional(),
+      platform: z.string().optional(),
+      all: z.boolean().optional(),
+    }).parse(request.body ?? {});
+
+    const whereClause: any = { tenantId, deviceId };
+    if (body.socialAccountId) {
+      whereClause.id = body.socialAccountId;
+    } else if (body.platform) {
+      whereClause.platform = body.platform;
+    }
+
+    const accountsToUnassign = await db.socialAccount.findMany({
+      where: whereClause,
+      select: { id: true, proxyId: true, authMethod: true },
+    });
+
+    for (const acc of accountsToUnassign) {
+      if (acc.authMethod === 'device' && acc.proxyId) {
+        await db.proxy.updateMany({
+          where: { id: acc.proxyId, assignedAccounts: { gt: 0 } },
+          data: { assignedAccounts: { decrement: 1 } },
+        }).catch(() => {});
+      }
+    }
+
+    const result = await db.socialAccount.updateMany({
+      where: whereClause,
+      data: { deviceId: null },
+    });
+
+    return reply.send({ ok: true, deviceId, unassignedCount: result.count });
   });
 
   app.post('/devices/:deviceId/screenshot', { config: farmControlRateLimit }, async (request, reply) => {

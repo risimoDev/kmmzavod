@@ -845,6 +845,12 @@ export const accountFarmApi = {
       body: JSON.stringify({ socialAccountId }),
     }),
 
+  unassignDeviceAccount: (deviceId: string, opts?: { socialAccountId?: string; platform?: string; all?: boolean }) =>
+    apiFetch<{ ok: boolean; deviceId: string; unassignedCount: number }>(`/api/v1/farm/devices/${deviceId}/unassign-account`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
+    }),
+
   screenshotDevice: (deviceId: string) =>
     apiFetch<{ ok: boolean; data?: any; error?: string }>(`/api/v1/farm/devices/${deviceId}/screenshot`, { method: 'POST' }),
 
@@ -1223,6 +1229,15 @@ export interface FarmDevice {
     warmupStatus: string;
     warmupCount: number;
   } | null;
+  assignedAccounts?: Array<{
+    id: string;
+    accountName: string;
+    platform: string;
+    healthScore: number;
+    warmupStatus: string;
+    warmupCount: number;
+    followers?: number | null;
+  }>;
   /** Proxy applied on the phone (password is never sent to the browser — see hasPassword). */
   proxy?: {
     host: string;

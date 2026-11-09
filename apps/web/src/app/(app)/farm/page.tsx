@@ -2326,11 +2326,22 @@ function DevicesTab() {
     try {
       await accountFarmApi.assignDeviceAccount(selectedDevice.deviceId, assignAccountId);
       setAssignModalOpen(false);
-      loadData();
+      setAssignAccountId('');
+      await loadData();
     } catch (err: any) {
       alert(`Ошибка привязки: ${err.message}`);
     } finally {
       setAssignSaving(false);
+    }
+  };
+
+  const handleUnassignAccount = async (deviceId: string, socialAccountId?: string) => {
+    if (!confirm(socialAccountId ? 'Отвязать этот аккаунт от платы?' : 'Отвязать все аккаунты от этой платы?')) return;
+    try {
+      await accountFarmApi.unassignDeviceAccount(deviceId, { socialAccountId });
+      await loadData();
+    } catch (err: any) {
+      alert(`Ошибка отвязки аккаунта: ${err.message}`);
     }
   };
 
@@ -3559,7 +3570,8 @@ function DevicesTab() {
 
   const onlineCount = devices.filter((d) => d.online).length;
   const withProxyCount = devices.filter((d) => d.proxy).length;
-  const withAccountCount = devices.filter((d) => d.assignedAccount).length;
+  const withAccountCount = devices.filter((d) => (d.assignedAccounts && d.assignedAccounts.length > 0) || d.assignedAccount).length;
+  const totalAssignedAccounts = devices.reduce((sum, d) => sum + (d.assignedAccounts?.length ?? (d.assignedAccount ? 1 : 0)), 0);
 
   return (
     <div className="space-y-6">
@@ -3589,8 +3601,10 @@ function DevicesTab() {
         <Card className="bg-surface-2 border-border/60">
           <CardContent className="p-4 space-y-1">
             <p className="text-xs text-text-tertiary">Привязано аккаунтов</p>
-            <p className="text-2xl font-bold text-indigo-400">{withAccountCount}</p>
-            <p className="text-[11px] text-text-secondary">Instagram & TikTok профили</p>
+            <p className="text-2xl font-bold text-indigo-400">
+              {totalAssignedAccounts} <span className="text-xs font-normal text-text-tertiary">({withAccountCount} плат)</span>
+            </p>
+            <p className="text-[11px] text-text-secondary">TikTok, Instagram & WB (опционально)</p>
           </CardContent>
         </Card>
       </div>
@@ -4056,46 +4070,102 @@ function DevicesTab() {
                   ID: {device.deviceId}
                 </div>
 
-                {/* Assigned Social Account */}
-                <div className="p-2.5 rounded-lg bg-surface-3/60 border border-border/40 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-text-tertiary">Аккаунт</span>
-                    {device.assignedAccount ? (
-                      <span className="text-[11px] font-semibold text-brand-400 capitalize">
-                        {device.assignedAccount.platform}
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setSelectedDevice(device);
-                          setAssignModalOpen(true);
-                        }}
-                        className="text-[11px] text-brand-400 hover:underline"
-                      >
-                        + Привязать
-                      </button>
-                    )}
-                  </div>
-
-                  {device.assignedAccount ? (
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-medium text-text-primary truncate">
-                          @{device.assignedAccount.accountName}
+                {/* Assigned Social Accounts (Multi-Network per Board) */}
+                {(() => {
+                  const devAccounts = (device.assignedAccounts && device.assignedAccounts.length > 0)
+                    ? device.assignedAccounts
+                    : (device.assignedAccount ? [device.assignedAccount] : []);
+                  return (
+                    <div className="p-2.5 rounded-lg bg-surface-3/60 border border-border/40 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-text-tertiary font-medium">
+                          Соцсети ({devAccounts.length})
                         </span>
-                        <Badge variant="outline" className="text-[10px]">
-                          {device.assignedAccount.warmupStatus === 'warm' ? '🔥 Warm' : (device.assignedAccount.warmupStatus === 'warming' ? '☕ Warming' : '❄️ Cold')}
-                        </Badge>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedDevice(device);
+                            setAssignAccountId('');
+                            setAssignModalOpen(true);
+                          }}
+                          className="text-[11px] text-brand-400 hover:underline font-medium"
+                          title="Привязать профиль новой соцсети или заменить существующий"
+                        >
+                          + Привязать
+                        </button>
                       </div>
-                      <div className="flex items-center justify-between text-[10px] text-text-secondary">
-                        <span>Здоровье: {device.assignedAccount.healthScore}%</span>
-                        <span>Действий: {device.assignedAccount.warmupCount}</span>
-                      </div>
+
+                      {devAccounts.length > 0 ? (
+                        <div className="space-y-1.5">
+                          {devAccounts.map((acc) => (
+                            <div
+                              key={acc.id}
+                              className="flex items-center justify-between gap-1 p-1.5 rounded bg-surface-2/80 border border-border/50 text-[11px]"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className={cn(
+                                  "text-[9px] px-1.5 py-0.2 rounded font-bold uppercase",
+                                  acc.platform === 'tiktok' ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30" :
+                                  acc.platform === 'instagram' ? "bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30" :
+                                  "bg-purple-500/15 text-purple-300 border border-purple-500/30"
+                                )}>
+                                  {acc.platform}
+                                </span>
+                                <span className="font-medium text-text-primary truncate max-w-[95px]" title={`@${acc.accountName}`}>
+                                  @{acc.accountName}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                <span
+                                  className="text-[9px] text-text-secondary"
+                                  title={`Здоровье: ${acc.healthScore}%, действий: ${acc.warmupCount}`}
+                                >
+                                  {acc.warmupStatus === 'warm' ? '🔥' : '☕'} {acc.healthScore}%
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedDevice(device);
+                                    setAssignAccountId(acc.id);
+                                    setAssignModalOpen(true);
+                                  }}
+                                  className="text-text-tertiary hover:text-cyan-300 p-0.5 text-[11px]"
+                                  title="Заменить аккаунт на другой"
+                                >
+                                  🔄
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnassignAccount(device.deviceId, acc.id)}
+                                  className="text-text-tertiary hover:text-rose-400 p-0.5 text-[11px]"
+                                  title="Отвязать аккаунт от этой платы"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-text-secondary py-1 flex items-center justify-between">
+                          <span className="italic text-zinc-400 text-[10px]">Ручной вход (без привязки)</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDevice(device);
+                              setAssignAccountId('');
+                              setAssignModalOpen(true);
+                            }}
+                            className="text-[10px] text-brand-400 hover:underline"
+                          >
+                            Привязать
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <p className="text-[11px] text-text-secondary italic">Слот свободен для привязки</p>
-                  )}
-                </div>
+                  );
+                })()}
 
                 {/* Network & Proxy Status */}
                 <div className="space-y-1.5 text-xs">
@@ -4739,22 +4809,58 @@ function DevicesTab() {
       {/* Assign Account Modal */}
       {assignModalOpen && selectedDevice && (
         <Modal
-          title={`Привязка аккаунта к плате ${selectedDevice.name}`}
+          title={`Управление аккаунтами платы: ${selectedDevice.name}`}
           onClose={() => setAssignModalOpen(false)}
         >
           <div className="space-y-4 text-xs">
-            <p className="text-text-secondary">
-              Выберите соцсеть и профиль, который авторизован на физическом телефоне в этом слоте.
-            </p>
+            <div className="p-2.5 rounded-lg bg-surface-2 border border-border/60 text-text-secondary space-y-1">
+              <p>
+                ℹ️ <strong>Привязка опциональна:</strong> Вы можете входить в приложения вручную через Пульт управления.
+              </p>
+              <p className="text-[11px] text-zinc-400">
+                На одной плате можно иметь <strong>по 1 аккаунту для разных соцсетей</strong> (TikTok + Instagram + WB). При привязке заменяется только профиль той же платформы.
+              </p>
+            </div>
+
+            {/* Currently assigned on this board */}
+            {(() => {
+              const currentList = (selectedDevice.assignedAccounts && selectedDevice.assignedAccounts.length > 0)
+                ? selectedDevice.assignedAccounts
+                : (selectedDevice.assignedAccount ? [selectedDevice.assignedAccount] : []);
+              if (currentList.length === 0) return null;
+              return (
+                <div className="space-y-1.5 p-2.5 rounded-lg bg-surface-1 border border-border/40">
+                  <span className="text-[11px] font-semibold text-text-primary">Привязанные соцсети на этой плате:</span>
+                  <div className="space-y-1">
+                    {currentList.map((acc) => (
+                      <div key={acc.id} className="flex items-center justify-between p-1.5 rounded bg-surface-2 text-[11px]">
+                        <span className="font-medium text-cyan-300">[{acc.platform.toUpperCase()}] @{acc.accountName}</span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-rose-400 hover:text-rose-300 h-6 px-1.5 text-[10px]"
+                          onClick={() => {
+                            handleUnassignAccount(selectedDevice.deviceId, acc.id);
+                            setAssignModalOpen(false);
+                          }}
+                        >
+                          ✕ Отвязать
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="space-y-1.5">
-              <label className="text-text-primary font-medium">Аккаунт из базы:</label>
+              <label className="text-text-primary font-medium">Выберите аккаунт из базы для привязки/замены:</label>
               <select
                 value={assignAccountId}
                 onChange={(e) => setAssignAccountId(e.target.value)}
                 className="w-full bg-surface-2 border border-border rounded-lg p-2 text-text-primary text-xs"
               >
-                <option value="">-- Выберите аккаунт --</option>
+                <option value="">-- Выберите профиль --</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
                     [{acc.platform.toUpperCase()}] @{acc.accountName} ({acc.warmupStatus}, {acc.healthScore}%)
@@ -4767,7 +4873,7 @@ function DevicesTab() {
           <ModalActions
             onCancel={() => setAssignModalOpen(false)}
             onConfirm={handleAssignAccount}
-            confirmLabel="Привязать аккаунт"
+            confirmLabel="Сохранить привязку"
             loading={assignSaving}
             disabled={!assignAccountId}
           />
