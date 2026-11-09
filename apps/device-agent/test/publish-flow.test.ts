@@ -250,5 +250,37 @@ ok(prof.tiles.length === 3 && prof.tiles[0].views === null, `profile: uploading 
 ok(isNewPostOnProfile({ posts: null, tiles: [{ views: 0 }, { views: 436 }] }, { posts: null, tiles: prof.tiles }),
   'profile: [0, 436] → [uploading, 0, 436] is a new post');
 
+
+// ── Additional TikTok edge cases ─────────────────────────────────────────────
+const ttPostShareRu = screen(TT,
+  el({ id: 'com.zhiliaoapp.musically:id/h9r', cls: 'android.widget.AutoCompleteTextView', text: 'Опишите видео...', click: true, b: [40, 300, 800, 600] }),
+  button('Черновики', [40, 2200, 520, 2320], 'com.zhiliaoapp.musically:id/gj6'),
+  button('Поделиться', [560, 2200, 1040, 2320], 'com.zhiliaoapp.musically:id/tl8'));
+a = decide('tiktok', ttPostShareRu, st(), true);
+ok(a.kind === 'caption', 'TikTok compose screen with "Поделиться" and AutoCompleteTextView → type caption');
+a = decide('tiktok', ttPostShareRu, st({ captionDone: true }), true);
+ok(a.kind === 'tap' && a.marks === 'share' && a.el.text === 'Поделиться', 'TikTok compose screen with "Поделиться" → tap Share');
+
+const ttPostObfuscated = screen(TT,
+  el({ cls: 'android.widget.EditText', text: '', desc: 'Добавьте хештеги', click: true, b: [40, 300, 800, 600] }),
+  button('Черновики', [40, 2200, 520, 2320]),
+  button('Publish (1)', [560, 2200, 1040, 2320], 'com.zhiliaoapp.musically:id/xyz'));
+a = decide('tiktok', ttPostObfuscated, st({ captionDone: true }), true);
+ok(a.kind === 'tap' && a.marks === 'share', 'TikTok structural layout next to Drafts → tap Post button');
+
+const ttGalleryPickerCount = screen(TT,
+  el({ text: 'Недавние', b: [40, 100, 400, 200] }),
+  el({ cls: 'android.widget.ImageView', click: true, b: [40, 300, 360, 600], id: 'com.zhiliaoapp.musically:id/thumb' }),
+  button('Далее (1)', [700, 2200, 1040, 2320]));
+a = decide('tiktok', ttGalleryPickerCount, st(), true);
+ok(a.kind === 'tap' && a.marks === 'next' && /Далее \(1\)/.test(a.el.text || ''), 'TikTok gallery picker with "Далее (1)" → tap Next');
+
+const ttDismissDecl = screen(TT,
+  el({ text: 'Синхронизировать контакты?', b: [100, 1000, 980, 1200] }),
+  button('Отклонить', [100, 1300, 500, 1400]),
+  button('Синхронизировать', [580, 1300, 980, 1400]));
+a = decide('tiktok', ttDismissDecl, st(), true);
+ok(a.kind === 'tap' && a.el.text === 'Отклонить', 'TikTok contacts sync popup → Отклонить');
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exitCode = failed ? 1 : 0;

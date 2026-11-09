@@ -149,7 +149,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
     logger.info({ deviceId, platform, component, amOut: (amOut || '').trim() }, 'publish: am start executed');
 
-    const amFailed = !amOut || /Error|Exception|SecurityException|Permission Denial|not exported|does not exist|unable to resolve/i.test(amOut) || !/Starting: Intent/i.test(amOut);
+    const amFailed = !amOut || /Error|Exception|SecurityException|Permission Denial|not exported|does not exist|unable to resolve/i.test(amOut) || (!/Starting: Intent/i.test(amOut) && !/intent has been delivered/i.test(amOut));
     if (component && amFailed) {
       logger.warn({ deviceId, component, amOut: (amOut || '').trim() }, 'publish: specific component failed, falling back to package-level intent');
       amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;

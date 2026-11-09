@@ -89,7 +89,7 @@ export function screenHas(s: UiScreen, re: RegExp): boolean {
 }
 
 export function editTexts(s: UiScreen): UiEl[] {
-  return s.els.filter((e) => isVisible(e) && /EditText$/.test(e.cls));
+  return s.els.filter((e) => isVisible(e) && (/EditText$/.test(e.cls) || /AutoCompleteTextView$/.test(e.cls)));
 }
 
 /** Nearest clickable ancestor-or-self (labels are often non-clickable TextViews). */

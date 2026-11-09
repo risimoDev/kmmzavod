@@ -35,34 +35,34 @@ export function initialFlowState(): FlowState {
 // ── Labels ────────────────────────────────────────────────────────────────────
 
 const PERMISSION_ALLOW_ID = /^permission_allow(_foreground_only|_all|_one_time)?_button$/;
-const ALLOW = /^(allow|allow all|разрешить|разрешить все|while using the app|при использовании приложения|только во время использования приложения|всегда разрешать|разрешать только при использовании приложения)$/i;
-/** Harmless "close this tip/prompt" buttons. Deliberately no "Close"/"Cancel": those discard drafts. */
-const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет, спасибо|later|позже|maybe later|dismiss)$/i;
+const ALLOW = /^(allow|allow all|разрешить|разрешить все|while using the app|при использовании приложения|только во время использования приложения|всегда разрешать|разрешать только при использовании приложения|разрешить доступ ко всем фото и видео|разрешить доступ|выбрать все фото|разрешить все)$/i;
+/** Harmless "close this tip/prompt" buttons. */
+const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет, спасибо|later|позже|maybe later|dismiss|отклонить|не разрешать|отмена|сохранить|понятно, продолжить)$/i;
 /** "Discard reel?" dialogs → keep editing, never discard. */
 const KEEP_EDITING = /^(keep editing|продолжить редактирование|continue editing)$/i;
 const LOGGED_OUT = /^(log in|войти|sign up|зарегистрироваться|create new account|создать новый аккаунт|log into another account)$/i;
 
-const NEXT = /^(next|далее|дальше|продолжить)$/i;
-const NEXT_ID = /(^|_)(next|btn_next|next_btn)(_button|_btn|_textview)?$/i;
+const NEXT = /^(next|далее|дальше|продолжить|выбрать|готово|save|сохранить)(\s*\(\d+\))?$/i;
+const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|right_action_button)(_button|_btn|_textview)?$/i;
 const IG_REELS_TARGET = /^(reels?)$/i;
 const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты)$/i;
-const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+tiktok)$/i;
-const TT_OTHER_TARGETS = /^(chats|чаты|друзья|friends|direct|сообщения|messages)$/i;
-const IG_SHARE = /^(share|поделиться|опубликовать)$/i;
+const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту))$/i;
+const TT_OTHER_TARGETS = /^(chats|чаты|друзья|friends|direct|сообщения|messages|история|истории|story|stories)$/i;
+const IG_SHARE = /^(share|поделиться|опубликовать)(\s*\(\d+\))?$/i;
 const IG_SHARE_ID = /share_button|(^|_)share$/i;
 /**
  * The final button's WHOLE label. Never a substring match: the TikTok post screen also has
  * a "Post" title in its header and a "Everyone can view this post" privacy row — tapping
  * either of those leaves the video unposted.
  */
-const TT_POST = /^(post|post now|post video|post to feed|опубликовать|опубликовать сейчас|опубликовать видео|publish|опубликовать в ленту|поделиться в tiktok)$/i;
+const TT_POST = /^(post|post now|post video|post to feed|post entry|share|share to feed|share to tiktok|share video|share post|опубликовать|опубликовать сейчас|опубликовать видео|опубликовать запись|опубликовать клип|опубликовать в tiktok|опубликовать в ленту|поделиться|поделиться в tiktok|поделиться видео|поделиться записью|поделиться в ленту|publish)(\s*\(\d+\))?$/i;
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
 const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|btn_post|btn_publish|(^|_)publish$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить|подтвердить|confirm)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|интересное|inbox|входящие|profile|профиль|я|me)$/i;
 
-const CAPTION_FIELD_ID = /caption|desc|title/i;
-const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag/i;
+const CAPTION_FIELD_ID = /caption|desc|title|content|input|text_field/i;
+const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag|расскажите|о чем|добавьте|введите/i;
 
 /** Before sharing: the app refused the video itself — retrying the same file will not help. */
 const VIDEO_REJECTED = /(video|видео) (is )?(too (short|long)|слишком (коротк|длинн))|unsupported (video|file|format)|неподдерживаем|can.?t (use|import) this video|не удалось импортировать/i;
@@ -82,31 +82,82 @@ const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео �
  */
 export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | undefined {
   const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
+  const screenW = Math.max(...s.els.map((e) => e.bounds[2]), 1);
   const labelRe = platform === 'instagram' ? IG_SHARE : TT_POST;
   const idRe = platform === 'instagram' ? IG_SHARE_ID : TT_POST_ID;
+
   const candidates = s.els.filter((e) => {
     if (!isVisible(e) || !e.enabled) return false;
-    const text = e.text.trim();
-    const desc = e.desc.trim();
+    const text = e.text.replace(/[\u00A0\s]+/g, ' ').trim();
+    const desc = e.desc.replace(/[\u00A0\s]+/g, ' ').trim();
     if (TT_POST_EXCLUDE.test(`${text} ${desc}`)) return false;
     return labelRe.test(text) || labelRe.test(desc) || idRe.test(e.resId.replace(/^.*:id\//, ''));
   });
+
   // TikTok keeps Post in a bottom bar; Instagram's Share also sits at the bottom on new
   // versions but in the top bar on old ones → bottom half preferred, top accepted for IG.
   const lower = candidates.filter((e) => e.bounds[1] >= screenH * 0.5);
   const pool = lower.length ? lower : platform === 'instagram' ? candidates : [];
-  return pool.sort((a, b) => b.bounds[1] - a.bounds[1])[0];
+  if (pool.length > 0) {
+    return pool.sort((a, b) => b.bounds[1] - a.bounds[1])[0];
+  }
+
+  // Structural fallback for TikTok: if Drafts button is visible in the bottom bar (y >= screenH * 0.7),
+  // the primary action button to its right is the Post/Share button, even with obfuscated IDs/text.
+  if (platform === 'tiktok') {
+    const draftsBtn = s.els.find((e) =>
+      isVisible(e) && e.enabled && e.bounds[1] >= screenH * 0.7 &&
+      (/^(drafts?|черновик(и)?)$/i.test(e.text.trim()) || /^(drafts?|черновик(и)?)$/i.test(e.desc.trim()) || /draft/i.test(e.resId))
+    );
+    if (draftsBtn) {
+      const rightBtns = s.els.filter((e) =>
+        isVisible(e) && e.enabled && (e.clickable || /Button|TextView/i.test(e.cls)) &&
+        e.bounds[1] >= screenH * 0.7 && e.bounds[0] >= Math.round(screenW * 0.45) &&
+        !/draft|черновик/i.test(`${e.text} ${e.desc} ${e.resId}`)
+      );
+      if (rightBtns.length > 0) {
+        return rightBtns.sort((a, b) => (b.bounds[2] - b.bounds[0]) * (b.bounds[3] - b.bounds[1]) - (a.bounds[2] - a.bounds[0]) * (a.bounds[3] - a.bounds[1]))[0];
+      }
+    }
+  }
+
+  return undefined;
 }
 
-/** Still on the final compose screen (caption field + Share/Post button visible)? */
+/** Still on the final compose screen (Share/Post button visible)? */
 export function isComposeScreen(platform: FlowPlatform, s: UiScreen): boolean {
-  return Boolean(findPostButton(s, platform) && captionField(s));
+  return Boolean(findPostButton(s, platform));
 }
 
 function captionField(s: UiScreen): UiEl | undefined {
+  const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
   const fields = editTexts(s);
-  return fields.find((e) => CAPTION_FIELD_ID.test(e.resId.replace(/^.*:id\//, '')) || CAPTION_FIELD_HINT.test(`${e.text} ${e.desc}`))
-    ?? (fields.length === 1 ? fields[0] : undefined);
+
+  // 1. Matched by ID or Hint
+  const matched = fields.find((e) =>
+    CAPTION_FIELD_ID.test(e.resId.replace(/^.*:id\//, '')) ||
+    CAPTION_FIELD_HINT.test(`${e.text} ${e.desc}`)
+  );
+  if (matched) return matched;
+
+  // 2. If exactly one edit field
+  if (fields.length === 1) return fields[0];
+
+  // 3. Any edit field in the upper half of screen (y between 5% and 60%)
+  const topFields = fields.filter((e) => e.bounds[1] >= screenH * 0.05 && e.bounds[1] <= screenH * 0.6);
+  if (topFields.length > 0) {
+    // Pick the one with the largest area (main caption box)
+    return topFields.sort((a, b) =>
+      (b.bounds[2] - b.bounds[0]) * (b.bounds[3] - b.bounds[1]) -
+      (a.bounds[2] - a.bounds[0]) * (a.bounds[3] - a.bounds[1])
+    )[0];
+  }
+
+  // 4. Clickable placeholder view with caption hint (some custom TikTok layouts lazy-inflate EditText)
+  return s.els.find((e) =>
+    isVisible(e) && e.clickable && e.bounds[1] <= screenH * 0.6 &&
+    CAPTION_FIELD_HINT.test(`${e.text} ${e.desc}`)
+  );
 }
 
 export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCaption: boolean): FlowAction {
@@ -117,7 +168,7 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
 
   // System share chooser / resolver (Android / Samsung share sheet)
   if (/resolver|chooser|intentresolver|sharelive/i.test(s.pkg) || s.pkg === 'android') {
-    const targetLabel = platform === 'tiktok' ? /^(tiktok|tiktok lite)$/i : /^(instagram)$/i;
+    const targetLabel = platform === 'tiktok' ? /(^|\b)tiktok(\s+lite)?(\b|$)/i : /(^|\b)instagram(\b|$)/i;
     const target = s.els.find((e) => isVisible(e) && (targetLabel.test(e.text.trim()) || targetLabel.test(e.desc.trim())));
     if (target) {
       return { kind: 'tap', el: target, why: `выбор приложения ${platform} в системном меню «Поделиться»` };
@@ -154,11 +205,57 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     if (feed && s.els.some((e) => TT_OTHER_TARGETS.test(e.text.trim()) || TT_OTHER_TARGETS.test(e.desc.trim()))) {
       return { kind: 'tap', el: feed, why: 'выбор публикации в ленту TikTok', marks: 'target' };
     }
+  }
 
-    // TikTok media picker / gallery (if camera opened gallery)
+  // Confirmation / pre-confirm dialogs ("Post anyway?", "Copyright check", etc.)
+  const preConfirm = byLabel(s, POST_CONFIRM);
+  if (preConfirm && !editTexts(s).some((e) => CAPTION_FIELD_ID.test(e.resId))) {
+    return { kind: 'tap', el: preConfirm, why: `подтверждение «${preConfirm.text || preConfirm.desc}»` };
+  }
+
+  // ── Final screen: caption field + Share/Post button ──────────────────────────
+  const finalBtn = findPostButton(s, platform);
+  const field = captionField(s);
+
+  if (finalBtn) {
+    if (hasCaption && !st.captionDone && field) {
+      return { kind: 'caption', el: field };
+    }
+    // If caption is done, or no caption needed, or field is not found (keyboard open / no text field):
+    // Tap the Post button! Never fall through to unknown!
+    return { kind: 'tap', el: finalBtn, why: platform === 'instagram' ? '«Поделиться»' : '«Опубликовать»', marks: 'share' };
+  }
+
+  // ── Navigation & Next button ───────────────────────────────────────────────
+  const next = byLabel(s, NEXT) ?? byResId(s, NEXT_ID);
+  if (next && st.nextTaps < 6) return { kind: 'tap', el: next, why: '«Далее»', marks: 'next' };
+
+  // Editor screen fallback: if "Your Story" / "В историю" is on the left in the bottom bar,
+  // the right button is the Next button
+  if (platform === 'tiktok' && st.nextTaps < 6) {
+    const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
+    const screenW = Math.max(...s.els.map((e) => e.bounds[2]), 1);
+    const storyBtn = s.els.find((e) =>
+      isVisible(e) && e.enabled && e.bounds[1] >= screenH * 0.7 &&
+      (/story|истори/i.test(`${e.text} ${e.desc}`) || /quick_publish/i.test(e.resId))
+    );
+    if (storyBtn) {
+      const editorNext = s.els.find((e) =>
+        isVisible(e) && e.enabled && (e.clickable || /Button|TextView/i.test(e.cls)) &&
+        e.bounds[1] >= screenH * 0.7 && e.bounds[0] >= Math.round(screenW * 0.45) &&
+        !/story|истори/i.test(`${e.text} ${e.desc}`)
+      );
+      if (editorNext) {
+        return { kind: 'tap', el: editorNext, why: 'переход далее из редактора TikTok', marks: 'next' };
+      }
+    }
+  }
+
+  // ── Media picker / Gallery fallback (TikTok) ───────────────────────────────
+  if (platform === 'tiktok') {
     const isGalleryPicker = s.els.some((e) =>
-      isVisible(e) && /^(videos?|видео|all|все|photos?|фото)$/i.test(e.text.trim() || e.desc.trim())
-    ) || s.els.some((e) => /media_grid|media_list|gallery_grid|view_pager/i.test(e.resId));
+      isVisible(e) && /^(videos?|видео|all|все|photos?|фото|недавние|recents|галерея|gallery)$/i.test(e.text.trim() || e.desc.trim())
+    ) || s.els.some((e) => /media_grid|media_list|gallery_grid|view_pager|recycler_view/i.test(e.resId));
 
     if (isGalleryPicker) {
       const nextBtn = byLabel(s, NEXT) ?? byResId(s, NEXT_ID);
@@ -204,27 +301,7 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     }
   }
 
-  const preConfirm = byLabel(s, POST_CONFIRM);
-  if (preConfirm && !editTexts(s).some((e) => CAPTION_FIELD_ID.test(e.resId))) {
-    return { kind: 'tap', el: preConfirm, why: `подтверждение «${preConfirm.text || preConfirm.desc}»` };
-  }
-
-  // Final screen: caption field + Share/Post button.
-  const finalBtn = findPostButton(s, platform);
-  const field = captionField(s);
-  if (finalBtn && field) {
-    if (hasCaption && !st.captionDone) return { kind: 'caption', el: field };
-    return { kind: 'tap', el: finalBtn, why: platform === 'instagram' ? '«Поделиться»' : '«Опубликовать»', marks: 'share' };
-  }
-
-  const next = byLabel(s, NEXT) ?? byResId(s, NEXT_ID);
-  if (next && st.nextTaps < 6) return { kind: 'tap', el: next, why: '«Далее»', marks: 'next' };
-
-  // Final button visible but no caption field (keyboard covering it, or none needed).
-  if (finalBtn && (!hasCaption || st.captionDone)) {
-    return { kind: 'tap', el: finalBtn, why: 'публикация', marks: 'share' };
-  }
-
+  // ── Harmless dismissals / Popups ───────────────────────────────────────────
   const dismiss = byLabel(s, DISMISS);
   if (dismiss) return { kind: 'tap', el: dismiss, why: `закрыть подсказку «${dismiss.text || dismiss.desc}»` };
 
