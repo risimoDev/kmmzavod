@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     KMMZAVOD - Глубокая диагностика и АВТО-ВОССТАНОВЛЕНИЕ всех плат стойки
     Проверка и исправление: USB-сеть -> DNS -> Magisk Root -> Шлюз -> Sing-box -> iptables -> AstroProxy -> TikTok
@@ -35,7 +35,7 @@ if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
 $agentRunning = $false
 $agentStatus = $null
 $agentUrl = "http://127.0.0.1:8300"
-$candidateIps = @("127.0.0.1", "10.66.66.2", "localhost")
+$candidateIps = @("127.0.0.1", "10.66.66.2", "10.13.13.2", "localhost")
 
 try {
     $tcpConns = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     KMMZAVOD - ГЛУБОКИЙ АНАЛИЗАТОР СЕТИ И ПРИЛОЖЕНИЙ (DEEP DIAGNOSTIC & AUTO-DOCTOR)
     Полная проверка всех 12 уровней стека фермы:
@@ -50,7 +50,7 @@ if ($gnirehtetProc) {
 $agentRunning = $false
 $agentStatus = $null
 $agentUrl = "http://127.0.0.1:8300"
-$candidateIps = @("127.0.0.1", "10.66.66.2", "localhost")
+$candidateIps = @("127.0.0.1", "10.66.66.2", "10.13.13.2", "localhost")
 
 try {
     $tcpConns = Get-NetTCPConnection -LocalPort 8300 -ErrorAction SilentlyContinue

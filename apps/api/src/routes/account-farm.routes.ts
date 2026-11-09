@@ -1536,6 +1536,16 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       accountsByDeviceId.set(a.deviceId, list);
     }
 
+    if (!farmResult.ok) {
+      const errMsg = farmResult.error || 'device-agent вернул статус ok: false';
+      return reply.status(502).send({
+        ok: false,
+        message: errMsg,
+        error: errMsg,
+        devices: [],
+      });
+    }
+
     let rawList: any[] = [];
     if (Array.isArray(farmResult.raw)) {
       rawList = farmResult.raw;
@@ -1546,6 +1556,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
 
     const proxies = farmResult.proxies || {};
     const proxyStatus = farmResult.proxyStatus || {};
+    const appsMap = farmResult.apps || {};
     const devices = rawList.map((d: any) => {
       const devId = String(d.deviceid || d.deviceId || d.id || d.serial || '');
       const devAccounts = accountsByDeviceId.get(devId) ?? [];
@@ -1574,6 +1585,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
           warmupCount: primaryAssigned.warmupCount,
         } : null,
         assignedAccounts,
+        apps: appsMap[devId] ?? null,
         // What is actually applied on the phone (from the farm agent).
         proxy: proxies[devId] ?? null,
         proxyStatus: proxyStatus[devId] ?? null,

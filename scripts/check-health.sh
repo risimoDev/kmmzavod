@@ -474,6 +474,97 @@ else
 fi
 
 # =============================================================================
+# 10. Телефонная ферма и AmneziaWG (device-agent)
+# =============================================================================
+header "10. Телефонная ферма и AmneziaWG (device-agent)"
+
+AWG_UP=false
+if ip link show awg0 &>/dev/null; then
+  ok "Сетевой интерфейс awg0 поднят"
+  AWG_UP=true
+elif command -v awg &>/dev/null && awg show awg0 &>/dev/null; then
+  ok "AmneziaWG интерфейс awg0 активен"
+  AWG_UP=true
+elif command -v wg &>/dev/null && wg show awg0 &>/dev/null; then
+  ok "WireGuard/AmneziaWG интерфейс awg0 активен"
+  AWG_UP=true
+else
+  warn "Интерфейс awg0 не найден на сервере (AmneziaWG туннель не запущен)"
+  info "Для запуска туннеля: systemctl start awg-quick@awg0 (см. infra/amneziawg/README.md)"
+fi
+
+IP_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+if [ "$IP_FORWARD" = "1" ]; then
+  ok "net.ipv4.ip_forward = 1 (включен)"
+else
+  fail "net.ipv4.ip_forward = $IP_FORWARD (пакеты из Docker не форвардируются в туннель)"
+  if [ "$DRY_RUN" = false ]; then
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    grep -qxF 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf 2>/dev/null || true
+    fixed "Включен net.ipv4.ip_forward=1 в sysctl"
+  fi
+fi
+
+if [ "$AWG_UP" = true ]; then
+  if iptables -t nat -C POSTROUTING -o awg0 -j MASQUERADE 2>/dev/null; then
+    ok "iptables MASQUERADE для awg0 настроен"
+  else
+    warn "Отсутствует iptables MASQUERADE для awg0 (пакеты Docker к ПК фермы будут отброшены)"
+    if [ "$DRY_RUN" = false ]; then
+      iptables -I FORWARD -o awg0 -j ACCEPT 2>/dev/null || true
+      iptables -I FORWARD -i awg0 -j ACCEPT 2>/dev/null || true
+      iptables -t nat -A POSTROUTING -o awg0 -j MASQUERADE 2>/dev/null || true
+      fixed "Добавлено правило iptables MASQUERADE для awg0"
+    fi
+  fi
+fi
+
+FARM_CONFIGURED_URL="$(env_get DEVICE_AGENT_URL 2>/dev/null || echo 'http://10.66.66.2:8300')"
+[ -z "$FARM_CONFIGURED_URL" ] && FARM_CONFIGURED_URL="http://10.66.66.2:8300"
+
+CANDIDATE_URLS=("$FARM_CONFIGURED_URL")
+if [[ "$FARM_CONFIGURED_URL" == *"10.66.66.2"* ]]; then
+  CANDIDATE_URLS+=("${FARM_CONFIGURED_URL/10.66.66.2/10.13.13.2}")
+elif [[ "$FARM_CONFIGURED_URL" == *"10.13.13.2"* ]]; then
+  CANDIDATE_URLS+=("${FARM_CONFIGURED_URL/10.13.13.2/10.66.66.2}")
+fi
+
+ACTIVE_FARM_URL=""
+for curl_url in "${CANDIDATE_URLS[@]}"; do
+  if curl -sf --connect-timeout 2 --max-time 3 "$curl_url/health" &>/dev/null; then
+    ACTIVE_FARM_URL="$curl_url"
+    break
+  fi
+done
+
+if [ -n "$ACTIVE_FARM_URL" ]; then
+  ok "device-agent доступен с хоста: $ACTIVE_FARM_URL/health"
+
+  if docker compose exec -T orchestrator curl -sf --connect-timeout 3 "$ACTIVE_FARM_URL/health" &>/dev/null; then
+    ok "device-agent доступен из контейнера orchestrator"
+  elif docker compose exec -T api curl -sf --connect-timeout 3 "$ACTIVE_FARM_URL/health" &>/dev/null; then
+    ok "device-agent доступен из контейнера api"
+  else
+    warn "device-agent доступен с хоста VPS, но контейнеры Docker не могут достучаться"
+    info "Запустите sudo bash infra/amneziawg/setup-server-routing.sh"
+  fi
+
+  DEVICES_RESP=$(curl -sf --connect-timeout 3 --max-time 5 "$ACTIVE_FARM_URL/devices" 2>/dev/null || true)
+  if [ -n "$DEVICES_RESP" ]; then
+    DEVICES_COUNT=$(echo "$DEVICES_RESP" | grep -o '"serial":"[^"]*"' | wc -l | tr -d ' ' || echo "0")
+    if [ "$DEVICES_COUNT" -gt 0 ]; then
+      ok "Обнаружено $DEVICES_COUNT подключенных плат/телефонов на ПК фермы"
+    else
+      warn "device-agent отвечает, но подключенных Android-плат не обнаружено (adb devices пуст)"
+    fi
+  fi
+else
+  warn "device-agent на ПК фермы (${CANDIDATE_URLS[*]}) не отвечает"
+  info "Для проверки запустите bash scripts/diagnose-vps-farm.sh на сервере"
+  info "На ПК фермы убедитесь, что запущен start-farm.bat и подключен AmneziaWG"
+fi
+
+# =============================================================================
 # ИТОГОВЫЙ ОТЧЁТ
 # =============================================================================
 TOTAL=$((PASS + FAIL + WARN))

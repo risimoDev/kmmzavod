@@ -24,19 +24,27 @@ else
     echo "[OK] Правило NAT MASQUERADE для awg0 уже существует."
 fi
 
-echo "=== [3/3] Проверка доступности ПК с фермой телефонов (10.66.66.2:8300) ==="
-if curl -s -m 5 http://10.66.66.2:8300/health >/dev/null; then
-    echo "✅ [УСПЕХ] ПК с фермой отвечает на http://10.66.66.2:8300/health!"
-    echo "Список плат с агента:"
-    curl -s http://10.66.66.2:8300/devices | grep -o '"serial":"[^"]*"' || true
+echo "=== [3/3] Проверка доступности ПК с фермой телефонов ==="
+FARM_URL=""
+for candidate in "http://10.66.66.2:8300" "http://10.13.13.2:8300"; do
+    if curl -s -m 4 "$candidate/health" >/dev/null 2>&1; then
+        FARM_URL="$candidate"
+        break
+    fi
+done
+
+if [ -n "$FARM_URL" ]; then
+    echo "✅ [УСПЕХ] ПК с фермой отвечает на $FARM_URL/health!"
+    echo "Список подключенных плат с агента:"
+    curl -s "$FARM_URL/devices" | grep -o '"serial":"[^"]*"' || true
 else
-    echo "⚠️  ПК 10.66.66.2:8300 пока не отвечает."
+    echo "⚠️  ПК с фермой (10.66.66.2:8300 / 10.13.13.2:8300) пока не отвечает."
     echo "Убедитесь, что:"
     echo "1. AmneziaWG подключен на Windows."
     echo "2. start-farm.bat запущен на ПК."
-    echo "3. Брандмауэр Windows не блокирует порт 8300."
+    echo "3. Брандмауэр Windows не блокирует порт 8300 (запустите apps/device-agent/deep-diagnose.ps1)."
 fi
 
 echo ""
-echo "=== Готово! Теперь перезапустите api-контейнер: ==="
-echo "docker compose up -d api"
+echo "=== Готово! Перезапустите контейнеры api и orchestrator: ==="
+echo "docker compose up -d api orchestrator"

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     KMMZAVOD - Запуск агента стойки телефонной фермы (Native ADB Device-Agent)
 .DESCRIPTION
@@ -67,7 +67,7 @@ try {
 
 $adbOk = $false
 try {
-    $test = & adb get-state 2>&1
+    $test = & adb devices 2>&1
     if ($LASTEXITCODE -eq 0) { $adbOk = $true }
 } catch {}
 

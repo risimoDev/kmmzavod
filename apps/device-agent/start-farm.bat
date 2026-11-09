@@ -15,7 +15,7 @@ echo.
 
 :: 1. Проверка Node.js
 where node >nul 2>nul
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ОШИБКА] Node.js не найден в PATH!
     echo Установите Node.js 20+ с официального сайта: https://nodejs.org/
     echo После установки перезапустите этот скрипт.
@@ -60,14 +60,11 @@ echo.
 echo Проверка состояния ADB и портов...
 
 :: Очистка зависших процессов старого device-agent на порту 8300 (если есть)
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr :8300 ^| findstr LISTENING') do (
-    echo [ОЧИСТКА] Завершение старого процесса device-agent на порту 8300 (PID %%a)...
-    taskkill /F /PID %%a >nul 2>nul
-)
+powershell -NoProfile -Command "try { (Get-NetTCPConnection -LocalPort 8300 -State Listen -ErrorAction SilentlyContinue) | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } } catch {}" >nul 2>nul
 
-:: Проверяем, отвечает ли ADB прямо сейчас
+:: Проверяем, отвечает ли ADB прямо сейчас (adb devices возвращает 0 при живом сервере, даже если 20 плат)
 set "ADB_ALREADY_OK=0"
-adb get-state >nul 2>nul
+adb devices >nul 2>nul
 if not errorlevel 1 (
     set "ADB_ALREADY_OK=1"
     echo [OK] Служба ADB активна и отвечает (перезапуск не требуется).
@@ -77,7 +74,7 @@ if "%ADB_ALREADY_OK%"=="0" (
     echo Очистка старых процессов ADB и Gnirehtet...
     taskkill /F /IM gnirehtet.exe >nul 2>nul
     adb kill-server >nul 2>nul
-    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr :5037 ^| findstr LISTENING') do taskkill /F /PID %%a >nul 2>nul
+    powershell -NoProfile -Command "try { (Get-NetTCPConnection -LocalPort 5037 -ErrorAction SilentlyContinue) | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } } catch {}" >nul 2>nul
     taskkill /F /IM adb.exe >nul 2>nul
     ping 127.0.0.1 -n 3 >nul
 
@@ -110,15 +107,19 @@ echo [OK] Служба Gnirehtet активна.
 echo.
 :skip_gnirehtet
 
-:: 3c. Проверка нативного движка sing-box (для прозрачного проксирования на платах)
+:: 3c. Проверка нативного движка sing-box (с защитой от зависания при DPI-блокировках)
 if not exist "%~dp0bin\sing-box" (
-    echo [PROXIES] Загрузка нативного движка sing-box для Android ARM64...
+    echo [PROXIES] Проверка нативного движка sing-box для Android ARM64...
     if not exist "%~dp0bin" mkdir "%~dp0bin"
-    curl.exe -L -s -o "%~dp0bin\sing-box.tar.gz" https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz
+    curl.exe -L -k --connect-timeout 8 --max-time 30 -s -o "%~dp0bin\sing-box.tar.gz" https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-android-arm64.tar.gz >nul 2>nul
     if exist "%~dp0bin\sing-box.tar.gz" (
-        tar -xzf "%~dp0bin\sing-box.tar.gz" -C "%~dp0bin" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box
+        tar -xzf "%~dp0bin\sing-box.tar.gz" -C "%~dp0bin" --strip-components=1 sing-box-1.14.2-android-arm64/sing-box >nul 2>nul
         del "%~dp0bin\sing-box.tar.gz" >nul 2>nul
+    )
+    if exist "%~dp0bin\sing-box" (
         echo [OK] Нативный движок sing-box загружен в bin\sing-box.
+    ) else (
+        echo [ИНФО] sing-box не загружен (DPI). Агент будет использовать нативный Android system proxy (полная поддержка).
     )
 )
 
@@ -135,6 +136,7 @@ if errorlevel 1 (
 :: 4a. Прямое подключение к AstroProxy (без промежуточного relay сервера)
 set "DEVICE_AGENT_UPSTREAM_VIA="
 echo [OK] Режим подключения: Прямой канал к AstroProxy (без задержек relay).
+
 :: 4b. Автоматическое обновление конфигурации прокси на AstroProxy Казахстан
 if exist "%~dp0devices-proxy-state.astroproxy.json" (
     if not exist "%~dp0devices-proxy-state.json" (
@@ -166,7 +168,7 @@ if errorlevel 1 (
 
 echo.
 echo ================================================================
-echo   ЗАПУСК NATIVE DEVICE-AGENT (ADB CONTROLLER)...
+echo   ЗАПУСК NATIVE DEVICE-AGENT (порт 8300)...
 echo ================================================================
 echo.
 
@@ -175,23 +177,30 @@ set "RUN_CMD="
 where pnpm >nul 2>nul
 if not errorlevel 1 set "RUN_CMD=pnpm"
 if not defined RUN_CMD (
+    if exist "%LOCALAPPDATA%\pnpm\pnpm.cmd" set "RUN_CMD=%LOCALAPPDATA%\pnpm\pnpm.cmd"
+    if exist "%APPDATA%\npm\pnpm.cmd" set "RUN_CMD=%APPDATA%\npm\pnpm.cmd"
+)
+if not defined RUN_CMD (
     where npm >nul 2>nul
     if not errorlevel 1 set "RUN_CMD=npm"
 )
 if not defined RUN_CMD (
     echo [ОШИБКА] Ни pnpm, ни npm не найдены в системе!
+    echo Установите Node.js: https://nodejs.org/
     pause
     exit /b 1
 )
 
 :: 6. Установка зависимостей, если еще не установлены
 if not exist "node_modules" (
-    echo Папка node_modules не найдена. Установка зависимостей через %RUN_CMD%...
-    call %RUN_CMD% install
-    if errorlevel 1 (
-        echo [ОШИБКА] Не удалось установить зависимости!
-        pause
-        exit /b 1
+    if exist "..\..\package.json" (
+        echo Установка зависимостей в корне монорепозитория через %RUN_CMD%...
+        cd /d "%~dp0..\.."
+        call %RUN_CMD% install
+        cd /d "%~dp0"
+    ) else (
+        echo Установка зависимостей через %RUN_CMD%...
+        call %RUN_CMD% install
     )
 )
 
@@ -199,12 +208,16 @@ if not exist "node_modules" (
 if "%RUN_CMD%"=="pnpm" (
     call pnpm dev
 ) else (
-    call npm run dev
+    call npx tsx watch src/index.ts
 )
 
 if errorlevel 1 (
     echo.
-    echo [ОШИБКА] Device-agent завершился с ошибкой.
+    echo [ОШИБКА] Device-agent завершился с кодом ошибки: %errorlevel%
+    echo Возможные причины:
+    echo 1. Порт 8300 занят другим процессом
+    echo 2. Ошибка в конфигурации devices-proxy-state.json
+    echo 3. Ошибка сборки TypeScript
 )
 
 echo.

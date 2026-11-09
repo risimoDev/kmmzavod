@@ -145,13 +145,14 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 4. Share the video into the app
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
-    let amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
+    let amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
     let amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
     logger.info({ deviceId, platform, component, amOut: (amOut || '').trim() }, 'publish: am start executed');
 
-    if (component && /ActivityNotFoundException|unable to resolve|SecurityException|Permission Denial|not exported/i.test(amOut)) {
-      logger.warn({ deviceId, component }, 'publish: specific component failed, falling back to package-level intent');
-      amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x14000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;
+    const amFailed = !amOut || /Error|Exception|SecurityException|Permission Denial|not exported|does not exist|unable to resolve/i.test(amOut) || !/Starting: Intent/i.test(amOut);
+    if (component && amFailed) {
+      logger.warn({ deviceId, component, amOut: (amOut || '').trim() }, 'publish: specific component failed, falling back to package-level intent');
+      amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission -p ${pkg}`;
       amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
       logger.info({ deviceId, platform, amOut: (amOut || '').trim() }, 'publish: fallback am start executed');
     }

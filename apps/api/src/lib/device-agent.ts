@@ -1,7 +1,95 @@
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 import { config } from '../config';
 
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
+
+let activeBaseUrl: string | null = null;
+let lastBaseCheck = 0;
+
+export async function getDeviceAgentBaseUrl(): Promise<string> {
+  const configured = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
+  const now = Date.now();
+  if (activeBaseUrl && now - lastBaseCheck < 60_000) {
+    return activeBaseUrl;
+  }
+
+  const candidates: string[] = [configured];
+  if (configured.includes('10.66.66.2')) {
+    candidates.push(configured.replace('10.66.66.2', '10.13.13.2'));
+  } else if (configured.includes('10.13.13.2')) {
+    candidates.push(configured.replace('10.13.13.2', '10.66.66.2'));
+  }
+
+  for (const c of candidates) {
+    try {
+      const res = await axios.get(`${c}/health`, { timeout: 2500 });
+      if (res.status === 200) {
+        activeBaseUrl = c;
+        lastBaseCheck = now;
+        return c;
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  return activeBaseUrl || configured;
+}
+
+function getAlternateUrl(currentUrl: string): string | null {
+  if (currentUrl.includes('10.66.66.2')) return currentUrl.replace('10.66.66.2', '10.13.13.2');
+  if (currentUrl.includes('10.13.13.2')) return currentUrl.replace('10.13.13.2', '10.66.66.2');
+  return null;
+}
+
+export async function requestWithFallback<T>(fn: (base: string) => Promise<{ data: T }>): Promise<T> {
+  const base = await getDeviceAgentBaseUrl();
+  try {
+    const res = await fn(base);
+    return res.data;
+  } catch (err) {
+    const alt = getAlternateUrl(base);
+    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
+      try {
+        const res = await fn(alt);
+        activeBaseUrl = alt;
+        lastBaseCheck = Date.now();
+        return res.data;
+      } catch {
+        // preserve original error
+      }
+    }
+    throw err;
+  }
+}
+
+export async function agentGet<T = any>(path: string, options?: AxiosRequestConfig): Promise<T> {
+  return requestWithFallback((base) => axios.get(`${base}${path}`, options));
+}
+
+export async function agentPost<T = any>(path: string, data?: any, options?: AxiosRequestConfig): Promise<T> {
+  return requestWithFallback((base) => axios.post(`${base}${path}`, data, options));
+}
+
+export async function requestWithFallbackRaw<T>(fn: (base: string) => Promise<T>): Promise<T> {
+  const base = await getDeviceAgentBaseUrl();
+  try {
+    return await fn(base);
+  } catch (err) {
+    const alt = getAlternateUrl(base);
+    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
+      try {
+        const res = await fn(alt);
+        activeBaseUrl = alt;
+        lastBaseCheck = Date.now();
+        return res;
+      } catch {
+        // preserve original error
+      }
+    }
+    throw err;
+  }
+}
 
 export type ProxyType = 'http' | 'https' | 'socks5' | 'residential' | 'mobile';
 
@@ -104,20 +192,21 @@ export interface WbWarmupResult {
 }
 
 export function describeDeviceAgentError(err: unknown): string {
+  const effectiveBase = activeBaseUrl || BASE;
   if (axios.isAxiosError(err)) {
     const code = err.code;
     if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
-      return `device-agent (${BASE}) не ответил вовремя — операция на плате может ещё выполняться. Обновите статус через несколько секунд.`;
+      return `device-agent (${effectiveBase}) не ответил вовремя — операция на плате может ещё выполняться. Обновите статус через несколько секунд.`;
     }
     if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'EHOSTUNREACH' || code === 'ECONNRESET') {
-      return `device-agent недоступен по адресу ${BASE} (${code}). ` +
+      return `device-agent недоступен по адресу ${effectiveBase} (${code}). ` +
         `Убедитесь, что AmneziaWG туннель поднят, в iptables на сервере включен MASQUERADE для awg0, и device-agent запущен на ПК с фермой телефонов.`;
     }
     const status = err.response?.status;
     const data = err.response?.data as { detail?: string; error?: unknown; message?: string } | string | undefined;
     if (status === 404) {
       const routeMsg = typeof data === 'object' && data?.message ? `: ${data.message}` : '';
-      return `Эндпоинт ${err.config?.url ?? ''} не найден на device-agent (${BASE})${routeMsg}. Перезапустите apps/device-agent на ПК фермы (pnpm --filter @kmmzavod/device-agent run build && pnpm --filter @kmmzavod/device-agent run start).`;
+      return `Эндпоинт ${err.config?.url ?? ''} не найден на device-agent (${effectiveBase})${routeMsg}. Перезапустите apps/device-agent на ПК фермы (pnpm --filter @kmmzavod/device-agent run build && pnpm --filter @kmmzavod/device-agent run start).`;
     }
     const body = typeof data === 'string'
       ? data
@@ -145,10 +234,10 @@ export const deviceAgentClient = {
     proxies?: Record<string, MaskedDeviceProxyConfig>;
     proxyStatus?: Record<string, { route: DeviceRoute; method: string | null; applyError?: string; transparentError?: string; gateway?: { activeConnections: number; lastError?: string } }>;
     proxyMode?: Omit<ProxyModeState, 'ok'>;
+    apps?: Record<string, any>;
     error?: string;
   }> {
-    const res = await axios.get(`${BASE}/devices`, { timeout: 30_000 });
-    return res.data;
+    return agentGet('/devices', { timeout: 30_000 });
   },
 
   /** Verifies the proxy from the farm PC first, then wires the phone and checks its exit IP. */
@@ -157,62 +246,51 @@ export const deviceAgentClient = {
     proxy: DeviceProxyConfig,
     opts: { activate?: boolean; skipTest?: boolean } = {},
   ): Promise<{ ok: boolean; check?: DeviceIpCheckResult; upstream?: UpstreamTestResult; error?: string }> {
-    const res = await axios.post(`${BASE}/proxy/set`, { deviceId, ...proxy, ...opts }, { timeout: 120_000 });
-    return res.data;
+    return agentPost('/proxy/set', { deviceId, ...proxy, ...opts }, { timeout: 120_000 });
   },
 
   /** Check a proxy from the farm PC without touching any phone. */
   async testProxy(proxy: DeviceProxyConfig): Promise<UpstreamTestResult> {
-    const res = await axios.post(`${BASE}/proxy/test`, proxy, { timeout: 60_000 });
-    return res.data;
+    return agentPost('/proxy/test', proxy, { timeout: 60_000 });
   },
 
   async getProxyStatus(): Promise<Record<string, unknown>> {
-    const res = await axios.get(`${BASE}/proxy/status`, { timeout: 10_000 });
-    return res.data;
+    return agentGet('/proxy/status', { timeout: 10_000 });
   },
 
   async clearProxy(deviceId: string): Promise<{ ok: boolean; error?: string }> {
-    const res = await axios.post(`${BASE}/proxy/clear`, { deviceId }, { timeout: 60_000 });
-    return res.data;
+    return agentPost('/proxy/clear', { deviceId }, { timeout: 60_000 });
   },
 
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    const res = await axios.post(`${BASE}/proxy/check`, { deviceId }, { timeout: 90_000 });
-    return res.data;
+    return agentPost('/proxy/check', { deviceId }, { timeout: 90_000 });
   },
 
   async getProxyMode(): Promise<ProxyModeState> {
-    const res = await axios.get(`${BASE}/proxy/mode`, { timeout: 8_000 });
-    return res.data;
+    return agentGet('/proxy/mode', { timeout: 8_000 });
   },
 
   async setProxyMode(mode: 'shared_sequential' | 'private_parallel', inactivePolicy?: 'direct' | 'block'): Promise<ProxyModeState> {
-    const res = await axios.post(`${BASE}/proxy/mode`, { mode, inactivePolicy }, { timeout: 30_000 });
-    return res.data;
+    return agentPost('/proxy/mode', { mode, inactivePolicy }, { timeout: 30_000 });
   },
 
   async getTrafficConfig(): Promise<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }> {
-    const res = await axios.get(`${BASE}/proxy/traffic`, { timeout: 8_000 });
-    return res.data;
+    return agentGet('/proxy/traffic', { timeout: 8_000 });
   },
 
   async setTrafficConfig(
     trafficSaver?: 'block_media' | 'direct_media' | 'off',
     trafficStandby?: boolean,
   ): Promise<{ ok: boolean; trafficSaver: 'block_media' | 'direct_media' | 'off'; trafficStandby: boolean }> {
-    const res = await axios.post(`${BASE}/proxy/traffic`, { trafficSaver, trafficStandby }, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/proxy/traffic', { trafficSaver, trafficStandby }, { timeout: 15_000 });
   },
 
   async optimizeDataSaver(deviceId?: string): Promise<{ ok: boolean; total?: number; successful?: number; results?: any[] }> {
-    const res = await axios.post(`${BASE}/proxy/optimize-data-saver`, { deviceId }, { timeout: 60_000 });
-    return res.data;
+    return agentPost('/proxy/optimize-data-saver', { deviceId }, { timeout: 60_000 });
   },
 
   async switchActiveProxyDevice(deviceId: string, force?: boolean): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
-    const res = await axios.post(`${BASE}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 });
-    return res.data;
+    return agentPost('/proxy/switch-active', { deviceId, force }, { timeout: 60_000 });
   },
 
   async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
@@ -224,8 +302,7 @@ export const deviceAgentClient = {
     check: DeviceIpCheckResult;
     error?: string;
   }> {
-    const res = await axios.post(`${BASE}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 });
-    return res.data;
+    return agentPost('/proxy/rotate-ip', { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 });
   },
 
   async restartNetworkInterface(opts: {
@@ -244,8 +321,7 @@ export const deviceAgentClient = {
       log: string;
     }>;
   }> {
-    const res = await axios.post(`${BASE}/network/restart-interface`, opts, { timeout: 30_000 });
-    return res.data;
+    return agentPost('/network/restart-interface', opts, { timeout: 30_000 });
   },
 
   async batchSetProxy(assignments: Array<{ deviceId: string } & DeviceProxyConfig>): Promise<{
@@ -260,44 +336,40 @@ export const deviceAgentClient = {
       upstream?: { ip?: string; protocol?: 'http' | 'socks5' };
     }>;
   }> {
-    const res = await axios.post(`${BASE}/proxy/batch-set`, { assignments }, { timeout: 600_000 });
-    return res.data;
+    return agentPost('/proxy/batch-set', { assignments }, { timeout: 600_000 });
   },
 
   async batchCheckDeviceIp(deviceIds: string[]): Promise<Array<{ deviceId: string } & DeviceIpCheckResult>> {
-    const res = await axios.post(`${BASE}/proxy/batch-check`, { deviceIds }, { timeout: 600_000 });
-    return res.data.results;
+    const data = await agentPost<{ results: Array<{ deviceId: string } & DeviceIpCheckResult> }>('/proxy/batch-check', { deviceIds }, { timeout: 600_000 });
+    return data.results;
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {
-    const res = await axios.post(`${BASE}/view-target`, opts, { timeout: 660_000 });
-    return res.data;
+    return agentPost('/view-target', opts, { timeout: 660_000 });
   },
 
   async wbWarmup(opts: WbWarmupOptions): Promise<WbWarmupResult> {
-    const res = await axios.post(`${BASE}/wb/warmup`, opts, { timeout: 660_000 });
-    return res.data;
+    return agentPost('/wb/warmup', opts, { timeout: 660_000 });
   },
 
   async reboot(deviceId: string): Promise<{ ok: boolean; message?: string }> {
-    const res = await axios.post(`${BASE}/device/reboot`, { deviceId }, { timeout: 10_000 });
-    return res.data;
+    return agentPost('/device/reboot', { deviceId }, { timeout: 10_000 });
   },
 
   async wake(deviceId: string): Promise<{ ok: boolean; message?: string }> {
-    const res = await axios.post(`${BASE}/device/wake`, { deviceId }, { timeout: 10_000 });
-    return res.data;
+    return agentPost('/device/wake', { deviceId }, { timeout: 10_000 });
   },
 
   async screenshot(deviceId: string): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-    const res = await axios.post(`${BASE}/device/screenshot`, { deviceId }, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/screenshot', { deviceId }, { timeout: 15_000 });
   },
 
   /** Binary screen frame (JPEG/PNG bytes) + full-resolution screen size. */
   async frame(deviceId: string): Promise<{ image: Buffer; contentType: string; width: number; height: number }> {
     try {
-      const res = await axios.post(`${BASE}/device/frame`, { deviceId }, { timeout: 15_000, responseType: 'arraybuffer' });
+      const res = await requestWithFallbackRaw((base) =>
+        axios.post(`${base}/device/frame`, { deviceId }, { timeout: 15_000, responseType: 'arraybuffer' })
+      );
       return {
         image: Buffer.from(res.data),
         contentType: String(res.headers['content-type'] ?? 'image/jpeg'),
@@ -316,18 +388,15 @@ export const deviceAgentClient = {
   },
 
   async heal(deviceId: string): Promise<{ ok: boolean; message?: string; error?: string }> {
-    const res = await axios.post(`${BASE}/device/heal`, { deviceId }, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/heal', { deviceId }, { timeout: 15_000 });
   },
 
   async getHealth(deviceId: string): Promise<{ deviceId: string; online: boolean; batteryLevel?: number; batteryTemp?: number; freeRamMb?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/health`, { deviceId }, { timeout: 10_000 });
-    return res.data;
+    return agentPost('/device/health', { deviceId }, { timeout: 10_000 });
   },
 
   async optimizeFarm(deviceIds?: string[]): Promise<{ ok: boolean; total?: number; results?: Array<{ deviceId: string; ok: boolean; message: string }> }> {
-    const res = await axios.post(`${BASE}/farm/optimize`, { deviceIds }, { timeout: 30_000 });
-    return res.data;
+    return agentPost('/farm/optimize', { deviceIds }, { timeout: 30_000 });
   },
 
   async tap(opts: {
@@ -340,8 +409,7 @@ export const deviceAgentClient = {
     yPercent?: number;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/tap`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/tap', opts, { timeout: 15_000 });
   },
 
   async swipe(opts: {
@@ -357,8 +425,7 @@ export const deviceAgentClient = {
     durationMs?: number;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/swipe`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/swipe', opts, { timeout: 15_000 });
   },
 
   async key(opts: {
@@ -366,8 +433,7 @@ export const deviceAgentClient = {
     key: 'home' | 'back' | 'recents' | 'power' | 'wake' | 'volup' | 'voldown' | number;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/key`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/key', opts, { timeout: 15_000 });
   },
 
   async text(opts: {
@@ -375,8 +441,7 @@ export const deviceAgentClient = {
     text: string;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/text`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/text', opts, { timeout: 15_000 });
   },
 
   async openApp(opts: {
@@ -384,8 +449,7 @@ export const deviceAgentClient = {
     packageName: string;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/open-app`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/open-app', opts, { timeout: 15_000 });
   },
 
   async setOrientation(opts: {
@@ -393,16 +457,14 @@ export const deviceAgentClient = {
     orientation: 0 | 1;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; orientation?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/orientation`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/orientation', opts, { timeout: 15_000 });
   },
 
   async acceptDialog(opts: {
     deviceId: string;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/accept-dialog`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/accept-dialog', opts, { timeout: 15_000 });
   },
 
   async grantPermissions(opts: {
@@ -410,8 +472,7 @@ export const deviceAgentClient = {
     packageName?: string;
     targetDeviceIds?: string[];
   }): Promise<{ ok: boolean; targetsCount?: number; successful?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/control/grant-permissions`, opts, { timeout: 15_000 });
-    return res.data;
+    return agentPost('/device/control/grant-permissions', opts, { timeout: 15_000 });
   },
 
   async installApk(opts: {
@@ -433,8 +494,7 @@ export const deviceAgentClient = {
       error?: string;
     }>;
   }> {
-    const res = await axios.post(`${BASE}/device/apps/install`, opts, { timeout: 600_000 });
-    return res.data;
+    return agentPost('/device/apps/install', opts, { timeout: 600_000 });
   },
 
   async uploadAndInstallApk(opts: {
@@ -458,8 +518,8 @@ export const deviceAgentClient = {
     }>;
   }> {
     const { fileData, filename = 'app.apk', targetDeviceIds, reinstall = true, grantPermissions = true } = opts;
-    const res = await axios.post(
-      `${BASE}/device/apps/upload-and-install`,
+    return agentPost(
+      '/device/apps/upload-and-install',
       fileData,
       {
         params: {
@@ -476,7 +536,6 @@ export const deviceAgentClient = {
         timeout: 900_000,
       }
     );
-    return res.data;
   },
 
   async batchAppAction(opts: {
@@ -497,8 +556,7 @@ export const deviceAgentClient = {
       error?: string;
     }>;
   }> {
-    const res = await axios.post(`${BASE}/device/apps/batch-action`, opts, { timeout: 120_000 });
-    return res.data;
+    return agentPost('/device/apps/batch-action', opts, { timeout: 120_000 });
   },
 
   async listApps(deviceId: string, thirdPartyOnly = true): Promise<{
@@ -507,8 +565,7 @@ export const deviceAgentClient = {
     packages: string[];
     count: number;
   }> {
-    const res = await axios.post(`${BASE}/device/apps/list`, { deviceId, thirdPartyOnly }, { timeout: 20_000 });
-    return res.data;
+    return agentPost('/device/apps/list', { deviceId, thirdPartyOnly }, { timeout: 20_000 });
   },
 
   async runScript(opts: {
@@ -541,8 +598,7 @@ export const deviceAgentClient = {
       error?: string;
     }>;
   }> {
-    const res = await axios.post(`${BASE}/device/scripts/run`, opts, { timeout: 600_000 });
-    return res.data;
+    return agentPost('/device/scripts/run', opts, { timeout: 600_000 });
   },
 
   async loginAccount(opts: {
@@ -563,8 +619,7 @@ export const deviceAgentClient = {
     detail: string;
     error?: string;
   }> {
-    const res = await axios.post(`${BASE}/device/account/login`, opts, { timeout: 180_000 });
-    return res.data;
+    return agentPost('/device/account/login', opts, { timeout: 180_000 });
   },
 
   async testEmail(opts: {
@@ -573,8 +628,7 @@ export const deviceAgentClient = {
     host?: string;
     port?: number;
   }): Promise<{ ok: boolean; messageCount?: number; error?: string }> {
-    const res = await axios.post(`${BASE}/device/account/test-email`, opts, { timeout: 20_000 });
-    return res.data;
+    return agentPost('/device/account/test-email', opts, { timeout: 20_000 });
   },
 
   async getEmailCode(opts: {
@@ -585,8 +639,7 @@ export const deviceAgentClient = {
     platform?: 'tiktok' | 'instagram';
     maxWaitSec?: number;
   }): Promise<{ ok: boolean; code?: string; subject?: string; from?: string; date?: string; error?: string }> {
-    const res = await axios.post(`${BASE}/device/account/email-code`, opts, { timeout: 120_000 });
-    return res.data;
+    return agentPost('/device/account/email-code', opts, { timeout: 120_000 });
   },
 
   async submitVerificationCode(opts: {
@@ -594,8 +647,7 @@ export const deviceAgentClient = {
     code: string;
     platform?: 'tiktok' | 'instagram';
   }): Promise<{ ok: boolean; detail: string; error?: string }> {
-    const res = await axios.post(`${BASE}/device/account/submit-code`, opts, { timeout: 30_000 });
-    return res.data;
+    return agentPost('/device/account/submit-code', opts, { timeout: 30_000 });
   },
 
   async checkApps(deviceId: string): Promise<{
@@ -603,8 +655,7 @@ export const deviceAgentClient = {
     deviceId: string;
     apps: Record<string, { installed: boolean; packageName?: string; error?: string }>;
   }> {
-    const res = await axios.get(`${BASE}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 });
-    return res.data;
+    return agentGet(`/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 });
   },
 };
 
