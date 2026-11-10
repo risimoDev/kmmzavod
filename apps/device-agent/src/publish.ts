@@ -111,6 +111,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 3. App + baseline
     stage = 'prepare';
+    await adb.fastShell(deviceId, 'am force-stop com.samsung.android.app.galaxyfinder').catch(() => {});
     await adb.wakeUp(deviceId);
     await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
     await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
@@ -164,15 +165,17 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let captionTyped = !caption;
     let unknown = 0;
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
+    let lastScreen: any = null;
     const isLauncherOrSys = (p?: string) =>
       !p || /launcher|galaxyfinder|finder|nexuslauncher|trebuchet|miui\.home|touchwiz|systemui/i.test(p);
 
     while (!st.shareTapped) {
       if (Date.now() > composeDeadline) {
-        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_timeout`).catch(() => undefined);
+        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_timeout`, lastScreen?.xml).catch(() => undefined);
         return result({ ok: false, retryable: true, debugSnapshot: snap, detail: 'Не удалось дойти до кнопки публикации за 3 мин' });
       }
       const screen = await dumpScreen(adb, deviceId);
+      lastScreen = screen;
       if (!screen) {
         unknown++;
       } else if (isLauncherOrSys(screen.pkg)) {

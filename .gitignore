@@ -24,3 +24,4 @@ apps/device-agent/devices-proxy-state.json.tmp
 
 # local env files (apps/web/.env.local etc.)
 .env.local
+apps/device-agent/debug-reports/

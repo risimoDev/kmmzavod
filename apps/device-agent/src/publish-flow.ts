@@ -6,7 +6,7 @@
  * again. Labels are matched in English and Russian; anything unrecognised is reported
  * as `unknown` instead of being tapped blindly.
  */
-import { byLabel, byResId, editTexts, isVisible, screenHas, type UiEl, type UiScreen } from './ui-automation';
+import { byLabel, byResId, clickTarget, editTexts, isVisible, screenHas, type UiEl, type UiScreen } from './ui-automation';
 
 export type FlowPlatform = 'instagram' | 'tiktok';
 
@@ -46,8 +46,8 @@ const NEXT = /^(next|далее|дальше|продолжить|выбрать
 const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|right_action_button)(_button|_btn|_textview)?$/i;
 const IG_REELS_TARGET = /^(reels?)$/i;
 const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты)$/i;
-const TT_FEED_TARGET = /^(post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту))$/i;
-const TT_OTHER_TARGETS = /^(chats|чаты|друзья|friends|direct|сообщения|messages|история|истории|story|stories)$/i;
+const TT_FEED_TARGET = /^(video|видео|post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту))$/i;
+const TT_OTHER_TARGETS = /^(message|сообщение|chats|чаты|друзья|friends|direct|сообщения|messages|история|истории|story|stories)$/i;
 const IG_SHARE = /^(share|поделиться|опубликовать)(\s*\(\d+\))?$/i;
 const IG_SHARE_ID = /share_button|(^|_)share$/i;
 /**
@@ -201,8 +201,14 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
   }
 
   if (platform === 'tiktok' && !st.targetChosen) {
-    const feed = byLabel(s, TT_FEED_TARGET);
-    if (feed && s.els.some((e) => TT_OTHER_TARGETS.test(e.text.trim()) || TT_OTHER_TARGETS.test(e.desc.trim()))) {
+    const isShareSheet = s.els.some((e) =>
+      isVisible(e) && /(share on tiktok|поделиться в tiktok|отправить в tiktok|bottom sheet)/i.test(`${e.text} ${e.desc}`)
+    );
+    const feed = s.els.find((e) =>
+      isVisible(e) && (e.clickable || /Button|TextView/i.test(e.cls)) &&
+      TT_FEED_TARGET.test(e.text.trim() || e.desc.trim())
+    );
+    if (feed && (isShareSheet || s.els.some((e) => TT_OTHER_TARGETS.test(e.text.trim()) || TT_OTHER_TARGETS.test(e.desc.trim())))) {
       return { kind: 'tap', el: feed, why: 'выбор публикации в ленту TikTok', marks: 'target' };
     }
   }
@@ -251,43 +257,20 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     }
   }
 
-  // ── Media picker / Gallery fallback (TikTok) ───────────────────────────────
+  // ── TikTok Main Feed / Bottom Nav navigation fallback ─────────────────────
   if (platform === 'tiktok') {
-    const isGalleryPicker = s.els.some((e) =>
-      isVisible(e) && /^(videos?|видео|all|все|photos?|фото|недавние|recents|галерея|gallery)$/i.test(e.text.trim() || e.desc.trim())
-    ) || s.els.some((e) => /media_grid|media_list|gallery_grid|view_pager|recycler_view/i.test(e.resId));
-
-    if (isGalleryPicker) {
-      const nextBtn = byLabel(s, NEXT) ?? byResId(s, NEXT_ID);
-      const mediaTile = s.els.find((e) =>
-        isVisible(e) && (e.clickable || /checkbox|media_item|iv_cover|thumb/i.test(e.resId)) &&
-        e.bounds[1] > 100 && e.bounds[3] < (nextBtn ? nextBtn.bounds[1] : 2000)
-      );
-      if (mediaTile && (!nextBtn || !nextBtn.enabled)) {
-        return { kind: 'tap', el: mediaTile, why: 'выбор добавленного видео в галерее TikTok', marks: 'target' };
-      }
-      if (nextBtn) {
-        return { kind: 'tap', el: nextBtn, why: 'переход к редактированию видео', marks: 'next' };
-      }
-    }
-
-    // TikTok Camera screen fallback: "Загрузить" / "Галерея"
-    const uploadBtn = s.els.find((e) =>
-      isVisible(e) && (
-        /^(upload|загрузить|галерея|gallery)$/i.test(e.text.trim()) ||
-        /^(upload|загрузить|галерея|gallery)$/i.test(e.desc.trim()) ||
-        /upload_btn|tv_upload|upload_layout|btn_upload/i.test(e.resId)
-      )
-    );
-    if (uploadBtn) {
-      return { kind: 'tap', el: uploadBtn, why: 'выбор «Загрузить» из галереи' };
-    }
-
-    // TikTok main screen navigation fallback: "+" button if app opened to Feed/Home/Friends/Profile
     const isMainFeed = s.els.some((e) =>
+      isVisible(e) && /^(for you|following|explore|рекомендации|подписки)$/i.test(e.text.trim() || e.desc.trim())
+    );
+    const hasBottomNav = s.els.some((e) =>
       isVisible(e) && /^(home|главная|inbox|входящие|friends|друзья|profile|профиль|я|me)$/i.test(e.text.trim() || e.desc.trim())
     );
-    if (isMainFeed) {
+
+    if (hasBottomNav || isMainFeed) {
+      const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
+      const screenW = Math.max(...s.els.map((e) => e.bounds[2]), 1);
+
+      // 1. Center create button by label/ID
       const createBtn = s.els.find((e) =>
         isVisible(e) && (
           /^(create|создать|record|\+)$/i.test(e.desc.trim()) ||
@@ -296,7 +279,53 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
         )
       );
       if (createBtn) {
-        return { kind: 'tap', el: createBtn, why: 'переход к публикации через «+» в TikTok' };
+        return { kind: 'tap', el: clickTarget(createBtn), why: 'переход к публикации через «+» в TikTok' };
+      }
+
+      // 2. Structural: center element in the bottom bar
+      const centerBtn = s.els.find((e) =>
+        isVisible(e) && (e.clickable || e.parent?.clickable) &&
+        e.bounds[1] >= screenH * 0.85 &&
+        e.bounds[0] >= screenW * 0.35 && e.bounds[2] <= screenW * 0.65
+      );
+      if (centerBtn) {
+        return { kind: 'tap', el: clickTarget(centerBtn), why: 'нажатие центральной кнопки «+» в нижней панели TikTok' };
+      }
+    }
+
+    // ── TikTok Camera screen fallback: "Загрузить" / "Галерея" ───────────────
+    const uploadBtn = s.els.find((e) =>
+      isVisible(e) && (
+        /^(upload|загрузить|галерея|gallery)$/i.test(e.text.trim()) ||
+        /^(upload|загрузить|галерея|gallery)$/i.test(e.desc.trim()) ||
+        /upload_btn|tv_upload|upload_layout|btn_upload/i.test(e.resId)
+      )
+    );
+    if (uploadBtn) {
+      return { kind: 'tap', el: clickTarget(uploadBtn), why: 'выбор «Загрузить» из галереи' };
+    }
+
+    // ── Media picker / Gallery fallback (TikTok) ─────────────────────────────
+    if (!hasBottomNav && !isMainFeed) {
+      const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
+      const isGalleryPicker = s.els.some((e) =>
+        isVisible(e) && e.bounds[1] <= screenH * 0.35 &&
+        /^(videos?|видео|all|все|photos?|фото|недавние|recents|галерея|gallery)$/i.test(e.text.trim() || e.desc.trim())
+      ) || s.els.some((e) => /media_grid|gallery_grid|album_recycler/i.test(e.resId));
+
+      if (isGalleryPicker) {
+        const nextBtn = byLabel(s, NEXT) ?? byResId(s, NEXT_ID);
+        const mediaTile = s.els.find((e) =>
+          isVisible(e) && (e.clickable || /checkbox|media_item|iv_cover|thumb/i.test(e.resId)) &&
+          e.bounds[1] >= screenH * 0.08 && e.bounds[3] <= (nextBtn ? nextBtn.bounds[1] : screenH * 0.9) &&
+          !/^(videos?|видео|all|все|photos?|фото|недавние|recents|галерея|gallery)$/i.test(e.text.trim() || e.desc.trim())
+        );
+        if (mediaTile && (!nextBtn || !nextBtn.enabled)) {
+          return { kind: 'tap', el: clickTarget(mediaTile), why: 'выбор добавленного видео в галерее TikTok', marks: 'target' };
+        }
+        if (nextBtn) {
+          return { kind: 'tap', el: clickTarget(nextBtn), why: 'переход к редактированию видео', marks: 'next' };
+        }
       }
     }
   }

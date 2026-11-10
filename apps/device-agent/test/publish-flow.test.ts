@@ -282,5 +282,20 @@ const ttDismissDecl = screen(TT,
 a = decide('tiktok', ttDismissDecl, st(), true);
 ok(a.kind === 'tap' && a.el.text === 'Отклонить', 'TikTok contacts sync popup → Отклонить');
 
+const ttShareBottomSheet = screen(TT,
+  el({ text: 'Share on TikTok', b: [406, 1197, 674, 1244] }),
+  el({ text: 'Video', click: true, b: [181, 1850, 438, 1924], id: 'com.zhiliaoapp.musically:id/qka' }),
+  el({ text: 'Message', click: true, b: [642, 1850, 899, 1924], id: 'com.zhiliaoapp.musically:id/qka' }));
+a = decide('tiktok', ttShareBottomSheet, st(), true);
+ok(a.kind === 'tap' && a.marks === 'target' && a.el.text === 'Video', 'TikTok share sheet with "Video" and "Message" → tap Video');
+
+const ttRealHomeFeed = screen(TT,
+  el({ desc: 'For You', text: 'For You', b: [663, 63, 867, 215] }),
+  el({ desc: 'Home', click: true, b: [0, 1965, 216, 2094] }),
+  el({ desc: 'Create', click: true, b: [432, 1965, 648, 2094], id: 'com.zhiliaoapp.musically:id/lwh' }),
+  el({ desc: 'Profile', click: true, b: [864, 1965, 1080, 2094] }));
+a = decide('tiktok', ttRealHomeFeed, st(), true);
+ok(a.kind === 'tap' && a.el.desc === 'Create', 'TikTok real home feed → tap Create button');
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exitCode = failed ? 1 : 0;
