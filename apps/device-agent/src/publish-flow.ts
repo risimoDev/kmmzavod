@@ -37,32 +37,32 @@ export function initialFlowState(): FlowState {
 const PERMISSION_ALLOW_ID = /^permission_allow(_foreground_only|_all|_one_time)?_button$/;
 const ALLOW = /^(allow|allow all|разрешить|разрешить все|while using the app|при использовании приложения|только во время использования приложения|всегда разрешать|разрешать только при использовании приложения|разрешить доступ ко всем фото и видео|разрешить доступ|выбрать все фото|разрешить все)$/i;
 /** Harmless "close this tip/prompt" buttons. */
-const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет, спасибо|later|позже|maybe later|dismiss|отклонить|не разрешать|отмена|сохранить|понятно, продолжить)$/i;
+const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет,?\s*спасибо|later|позже|maybe later|dismiss|отклонить|не разрешать|не переносить|отмена|cancel|close|закрыть|сохранить|понятно, продолжить)$/i;
 /** "Discard reel?" dialogs → keep editing, never discard. */
 const KEEP_EDITING = /^(keep editing|продолжить редактирование|continue editing)$/i;
 const LOGGED_OUT = /^(log in|войти|sign up|зарегистрироваться|create new account|создать новый аккаунт|log into another account)$/i;
 
 const NEXT = /^(next|далее|дальше|продолжить|выбрать|готово|save|сохранить)(\s*\(\d+\))?$/i;
-const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|right_action_button)(_button|_btn|_textview)?$/i;
-const IG_REELS_TARGET = /^(reels?)$/i;
-const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты)$/i;
-const TT_FEED_TARGET = /^(video|видео|post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту))$/i;
+const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|action_bar_button_action|bb_primary_action_container|creation_secondary_cta|right_action_button)(_button|_btn|_textview)?$/i;
+const IG_REELS_TARGET = /^(reels?|видео\s*reels|ролик\s*reels|клип\s*reels)$/i;
+const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты|сообщения|direct|сообщение)$/i;
+const TT_FEED_TARGET = /^(video|видео|post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту)|tiktok\s+video|запись)$/i;
 const TT_OTHER_TARGETS = /^(message|сообщение|chats|чаты|друзья|friends|direct|сообщения|messages|история|истории|story|stories)$/i;
-const IG_SHARE = /^(share|поделиться|опубликовать)(\s*\(\d+\))?$/i;
-const IG_SHARE_ID = /share_button|(^|_)share$/i;
+const IG_SHARE = /^(share(\s+to\s+reels?)?|поделиться(\s+в\s+reels?)?|опубликовать(\s+в\s+reels?)?)(\s*\(\d+\))?$/i;
+const IG_SHARE_ID = /share_button|share_footer_button|bb_primary_action_container|share_reels_button|(^|_)share$/i;
 /**
  * The final button's WHOLE label. Never a substring match: the TikTok post screen also has
  * a "Post" title in its header and a "Everyone can view this post" privacy row — tapping
  * either of those leaves the video unposted.
  */
-const TT_POST = /^(post|post now|post video|post to feed|post entry|share|share to feed|share to tiktok|share video|share post|опубликовать|опубликовать сейчас|опубликовать видео|опубликовать запись|опубликовать клип|опубликовать в tiktok|опубликовать в ленту|поделиться|поделиться в tiktok|поделиться видео|поделиться записью|поделиться в ленту|publish)(\s*\(\d+\))?$/i;
+const TT_POST = /^(post|post now|post video|post to feed|post entry|share|share to feed|share to tiktok|share video|share post|опубликовать|опубликовать сейчас|опубликовать видео|опубликовать запись|опубликовать клип|опубликовать в tiktok|опубликовать в ленту|поделиться|поделиться в tiktok|поделиться видео|поделиться записью|поделиться в ленту|отправить|отправить в tiktok|publish)(\s*\(\d+\))?$/i;
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
 const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|btn_post|btn_publish|(^|_)publish$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить|подтвердить|confirm)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|интересное|inbox|входящие|profile|профиль|я|me)$/i;
 
 const CAPTION_FIELD_ID = /caption|desc|title|content|input|text_field/i;
-const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag|расскажите|о чем|добавьте|введите/i;
+const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag|расскажите|о чем|добавьте|введите|write a caption|напишите подпись/i;
 
 /** Before sharing: the app refused the video itself — retrying the same file will not help. */
 const VIDEO_REJECTED = /(video|видео) (is )?(too (short|long)|слишком (коротк|длинн))|unsupported (video|file|format)|неподдерживаем|can.?t (use|import) this video|не удалось импортировать/i;
@@ -119,6 +119,16 @@ export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | unde
         return rightBtns.sort((a, b) => (b.bounds[2] - b.bounds[0]) * (b.bounds[3] - b.bounds[1]) - (a.bounds[2] - a.bounds[0]) * (a.bounds[3] - a.bounds[1]))[0];
       }
     }
+  }
+
+  // Structural fallback for Instagram Reels: primary action button in bottom 25% of screen
+  if (platform === 'instagram') {
+    const bottomBtn = s.els.find((e) =>
+      isVisible(e) && e.enabled && (e.clickable || /Button|TextView/i.test(e.cls)) &&
+      e.bounds[1] >= screenH * 0.75 &&
+      !/draft|черновик|cancel|отмена|discard/i.test(`${e.text} ${e.desc} ${e.resId}`)
+    );
+    if (bottomBtn) return bottomBtn;
   }
 
   return undefined;

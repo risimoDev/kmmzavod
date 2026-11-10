@@ -255,6 +255,18 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
                 continue;
               }
             }
+            if (aiDecision.action === 'key_back') {
+              logger.info({ deviceId, reason: aiDecision.reason }, 'publish: ИИ нажал Назад на экране');
+              await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
+              await sleep(2000);
+              continue;
+            }
+            if (aiDecision.action === 'swipe_up') {
+              logger.info({ deviceId, reason: aiDecision.reason }, 'publish: ИИ свайпнул вверх');
+              await adb.swipe(deviceId, Math.round(sw / 2), Math.round(sh * 0.75), Math.round(sw / 2), Math.round(sh * 0.25), 350).catch(() => {});
+              await sleep(2000);
+              continue;
+            }
           }
         }
 
