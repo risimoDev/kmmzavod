@@ -91,6 +91,7 @@ export default function AutopilotDetailPage() {
   const progressPercent = Math.round((published / totalCyclePosts) * 100);
 
   const isActivelyPublishing = publishingPosts.length > 0 || Boolean(liveProgress?.activeItem);
+  const isPublishing = isActivelyPublishing;
   const isProducing = inFlight.length > 0;
   const hasFailed = failedPosts.length > 0;
   const hasScheduled = scheduledPosts.length > 0;
@@ -118,8 +119,12 @@ export default function AutopilotDetailPage() {
       ? `Уникализация видеокопий: создано ${activeBatch.uniquify.completedCount} из ${activeBatch.uniquify.variantCount}`
       : `Текущий этап: ${BATCH_STAGES[stageIndex(activeBatch.status)]?.label || activeBatch.status}`;
   } else if (hasScheduled) {
-    const nextItem = [...scheduledPosts].sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())[0];
-    const nextTimeStr = nextItem ? new Date(nextItem.scheduledAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "скоро";
+    const nextItem = [...scheduledPosts].sort((a, b) => {
+      const ta = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+      const tb = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+      return ta - tb;
+    })[0];
+    const nextTimeStr = nextItem?.scheduledAt ? new Date(nextItem.scheduledAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "скоро";
     liveStatusTitle = `В очереди к публикации: ${scheduledPosts.length} постов`;
     liveStatusSubtitle = `Следующий запуск: ~${nextTimeStr} (антибан-интервал между платами)`;
     currentActionDetail = "Посты распределяются последовательно с защитой стойки от блокировок. Нажмите «Опубликовать сейчас» для мгновенной выгрузки.";
