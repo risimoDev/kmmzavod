@@ -17,6 +17,8 @@ import { config } from '../config';
 import { assertOwnStorageKey } from '../lib/storage-keys';
 import { getAstroProxySummary } from '../lib/astroproxy';
 import { deviceAgentClient } from '../lib/device-agent';
+import { publishQueue } from '../lib/queues';
+import type { PublishJobPayload } from '@kmmzavod/queue';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
 const SCRIPT_STYLES = ['blogger', 'story', 'review', 'hype', 'educational', 'sales', 'humor', 'minimal'] as const;
@@ -443,6 +445,33 @@ export async function autopilotRoutes(app: FastifyInstance) {
     const presign = async (key: string | null | undefined) =>
       key ? app.storage.presignedUrl(key, 3600).catch(() => null) : null;
 
+    const scheduledItems = posts.filter((p) => p.status === 'scheduled');
+    const publishingItems = posts.filter((p) => p.status === 'publishing');
+    const publishedItems = posts.filter((p) => p.status === 'published');
+    const failedItems = posts.filter((p) => p.status === 'failed' || p.status === 'skipped');
+    const activePublishing = publishingItems[0] ?? null;
+    const activeBatch = batches.find((b) => !['ready', 'failed'].includes(b.status)) ?? null;
+
+    const liveProgress = {
+      totalPosts: posts.length,
+      scheduledCount: scheduledItems.length,
+      publishingCount: publishingItems.length,
+      publishedCount: publishedItems.length,
+      failedCount: failedItems.length,
+      isPublishing: publishingItems.length > 0 || scheduledItems.length > 0,
+      activeItem: activePublishing ? {
+        id: activePublishing.id,
+        accountName: activePublishing.socialAccount.accountName,
+        platform: activePublishing.socialAccount.platform,
+        deviceId: activePublishing.socialAccount.deviceId,
+      } : null,
+      activeBatch: activeBatch ? {
+        id: activeBatch.id,
+        status: activeBatch.status,
+      } : null,
+      activeDeviceId: farmProxy.activeDeviceId ?? null,
+    };
+
     return {
       autopilot: ap,
       batches: await Promise.all(batches.map(async (b) => ({
@@ -460,6 +489,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       }))),
       aiKeys: await aiKeyStatus(),
       farmProxy,
+      liveProgress,
     };
   });
 
@@ -571,6 +601,194 @@ export async function autopilotRoutes(app: FastifyInstance) {
     if (ap.status !== 'active') return reply.code(400).send({ error: 'BadRequest', message: 'Сначала запустите автопилот' });
     await db.autopilot.update({ where: { id }, data: { nextWindowAt: new Date() } });
     return { ok: true, message: 'Публикация готовых копий начнётся в течение минуты' };
+  });
+
+  /** Retry all failed or skipped distribute items for this autopilot */
+  app.post('/:id/retry-failed', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const ap = await db.autopilot.findFirst({ where: { id, tenantId }, select: { id: true, name: true, status: true } });
+    if (!ap) return reply.code(404).send({ error: 'NotFound' });
+
+    const failedItems = await db.distributeItem.findMany({
+      where: {
+        distributeJob: { autopilotId: id },
+        status: { in: ['failed', 'skipped'] },
+      },
+      include: {
+        socialAccount: true,
+        uniqueVariant: true,
+        publishJob: true,
+      },
+      take: 100,
+    });
+
+    if (!failedItems.length) {
+      return { ok: true, retriedCount: 0, message: 'Нет упавших публикаций для перезапуска' };
+    }
+
+    let retriedCount = 0;
+    const now = new Date();
+
+    for (let i = 0; i < failedItems.length; i++) {
+      const item = failedItems[i];
+      if (!item.socialAccount || !item.uniqueVariant) continue;
+
+      const scheduledAt = new Date(now.getTime() + i * 6_000);
+      let jobId = item.publishJobId;
+
+      if (jobId && item.publishJob) {
+        await db.publishJob.update({
+          where: { id: jobId },
+          data: {
+            status: 'scheduled',
+            scheduledAt,
+            error: null,
+            publishedAt: null,
+          },
+        });
+      } else {
+        const pj = await db.publishJob.create({
+          data: {
+            tenantId,
+            socialAccountId: item.socialAccountId,
+            uniqueVariantId: item.uniqueVariantId,
+            platform: item.socialAccount.platform as any,
+            caption: item.caption || item.uniqueVariant.generatedCaption || '',
+            hashtags: (item.hashtags as string[]) || [],
+            scheduledAt,
+            status: 'scheduled',
+          },
+        });
+        jobId = pj.id;
+      }
+
+      await db.distributeItem.update({
+        where: { id: item.id },
+        data: {
+          status: 'scheduled',
+          publishJobId: jobId,
+          scheduledAt,
+          error: null,
+          publishedAt: null,
+        },
+      });
+
+      await publishQueue.remove(`publish:${jobId}`).catch(() => {});
+      const payload: PublishJobPayload = {
+        publishJobId: jobId,
+        uniqueVariantId: item.uniqueVariantId,
+        tenantId,
+        platform: item.socialAccount.platform as any,
+        socialAccountId: item.socialAccountId,
+        scheduledAt: scheduledAt.toISOString(),
+      };
+      const delay = Math.max(0, scheduledAt.getTime() - Date.now());
+      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId });
+      retriedCount++;
+    }
+
+    await db.autopilotRun.create({
+      data: {
+        autopilotId: id,
+        tenantId,
+        kind: 'info',
+        message: `Ручной перезапуск: ${retriedCount} упавших публикаций отправлены в очередь`,
+      },
+    });
+
+    return {
+      ok: true,
+      retriedCount,
+      message: `Перезапущено ${retriedCount} публикаций — выполнение началось`,
+    };
+  });
+
+  /** Retry a single distribute item */
+  app.post('/:id/posts/:distributeItemId/retry', async (req, reply) => {
+    const { tenantId } = req.user;
+    const { id, distributeItemId } = z.object({
+      id: z.string().uuid(),
+      distributeItemId: z.string().uuid(),
+    }).parse(req.params);
+
+    const ap = await db.autopilot.findFirst({ where: { id, tenantId }, select: { id: true, name: true } });
+    if (!ap) return reply.code(404).send({ error: 'NotFound' });
+
+    const item = await db.distributeItem.findFirst({
+      where: { id: distributeItemId, distributeJob: { autopilotId: id } },
+      include: {
+        socialAccount: true,
+        uniqueVariant: true,
+        publishJob: true,
+      },
+    });
+    if (!item) return reply.code(404).send({ error: 'NotFound', message: 'Публикация не найдена' });
+
+    const scheduledAt = new Date();
+    let jobId = item.publishJobId;
+
+    if (jobId && item.publishJob) {
+      await db.publishJob.update({
+        where: { id: jobId },
+        data: {
+          status: 'scheduled',
+          scheduledAt,
+          error: null,
+          publishedAt: null,
+        },
+      });
+    } else {
+      const pj = await db.publishJob.create({
+        data: {
+          tenantId,
+          socialAccountId: item.socialAccountId,
+          uniqueVariantId: item.uniqueVariantId,
+          platform: item.socialAccount.platform as any,
+          caption: item.caption || item.uniqueVariant.generatedCaption || '',
+          hashtags: (item.hashtags as string[]) || [],
+          scheduledAt,
+          status: 'scheduled',
+        },
+      });
+      jobId = pj.id;
+    }
+
+    await db.distributeItem.update({
+      where: { id: item.id },
+      data: {
+        status: 'scheduled',
+        publishJobId: jobId,
+        scheduledAt,
+        error: null,
+        publishedAt: null,
+      },
+    });
+
+    await publishQueue.remove(`publish:${jobId}`).catch(() => {});
+    const payload: PublishJobPayload = {
+      publishJobId: jobId,
+      uniqueVariantId: item.uniqueVariantId,
+      tenantId,
+      platform: item.socialAccount.platform as any,
+      socialAccountId: item.socialAccountId,
+      scheduledAt: scheduledAt.toISOString(),
+    };
+    await publishQueue.add(`publish:${jobId}`, payload, { jobId });
+
+    await db.autopilotRun.create({
+      data: {
+        autopilotId: id,
+        tenantId,
+        kind: 'info',
+        message: `Ручной перезапуск публикации на аккаунт «${item.socialAccount.accountName}»`,
+      },
+    });
+
+    return {
+      ok: true,
+      message: `Публикация для ${item.socialAccount.accountName} перезапущена`,
+    };
   });
 
   app.delete('/:id', async (req, reply) => {

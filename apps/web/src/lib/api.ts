@@ -2453,6 +2453,27 @@ export interface AutopilotDetail {
     trafficSaver?: string;
     activeDeviceId?: string | null;
   };
+  liveProgress?: AutopilotLiveProgress;
+}
+
+export interface AutopilotLiveProgress {
+  totalPosts: number;
+  scheduledCount: number;
+  publishingCount: number;
+  publishedCount: number;
+  failedCount: number;
+  isPublishing: boolean;
+  activeItem: {
+    id: string;
+    accountName: string;
+    platform: string;
+    deviceId: string | null;
+  } | null;
+  activeBatch: {
+    id: string;
+    status: string;
+  } | null;
+  activeDeviceId: string | null;
 }
 
 export interface AutopilotMeta {
@@ -2496,6 +2517,10 @@ export const autopilotApi = {
     apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${id}/produce-now`, { method: 'POST' }),
   publishNow: (id: string) =>
     apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${id}/publish-now`, { method: 'POST' }),
+  retryFailed: (id: string) =>
+    apiFetch<{ ok: boolean; retriedCount: number; message: string }>(`/api/v1/autopilots/${id}/retry-failed`, { method: 'POST' }),
+  retryPost: (autopilotId: string, distributeItemId: string) =>
+    apiFetch<{ ok: boolean; message: string }>(`/api/v1/autopilots/${autopilotId}/posts/${distributeItemId}/retry`, { method: 'POST' }),
   remove: (id: string) => apiFetch<void>(`/api/v1/autopilots/${id}`, { method: 'DELETE' }),
   /** Add / rename a voice in the tenant library (id is checked against Fish Audio). */
   saveVoice: (body: { voiceId: string; name?: string; gender?: TenantVoice['gender'] }) =>
