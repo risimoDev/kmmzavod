@@ -400,15 +400,56 @@ export async function autopilotRoutes(app: FastifyInstance) {
     });
     if (!ap) return reply.code(404).send({ error: 'NotFound' });
 
-    const [batches, runs, accounts, sources, ready, posts, farmProxySummary, farmProxyMode] = await Promise.all([
+    const [
+      batches,
+      runs,
+      accounts,
+      sources,
+      ready,
+      farmProxySummary,
+      farmProxyMode,
+      totalDistCount,
+      realPublishedCount,
+      realScheduledCount,
+      realPublishingCount,
+      realFailedCount,
+      activeItems,
+      recentPublishedItems,
+    ] = await Promise.all([
       db.autopilotBatch.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 30 }),
       db.autopilotRun.findMany({ where: { autopilotId: id }, orderBy: { createdAt: 'desc' }, take: 80 }),
       scopeAccounts({ ...ap, tenantId }),
       sourceStats(tenantId, ap.projectId, ap.id),
       readyVariants(ap.id),
+      getAstroProxySummary().catch(() => ({ configured: false })),
+      deviceAgentClient.getProxyMode().catch(() => null),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id } } }),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'published' } }),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'scheduled' } }),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'publishing' } }),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: { in: ['failed', 'skipped'] } } }),
+      // All active in-flight / queued / failed items
       db.distributeItem.findMany({
-        where: { distributeJob: { autopilotId: id } },
-        orderBy: { createdAt: 'desc' },
+        where: {
+          distributeJob: { autopilotId: id },
+          status: { in: ['publishing', 'scheduled', 'failed', 'skipped', 'pending'] },
+        },
+        orderBy: { scheduledAt: 'asc' },
+        take: 60,
+        select: {
+          id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
+          socialAccount: { select: { accountName: true, platform: true, deviceId: true } },
+          publishJob: { select: { status: true, externalPostId: true, error: true } },
+          uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
+        },
+      }),
+      // Recent successfully published items
+      db.distributeItem.findMany({
+        where: {
+          distributeJob: { autopilotId: id },
+          status: 'published',
+        },
+        orderBy: { publishedAt: 'desc' },
         take: 40,
         select: {
           id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
@@ -417,8 +458,6 @@ export async function autopilotRoutes(app: FastifyInstance) {
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
-      getAstroProxySummary().catch(() => ({ configured: false })),
-      deviceAgentClient.getProxyMode().catch(() => null),
     ]);
 
     const farmProxy = {
@@ -427,6 +466,27 @@ export async function autopilotRoutes(app: FastifyInstance) {
       trafficSaver: farmProxyMode?.trafficSaver,
       activeDeviceId: farmProxyMode?.activeDeviceId,
     };
+
+    // Sort: publishing at top, then scheduled by time, then failed, then published
+    const sortScore = (s: string) => {
+      if (s === 'publishing') return 0;
+      if (s === 'scheduled') return 1;
+      if (s === 'pending') return 2;
+      if (s === 'failed' || s === 'skipped') return 3;
+      return 4;
+    };
+    const posts = [...activeItems, ...recentPublishedItems].sort((a, b) => {
+      const scoreDiff = sortScore(a.status) - sortScore(b.status);
+      if (scoreDiff !== 0) return scoreDiff;
+      if (a.status === 'scheduled' && b.status === 'scheduled') {
+        const ta = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+        const tb = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+        return ta - tb;
+      }
+      const ca = new Date(a.createdAt).getTime();
+      const cb = new Date(b.createdAt).getTime();
+      return cb - ca;
+    });
 
     // Enrich batches with child-entity progress for the timeline.
     const ujIds = batches.map((b) => b.uniquifyJobId).filter((x): x is string => Boolean(x));
@@ -445,20 +505,20 @@ export async function autopilotRoutes(app: FastifyInstance) {
     const presign = async (key: string | null | undefined) =>
       key ? app.storage.presignedUrl(key, 3600).catch(() => null) : null;
 
-    const scheduledItems = posts.filter((p) => p.status === 'scheduled');
-    const publishingItems = posts.filter((p) => p.status === 'publishing');
-    const publishedItems = posts.filter((p) => p.status === 'published');
-    const failedItems = posts.filter((p) => p.status === 'failed' || p.status === 'skipped');
-    const activePublishing = publishingItems[0] ?? null;
+    const activePublishing = posts.find((p) => p.status === 'publishing') ?? null;
     const activeBatch = batches.find((b) => !['ready', 'failed'].includes(b.status)) ?? null;
 
+    // True cycle total: all active queue items + published posts
+    const cycleTotal = realScheduledCount + realPublishingCount + realPublishedCount + realFailedCount;
+
     const liveProgress = {
-      totalPosts: posts.length,
-      scheduledCount: scheduledItems.length,
-      publishingCount: publishingItems.length,
-      publishedCount: publishedItems.length,
-      failedCount: failedItems.length,
-      isPublishing: publishingItems.length > 0,
+      totalPosts: totalDistCount,
+      scheduledCount: realScheduledCount,
+      publishingCount: realPublishingCount,
+      publishedCount: realPublishedCount,
+      failedCount: realFailedCount,
+      cycleTotal: Math.max(cycleTotal, 1),
+      isPublishing: realPublishingCount > 0,
       activeItem: activePublishing ? {
         id: activePublishing.id,
         accountName: activePublishing.socialAccount.accountName,
@@ -622,8 +682,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
         const item = scheduledItems[i];
         if (!item.socialAccount || !item.uniqueVariant) continue;
 
-        // Sequence with 35s gap between physical boards
-        const scheduledAt = new Date(now.getTime() + i * 35_000);
+        // Sequence with 75s gap between physical boards (allowing full upload & IP rotation)
+        const scheduledAt = new Date(now.getTime() + i * 75_000);
         const jobId = item.publishJobId || item.id;
 
         await db.distributeItem.update({
@@ -708,7 +768,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
       const item = failedItems[i];
       if (!item.socialAccount || !item.uniqueVariant) continue;
 
-      const scheduledAt = new Date(now.getTime() + i * 6_000);
+      // Stagger retry by 75s so physical boards don't collide on proxy lock
+      const scheduledAt = new Date(now.getTime() + i * 75_000);
       let jobId = item.publishJobId;
 
       if (jobId && item.publishJob) {

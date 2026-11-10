@@ -127,7 +127,7 @@ export async function settleDistributeItem(
   const claimed = await db.distributeItem.updateMany({
     where: { id: item.id, status: { in: [...DIST_ITEM_OPEN] } },
     data: outcome.status === 'published'
-      ? { status: 'published', publishedAt: outcome.at }
+      ? { status: 'published', publishedAt: outcome.at, error: null }
       : { status: 'failed', error: outcome.error },
   });
   if (claimed.count === 0) return; // already settled
@@ -406,7 +406,8 @@ export function createPublishWorker(deps: Deps): Worker {
           let farmProxyLockOwner: string | null = null;
           if (proxyMode === 'shared_sequential') {
             // Shared farm proxy lock: serializes posts across phones to save expensive AstroProxy traffic
-            farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 2_000);
+            // Wait up to 150 seconds for previous phone to finish upload & release proxy lock
+            farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 150_000);
             if (!farmProxyLockOwner) {
   
               await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);

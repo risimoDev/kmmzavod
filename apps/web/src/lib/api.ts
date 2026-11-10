@@ -2462,6 +2462,7 @@ export interface AutopilotLiveProgress {
   publishingCount: number;
   publishedCount: number;
   failedCount: number;
+  cycleTotal?: number;
   isPublishing: boolean;
   activeItem: {
     id: string;

@@ -688,7 +688,8 @@ async function recoverStuckScheduledItems(deps: AutopilotLoopDeps, ap: Autopilot
       continue;
     }
 
-    const newScheduledAt = new Date(now.getTime() + i * 40_000);
+    // Space recovered items by 75s so physical boards sequentially process them without proxy lock collisions
+    const newScheduledAt = new Date(now.getTime() + i * 75_000);
     const jobId = item.publishJobId || item.id;
 
     await db.distributeItem.update({

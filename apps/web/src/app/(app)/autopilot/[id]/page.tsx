@@ -82,19 +82,25 @@ export default function AutopilotDetailPage() {
   const okPhones = accounts.filter((a) => a.ok).length;
   const inFlight = batches.filter((b) => !["ready", "failed"].includes(b.status));
 
-  // Метрики публикаций
-  const published = posts.filter((p) => p.status === "published").length;
+  // Метрики публикаций: истинные агрегаты из базы данных (никогда не зависят от размера выборки)
+  const published = liveProgress?.publishedCount ?? posts.filter((p) => p.status === "published").length;
+  const publishingCount = liveProgress?.publishingCount ?? posts.filter((p) => p.status === "publishing").length;
+  const scheduledCount = liveProgress?.scheduledCount ?? posts.filter((p) => p.status === "scheduled").length;
+  const failedCount = liveProgress?.failedCount ?? posts.filter((p) => p.status === "failed" || p.status === "skipped").length;
+
   const publishingPosts = posts.filter((p) => p.status === "publishing");
   const scheduledPosts = posts.filter((p) => p.status === "scheduled");
   const failedPosts = posts.filter((p) => p.status === "failed" || p.status === "skipped");
-  const totalCyclePosts = Math.max(posts.length, 1);
-  const progressPercent = Math.round((published / totalCyclePosts) * 100);
 
-  const isActivelyPublishing = publishingPosts.length > 0 || Boolean(liveProgress?.activeItem);
+  // Полный объём цикла: всё, что запланировано, публикуется, завершено или упало
+  const totalCyclePosts = Math.max(liveProgress?.cycleTotal ?? (published + publishingCount + scheduledCount + failedCount), 1);
+  const progressPercent = Math.min(100, Math.round((published / totalCyclePosts) * 100));
+
+  const isActivelyPublishing = publishingCount > 0 || publishingPosts.length > 0 || Boolean(liveProgress?.activeItem);
   const isPublishing = isActivelyPublishing;
   const isProducing = inFlight.length > 0;
-  const hasFailed = failedPosts.length > 0;
-  const hasScheduled = scheduledPosts.length > 0;
+  const hasFailed = failedCount > 0;
+  const hasScheduled = scheduledCount > 0;
 
   // Динамический статус текущего шага в реальном времени
   let liveStatusTitle = "Автопилот в штатном режиме";
@@ -125,11 +131,11 @@ export default function AutopilotDetailPage() {
       return ta - tb;
     })[0];
     const nextTimeStr = nextItem?.scheduledAt ? new Date(nextItem.scheduledAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "скоро";
-    liveStatusTitle = `В очереди к публикации: ${scheduledPosts.length} постов`;
-    liveStatusSubtitle = `Следующий запуск: ~${nextTimeStr} (антибан-интервал между платами)`;
+    liveStatusTitle = `В очереди к публикации: ${scheduledCount} постов`;
+    liveStatusSubtitle = `Следующий запуск: ~${nextTimeStr} (поочерёдная публикация плат)`;
     currentActionDetail = "Посты распределяются последовательно с защитой стойки от блокировок. Нажмите «Опубликовать сейчас» для мгновенной выгрузки.";
   } else if (hasFailed) {
-    liveStatusTitle = `Внимание: ${failedPosts.length} из ${posts.length} публикаций требуют перезапуска`;
+    liveStatusTitle = `Внимание: ${failedCount} из ${totalCyclePosts} публикаций требуют перезапуска`;
     liveStatusSubtitle = "Ошибки зафиксированы. Вы можете перезапустить их все одной кнопкой или по отдельности.";
     currentActionDetail = "Используйте кнопку «↻ Перезапустить все упавшие» выше для мгновенной повторной отправки.";
   } else if (published > 0) {
@@ -147,14 +153,14 @@ export default function AutopilotDetailPage() {
             <AutopilotStatusBadge status={ap.status} />
 
             {/* Быстрая кнопка перезапуска упавших публикаций в шапке */}
-            {failedPosts.length > 0 && (
+            {failedCount > 0 && (
               <Button
                 size="sm"
                 variant="danger"
                 loading={busy === "retry-failed"}
                 onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
               >
-                ↻ Перезапустить упавшие ({failedPosts.length})
+                ↻ Перезапустить упавшие ({failedCount})
               </Button>
             )}
 
@@ -276,7 +282,7 @@ export default function AutopilotDetailPage() {
 
                   {/* Быстрые кнопки ручного регулирования */}
                   <div className="flex flex-wrap items-center gap-2">
-                    {failedPosts.length > 0 && (
+                    {failedCount > 0 && (
                       <Button
                         size="sm"
                         variant="primary"
@@ -284,7 +290,7 @@ export default function AutopilotDetailPage() {
                         loading={busy === "retry-failed"}
                         onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
                       >
-                        ↻ Перезапустить все упавшие ({failedPosts.length})
+                        ↻ Перезапустить все упавшие ({failedCount})
                       </Button>
                     )}
                     <Button
@@ -306,18 +312,18 @@ export default function AutopilotDetailPage() {
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-semibold text-text-primary">
-                      Прогресс публикаций цикла: {published} из {posts.length} ({progressPercent}%)
+                      Прогресс публикаций цикла: {published} из {totalCyclePosts} ({progressPercent}%)
                     </span>
                     <div className="flex flex-wrap items-center gap-3 text-2xs">
                       <span className="text-success font-medium">✓ Опубликовано: {published}</span>
-                      {publishingPosts.length > 0 && (
-                        <span className="text-brand-400 font-medium animate-pulse">● В процессе: {publishingPosts.length}</span>
+                      {publishingCount > 0 && (
+                        <span className="text-brand-400 font-medium animate-pulse">● В процессе: {publishingCount}</span>
                       )}
-                      {scheduledPosts.length > 0 && (
-                        <span className="text-text-tertiary">В очереди: {scheduledPosts.length}</span>
+                      {scheduledCount > 0 && (
+                        <span className="text-text-tertiary">В очереди: {scheduledCount}</span>
                       )}
-                      {failedPosts.length > 0 && (
-                        <span className="text-danger font-medium">✕ Ошибок: {failedPosts.length}</span>
+                      {failedCount > 0 && (
+                        <span className="text-danger font-medium">✕ Ошибок: {failedCount}</span>
                       )}
                     </div>
                   </div>
@@ -430,16 +436,16 @@ export default function AutopilotDetailPage() {
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-xs text-text-tertiary">
-                        всего: {ap.postsScheduled} · опубликовано: {published}
+                        всего: {liveProgress?.totalPosts ?? ap.postsScheduled} · опубликовано: {published}
                       </span>
-                      {failedPosts.length > 0 && (
+                      {failedCount > 0 && (
                         <Button
                           size="xs"
                           variant="danger"
                           loading={busy === "retry-failed"}
                           onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
                         >
-                          ↻ Перезапустить все {failedPosts.length}
+                          ↻ Перезапустить все {failedCount}
                         </Button>
                       )}
                     </div>
