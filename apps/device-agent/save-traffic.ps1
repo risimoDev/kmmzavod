@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
   [ValidateSet('block_media', 'direct_media', 'off')]
-  [string]$Mode = 'block_media',
+  [string]$Mode = 'direct_media',
   [switch]$Standby
 )
 
@@ -81,15 +81,18 @@ if (-not $adbValid) {
         foreach ($dev in $deviceList) {
             Write-Host "[$idx/$($deviceList.Count)] Настройка платы $dev..." -ForegroundColor Cyan
             $cmds = @(
-                'settings put global data_saver 1',
-                'settings put global data_saver_enabled 1',
-                'cmd netpolicy set restrict-background true',
-                'cmd netpolicy set metered-network true tun0',
-                'cmd netpolicy set metered-network true wlan0 2>/dev/null || true',
-                'settings put master sync_automatically 0'
+                'cmd netpolicy set restrict-background false',
+                'cmd netpolicy set metered-network false tun0',
+                'cmd netpolicy set metered-network false wlan0 2>/dev/null || true',
+                'settings put global data_saver 0',
+                'settings put global data_saver_enabled 0',
+                'settings put global background_data 1',
+                'settings put master sync_automatically 0',
+                'cmd netpolicy add restrict-background-whitelist 2000 2>/dev/null || true',
+                'cmd netpolicy add restrict-background-whitelist 0 2>/dev/null || true'
             ) -join '; '
             & $AdbPath -s $dev shell $cmds | Out-Null
-            Write-Host '  -> [OK] Включен Android Data Saver, запрещен фоновый трафик, tun0 помечен как платный (metered).' -ForegroundColor Green
+            Write-Host '  -> [OK] tun0 разблокирован (не metered), фоновый интернет разрешен, синхронизация отключена.' -ForegroundColor Green
             $idx++
         }
     }

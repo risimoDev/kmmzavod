@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Запуск агента стойки телефонной фермы (Native ADB Device-Agent)
 .DESCRIPTION
@@ -105,6 +105,9 @@ if ($adbBin) {
             $info = $matches[3].Trim()
             $color = if ($state -eq "device") { "Green" } else { "Red" }
             Write-Host "  [$deviceCount] $serial - $state ($info)" -ForegroundColor $color
+            if ($state -eq "device") {
+                & $adbBin -s $serial shell "cmd netpolicy set restrict-background false; cmd netpolicy set metered-network false tun0; settings put global data_saver 0; settings put global data_saver_enabled 0; true" 2>$null | Out-Null
+            }
         }
     }
 
@@ -166,6 +169,15 @@ if (Test-Path $proxyStateFile) {
         Write-Host "[OK] Создана конфигурация AstroProxy для всех 20 плат." -ForegroundColor Green
     }
 }
+
+# 4c. Проверка правила Брандмауэра Windows для порта 8300
+try {
+    $fw = netsh advfirewall firewall show rule name="DeviceAgent 8300" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Настройка Брандмауэра Windows: открытие порта 8300..." -ForegroundColor Yellow
+        netsh advfirewall firewall add rule name="DeviceAgent 8300" dir=in action=allow protocol=TCP localport=8300 >$null 2>$null
+    }
+} catch {}
 
 # 5. Определение пакетного менеджера (pnpm / npm)
 $pkgManager = if (Get-Command pnpm -ErrorAction SilentlyContinue) { "pnpm" } else { "npm" }

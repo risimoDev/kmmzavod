@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     KMMZAVOD - Глубокая диагностика и АВТО-ВОССТАНОВЛЕНИЕ всех плат стойки
     Проверка и исправление: USB-сеть -> DNS -> Magisk Root -> Шлюз -> Sing-box -> iptables -> AstroProxy -> TikTok
@@ -201,6 +201,8 @@ foreach ($dev in $devices) {
         }
     } else {
         Write-Host "  [2/9] USB-сеть (Gnirehtet): [OK] Туннель tun0 активен (10.0.0.2)" -ForegroundColor Green
+    # Снятие блокировок трафика Android netpolicy (Data Saver / metered tun0)
+    & adb -s $serial shell "cmd netpolicy set restrict-background false; cmd netpolicy set metered-network false tun0; settings put global data_saver 0; settings put global data_saver_enabled 0; cmd netpolicy add restrict-background-whitelist 2000 2>/dev/null; cmd netpolicy add restrict-background-whitelist 0 2>/dev/null; true" 2>$null | Out-Null
     }
     $usbNetOk = $hasTun0
 

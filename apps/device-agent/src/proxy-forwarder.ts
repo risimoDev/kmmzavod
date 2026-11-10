@@ -828,43 +828,43 @@ export function isWildberriesHost(host: string): boolean {
 }
 
 /**
- * Returns true if the host is a heavy video CDN or static media delivery node.
- * Crucial: API, login, passport, and upload endpoints are NEVER treated as media CDN.
+ * Returns true if the host is a heavy video CDN stream (feed playback).
+ * Crucial: API, login, passport, TOS storage and upload endpoints are NEVER treated as media CDN.
  */
 export function isTikTokMediaCdn(host: string): boolean {
   if (!host) return false;
   const h = host.toLowerCase().trim();
 
-  // 1. Safeguard: Critical API, passport/auth, upload endpoints must ALWAYS pass
+  // 1. Safeguard: Critical API, passport/auth, upload endpoints, ByteDance TOS storage must ALWAYS pass
   if (
     h.includes('passport') ||
     h.includes('login') ||
+    h.includes('auth') ||
     h.includes('upload') ||
+    h.includes('tos') ||             // ByteDance TOS (Target Object Storage) used for video uploads!
+    h.includes('ibytedtos') ||       // ByteDance TOS domain (*.ibytedtos.com)
+    h.includes('byteoversea') ||     // TikTok oversea configuration endpoints
+    h.includes('byteintl') ||        // ByteDance international endpoints
+    h.includes('bytegoofy') ||       // ByteDance dynamic client configurations
+    h.includes('sgpstatp') ||        // ByteDance static assets / configs
+    h.includes('muscdn') ||          // Musical.ly audio/metadata
     h.endsWith('.tiktokv.com') ||
     h === 'tiktokv.com' ||
     h === 'tiktok.com' ||
     h === 'www.tiktok.com' ||
     h === 'm.tiktok.com' ||
-    h.includes('musical.ly') ||
-    h.includes('byteoversea.com') ||
-    h.includes('byteintl.net')
+    h.includes('musical.ly')
   ) {
     return false;
   }
 
-  // 2. Video CDN streaming and heavy chunk distribution domains (consume 98% of bandwidth)
+  // 2. Video CDN streaming downstream player domains (feed video chunks)
   return (
     h.includes('tiktokcdn.com') ||
     h.includes('tiktokcdn-eu.com') ||
     h.includes('tiktokcdn-us.com') ||
     h.includes('tiktokcdn-in.com') ||
-    h.includes('byteoversea.net') ||
-    h.includes('ibytedtos.com') ||
-    h.includes('muscdn.com') ||
-    h.includes('tlivecdn.com') ||
-    h.includes('bytegoofy.com') ||
-    h.includes('sgpstatp.com') ||
-    (h.includes('akamaized.net') && !h.includes('api'))
+    h.includes('tlivecdn.com')
   );
 }
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Пакетная установка APK-приложения на все подключенные устройства телефонной фермы (Android USB-стойка).
 .DESCRIPTION
@@ -138,7 +138,8 @@ if ($Parallel -and $PSVersionTable.PSVersion.Major -ge 7) {
         $sw.Stop()
         $isOk = $output -match "Success"
         
-        $using:results.Add([PSCustomObject]@{
+        $targetResults = $using:results
+        $targetResults.Add([PSCustomObject]@{
             Device   = $dev
             Success  = $isOk
             Duration = "$([math]::Round($sw.Elapsed.TotalSeconds, 1))с"
