@@ -211,6 +211,10 @@ export function createPublishWorker(deps: Deps): Worker {
         where: { id: publishJobId },
         data: { status: 'uploading' },
       });
+      await db.distributeItem.updateMany({
+        where: { publishJobId },
+        data: { status: 'publishing' },
+      });
 
       // Social clients are created per job: their `proxyUrl` is mutable state, and with
       // concurrency > 1 shared instances let one account post through another's proxy.
@@ -380,6 +384,10 @@ export function createPublishWorker(deps: Deps): Worker {
               where: { id: publishJobId },
               data: { status: 'pending', error: `Телефон ${accountRaw.deviceId} занят — повтор через ~${Math.round(DEVICE_BUSY_RETRY_MS / 1000)} с` },
             });
+            await db.distributeItem.updateMany({
+              where: { publishJobId },
+              data: { status: 'scheduled', error: `Телефон занят — повтор через ~${Math.round(DEVICE_BUSY_RETRY_MS / 1000)} с` },
+            });
             await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
             throw new DelayedError();
           }
@@ -405,6 +413,10 @@ export function createPublishWorker(deps: Deps): Worker {
               await db.publishJob.update({
                 where: { id: publishJobId },
                 data: { status: 'pending', error: `Общий прокси фермы занят другой платой — повтор через ~60 с` },
+              });
+              await db.distributeItem.updateMany({
+                where: { publishJobId },
+                data: { status: 'scheduled', error: 'Общий прокси фермы занят другой платой — повтор через ~60 с' },
               });
               await job.moveToDelayed(Date.now() + 60_000, token);
               throw new DelayedError();

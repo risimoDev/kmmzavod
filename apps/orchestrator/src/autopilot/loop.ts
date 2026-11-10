@@ -21,6 +21,7 @@ import {
   type EditorRenderJobPayload,
   type UniquifyAnalyzeJobPayload,
   type DistributeJobPayload,
+  type PublishJobPayload,
 } from '@kmmzavod/queue';
 import type { PrismaClient, Autopilot } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
@@ -36,6 +37,7 @@ export interface AutopilotLoopDeps {
   editorRenderQueue: Queue<EditorRenderJobPayload>;
   uniquifyAnalyzeQueue: Queue<UniquifyAnalyzeJobPayload>;
   distributeQueue: Queue<DistributeJobPayload>;
+  publishQueue?: Queue<PublishJobPayload>;
 }
 
 const MIN = 60_000;
@@ -72,6 +74,7 @@ export async function runAutopilotsTick(deps: AutopilotLoopDeps, now: Date): Pro
 async function tickOne(deps: AutopilotLoopDeps, ap: Autopilot, now: Date): Promise<void> {
   const { db } = deps;
   await advanceBatches(deps, ap, now);
+  await recoverStuckScheduledItems(deps, ap, now);
 
   // Re-read: advancing may have flipped the autopilot to `error`.
   const fresh = await db.autopilot.findUnique({ where: { id: ap.id } });
@@ -462,15 +465,17 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
       socialAccountId: { in: ids },
       OR: [{ createdAt: { gte: sod }, status: { in: [...ITEM_COUNTED] } }, { status: { in: [...ITEM_INFLIGHT] } }],
     },
-    select: { socialAccountId: true, status: true, createdAt: true },
+    select: { socialAccountId: true, status: true, createdAt: true, scheduledAt: true },
   });
   const todayCount = new Map<string, number>();
   const inflight = new Set<string>();
   for (const r of recent) {
-    if (r.createdAt >= sod && (ITEM_COUNTED as readonly string[]).includes(r.status)) {
+    // Only count published items, active publishing items, or freshly scheduled items (within last 25 min or upcoming)
+    const isStaleScheduled = r.status === 'scheduled' && r.scheduledAt && r.scheduledAt.getTime() < now.getTime() - 25 * 60 * 1000;
+    if (r.createdAt >= sod && (ITEM_COUNTED as readonly string[]).includes(r.status) && !isStaleScheduled) {
       todayCount.set(r.socialAccountId, (todayCount.get(r.socialAccountId) ?? 0) + 1);
     }
-    if ((ITEM_INFLIGHT as readonly string[]).includes(r.status)) inflight.add(r.socialAccountId);
+    if ((ITEM_INFLIGHT as readonly string[]).includes(r.status) && !isStaleScheduled) inflight.add(r.socialAccountId);
   }
 
   const jobIds = await readyJobIds(db, ap.id);
@@ -641,4 +646,79 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
   return out;
+}
+
+/**
+ * Watchdog: finds scheduled distribute items that missed their window by >25 min,
+ * reschedules them, and ensures BullMQ jobs are active.
+ */
+async function recoverStuckScheduledItems(deps: AutopilotLoopDeps, ap: Autopilot, now: Date): Promise<void> {
+  const { db, publishQueue } = deps;
+  if (!publishQueue) return;
+
+  const staleThreshold = new Date(now.getTime() - 25 * 60 * 1000);
+  const stuck = await db.distributeItem.findMany({
+    where: {
+      distributeJob: { autopilotId: ap.id },
+      status: 'scheduled',
+      scheduledAt: { lt: staleThreshold },
+    },
+    include: {
+      publishJob: true,
+      socialAccount: true,
+      uniqueVariant: true,
+    },
+    take: 25,
+  });
+
+  if (!stuck.length) return;
+
+  logger.warn({ autopilotId: ap.id, count: stuck.length }, 'autopilot watchdog: recovering past-due scheduled items');
+
+  for (let i = 0; i < stuck.length; i++) {
+    const item = stuck[i];
+    if (!item.socialAccount || !item.uniqueVariant) continue;
+
+    if (item.publishJob?.status === 'published') {
+      await db.distributeItem.update({ where: { id: item.id }, data: { status: 'published', publishedAt: now } });
+      continue;
+    }
+    if (item.publishJob?.status === 'failed') {
+      await db.distributeItem.update({ where: { id: item.id }, data: { status: 'failed', error: item.publishJob.error } });
+      continue;
+    }
+
+    const newScheduledAt = new Date(now.getTime() + i * 40_000);
+    const jobId = item.publishJobId || item.id;
+
+    await db.distributeItem.update({
+      where: { id: item.id },
+      data: { scheduledAt: newScheduledAt },
+    });
+
+    if (item.publishJobId) {
+      await db.publishJob.update({
+        where: { id: item.publishJobId },
+        data: { scheduledAt: newScheduledAt, status: 'scheduled', error: null },
+      });
+    }
+
+    const payload: PublishJobPayload = {
+      publishJobId: item.publishJobId || jobId,
+      uniqueVariantId: item.uniqueVariantId,
+      tenantId: ap.tenantId,
+      platform: item.socialAccount.platform as any,
+      socialAccountId: item.socialAccountId,
+      scheduledAt: newScheduledAt.toISOString(),
+    };
+
+    const oldJob = await publishQueue.getJob(jobId).catch(() => null);
+    if (oldJob) await oldJob.remove().catch(() => {});
+
+    const bullJobId = `watchdog-${item.id}-${now.getTime()}-${i}`;
+    const delay = Math.max(0, newScheduledAt.getTime() - now.getTime());
+    await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId }).catch((err) => {
+      logger.warn({ err: err.message, itemId: item.id }, 'autopilot watchdog: failed to re-enqueue publish job');
+    });
+  }
 }

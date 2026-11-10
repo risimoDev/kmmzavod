@@ -195,6 +195,7 @@ async function main() {
       editorRenderQueue,
       uniquifyAnalyzeQueue,
       distributeQueue,
+      publishQueue,
     },
     connection,
   });

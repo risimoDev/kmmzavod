@@ -592,13 +592,87 @@ export async function autopilotRoutes(app: FastifyInstance) {
     return { ok: true, message: 'Новый монтаж стартует в течение минуты' };
   });
 
-  /** Open a publish window now (the next scheduled one is recomputed afterwards). */
+  /** Open a publish window now or immediately retrigger waiting/stuck scheduled items. */
   app.post('/:id/publish-now', async (req, reply) => {
     const { tenantId } = req.user;
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    const ap = await db.autopilot.findFirst({ where: { id, tenantId }, select: { status: true } });
+    const ap = await db.autopilot.findFirst({ where: { id, tenantId }, select: { id: true, status: true, staggerMinutes: true } });
     if (!ap) return reply.code(404).send({ error: 'NotFound' });
     if (ap.status !== 'active') return reply.code(400).send({ error: 'BadRequest', message: 'Сначала запустите автопилот' });
+
+    // Check if there are scheduled distribute items waiting or stuck
+    const scheduledItems = await db.distributeItem.findMany({
+      where: {
+        distributeJob: { autopilotId: id },
+        status: 'scheduled',
+      },
+      include: {
+        publishJob: true,
+        socialAccount: true,
+        uniqueVariant: true,
+      },
+      orderBy: { scheduledAt: 'asc' },
+    });
+
+    if (scheduledItems.length > 0) {
+      let retriggeredCount = 0;
+      const now = new Date();
+
+      for (let i = 0; i < scheduledItems.length; i++) {
+        const item = scheduledItems[i];
+        if (!item.socialAccount || !item.uniqueVariant) continue;
+
+        // Sequence with 35s gap between physical boards
+        const scheduledAt = new Date(now.getTime() + i * 35_000);
+        const jobId = item.publishJobId || item.id;
+
+        await db.distributeItem.update({
+          where: { id: item.id },
+          data: { scheduledAt, status: 'scheduled', error: null },
+        });
+
+        if (item.publishJobId) {
+          await db.publishJob.update({
+            where: { id: item.publishJobId },
+            data: { scheduledAt, status: 'scheduled', error: null },
+          });
+        }
+
+        const payload: PublishJobPayload = {
+          publishJobId: item.publishJobId || jobId,
+          uniqueVariantId: item.uniqueVariantId,
+          tenantId,
+          platform: item.socialAccount.platform as any,
+          socialAccountId: item.socialAccountId,
+          scheduledAt: scheduledAt.toISOString(),
+        };
+
+        const oldJob = await publishQueue.getJob(jobId).catch(() => null);
+        if (oldJob) await oldJob.remove().catch(() => {});
+
+        const bullJobId = `publish-now-${item.id}-${Date.now()}-${i}`;
+        const delay = Math.max(0, scheduledAt.getTime() - Date.now());
+        await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId }).catch(() => {});
+        retriggeredCount++;
+      }
+
+      await db.autopilotRun.create({
+        data: {
+          autopilotId: id,
+          tenantId,
+          kind: 'info',
+          message: `Мгновенный запуск: отправлено в работу ${retriggeredCount} постов из очереди`,
+        },
+      });
+
+      return {
+        ok: true,
+        retriggeredCount,
+        message: `Запущена публикация ${retriggeredCount} постов из очереди на стойку`,
+      };
+    }
+
+    // Otherwise trigger a fresh window
     await db.autopilot.update({ where: { id }, data: { nextWindowAt: new Date() } });
     return { ok: true, message: 'Публикация готовых копий начнётся в течение минуты' };
   });
@@ -674,7 +748,9 @@ export async function autopilotRoutes(app: FastifyInstance) {
         },
       });
 
-      await publishQueue.remove(`publish:${jobId}`).catch(() => {});
+      const oldJob = await publishQueue.getJob(jobId).catch(() => null);
+      if (oldJob) await oldJob.remove().catch(() => {});
+
       const payload: PublishJobPayload = {
         publishJobId: jobId,
         uniqueVariantId: item.uniqueVariantId,
@@ -684,7 +760,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
         scheduledAt: scheduledAt.toISOString(),
       };
       const delay = Math.max(0, scheduledAt.getTime() - Date.now());
-      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId });
+      const bullJobId = `retry-${jobId}-${Date.now()}-${i}`;
+      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId });
       retriedCount++;
     }
 
@@ -765,7 +842,9 @@ export async function autopilotRoutes(app: FastifyInstance) {
       },
     });
 
-    await publishQueue.remove(`publish:${jobId}`).catch(() => {});
+    const oldJob = await publishQueue.getJob(jobId).catch(() => null);
+    if (oldJob) await oldJob.remove().catch(() => {});
+
     const payload: PublishJobPayload = {
       publishJobId: jobId,
       uniqueVariantId: item.uniqueVariantId,
@@ -774,7 +853,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
       socialAccountId: item.socialAccountId,
       scheduledAt: scheduledAt.toISOString(),
     };
-    await publishQueue.add(`publish:${jobId}`, payload, { jobId });
+    const bullJobId = `single-retry-${jobId}-${Date.now()}`;
+    await publishQueue.add(`publish:${jobId}`, payload, { jobId: bullJobId });
 
     await db.autopilotRun.create({
       data: {
