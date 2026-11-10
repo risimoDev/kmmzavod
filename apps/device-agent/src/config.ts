@@ -59,6 +59,11 @@ export const config = {
   // Optional shared secret: when set, every request except GET /health must carry it in `x-agent-token`.
   AGENT_TOKEN: env('DEVICE_AGENT_TOKEN', ''),
 
+  // ClaudeHub AI
+  CLAUDEHUB_API_KEY: env('CLAUDEHUB_API_KEY', ''),
+  CLAUDEHUB_BASE_URL: env('CLAUDEHUB_BASE_URL', 'https://api.claudehub.fun/v1'),
+  CLAUDEHUB_MODEL: env('CLAUDEHUB_VISION_MODEL', env('CLAUDEHUB_MODEL', 'gemini-flash-3.8')),
+
   // ── Proxy gateway (see src/proxy-manager.ts) ──
   // Where device proxy configs are persisted (contains proxy passwords — keep it out of git).
   PROXY_STATE_FILE: env('DEVICE_AGENT_PROXY_STATE_FILE', path.join(resolveScriptsDir(), '..', 'devices-proxy-state.json')),

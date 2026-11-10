@@ -21,6 +21,7 @@ import { TikTokClient } from '../clients/social/tiktok.client';
 import { InstagramClient } from '../clients/social/instagram.client';
 import { PostBridgeClient } from '../clients/social/postbridge.client';
 import { YouTubeClient } from '../clients/social/youtube.client';
+import { config } from '../config';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
 import { normalizeCaption } from '../lib/caption';
@@ -439,6 +440,8 @@ export function createPublishWorker(deps: Deps): Worker {
               videoUrl: presignedUrl,
               caption: fullCaption,
               username: deviceUsername(accountRaw.sessionData, accountRaw.accountName),
+              claudehubApiKey: config.CLAUDEHUB_API_KEY || undefined,
+              aiModel: config.CLAUDEHUB_VISION_MODEL || 'gemini-flash-3.8',
             });
           } catch (err: unknown) {
             const msg = describeDeviceAgentError(err);

@@ -26,7 +26,8 @@ import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
 import { decide, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, type ProfileSnapshot } from './profile-stats';
-import { dumpScreen, editTexts, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
+import { dumpScreen, editTexts, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
+import { consultAiAutopilot } from './ai-autopilot';
 
 export interface PublishRequest {
   deviceId: string;
@@ -35,6 +36,8 @@ export interface PublishRequest {
   caption: string;
   /** The account's own username — needed to verify the post on its profile. */
   username?: string;
+  claudehubApiKey?: string;
+  aiModel?: string;
 }
 
 export type PublishStage = 'download' | 'push' | 'prepare' | 'compose' | 'upload' | 'verify' | 'done';
@@ -164,6 +167,8 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     const st = initialFlowState();
     let captionTyped = !caption;
     let unknown = 0;
+    let aiAdviceAttempts = 0;
+    const MAX_AI_ADVICE = 4;
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
     let lastScreen: any = null;
     const isLauncherOrSys = (p?: string) =>
@@ -248,6 +253,109 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
           await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.75), Math.round(width / 2), Math.round(height * 0.35), 300).catch(() => {});
           await sleep(1000);
+        }
+
+        // ── AI Autopilot Advisor Fallback (ClaudeHub Vision) ─────────────────
+        if (unknown >= 2 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+          aiAdviceAttempts++;
+          logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: asking AI Autopilot advisor to analyze stuck screen');
+          const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+          const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+
+          const aiDecision = await consultAiAutopilot({
+            platform: flowPlatform,
+            deviceId,
+            stage,
+            st,
+            hasCaption: !!caption,
+            captionText: caption,
+            screen,
+            base64Screenshot,
+            screenSize,
+            apiKey: req.claudehubApiKey,
+            model: req.aiModel,
+            logger,
+          }).catch((err) => {
+            logger.warn({ err: (err as Error).message }, 'publish: AI Autopilot error, continuing standard flow');
+            return null;
+          });
+
+          if (aiDecision) {
+            if (aiDecision.action === 'abort') {
+              const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_ai_abort`, screen?.xml).catch(() => undefined);
+              return result({
+                ok: false,
+                retryable: false,
+                debugSnapshot: snap,
+                detail: `ИИ автопилот: ${aiDecision.reason}`,
+              });
+            }
+
+            if (aiDecision.action === 'key_back') {
+              logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot pressed BACK');
+              await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
+              unknown = 0;
+              await sleep(1500);
+              continue;
+            }
+
+            if (aiDecision.action === 'swipe_up') {
+              logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot swiped UP');
+              await adb.swipe(deviceId, Math.round(screenSize.width / 2), Math.round(screenSize.height * 0.75), Math.round(screenSize.width / 2), Math.round(screenSize.height * 0.35), 300).catch(() => {});
+              unknown = 0;
+              await sleep(1500);
+              continue;
+            }
+
+            if (aiDecision.action === 'type_caption' && caption) {
+              const editField = screen.els.find((e) => /EditText|AutoCompleteTextView/i.test(e.cls));
+              if (editField) {
+                logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption');
+                await tapEl(adb, deviceId, editField);
+                await sleep(700);
+                await typeText(adb, deviceId, caption);
+                st.captionDone = true;
+                captionTyped = await captionLanded(adb, deviceId, caption);
+                await hideKeyboard(adb, deviceId);
+                unknown = 0;
+                await sleep(1500);
+                continue;
+              }
+            }
+
+            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
+              let targetEl: UiEl | undefined;
+              if (aiDecision.targetText) {
+                const escaped = aiDecision.targetText.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                targetEl = screen.els.find((e) =>
+                  (e.clickable || /Button|TextView|ImageView|View/i.test(e.cls)) &&
+                  (new RegExp(`^${escaped}$`, 'i').test(e.text.trim()) || new RegExp(`^${escaped}$`, 'i').test(e.desc.trim()))
+                );
+                if (!targetEl) {
+                  targetEl = screen.els.find((e) =>
+                    new RegExp(escaped, 'i').test(e.text) || new RegExp(escaped, 'i').test(e.desc)
+                  );
+                }
+              }
+
+              if (targetEl) {
+                logger.info({ deviceId, platform, target: targetEl.text || targetEl.desc, reason: aiDecision.reason }, 'publish: AI Autopilot tapped element');
+                await tapEl(adb, deviceId, targetEl);
+              } else if (aiDecision.x && aiDecision.y && aiDecision.x > 0 && aiDecision.y > 0) {
+                logger.info({ deviceId, platform, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
+                await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+              }
+
+              if (targetEl || (aiDecision.x && aiDecision.y)) {
+                if (aiDecision.marks === 'target') st.targetChosen = true;
+                if (aiDecision.marks === 'next') st.nextTaps++;
+                if (aiDecision.marks === 'share') { st.shareTapped = true; posted = 'unknown'; }
+                unknown = 0;
+                await sleep(2500);
+                continue;
+              }
+            }
+          }
         }
       }
       if (unknown >= UNKNOWN_SCREEN_LIMIT) {

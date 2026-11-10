@@ -39,6 +39,11 @@ const schema = z.object({
   KLING_SECRET_KEY: z.string().default(''),
   AI_PROXY_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
 
+  // ClaudeHub AI (Vision Autopilot & LLM)
+  CLAUDEHUB_API_KEY: z.string().default(''),
+  CLAUDEHUB_BASE_URL: z.string().url().default('https://api.claudehub.fun/v1'),
+  CLAUDEHUB_VISION_MODEL: z.string().default('gemini-flash-3.8'),
+
   // Social publishing (optional — если не заданы, publishing для платформы отключён)
   TIKTOK_CLIENT_KEY: z.string().optional(),
   TIKTOK_CLIENT_SECRET: z.string().optional(),

@@ -45,6 +45,11 @@ export const DEFAULT_OPENROUTER_MODELS = [
   'meta-llama/llama-3.3-70b-instruct:free',
   'qwen/qwen-2.5-72b-instruct:free',
 ];
+export const DEFAULT_CLAUDEHUB_MODELS = [
+  'gemini-flash-3.8',
+  'claude-haiku-5-5',
+  'deepseek-v4.1-flash',
+];
 export const DEFAULT_GPTUNNEL_MODEL = 'gpt-4o-mini';
 
 export class LlmChain {

@@ -182,6 +182,8 @@ export const deviceAgentService = {
     videoUrl: string;
     caption: string;
     username?: string;
+    claudehubApiKey?: string;
+    aiModel?: string;
   }): Promise<DevicePublishResult> {
     return requestWithFallback((base) =>
       axios.post(`${base}/publish`, {
@@ -192,6 +194,8 @@ export const deviceAgentService = {
         username: opts.username,
         // The agent refuses to open the app if the phone would post from the farm's own IP.
         checkIpFirst: true,
+        claudehubApiKey: opts.claudehubApiKey,
+        aiModel: opts.aiModel,
       }, { timeout: DEVICE_PUBLISH_TIMEOUT_MS })
     );
   },

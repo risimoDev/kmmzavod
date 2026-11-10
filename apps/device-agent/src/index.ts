@@ -488,6 +488,8 @@ const PublishBody = z.object({
   username: z.string().max(100).optional(),
   // Verify the phone leaves via its proxy before opening the app (only enforced when the farm uses proxies).
   checkIpFirst: z.boolean().default(true),
+  claudehubApiKey: z.string().optional(),
+  aiModel: z.string().optional(),
 });
 
 /**
