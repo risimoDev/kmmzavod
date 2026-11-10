@@ -133,7 +133,9 @@ export async function queryClaudeHubVision(params: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 25_000,
+        timeout: 30_000,
+        maxBodyLength: 50 * 1024 * 1024,
+        maxContentLength: 50 * 1024 * 1024,
       }
     );
 
@@ -173,7 +175,9 @@ export async function queryClaudeHubVision(params: {
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
       },
-      timeout: 25_000,
+      timeout: 30_000,
+      maxBodyLength: 50 * 1024 * 1024,
+      maxContentLength: 50 * 1024 * 1024,
     }
   );
 
@@ -192,7 +196,7 @@ export async function queryClaudeHubVision(params: {
 export async function consultAiAutopilot(input: AiAutopilotInput): Promise<AiAutopilotDecision | null> {
   const apiKey = input.apiKey || config.CLAUDEHUB_API_KEY || process.env.CLAUDEHUB_API_KEY;
   if (!apiKey || apiKey.startsWith('change_me')) {
-    input.logger.debug('ai-autopilot: CLAUDEHUB_API_KEY not configured, skipping AI advice');
+    input.logger.warn({ deviceId: input.deviceId }, 'ai-autopilot: CLAUDEHUB_API_KEY is not configured — AI advice skipped. Set CLAUDEHUB_API_KEY in .env on Farm PC or server');
     return null;
   }
 

@@ -90,24 +90,25 @@ export default function AutopilotDetailPage() {
   const totalCyclePosts = Math.max(posts.length, 1);
   const progressPercent = Math.round((published / totalCyclePosts) * 100);
 
-  const isPublishing = publishingPosts.length > 0 || Boolean(liveProgress?.isPublishing && scheduledPosts.length > 0);
+  const isActivelyPublishing = publishingPosts.length > 0 || Boolean(liveProgress?.activeItem);
   const isProducing = inFlight.length > 0;
   const hasFailed = failedPosts.length > 0;
+  const hasScheduled = scheduledPosts.length > 0;
 
   // Динамический статус текущего шага в реальном времени
   let liveStatusTitle = "Автопилот в штатном режиме";
   let liveStatusSubtitle = "Ожидание планового окна публикации";
   let currentActionDetail: string | null = null;
 
-  if (isPublishing) {
+  if (isActivelyPublishing) {
     liveStatusTitle = "Идёт публикация на стойку телефонов";
     const active = publishingPosts[0] || (liveProgress?.activeItem ? posts.find((p) => p.id === liveProgress.activeItem?.id) : null);
     if (active) {
       liveStatusSubtitle = `Аккаунт: ${active.socialAccount.accountName} (${active.socialAccount.platform})`;
       currentActionDetail = `Плата ${active.socialAccount.deviceId ? active.socialAccount.deviceId.slice(0, 12) + "..." : "USB"}: передача ролика в ${active.socialAccount.platform === "tiktok" ? "TikTok" : "Instagram"} (с ротацией IP и ИИ-контролем)`;
     } else {
-      liveStatusSubtitle = `В очереди к публикации: ${scheduledPosts.length} постов`;
-      currentActionDetail = "Ротация мобильного IP через AstroProxy и отправка задачи в очередь...";
+      liveStatusSubtitle = "В процессе: обработка задачи на стойке...";
+      currentActionDetail = "Плата загружает видео и проверяет сетевое окружение...";
     }
   } else if (isProducing) {
     const activeBatch = inFlight[0];
@@ -116,9 +117,16 @@ export default function AutopilotDetailPage() {
     currentActionDetail = activeBatch.uniquify
       ? `Уникализация видеокопий: создано ${activeBatch.uniquify.completedCount} из ${activeBatch.uniquify.variantCount}`
       : `Текущий этап: ${BATCH_STAGES[stageIndex(activeBatch.status)]?.label || activeBatch.status}`;
+  } else if (hasScheduled) {
+    const nextItem = [...scheduledPosts].sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())[0];
+    const nextTimeStr = nextItem ? new Date(nextItem.scheduledAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "скоро";
+    liveStatusTitle = `В очереди к публикации: ${scheduledPosts.length} постов`;
+    liveStatusSubtitle = `Следующий запуск: ~${nextTimeStr} (антибан-интервал между платами)`;
+    currentActionDetail = "Посты распределяются последовательно с защитой стойки от блокировок. Нажмите «Опубликовать сейчас» для мгновенной выгрузки.";
   } else if (hasFailed) {
     liveStatusTitle = `Внимание: ${failedPosts.length} из ${posts.length} публикаций требуют перезапуска`;
     liveStatusSubtitle = "Ошибки зафиксированы. Вы можете перезапустить их все одной кнопкой или по отдельности.";
+    currentActionDetail = "Используйте кнопку «↻ Перезапустить все упавшие» выше для мгновенной повторной отправки.";
   } else if (published > 0) {
     liveStatusTitle = `Все ${published} публикаций успешно завершены!`;
     liveStatusSubtitle = `Следующее автоматическое окно публикации: ${ap.status === "active" && ap.nextWindowAt ? formatWindow(ap.nextWindowAt, ap.timezone) : "по расписанию"}`;

@@ -138,7 +138,15 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 3b. The app must have network: with "Network error" the upload would hang mid-way
     // (seen on the farm: TikTok stuck at 58%). Nothing is posted yet → safe to retry later.
-    const before = await dumpScreen(adb, deviceId, 1);
+    let before = await dumpScreen(adb, deviceId, 1);
+    if (before && before.pkg === pkg && isAppOffline(before)) {
+      logger.warn({ deviceId, platform }, 'publish: обнаружена «Network error» до публикации — попытка авто-восстановления сети');
+      await adb.fastShell(deviceId, `am force-stop ${pkg}`).catch(() => {});
+      await sleep(2000);
+      await adb.openApp(deviceId, pkg).catch(() => {});
+      await sleep(4000);
+      before = await dumpScreen(adb, deviceId, 1);
+    }
     if (before && before.pkg === pkg && isAppOffline(before)) {
       const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_offline`, before.xml).catch(() => undefined);
       return result({
@@ -201,9 +209,54 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           });
         }
 
-        // 1. Wake and unlock
+        // 1. Wake, unlock and dismiss swipe-lockscreen
         await adb.wakeUp(deviceId).catch(() => {});
         await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
+        const { width: sw, height: sh } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+        await adb.swipe(deviceId, Math.round(sw / 2), Math.round(sh * 0.8), Math.round(sw / 2), Math.round(sh * 0.25), 250).catch(() => {});
+
+        // ── AI Autopilot Advisor on launcher/stuck screen ──
+        if (unknown >= 2 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+          aiAdviceAttempts++;
+          logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: ИИ-автопилот анализирует экран рабочего стола/системы');
+          const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+          const aiDecision = await consultAiAutopilot({
+            platform: flowPlatform,
+            deviceId,
+            stage,
+            st,
+            hasCaption: !!caption,
+            captionText: caption,
+            screen,
+            base64Screenshot,
+            screenSize: { width: sw, height: sh },
+            apiKey: req.claudehubApiKey,
+            model: req.aiModel,
+            logger,
+          }).catch((err) => {
+            logger.warn({ err: (err as Error).message }, 'publish: AI Autopilot error on launcher');
+            return null;
+          });
+
+          if (aiDecision) {
+            if (aiDecision.action === 'tap_coord' && aiDecision.x && aiDecision.y) {
+              logger.info({ deviceId, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
+              await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+              await sleep(2000);
+              continue;
+            }
+            if (aiDecision.action === 'tap' && aiDecision.targetText) {
+              const target = aiDecision.targetText;
+              const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
+              if (el) {
+                logger.info({ deviceId, targetText: target, reason: aiDecision.reason }, 'publish: ИИ нажал элемент на рабочем столе');
+                await tapEl(adb, deviceId, el);
+                await sleep(2000);
+                continue;
+              }
+            }
+          }
+        }
 
         // 2. Re-dispatch share intent or launch app
         if (unknown <= 4) {

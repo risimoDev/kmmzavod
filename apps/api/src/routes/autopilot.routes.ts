@@ -458,7 +458,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       publishingCount: publishingItems.length,
       publishedCount: publishedItems.length,
       failedCount: failedItems.length,
-      isPublishing: publishingItems.length > 0 || scheduledItems.length > 0,
+      isPublishing: publishingItems.length > 0,
       activeItem: activePublishing ? {
         id: activePublishing.id,
         accountName: activePublishing.socialAccount.accountName,
