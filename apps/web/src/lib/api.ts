@@ -2475,6 +2475,17 @@ export interface AutopilotLiveProgress {
     status: string;
   } | null;
   activeDeviceId: string | null;
+  currentAction?: string | null;
+  liveAction?: {
+    deviceId?: string;
+    accountName?: string;
+    platform?: string;
+    step?: string;
+    detail?: string;
+    percent?: number;
+    stage?: string;
+    updatedAt?: number;
+  } | null;
 }
 
 export interface AutopilotMeta {

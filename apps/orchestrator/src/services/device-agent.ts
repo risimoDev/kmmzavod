@@ -85,6 +85,16 @@ export interface DevicePublishResult {
   country?: string;
 }
 
+export interface DevicePublishProgress {
+  deviceId: string;
+  platform: 'instagram' | 'tiktok' | 'youtube_shorts';
+  stage: string;
+  step: string;
+  detail?: string;
+  percent?: number;
+  updatedAt: number;
+}
+
 /**
  * The agent walks the app, waits for the upload and re-checks the profile:
  * up to ~3 min compose + 8 min upload + ~1.5 min verification + download/push.
@@ -273,6 +283,17 @@ export const deviceAgentService = {
     error?: string;
   }> {
     return requestWithFallback((base) => axios.post(`${base}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 }));
+  },
+
+  async getPublishProgress(deviceId: string): Promise<DevicePublishProgress | null> {
+    try {
+      const res = await requestWithFallback<{ ok: boolean; progress: DevicePublishProgress | null }>((base) =>
+        axios.get(`${base}/publish/progress/${encodeURIComponent(deviceId)}`, { timeout: 3000 })
+      );
+      return res.progress ?? null;
+    } catch {
+      return null;
+    }
   },
 };
 

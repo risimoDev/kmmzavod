@@ -56,6 +56,51 @@ export interface PublishResult {
   debugSnapshot?: string;
 }
 
+export interface DevicePublishProgress {
+  deviceId: string;
+  platform: 'instagram' | 'tiktok' | 'youtube_shorts';
+  stage: PublishStage;
+  step: string;
+  detail?: string;
+  percent?: number;
+  updatedAt: number;
+}
+
+export const activePublishProgress = new Map<string, DevicePublishProgress>();
+
+export function getDevicePublishProgress(deviceId: string): DevicePublishProgress | null {
+  return activePublishProgress.get(deviceId) ?? null;
+}
+
+export function getAllDevicePublishProgress(): Record<string, DevicePublishProgress> {
+  const result: Record<string, DevicePublishProgress> = {};
+  for (const [k, v] of activePublishProgress.entries()) {
+    result[k] = v;
+  }
+  return result;
+}
+
+function updateProgress(
+  deviceId: string,
+  p: {
+    platform: 'instagram' | 'tiktok' | 'youtube_shorts';
+    stage: PublishStage;
+    step: string;
+    detail?: string;
+    percent?: number;
+  }
+) {
+  activePublishProgress.set(deviceId, {
+    deviceId,
+    platform: p.platform,
+    stage: p.stage,
+    step: p.step,
+    detail: p.detail,
+    percent: p.percent,
+    updatedAt: Date.now(),
+  });
+}
+
 /** Max time to get from the share intent to tapping Share/Post. */
 const COMPOSE_TIMEOUT_MS = 3 * 60_000;
 /** Max time to wait for the upload after Share/Post. */
@@ -97,6 +142,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     ({ stage, posted, onDevicePath, ...r });
 
   try {
+    updateProgress(deviceId, { platform, stage: 'download', step: 'Скачивание видеоролика на управляющий ПК...', percent: 10 });
     await cleanupOldUploads(adb, deviceId);
 
     // 1. Download on the host PC (wired link, no mobile-proxy traffic)
@@ -105,15 +151,18 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 2. Push into the gallery and index it
     stage = 'push';
+    updateProgress(deviceId, { platform, stage: 'push', step: 'Копирование ролика по USB (ADB) в память телефона...', percent: 25 });
     await adb.shell(deviceId, `mkdir -p "${config.DOWNLOAD_DIR}"`).catch(() => {});
     await adb.pushFile(deviceId, localFilePath, onDevicePath);
     await adb.fastShell(deviceId, `chmod 666 "${onDevicePath}"`).catch(() => {});
     await adb.scanMediaFile(deviceId, onDevicePath).catch(() => {});
+    updateProgress(deviceId, { platform, stage: 'push', step: 'Регистрация видеоролика в MediaStore Android...', percent: 35 });
     mediaId = await resolveMediaId(adb, deviceId, onDevicePath, fileName);
     const streamUri = mediaId ? `${MEDIA_URI}/${mediaId}` : `file://${onDevicePath}`;
 
     // 3. App + baseline
     stage = 'prepare';
+    updateProgress(deviceId, { platform, stage: 'prepare', step: `Подготовка приложения ${platform === 'tiktok' ? 'TikTok' : 'Instagram'} и проверка профиля...`, percent: 45 });
     await adb.fastShell(deviceId, 'am force-stop com.samsung.android.app.galaxyfinder').catch(() => {});
     await adb.wakeUp(deviceId);
     await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
@@ -172,11 +221,12 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 5. Walk the screens up to Share/Post
     stage = 'compose';
+    updateProgress(deviceId, { platform, stage: 'compose', step: 'Открытие видео в редакторе публикации...', percent: 55 });
     const st = initialFlowState();
     let captionTyped = !caption;
     let unknown = 0;
     let aiAdviceAttempts = 0;
-    const MAX_AI_ADVICE = 4;
+    const MAX_AI_ADVICE = 12;
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
     let lastScreen: any = null;
     const isLauncherOrSys = (p?: string) =>
@@ -216,9 +266,10 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         await adb.swipe(deviceId, Math.round(sw / 2), Math.round(sh * 0.8), Math.round(sw / 2), Math.round(sh * 0.25), 250).catch(() => {});
 
         // ── AI Autopilot Advisor on launcher/stuck screen ──
-        if (unknown >= 2 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+        if (unknown >= 1 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: ИИ-автопилот анализирует экран рабочего стола/системы');
+          updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: восстановление приложения с рабочего стола...', percent: 58 });
           const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
           const aiDecision = await consultAiAutopilot({
             platform: flowPlatform,
@@ -239,6 +290,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           });
 
           if (aiDecision) {
+            updateProgress(deviceId, { platform, stage: 'compose', step: `ИИ: ${aiDecision.reason || 'восстановление'}`, percent: 60 });
             if (aiDecision.action === 'tap_coord' && aiDecision.x && aiDecision.y) {
               logger.info({ deviceId, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
               await adb.tap(deviceId, aiDecision.x, aiDecision.y);
@@ -290,6 +342,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           return result({ ok: false, retryable: action.retryable, debugSnapshot: snap, detail: action.why });
         }
         if (action.kind === 'caption') {
+          updateProgress(deviceId, { platform, stage: 'compose', step: 'Ввод описания и хэштегов...', percent: 72 });
           await tapEl(adb, deviceId, action.el);
           await sleep(700);
           try {
@@ -299,12 +352,20 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           }
           st.captionDone = true;
           captionTyped = await captionLanded(adb, deviceId, caption);
+          updateProgress(deviceId, { platform, stage: 'compose', step: captionTyped ? 'Описание проверено' : 'Описание введено', percent: 78 });
           await hideKeyboard(adb, deviceId);
           unknown = 0;
           continue;
         }
         if (action.kind === 'tap') {
           logger.info({ deviceId, platform, step: action.why }, 'publish: tap');
+          if (action.marks === 'share') {
+            updateProgress(deviceId, { platform, stage: 'compose', step: 'Нажатие кнопки публикации («Опубликовать»)...', percent: 84 });
+          } else if (action.marks === 'next') {
+            updateProgress(deviceId, { platform, stage: 'compose', step: 'Переход к следующему экрану («Далее»)...', percent: 65 });
+          } else if (action.marks === 'target') {
+            updateProgress(deviceId, { platform, stage: 'compose', step: `Выбор формата (${action.why})...`, percent: 60 });
+          }
           await tapEl(adb, deviceId, action.el);
           if (action.marks === 'target') st.targetChosen = true;
           if (action.marks === 'next') st.nextTaps++;
@@ -321,9 +382,10 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         }
 
         // ── AI Autopilot Advisor Fallback (ClaudeHub Vision) ─────────────────
-        if (unknown >= 2 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+        if (unknown >= 1 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: asking AI Autopilot advisor to analyze stuck screen');
+          updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: анализ экрана через Gemini Flash 3.8...', detail: 'Анализ снимка и разметки экрана', percent: 65 });
           const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
           const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
 
@@ -346,6 +408,14 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
           });
 
           if (aiDecision) {
+            updateProgress(deviceId, {
+              platform,
+              stage: 'compose',
+              step: `ИИ: ${aiDecision.reason || 'действие на экране'}`,
+              detail: aiDecision.targetText ? `Кнопка: ${aiDecision.targetText}` : (aiDecision.action || undefined),
+              percent: 70,
+            });
+
             if (aiDecision.action === 'abort') {
               const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_ai_abort`, screen?.xml).catch(() => undefined);
               return result({
@@ -373,19 +443,31 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
             }
 
             if (aiDecision.action === 'type_caption' && caption) {
+              updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ: ввод описания в поле редактора...', percent: 74 });
               const editField = screen.els.find((e) => /EditText|AutoCompleteTextView/i.test(e.cls));
               if (editField) {
-                logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption');
+                logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption into detected EditText');
                 await tapEl(adb, deviceId, editField);
-                await sleep(700);
-                await typeText(adb, deviceId, caption);
-                st.captionDone = true;
-                captionTyped = await captionLanded(adb, deviceId, caption);
-                await hideKeyboard(adb, deviceId);
-                unknown = 0;
-                await sleep(1500);
-                continue;
+              } else if (aiDecision.x && aiDecision.y && aiDecision.x > 0 && aiDecision.y > 0) {
+                logger.info({ deviceId, platform, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
+                await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+              } else if (aiDecision.targetText) {
+                const target = aiDecision.targetText.trim();
+                const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
+                if (el) {
+                  logger.info({ deviceId, platform, target, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption target');
+                  await tapEl(adb, deviceId, el);
+                }
               }
+              await sleep(800);
+              await typeText(adb, deviceId, caption);
+              st.captionDone = true;
+              captionTyped = await captionLanded(adb, deviceId, caption);
+              updateProgress(deviceId, { platform, stage: 'compose', step: captionTyped ? 'ИИ: описание проверено' : 'ИИ: описание введено', percent: 79 });
+              await hideKeyboard(adb, deviceId);
+              unknown = 0;
+              await sleep(1500);
+              continue;
             }
 
             if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
@@ -459,6 +541,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 6. Upload: wait for the app's confirmation / the progress to finish
     stage = 'upload';
+    updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер ${platform === 'tiktok' ? 'TikTok' : 'Instagram'}...`, percent: 86 });
     let appConfirmed = false;
     let offline = false;
     let lastPct: number | null = null;
@@ -474,6 +557,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         lastPct = pct;
         lastPctChange = Date.now();
         lastActivity = Date.now();
+        updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер (${lastPct}%)...`, percent: Math.min(94, 85 + Math.round(lastPct * 0.1)) });
       }
       // "Network error" and a frozen percentage: the upload is not moving — stop waiting.
       if (offline && Date.now() - lastPctChange > UPLOAD_STALL_MS) {
@@ -506,6 +590,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
 
     // 7. Verify on the profile
     stage = 'verify';
+    updateProgress(deviceId, { platform, stage: 'verify', step: 'Верификация: проверка появления видео в профиле...', percent: 95 });
     let profileVerified: boolean | null = null;
     let stuckAt: number | null = null;
     if (baseline) {
@@ -557,6 +642,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     await adb.home(deviceId).catch(() => {});
     stage = 'done';
     posted = 'yes';
+    updateProgress(deviceId, { platform, stage: 'done', step: 'Публикация успешно завершена и подтверждена в профиле!', percent: 100 });
     logger.info({ deviceId, platform, verified, captionTyped }, 'publish: post confirmed');
     return result({
       ok: true, retryable: false, verified, captionTyped,
@@ -566,6 +652,7 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     });
   } catch (err) {
     logger.error({ deviceId, platform, stage, err: (err as Error).message }, 'publish: failed');
+    updateProgress(deviceId, { platform, stage, step: `Ошибка публикации (${stage}): ${(err as Error).message}`, percent: 0 });
     const errScreen = await dumpScreen(adb, deviceId, 1).catch(() => null);
     const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_exception`, errScreen?.xml).catch(() => undefined);
     return result({ ok: false, retryable: posted === 'no', debugSnapshot: snap, detail: `Ошибка публикации через ADB (${stage}): ${(err as Error).message}` });
@@ -573,6 +660,9 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
     // Keep the gallery file while the outcome is unknown (the app may still be reading it).
     if (posted !== 'unknown') await removeFromGallery(adb, deviceId, onDevicePath, mediaId);
+    setTimeout(() => {
+      activePublishProgress.delete(deviceId);
+    }, 15_000).unref();
   }
 }
 
@@ -677,8 +767,11 @@ async function captionLanded(adb: AdbClient, deviceId: string, caption: string):
   const screen = await dumpScreen(adb, deviceId, 2);
   if (!screen) return false;
   const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
-  const head = norm(caption).slice(0, 12);
-  return editTexts(screen).some((e) => norm(e.text).includes(head));
+  const head = norm(caption).slice(0, 10);
+  if (!head) return true;
+  const inEdit = editTexts(screen).some((e) => norm(e.text).includes(head) || norm(e.desc).includes(head));
+  if (inEdit) return true;
+  return screen.els.some((e) => norm(e.text).includes(head) || norm(e.desc).includes(head));
 }
 
 async function hideKeyboard(adb: AdbClient, deviceId: string): Promise<void> {

@@ -110,9 +110,18 @@ export default function AutopilotDetailPage() {
   if (isActivelyPublishing) {
     liveStatusTitle = "Идёт публикация на стойку телефонов";
     const active = publishingPosts[0] || (liveProgress?.activeItem ? posts.find((p) => p.id === liveProgress.activeItem?.id) : null);
-    if (active) {
-      liveStatusSubtitle = `Аккаунт: ${active.socialAccount.accountName} (${active.socialAccount.platform})`;
-      currentActionDetail = `Плата ${active.socialAccount.deviceId ? active.socialAccount.deviceId.slice(0, 12) + "..." : "USB"}: передача ролика в ${active.socialAccount.platform === "tiktok" ? "TikTok" : "Instagram"} (с ротацией IP и ИИ-контролем)`;
+    const liveAct = liveProgress?.liveAction;
+    const devId = liveAct?.deviceId || active?.socialAccount.deviceId;
+    const devShort = devId ? (devId.length > 12 ? devId.slice(0, 10) + "..." : devId) : "USB-плата";
+    const accName = liveAct?.accountName || active?.socialAccount.accountName || "телефон";
+    const platformName = (liveAct?.platform || active?.socialAccount.platform) === "tiktok" ? "TikTok" : "Instagram";
+
+    liveStatusSubtitle = `Аккаунт: ${accName} (${platformName})`;
+
+    if (liveProgress?.currentAction) {
+      currentActionDetail = `[${devShort}] ${liveProgress.currentAction}${liveAct?.percent != null ? ` (${liveAct.percent}%)` : ""}`;
+    } else if (active) {
+      currentActionDetail = `[${devShort}] передача ролика в ${platformName} (с ротацией IP и ИИ-контролем)...`;
     } else {
       liveStatusSubtitle = "В процессе: обработка задачи на стойке...";
       currentActionDetail = "Плата загружает видео и проверяет сетевое окружение...";
@@ -363,13 +372,18 @@ export default function AutopilotDetailPage() {
 
                 {/* Живая строка текущего действия */}
                 {currentActionDetail && (
-                  <div className="rounded-lg bg-surface-2/90 border border-border px-3 py-2 text-xs flex items-center justify-between gap-2">
+                  <div className="rounded-lg bg-surface-2/95 border border-brand-500/30 px-3 py-2 text-xs flex items-center justify-between gap-2 shadow-inner">
                     <div className="flex items-center gap-2 truncate">
                       <span className="h-2 w-2 rounded-full bg-brand-400 shrink-0 animate-ping" />
-                      <span className="font-mono text-2xs text-text-tertiary">СЕЙЧАС:</span>
+                      <span className="font-mono text-2xs text-brand-400 font-semibold uppercase tracking-wider">
+                        {isPublishing ? "ИИ-ПУБЛИКАЦИЯ:" : "СЕЙЧАС:"}
+                      </span>
                       <span className="text-text-primary truncate font-medium">{currentActionDetail}</span>
                     </div>
-                    <span className="text-2xs text-text-tertiary shrink-0">обновление 2.5с</span>
+                    <span className="text-2xs text-text-tertiary shrink-0 flex items-center gap-1.5 font-mono">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
+                      онлайн 2.5с
+                    </span>
                   </div>
                 )}
               </CardContent>

@@ -154,6 +154,31 @@ export async function finalizePublishFailure(db: PrismaClient, publishJobId: str
   await settleDistributeItem(db, publishJobId, { status: 'failed', error: errorMsg });
 }
 
+async function setAutopilotLiveProgress(
+  redis: any,
+  autopilotId: string | null | undefined,
+  progress: {
+    deviceId?: string;
+    accountName?: string;
+    platform?: string;
+    step: string;
+    detail?: string;
+    percent?: number;
+    stage?: string;
+  }
+) {
+  if (!autopilotId || !redis) return;
+  try {
+    const payload = JSON.stringify({
+      ...progress,
+      updatedAt: Date.now(),
+    });
+    await redis.set(`autopilot:live:${autopilotId}`, payload, 'EX', 120);
+  } catch {
+    // Redis write failure shouldn't kill worker
+  }
+}
+
 interface Deps {
   db: PrismaClient;
   storage: IStorageClient;
@@ -269,14 +294,11 @@ export function createPublishWorker(deps: Deps): Worker {
         // Abort if this publish was scheduled from a distribution that got cancelled
         const linkedDistItem = await db.distributeItem.findFirst({
           where: { publishJobId },
-          select: { id: true, distributeJobId: true },
+          select: { id: true, distributeJobId: true, distributeJob: { select: { status: true, autopilotId: true } } },
         });
+        const autopilotId = linkedDistItem?.distributeJob?.autopilotId ?? null;
         if (linkedDistItem) {
-          const distJob = await db.distributeJob.findUnique({
-            where: { id: linkedDistItem.distributeJobId },
-            select: { status: true },
-          });
-          if (distJob?.status === 'cancelled') {
+          if (linkedDistItem.distributeJob?.status === 'cancelled') {
             logger.info({ publishJobId, distributeJobId: linkedDistItem.distributeJobId }, 'Publish: distribution cancelled, aborting');
             await db.publishJob.update({
               where: { id: publishJobId },
@@ -375,6 +397,13 @@ export function createPublishWorker(deps: Deps): Worker {
           const fullCaption = buildCaption(publishJob.caption, publishJob.hashtags);
 
           const redis = getRedisConnection();
+          await setAutopilotLiveProgress(redis, autopilotId, {
+            deviceId: accountRaw.deviceId,
+            accountName,
+            platform,
+            step: 'Ожидание очереди стойки плат...',
+            percent: 5,
+          });
           // TTL covers the whole agent call (incl. waiting for the shared farm proxy) plus margin.
           const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId, Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 300);
           if (!lockOwner) {
@@ -405,6 +434,13 @@ export function createPublishWorker(deps: Deps): Worker {
 
           let farmProxyLockOwner: string | null = null;
           if (proxyMode === 'shared_sequential') {
+            await setAutopilotLiveProgress(redis, autopilotId, {
+              deviceId: accountRaw.deviceId,
+              accountName,
+              platform,
+              step: 'Ожидание общего модема стойки AstroProxy...',
+              percent: 8,
+            });
             // Shared farm proxy lock: serializes posts across phones to save expensive AstroProxy traffic
             // Wait up to 150 seconds for previous phone to finish upload & release proxy lock
             farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 150_000);
@@ -425,6 +461,13 @@ export function createPublishWorker(deps: Deps): Worker {
 
             // In shared mode: move proxy to target device
             logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: переключение общего прокси фермы на целевую плату...');
+            await setAutopilotLiveProgress(redis, autopilotId, {
+              deviceId: accountRaw.deviceId,
+              accountName,
+              platform,
+              step: 'Переключение мобильного модема AstroProxy на целевую плату...',
+              percent: 10,
+            });
             try {
               await deviceAgentService.switchActiveDevice(accountRaw.deviceId, true);
             } catch (switchErr) {
@@ -433,6 +476,13 @@ export function createPublishWorker(deps: Deps): Worker {
 
             // In shared mode: rotate IP so account receives a clean mobile IP before posting
             logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: ротация IP AstroProxy для платы перед публикацией...');
+            await setAutopilotLiveProgress(redis, autopilotId, {
+              deviceId: accountRaw.deviceId,
+              accountName,
+              platform,
+              step: 'Ротация мобильного IP через AstroProxy...',
+              percent: 12,
+            });
             try {
               const rot = await rotateIpForFarmDevice(db, accountRaw.deviceId, accountRaw.proxyUrl);
               if (rot.newIp) {
@@ -446,6 +496,28 @@ export function createPublishWorker(deps: Deps): Worker {
           }
 
           let result: DevicePublishResult;
+          let pollInterval: NodeJS.Timeout | null = null;
+          if (autopilotId && accountRaw.deviceId) {
+            pollInterval = setInterval(async () => {
+              try {
+                const prog = await deviceAgentService.getPublishProgress(accountRaw.deviceId!);
+                if (prog) {
+                  await setAutopilotLiveProgress(redis, autopilotId, {
+                    deviceId: accountRaw.deviceId!,
+                    accountName,
+                    platform,
+                    step: prog.step,
+                    detail: prog.detail,
+                    percent: prog.percent,
+                    stage: prog.stage,
+                  });
+                }
+              } catch {
+                // ignore
+              }
+            }, 1500);
+          }
+
           try {
             result = await deviceAgentService.publish({
               deviceId: accountRaw.deviceId,
@@ -473,11 +545,20 @@ export function createPublishWorker(deps: Deps): Worker {
             }
             throw new Error(`device-${platform}: ${msg}`);
           } finally {
+            if (pollInterval) clearInterval(pollInterval);
             if (farmProxyLockOwner) await releaseDeviceLock(redis, 'farm:shared-proxy', farmProxyLockOwner);
             await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
 
           if (!result.ok) {
+            await setAutopilotLiveProgress(redis, autopilotId, {
+              deviceId: accountRaw.deviceId,
+              accountName,
+              platform,
+              step: `Ошибка публикации: ${result.detail ?? 'не подтверждено'}`,
+              percent: 0,
+              stage: 'failed',
+            });
             const where = result.debugSnapshot ? ` [снимок экрана: ${result.debugSnapshot}]` : '';
             const msg = `device-${platform}: ${result.detail ?? 'device-agent reported failure'}${where}`;
             // Share was tapped but the post was not confirmed → never retry (could post twice).
@@ -486,6 +567,14 @@ export function createPublishWorker(deps: Deps): Worker {
             throw new Error(msg);
           }
           posted = true;
+          await setAutopilotLiveProgress(redis, autopilotId, {
+            deviceId: accountRaw.deviceId,
+            accountName,
+            platform,
+            step: 'Публикация успешно завершена и подтверждена в профиле!',
+            percent: 100,
+            stage: 'done',
+          });
           // The agent re-read the profile and found the new post.
           if (result.verified?.profile) verifiedAt = new Date();
           if (result.detail) publishNote = result.detail; // e.g. caption could not be checked

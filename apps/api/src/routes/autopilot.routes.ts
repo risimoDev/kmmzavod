@@ -18,6 +18,7 @@ import { assertOwnStorageKey } from '../lib/storage-keys';
 import { getAstroProxySummary } from '../lib/astroproxy';
 import { deviceAgentClient } from '../lib/device-agent';
 import { publishQueue } from '../lib/queues';
+import { getRedis } from '../lib/redis';
 import type { PublishJobPayload } from '@kmmzavod/queue';
 
 const PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
@@ -511,6 +512,24 @@ export async function autopilotRoutes(app: FastifyInstance) {
     // True cycle total: all active queue items + published posts
     const cycleTotal = realScheduledCount + realPublishingCount + realPublishedCount + realFailedCount;
 
+    const redis = getRedis();
+    const liveJson = await redis.get(`autopilot:live:${id}`).catch(() => null);
+    let liveAction: {
+      deviceId?: string;
+      accountName?: string;
+      platform?: string;
+      step?: string;
+      detail?: string;
+      percent?: number;
+      stage?: string;
+      updatedAt?: number;
+    } | null = null;
+    if (liveJson) {
+      try {
+        liveAction = JSON.parse(liveJson);
+      } catch {}
+    }
+
     const liveProgress = {
       totalPosts: totalDistCount,
       scheduledCount: realScheduledCount,
@@ -530,6 +549,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
         status: activeBatch.status,
       } : null,
       activeDeviceId: farmProxy.activeDeviceId ?? null,
+      currentAction: liveAction?.step ? `${liveAction.step}${liveAction.detail ? ` (${liveAction.detail})` : ''}` : null,
+      liveAction,
     };
 
     return {

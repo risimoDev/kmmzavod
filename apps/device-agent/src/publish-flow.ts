@@ -234,11 +234,15 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
   const field = captionField(s);
 
   if (finalBtn) {
-    if (hasCaption && !st.captionDone && field) {
-      return { kind: 'caption', el: field };
+    if (hasCaption && !st.captionDone) {
+      if (field) {
+        return { kind: 'caption', el: field };
+      }
+      // If caption is required but field not detected heuristically:
+      // DO NOT post without caption! Return unknown so AI can identify and type the caption!
+      return { kind: 'unknown' };
     }
-    // If caption is done, or no caption needed, or field is not found (keyboard open / no text field):
-    // Tap the Post button! Never fall through to unknown!
+    // Caption is done or not needed -> tap Post
     return { kind: 'tap', el: finalBtn, why: platform === 'instagram' ? '«Поделиться»' : '«Опубликовать»', marks: 'share' };
   }
 

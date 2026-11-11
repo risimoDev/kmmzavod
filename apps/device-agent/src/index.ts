@@ -3,7 +3,7 @@ import pino from 'pino';
 import { z } from 'zod';
 import { config } from './config';
 import { AdbClient } from './adb-client';
-import { publishToDevice } from './publish';
+import { publishToDevice, getDevicePublishProgress, getAllDevicePublishProgress } from './publish';
 import { ProxyError, ProxyManager } from './proxy-manager';
 import { runViewTarget } from './view-target';
 import { runWbWarmup } from './wb-warmup';
@@ -543,6 +543,15 @@ app.post('/publish', async (req, reply) => {
     release?.();
     unlock?.();
   }
+});
+
+app.get('/publish/progress/:deviceId', async (req) => {
+  const { deviceId } = req.params as { deviceId: string };
+  return { ok: true, progress: getDevicePublishProgress(deviceId) };
+});
+
+app.get('/publish/progress', async () => {
+  return { ok: true, progress: getAllDevicePublishProgress() };
 });
 
 // ── Profile stats snapshot (views per post + followers) ────────────────────
