@@ -1009,17 +1009,69 @@ export class ProxyManager {
   }
 
   /**
+   * Checks if the device has actual internet access through its configured path.
+   * If down, executes active self-healing:
+   *   1. Ensures Wi-Fi on device is enabled.
+   *   2. Re-applies proxy and adb reverse.
+   *   3. If mobile proxy has a rotate URL, rotates IP to clear carrier stall.
+   *   4. Re-probes internet.
+   */
+  async ensureDeviceInternet(deviceId: string): Promise<{ ok: boolean; ip?: string; error?: string }> {
+    let check = await this.checkDeviceIp(deviceId);
+    if (check.ok) return { ok: true, ip: check.ip };
+
+    this.logger.warn({ deviceId, error: check.error }, 'proxy-manager: device has no internet — initiating active self-healing');
+
+    // 1. Wake up & enable Wi-Fi
+    await this.adb.wakeUp(deviceId).catch(() => {});
+    await this.adb.fastShell(deviceId, 'svc wifi enable').catch(() => {});
+
+    // 2. Re-apply device gateway
+    await this.applyDevice(deviceId).catch(() => {});
+
+    // 3. Test again
+    check = await this.checkDeviceIp(deviceId);
+    if (check.ok) {
+      this.logger.info({ deviceId, ip: check.ip }, 'proxy-manager: internet restored after reapplyDevice');
+      return { ok: true, ip: check.ip };
+    }
+
+    // 4. If mobile proxy has rotation URL (or shared AstroProxy), rotate IP to reset carrier radio/tunnel
+    const entry = this.devices.get(deviceId);
+    const hasRotate = Boolean(entry?.proxy.rotateUrl || this.sharedProxy?.rotateUrl);
+    if (hasRotate) {
+      this.logger.info({ deviceId }, 'proxy-manager: rotating mobile proxy IP to clear carrier stall');
+      try {
+        const rot = await this.rotateProxyIp(deviceId, undefined, 4000);
+        if (rot.ok && rot.check?.ok) {
+          this.logger.info({ deviceId, ip: rot.check.ip }, 'proxy-manager: internet restored after IP rotation');
+          return { ok: true, ip: rot.check.ip };
+        }
+      } catch (rotErr) {
+        this.logger.warn({ err: String(rotErr), deviceId }, 'proxy-manager: rotation failed during self-healing');
+      }
+    }
+
+    // 5. Final check
+    check = await this.checkDeviceIp(deviceId);
+    if (check.ok) return { ok: true, ip: check.ip };
+
+    return { ok: false, error: check.error || 'Плата не имеет доступа в интернет после всех попыток авто-восстановления' };
+  }
+
+  /**
    * Pre-flight network guard used before touching social / marketplace apps.
    * Blocks when the phone should be proxied but isn't, or when it would expose the farm's
    * home IP while proxies are in use on this farm.
    */
   async preflight(deviceId: string): Promise<{ ok: boolean; detail?: string; ipCheck?: DeviceIpCheckResult }> {
-    const ipCheck = await this.checkDeviceIp(deviceId);
     const usingProxies = this.hasAnyProxy();
-    if (!ipCheck.ok) {
-      if (!usingProxies) return { ok: true, ipCheck };
-      return { ok: false, ipCheck, detail: `Не удалось подтвердить прокси на плате: ${ipCheck.error}` };
+    const net = await this.ensureDeviceInternet(deviceId);
+    if (!net.ok) {
+      if (!usingProxies) return { ok: true };
+      return { ok: false, detail: `Не удалось подтвердить интернет на плате: ${net.error}` };
     }
+    const ipCheck = await this.checkDeviceIp(deviceId);
     if (ipCheck.leakDetected) {
       return { ok: false, ipCheck, detail: `Обнаружена утечка: плата выходит в интернет с IP фермы (${ipCheck.ip}), а не через прокси` };
     }

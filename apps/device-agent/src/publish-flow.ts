@@ -40,6 +40,10 @@ const ALLOW = /^(allow|allow all|разрешить|разрешить все|wh
 const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет,?\s*спасибо|later|позже|maybe later|dismiss|отклонить|не разрешать|не переносить|отмена|cancel|close|закрыть|сохранить|понятно, продолжить)$/i;
 /** "Discard reel?" dialogs → keep editing, never discard. */
 const KEEP_EDITING = /^(keep editing|продолжить редактирование|continue editing)$/i;
+const SAVE_TO_DRAFTS = /^(save to drafts?|сохранить в черновик(и)?|save draft)$/i;
+const NETWORK_RETRY = /^(try again|повторить|retry|попробовать снова)$/i;
+const SAVED_TO_DRAFTS = /saved to drafts?|сохранено в черновик(и)?/i;
+const DRAFTS_TILE = /^(drafts?|черновик(и)?)(:\s*\d+)?$/i;
 const LOGGED_OUT = /^(log in|войти|sign up|зарегистрироваться|create new account|создать новый аккаунт|log into another account)$/i;
 
 const NEXT = /^(next|далее|дальше|продолжить|выбрать|готово|save|сохранить)(\s*\(\d+\))?$/i;
@@ -189,8 +193,11 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     }
   }
 
-  const keep = byLabel(s, KEEP_EDITING);
-  if (keep) return { kind: 'tap', el: keep, why: 'не удалять черновик' };
+  const keep = byLabel(s, KEEP_EDITING) ?? byLabel(s, SAVE_TO_DRAFTS);
+  if (keep) return { kind: 'tap', el: keep, why: 'сохранить в черновики / продолжить редактирование' };
+
+  const retryBtn = byLabel(s, NETWORK_RETRY);
+  if (retryBtn) return { kind: 'tap', el: retryBtn, why: 'повторить попытку отправки (сеть)' };
 
   if (st.shareTapped) return decideAfterShare(s);
 
@@ -399,6 +406,9 @@ export function uploadPercent(s: UiScreen): number | null {
 }
 
 function decideAfterShare(s: UiScreen): FlowAction {
+  const retryBtn = byLabel(s, NETWORK_RETRY);
+  if (retryBtn) return { kind: 'tap', el: retryBtn, why: 'повторить попытку отправки (сеть)' };
+  if (screenHas(s, SAVED_TO_DRAFTS)) return { kind: 'progress', why: 'видео сохранено в черновики' };
   if (screenHas(s, UPLOAD_FAILED)) return { kind: 'error', why: 'Приложение сообщило об ошибке загрузки', retryable: false };
   const confirm = byLabel(s, POST_CONFIRM);
   if (confirm) return { kind: 'tap', el: confirm, why: 'подтверждение публикации' };
@@ -411,4 +421,15 @@ function decideAfterShare(s: UiScreen): FlowAction {
   const dismiss = byLabel(s, DISMISS);
   if (dismiss) return { kind: 'tap', el: dismiss, why: `закрыть подсказку «${dismiss.text || dismiss.desc}»` };
   return { kind: 'unknown' };
+}
+
+export function isSavedToDrafts(s: UiScreen): boolean {
+  return screenHas(s, SAVED_TO_DRAFTS);
+}
+
+export function findDraftsTile(s: UiScreen): UiEl | undefined {
+  return s.els.find((e) =>
+    isVisible(e) &&
+    (DRAFTS_TILE.test(e.text.trim()) || DRAFTS_TILE.test(e.desc.trim()) || /draft/i.test(e.resId))
+  );
 }

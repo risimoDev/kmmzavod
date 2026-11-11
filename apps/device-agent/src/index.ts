@@ -524,7 +524,7 @@ app.post('/publish', async (req, reply) => {
         };
       }
     }
-    const result = await publishToDevice(publishReq, adb, logger);
+    const result = await publishToDevice(publishReq, adb, proxyManager, logger);
     if (result.posted !== 'no' && release) {
       const hold = release;
       release = undefined;

@@ -24,9 +24,9 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
-import { decide, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
-import { snapshotProfile, type ProfileSnapshot } from './profile-stats';
-import { dumpScreen, editTexts, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
+import { decide, findDraftsTile, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, isSavedToDrafts, uploadPercent, type FlowPlatform } from './publish-flow';
+import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
+import { dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
 
 export interface PublishRequest {
@@ -117,7 +117,250 @@ const SHARE_TAP_ATTEMPTS = 3;
 const PROFILE_CHECK_GAP_MS = 20_000;
 const MEDIA_URI = 'content://media/external/video/media';
 
-export async function publishToDevice(req: PublishRequest, adb: AdbClient, logger: Logger): Promise<PublishResult> {
+/**
+ * Executes proactive self-healing for the board's network connection:
+ * wakes the device, enables Wi-Fi radio, and invokes proxyManager.ensureDeviceInternet.
+ */
+async function selfHealBoardInternet(
+  adb: AdbClient,
+  deviceId: string,
+  proxyManager: any | undefined,
+  logger: Logger,
+  reason: string,
+  updateProgressFn?: (step: string) => void,
+): Promise<{ ok: boolean; ip?: string; detail?: string }> {
+  logger.warn({ deviceId, reason }, 'publish: self-healing board internet connection');
+  updateProgressFn?.(`Восстановление сети на плате (${reason})...`);
+  await adb.wakeUp(deviceId).catch(() => {});
+  await adb.fastShell(deviceId, 'svc wifi enable').catch(() => {});
+  if (proxyManager && typeof proxyManager.ensureDeviceInternet === 'function') {
+    const res = await proxyManager.ensureDeviceInternet(deviceId).catch(() => ({ ok: false }));
+    if (res.ok) {
+      updateProgressFn?.(`Сеть платы восстановлена (IP: ${res.ip || 'OK'})`);
+      return res;
+    }
+    return { ok: false, detail: res.error || 'Не удалось восстановить доступ в интернет на плате' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Automatically recovers an unsent video saved to Drafts (Черновики) in TikTok or Instagram
+ * and publishes it to the feed.
+ */
+export async function recoverAndPublishDraft(params: {
+  deviceId: string;
+  platform: FlowPlatform;
+  pkg: string;
+  caption: string;
+  username?: string;
+  claudehubApiKey?: string;
+  aiModel?: string;
+  adb: AdbClient;
+  logger: Logger;
+  updateProgress: (p: { platform: FlowPlatform; stage: PublishStage; step: string; detail?: string; percent?: number }) => void;
+}): Promise<PublishResult | null> {
+  const { deviceId, platform, pkg, caption, username, claudehubApiKey, aiModel, adb, logger, updateProgress } = params;
+
+  try {
+    updateProgress({ platform, stage: 'compose', step: 'ИИ: поиск застрявшего ролика в Черновиках...', percent: 88 });
+    logger.info({ deviceId, platform }, 'publish: starting Drafts recovery flow');
+
+    // 1. Open app and navigate to Profile
+    if (platform === 'tiktok') {
+      await openProfile(adb, deviceId, platform, username ?? '', pkg).catch(() => {});
+    } else {
+      await adb.openApp(deviceId, pkg).catch(() => {});
+    }
+    await sleep(3500);
+
+    let screen = await dumpScreen(adb, deviceId, 2);
+    if (!screen) return null;
+
+    // 2. Locate Drafts tile
+    let draftTile = findDraftsTile(screen);
+    if (!draftTile) {
+      draftTile = screen.els.find((e) =>
+        isVisible(e) &&
+        (/drafts?|черновик(и)?/i.test(e.text.trim()) || /drafts?|черновик(и)?/i.test(e.desc.trim()) || /draft/i.test(e.resId))
+      );
+    }
+
+    if (!draftTile) {
+      // Ask ClaudeHub Vision to spot the Drafts card on profile
+      const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+      const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+      const aiDecision = await consultAiAutopilot({
+        platform,
+        deviceId,
+        stage: 'compose',
+        st: initialFlowState(),
+        hasCaption: true,
+        captionText: caption,
+        screen,
+        base64Screenshot,
+        screenSize,
+        apiKey: claudehubApiKey,
+        model: aiModel,
+        logger,
+      }).catch(() => null);
+
+      if (aiDecision && (aiDecision.action === 'tap' || aiDecision.action === 'tap_draft' || aiDecision.action === 'tap_coord')) {
+        if (aiDecision.x && aiDecision.y) {
+          logger.info({ deviceId, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
+          await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+          await sleep(3000);
+          screen = await dumpScreen(adb, deviceId, 2);
+        }
+      }
+    } else {
+      logger.info({ deviceId, label: draftTile.text || draftTile.desc }, 'publish: Drafts tile located, opening Drafts list');
+      updateProgress({ platform, stage: 'compose', step: 'ИИ: черновик обнаружен, открытие списка черновиков...', percent: 90 });
+      await tapEl(adb, deviceId, draftTile);
+      await sleep(3500);
+      screen = await dumpScreen(adb, deviceId, 2);
+    }
+
+    if (!screen) return null;
+
+    // 3. In Drafts list: tap the newest draft (first item)
+    updateProgress({ platform, stage: 'compose', step: 'ИИ: выбор видео из черновиков...', percent: 91 });
+    const firstDraft = screen.els.find((e) =>
+      isVisible(e) && e.bounds[1] >= 150 && e.bounds[1] <= 1400 &&
+      (e.clickable || /item|cover|thumb|cell|media/i.test(e.resId)) &&
+      !/back|назад|close|отмена/i.test(`${e.text} ${e.desc}`)
+    );
+
+    if (firstDraft) {
+      logger.info({ deviceId, resId: firstDraft.resId }, 'publish: tapped first draft item');
+      await tapEl(adb, deviceId, firstDraft);
+      await sleep(4000);
+    } else {
+      const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
+      logger.info({ deviceId }, 'publish: tapping top-left draft grid coordinates');
+      await adb.tap(deviceId, Math.round(width * 0.25), Math.round(height * 0.35));
+      await sleep(4000);
+    }
+
+    // 4. Walk the draft compose/editor screen to tap Post
+    const deadline = Date.now() + 120_000;
+    const st = initialFlowState();
+    let shareTapped = false;
+
+    while (Date.now() < deadline && !shareTapped) {
+      const s = await dumpScreen(adb, deviceId, 2);
+      if (!s) { await sleep(1500); continue; }
+
+      // Check if on video editor screen (Next / Далее)
+      const nextBtn = s.els.find((e) =>
+        isVisible(e) && e.enabled &&
+        (/^(next|далее|дальше)$/i.test(e.text.trim()) || /^(next|далее|дальше)$/i.test(e.desc.trim()) || /next|action_bar_button_action/i.test(e.resId))
+      );
+      if (nextBtn) {
+        logger.info({ deviceId }, 'publish: draft editor — tapping Next');
+        updateProgress({ platform, stage: 'compose', step: 'ИИ: переход из редактора черновика («Далее»)...', percent: 92 });
+        await tapEl(adb, deviceId, nextBtn);
+        await sleep(3000);
+        continue;
+      }
+
+      // Check if on final post screen
+      const postBtn = findPostButton(s, platform);
+      if (postBtn) {
+        // If caption not typed yet
+        if (caption && !st.captionDone) {
+          updateProgress({ platform, stage: 'compose', step: 'ИИ: проверка описания черновика...', percent: 93 });
+          const hasCap = await captionLanded(adb, deviceId, caption);
+          if (!hasCap) {
+            const field = s.els.find((e) => /EditText/i.test(e.cls) || /caption|desc|input/i.test(e.resId));
+            if (field) {
+              await tapEl(adb, deviceId, field);
+              await sleep(600);
+              await typeText(adb, deviceId, caption).catch(() => {});
+              await hideKeyboard(adb, deviceId);
+            }
+          }
+          st.captionDone = true;
+        }
+
+        logger.info({ deviceId }, 'publish: tapping Post button for draft');
+        updateProgress({ platform, stage: 'compose', step: 'ИИ: нажатие кнопки «Опубликовать» для черновика...', percent: 94 });
+        await tapEl(adb, deviceId, postBtn);
+        shareTapped = true;
+        await sleep(4000);
+        break;
+      }
+
+      // Popups / confirmation dialogs
+      const confirm = s.els.find((e) => isVisible(e) && /^(post now|опубликовать сейчас|continue|продолжить|понятно|ok)$/i.test(e.text.trim()));
+      if (confirm) {
+        await tapEl(adb, deviceId, confirm);
+        await sleep(2000);
+        continue;
+      }
+
+      await sleep(2000);
+    }
+
+    if (!shareTapped) {
+      logger.warn({ deviceId }, 'publish: draft recovery did not reach Post button');
+      return null;
+    }
+
+    // 5. Wait for upload to complete
+    updateProgress({ platform, stage: 'upload', step: 'Загрузка видеоролика из черновиков на сервер...', percent: 95 });
+    const uploadDeadline = Date.now() + 5 * 60_000;
+    let confirmedApp = false;
+
+    while (Date.now() < uploadDeadline) {
+      await sleep(3000);
+      const s = await dumpScreen(adb, deviceId, 1);
+      const pct = s ? uploadPercent(s) : null;
+      if (pct != null) {
+        updateProgress({ platform, stage: 'upload', step: `Загрузка черновика на сервер (${pct}%)...`, percent: Math.min(98, 94 + Math.round(pct * 0.05)) });
+      }
+      if (s && !isAppOffline(s) && pct == null) {
+        const top = await adb.fastShell(deviceId, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp"').catch(() => '');
+        if (/MainActivity|MainTabActivity|TabActivity/i.test(top) && !/publish|edit|compose|record/i.test(top)) {
+          confirmedApp = true;
+          break;
+        }
+      }
+    }
+
+    // 6. Profile verification
+    updateProgress({ platform, stage: 'verify', step: 'Верификация опубликованного черновика в профиле...', percent: 98 });
+    await sleep(5000);
+    const postCheck = await snapshotProfile(adb, deviceId, platform, username ?? '', pkg).catch(() => null);
+    const verified = { app: confirmedApp, profile: Boolean(postCheck?.onProfile) };
+
+    await adb.home(deviceId).catch(() => {});
+    updateProgress({ platform, stage: 'done', step: 'Видеоролик успешно опубликован из Черновиков!', percent: 100 });
+    logger.info({ deviceId, platform, verified }, 'publish: draft successfully published and confirmed');
+
+    return {
+      ok: true,
+      stage: 'done',
+      posted: 'yes',
+      retryable: false,
+      verified,
+      captionTyped: true,
+      detail: 'Видеоролик успешно опубликован из Черновиков после авто-восстановления сети',
+    };
+  } catch (err) {
+    logger.warn({ deviceId, err: (err as Error).message }, 'publish: draft recovery encountered error');
+    return null;
+  }
+}
+
+export async function publishToDevice(
+  req: PublishRequest,
+  adb: AdbClient,
+  arg3: any,
+  arg4?: Logger,
+): Promise<PublishResult> {
+  const proxyManager = arg4 ? arg3 : undefined;
+  const logger: Logger = arg4 || arg3;
   const { deviceId, platform, videoUrl } = req;
   const caption = req.caption.trim();
   const username = req.username?.replace(/^@+/, '').trim() || undefined;
@@ -168,6 +411,14 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
     await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
 
+    // Proactive self-healing of board internet connection before proceeding
+    const internetCheck = await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'подготовка к публикации', (msg) => {
+      updateProgress(deviceId, { platform, stage: 'prepare', step: msg, percent: 46 });
+    });
+    if (!internetCheck.ok) {
+      logger.warn({ deviceId, detail: internetCheck.detail }, 'publish: board internet check warning, continuing flow');
+    }
+
     const resolved = await new PackageResolver(adb, logger).resolve(deviceId, platform);
     if (!resolved.installed || !resolved.packageName) {
       return result({ ok: false, retryable: false, detail: resolved.error || `Приложение ${platform} не установлено на телефоне ${deviceId}` });
@@ -190,6 +441,9 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     let before = await dumpScreen(adb, deviceId, 1);
     if (before && before.pkg === pkg && isAppOffline(before)) {
       logger.warn({ deviceId, platform }, 'publish: обнаружена «Network error» до публикации — попытка авто-восстановления сети');
+      await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'Network error в приложении перед публикацией', (msg) => {
+        updateProgress(deviceId, { platform, stage: 'prepare', step: msg, percent: 48 });
+      });
       await adb.fastShell(deviceId, `am force-stop ${pkg}`).catch(() => {});
       await sleep(2000);
       await adb.openApp(deviceId, pkg).catch(() => {});
@@ -559,9 +813,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
         lastActivity = Date.now();
         updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер (${lastPct}%)...`, percent: Math.min(94, 85 + Math.round(lastPct * 0.1)) });
       }
-      // "Network error" and a frozen percentage: the upload is not moving — stop waiting.
+      // "Network error" and a frozen percentage: the upload is not moving — stop waiting and self-heal.
       if (offline && Date.now() - lastPctChange > UPLOAD_STALL_MS) {
-        logger.warn({ deviceId, platform, lastPct }, 'publish: app offline, upload stalled');
+        logger.warn({ deviceId, platform, lastPct }, 'publish: app offline, upload stalled — initiating self-healing');
+        updateProgress(deviceId, { platform, stage: 'upload', step: 'Загрузка зависла (потеря сети). Попытка самовосстановления...', percent: 87 });
+        await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'зависание загрузки ролика', (msg) => {
+          updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 88 });
+        });
         break;
       }
 
@@ -619,6 +877,36 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
     // an upload stuck in the grid or a lost network means the post is NOT out.
     const confirmed = profileVerified === true || (appConfirmed && stuckAt == null && !offline);
     if (!confirmed) {
+      // Automatic Drafts Recovery: if upload was dropped or stalled, TikTok/Instagram often saved it to Drafts
+      logger.info({ deviceId, platform, offline, stuckAt, profileVerified }, 'publish: post unconfirmed — attempting automatic Drafts recovery');
+      updateProgress(deviceId, { platform, stage: 'upload', step: 'Пост не подтверждён в ленте. Автопоиск в Черновиках...', percent: 90 });
+
+      // First restore internet if needed
+      await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'восстановление черновика', (msg) => {
+        updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 91 });
+      });
+
+      const draftResult = await recoverAndPublishDraft({
+        deviceId,
+        platform: flowPlatform,
+        pkg,
+        caption,
+        username,
+        claudehubApiKey: req.claudehubApiKey,
+        aiModel: req.aiModel,
+        adb,
+        logger,
+        updateProgress: (p) => updateProgress(deviceId, p),
+      });
+
+      if (draftResult && draftResult.ok) {
+        logger.info({ deviceId, platform }, 'publish: successfully recovered and published video from drafts!');
+        return {
+          ...result(draftResult),
+          detail: 'Видеоролик успешно опубликован из Черновиков (авто-восстановление ИИ)',
+        };
+      }
+
       // Capture the screen the app is on now — before leaving it.
       const unconfirmedScreen = await dumpScreen(adb, deviceId, 1);
       const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`, unconfirmedScreen?.xml).catch(() => undefined);
@@ -626,15 +914,13 @@ export async function publishToDevice(req: PublishRequest, adb: AdbClient, logge
       return result({
         ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
         detail: stuckAt != null
-          ? `Загрузка ролика остановилась на ${stuckAt}% (видно в профиле) — проверьте сеть/прокси платы. ` +
-            'Пост не выложен до конца; повтор отключён, чтобы не опубликовать дважды'
+          ? `Загрузка ролика остановилась на ${stuckAt}% (черновик не опубликован) — проверьте сеть/прокси платы.`
           : offline
-          ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — ` +
-            'проверьте прокси/интернет платы. Пост мог не выйти; повтор отключён, чтобы не опубликовать дважды'
+          ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — черновик не опубликован. Проверьте прокси/интернет платы.`
           : profileVerified === false
-          ? 'Пост не появился на профиле после публикации — проверьте вручную (повтор отключён, чтобы не опубликовать дважды)'
+          ? 'Пост не появился на профиле после публикации и не найден в Черновиках — проверьте вручную'
           : canReadProfile
-            ? 'Приложение не подтвердило публикацию, а профиль не удалось прочитать до публикации — проверьте вручную'
+            ? 'Приложение не подтвердило публикацию, черновик не найден — проверьте вручную'
             : 'Приложение не подтвердило публикацию, а профиль Instagram проверить нельзя (у аккаунта не указан username) — проверьте вручную',
       });
     }
