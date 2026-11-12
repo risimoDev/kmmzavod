@@ -47,7 +47,7 @@ const DRAFTS_TILE = /^(drafts?|черновик(и)?)(:\s*\d+)?$/i;
 const LOGGED_OUT = /^(log in|войти|sign up|зарегистрироваться|create new account|создать новый аккаунт|log into another account)$/i;
 
 const NEXT = /^(next|далее|дальше|продолжить|выбрать|готово|save|сохранить)(\s*\(\d+\))?$/i;
-const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|action_bar_button_action|bb_primary_action_container|creation_secondary_cta|right_action_button)(_button|_btn|_textview)?$/i;
+const NEXT_ID = /(^|_)(next|btn_next|next_btn|action_btn|action_bar_button_action|bb_primary_action_container|creation_secondary_cta|right_action_button|clips_right_action_button)(_button|_btn|_textview)?$/i;
 const IG_REELS_TARGET = /^(reels?|видео\s*reels|ролик\s*reels|клип\s*reels)$/i;
 const IG_OTHER_TARGETS = /^(feed|лента|story|stories|история|истории|post|публикация|chats|чаты|сообщения|direct|сообщение)$/i;
 const TT_FEED_TARGET = /^(video|видео|post(\s+to\s+feed)?|лента|опубликовать(\s+в\s+ленту)?|поделиться\s+в\s+(tiktok|ленту)|tiktok\s+video|запись)$/i;
@@ -61,7 +61,7 @@ const IG_SHARE_ID = /share_button|share_footer_button|bb_primary_action_containe
  */
 const TT_POST = /^(post|post now|post video|post to feed|post entry|share|share to feed|share to tiktok|share video|share post|опубликовать|опубликовать сейчас|опубликовать видео|опубликовать запись|опубликовать клип|опубликовать в tiktok|опубликовать в ленту|поделиться|поделиться в tiktok|поделиться видео|поделиться записью|поделиться в ленту|отправить|отправить в tiktok|publish)(\s*\(\d+\))?$/i;
 const TT_POST_EXCLUDE = /story|draft|черновик|истори/i;
-const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|btn_post|btn_publish|(^|_)publish$/i;
+const TT_POST_ID = /publish_btn|publish_button|post_button|post_btn|btn_post$/i;
 const POST_CONFIRM = /^(post now|опубликовать сейчас|post anyway|всё равно опубликовать|share now|поделиться сейчас|продолжить|continue|всё равно продолжить|подтвердить|confirm)$/i;
 const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|интересное|inbox|входящие|profile|профиль|я|me)$/i;
 
@@ -90,11 +90,20 @@ export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | unde
   const labelRe = platform === 'instagram' ? IG_SHARE : TT_POST;
   const idRe = platform === 'instagram' ? IG_SHARE_ID : TT_POST_ID;
 
+  // Never match on a screen that has bottom navigation bar (Home, Friends, Inbox, Profile).
+  // Bottom navigation indicates main feed or main tabs, NOT the compose/post screen!
+  const hasBottomNav = s.els.some((e) =>
+    isVisible(e) && (TT_HOME_NAV.test(e.text.trim()) || TT_HOME_NAV.test(e.desc.trim()))
+  );
+  if (hasBottomNav) return undefined;
+
   const candidates = s.els.filter((e) => {
     if (!isVisible(e) || !e.enabled) return false;
     const text = e.text.replace(/[\u00A0\s]+/g, ' ').trim();
     const desc = e.desc.replace(/[\u00A0\s]+/g, ' ').trim();
     if (TT_POST_EXCLUDE.test(`${text} ${desc}`)) return false;
+    // Exclude NEXT buttons from being Post buttons!
+    if (NEXT.test(text) || NEXT.test(desc) || NEXT_ID.test(e.resId.replace(/^.*:id\//, ''))) return false;
     return labelRe.test(text) || labelRe.test(desc) || idRe.test(e.resId.replace(/^.*:id\//, ''));
   });
 
@@ -117,22 +126,13 @@ export function findPostButton(s: UiScreen, platform: FlowPlatform): UiEl | unde
       const rightBtns = s.els.filter((e) =>
         isVisible(e) && e.enabled && (e.clickable || /Button|TextView/i.test(e.cls)) &&
         e.bounds[1] >= screenH * 0.7 && e.bounds[0] >= Math.round(screenW * 0.45) &&
-        !/draft|черновик/i.test(`${e.text} ${e.desc} ${e.resId}`)
+        !/draft|черновик/i.test(`${e.text} ${e.desc} ${e.resId}`) &&
+        !NEXT.test(e.text.trim()) && !NEXT.test(e.desc.trim())
       );
       if (rightBtns.length > 0) {
         return rightBtns.sort((a, b) => (b.bounds[2] - b.bounds[0]) * (b.bounds[3] - b.bounds[1]) - (a.bounds[2] - a.bounds[0]) * (a.bounds[3] - a.bounds[1]))[0];
       }
     }
-  }
-
-  // Structural fallback for Instagram Reels: primary action button in bottom 25% of screen
-  if (platform === 'instagram') {
-    const bottomBtn = s.els.find((e) =>
-      isVisible(e) && e.enabled && (e.clickable || /Button|TextView/i.test(e.cls)) &&
-      e.bounds[1] >= screenH * 0.75 &&
-      !/draft|черновик|cancel|отмена|discard/i.test(`${e.text} ${e.desc} ${e.resId}`)
-    );
-    if (bottomBtn) return bottomBtn;
   }
 
   return undefined;

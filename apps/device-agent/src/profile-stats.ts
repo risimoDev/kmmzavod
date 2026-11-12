@@ -33,7 +33,14 @@ export interface ProfileStats {
 
 export function parseCount(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  const s = raw.replace(/[  ]/g, ' ').trim().toLowerCase();
+  const s = raw
+    .replace(/[  \s]+/g, ' ')
+    .replace(/^[▶►▷▲👁\s\u25B6\u25B7\u25B8\u25B9\u25BA\u25BB]+/u, '')
+    .replace(/\s*(views?|просмотр(ов|а)?)\s*$/i, '')
+    .trim()
+    .toLowerCase();
+  if (!s) return null;
+  if (/^(now|только что|just now)$/i.test(s)) return 0;
   // Plain grouped thousands: 1,234 / 1 234 / 1.234.567
   if (/^\d{1,3}([ ,.]\d{3})+$/.test(s)) return Number(s.replace(/[ ,.]/g, ''));
   const m = /^(\d+(?:[.,]\d+)?)\s*(k|к|тыс\.?|m|м|млн\.?|b|млрд\.?)?$/.exec(s);
@@ -194,7 +201,7 @@ export async function openProfile(
       .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
   } else {
     const pkg = targetPkg || 'com.zhiliaoapp.musically';
-    await adb.fastShell(deviceId, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`).catch(() => {});
+    await adb.openApp(deviceId, pkg).catch(() => {});
     await new Promise((r) => setTimeout(r, 2000));
     const xml = await adb.fastShell(deviceId, 'uiautomator dump --compressed /sdcard/kmm_ui.xml >/dev/null 2>&1; cat /sdcard/kmm_ui.xml; rm -f /sdcard/kmm_ui.xml', 15_000).catch(() => '');
     if (xml) {

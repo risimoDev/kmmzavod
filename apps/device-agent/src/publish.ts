@@ -380,6 +380,7 @@ export async function publishToDevice(
   let mediaId: string | null = null;
   let stage: PublishStage = 'download';
   let posted: PublishResult['posted'] = 'no';
+  let verifiedProfile = false;
 
   const result = (r: Omit<PublishResult, 'stage' | 'posted' | 'onDevicePath'> & Partial<PublishResult>): PublishResult =>
     ({ stage, posted, onDevicePath, ...r });
@@ -460,7 +461,7 @@ export async function publishToDevice(
 
     // 4. Share the video into the app
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
-    let amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000000 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
+    let amCmd = `am start -a android.intent.action.SEND -t video/mp4 -f 0x10000001 --eu android.intent.extra.STREAM "${streamUri}" --grant-read-uri-permission ${component ? `-n ${component}` : `-p ${pkg}`}`;
     let amOut = await adb.fastShell(deviceId, amCmd).catch((err: Error) => err.message);
     logger.info({ deviceId, platform, component, amOut: (amOut || '').trim() }, 'publish: am start executed');
 
@@ -680,6 +681,29 @@ export async function publishToDevice(
               });
             }
 
+            if (aiDecision.action === 'require_human') {
+              const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_require_human`, screen?.xml).catch(() => undefined);
+              return result({
+                ok: false,
+                retryable: false,
+                debugSnapshot: snap,
+                detail: `ИИ автопилот: ${aiDecision.reason || 'требуется подтверждение человека'}`,
+              });
+            }
+
+            if (aiDecision.action === 'retry_network') {
+              logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot retry network requested');
+              updateProgress(deviceId, { platform, stage: 'upload', step: 'ИИ: повтор отправки и самовосстановление сети...', percent: 75 });
+              await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'ИИ запрос на повтор сети', (msg) => {
+                updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 76 });
+              });
+              const retryBtn = screen.els.find((e) => /try again|повторить|retry/i.test(`${e.text} ${e.desc}`));
+              if (retryBtn) await tapEl(adb, deviceId, retryBtn);
+              unknown = 0;
+              await sleep(2000);
+              continue;
+            }
+
             if (aiDecision.action === 'key_back') {
               logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot pressed BACK');
               await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
@@ -703,8 +727,14 @@ export async function publishToDevice(
                 logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption into detected EditText');
                 await tapEl(adb, deviceId, editField);
               } else if (aiDecision.x && aiDecision.y && aiDecision.x > 0 && aiDecision.y > 0) {
-                logger.info({ deviceId, platform, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
-                await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+                let tx = aiDecision.x;
+                let ty = aiDecision.y;
+                if (tx <= 1 && ty <= 1) {
+                  tx = Math.round(tx * screenSize.width);
+                  ty = Math.round(ty * screenSize.height);
+                }
+                logger.info({ deviceId, platform, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
+                await adb.tap(deviceId, tx, ty);
               } else if (aiDecision.targetText) {
                 const target = aiDecision.targetText.trim();
                 const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
@@ -724,7 +754,7 @@ export async function publishToDevice(
               continue;
             }
 
-            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
+            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
               let targetEl: UiEl | undefined;
               if (aiDecision.targetText) {
                 const escaped = aiDecision.targetText.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -739,15 +769,24 @@ export async function publishToDevice(
                 }
               }
 
+              let tx = aiDecision.x;
+              let ty = aiDecision.y;
+              if (tx != null && ty != null) {
+                if (tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
+                  tx = Math.round(tx * screenSize.width);
+                  ty = Math.round(ty * screenSize.height);
+                }
+              }
+
               if (targetEl) {
                 logger.info({ deviceId, platform, target: targetEl.text || targetEl.desc, reason: aiDecision.reason }, 'publish: AI Autopilot tapped element');
                 await tapEl(adb, deviceId, targetEl);
-              } else if (aiDecision.x && aiDecision.y && aiDecision.x > 0 && aiDecision.y > 0) {
-                logger.info({ deviceId, platform, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
-                await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+              } else if (tx != null && ty != null && tx > 0 && ty > 0) {
+                logger.info({ deviceId, platform, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
+                await adb.tap(deviceId, tx, ty);
               }
 
-              if (targetEl || (aiDecision.x && aiDecision.y)) {
+              if (targetEl || (tx != null && ty != null && tx > 0 && ty > 0)) {
                 if (aiDecision.marks === 'target') st.targetChosen = true;
                 if (aiDecision.marks === 'next') st.nextTaps++;
                 if (aiDecision.marks === 'share') { st.shareTapped = true; posted = 'unknown'; }
@@ -872,10 +911,13 @@ export async function publishToDevice(
         if (i < PROFILE_CHECKS - 1) await sleep(PROFILE_CHECK_GAP_MS);
       }
     }
+    if (profileVerified === true) verifiedProfile = true;
     const verified = { app: appConfirmed, profile: profileVerified };
-    // The app's own signal is enough only when the profile could not tell us otherwise:
-    // an upload stuck in the grid or a lost network means the post is NOT out.
-    const confirmed = profileVerified === true || (appConfirmed && stuckAt == null && !offline);
+    // For TikTok (and Instagram with username), profile verification is the ground truth.
+    // An app returning to MainActivity is NEVER proof of publication if the video is missing from profile!
+    const confirmed = canReadProfile && baseline
+      ? profileVerified === true
+      : profileVerified === true || (appConfirmed && stuckAt == null && !offline);
     if (!confirmed) {
       // Automatic Drafts Recovery: if upload was dropped or stalled, TikTok/Instagram often saved it to Drafts
       logger.info({ deviceId, platform, offline, stuckAt, profileVerified }, 'publish: post unconfirmed — attempting automatic Drafts recovery');
@@ -932,9 +974,7 @@ export async function publishToDevice(
     logger.info({ deviceId, platform, verified, captionTyped }, 'publish: post confirmed');
     return result({
       ok: true, retryable: false, verified, captionTyped,
-      ...(profileVerified === false && appConfirmed
-        ? { detail: 'Пост опубликован (выгрузка подтверждена приложением, появление в профиле ожидается)' }
-        : (!captionTyped ? { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' } : {})),
+      ...(!captionTyped ? { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' } : {}),
     });
   } catch (err) {
     logger.error({ deviceId, platform, stage, err: (err as Error).message }, 'publish: failed');
@@ -945,7 +985,7 @@ export async function publishToDevice(
   } finally {
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
     // Keep the gallery file while the outcome is unknown (the app may still be reading it).
-    if (posted !== 'unknown') await removeFromGallery(adb, deviceId, onDevicePath, mediaId);
+    if (posted === 'yes' && verifiedProfile) await removeFromGallery(adb, deviceId, onDevicePath, mediaId);
     setTimeout(() => {
       activePublishProgress.delete(deviceId);
     }, 15_000).unref();
@@ -1064,12 +1104,7 @@ async function hideKeyboard(adb: AdbClient, deviceId: string): Promise<void> {
   const ime = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
   if (/=true/.test(ime)) {
     // 111 = KEYCODE_ESCAPE: dismisses IME window safely without triggering Activity.onBackPressed
-    await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
-    await sleep(500);
-    const still = await adb.fastShell(deviceId, 'dumpsys input_method | grep -E "mInputShown=|mIsInputViewShown="').catch(() => '');
-    if (/=true/.test(still)) {
-      await adb.back(deviceId).catch(() => {});
-    }
+    await adb.fastShell(deviceId, 'input keyevent 111').catch(() => {});
     await sleep(600);
   }
 }
