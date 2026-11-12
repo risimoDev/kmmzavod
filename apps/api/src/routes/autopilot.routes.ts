@@ -768,7 +768,15 @@ export async function autopilotRoutes(app: FastifyInstance) {
     const failedItems = await db.distributeItem.findMany({
       where: {
         distributeJob: { autopilotId: id },
-        status: { in: ['failed', 'skipped'] },
+        OR: [
+          { status: { in: ['failed', 'skipped'] } },
+          {
+            status: 'published',
+            publishJob: {
+              error: { contains: 'появление в профиле ожидается' },
+            },
+          },
+        ],
       },
       include: {
         socialAccount: true,

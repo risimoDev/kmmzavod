@@ -110,9 +110,10 @@ export async function queryClaudeHubVision(params: {
     { type: 'text', text: userPrompt },
   ];
   if (base64Image) {
+    const imgUrl = base64Image.startsWith('data:') ? base64Image : `data:image/png;base64,${base64Image}`;
     openAiUserContent.push({
       type: 'image_url',
-      image_url: { url: `data:image/png;base64,${base64Image}` },
+      image_url: { url: imgUrl },
     });
   }
 
@@ -144,7 +145,8 @@ export async function queryClaudeHubVision(params: {
       return content.trim();
     }
   } catch (err: any) {
-    logger.warn({ err: err.message, status: err.response?.status, model }, 'claudehub: openAi chat/completions failed, trying Anthropic format');
+    const errDetail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    logger.warn({ status: err.response?.status, detail: errDetail, model }, 'claudehub: openAi chat/completions failed, trying Anthropic format');
   }
 
   // 2. Fallback: Anthropic messages endpoint
@@ -155,9 +157,10 @@ export async function queryClaudeHubVision(params: {
     { type: 'text', text: userPrompt },
   ];
   if (base64Image) {
+    const rawData = base64Image.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
     anthropicUserContent.push({
       type: 'image',
-      source: { type: 'base64', media_type: 'image/png', data: base64Image },
+      source: { type: 'base64', media_type: 'image/png', data: rawData },
     });
   }
 

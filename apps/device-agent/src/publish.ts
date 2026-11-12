@@ -206,9 +206,23 @@ export async function recoverAndPublishDraft(params: {
       }).catch(() => null);
 
       if (aiDecision && (aiDecision.action === 'tap' || aiDecision.action === 'tap_draft' || aiDecision.action === 'tap_coord')) {
-        if (aiDecision.x && aiDecision.y) {
-          logger.info({ deviceId, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
-          await adb.tap(deviceId, aiDecision.x, aiDecision.y);
+        let draftEl = aiDecision.targetText
+          ? screen.els.find((e) => new RegExp(aiDecision.targetText!.trim(), 'i').test(`${e.text} ${e.desc}`))
+          : undefined;
+        let tx = aiDecision.x;
+        let ty = aiDecision.y;
+        if (tx != null && ty != null && tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
+          tx = Math.round(tx * screenSize.width);
+          ty = Math.round(ty * screenSize.height);
+        }
+        if (draftEl) {
+          logger.info({ deviceId, target: aiDecision.targetText, reason: aiDecision.reason }, 'publish: AI tapped Drafts element');
+          await tapEl(adb, deviceId, draftEl);
+          await sleep(3000);
+          screen = await dumpScreen(adb, deviceId, 2);
+        } else if (tx != null && ty != null && tx > 0 && ty > 0) {
+          logger.info({ deviceId, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
+          await adb.tap(deviceId, tx, ty);
           await sleep(3000);
           screen = await dumpScreen(adb, deviceId, 2);
         }
@@ -546,18 +560,24 @@ export async function publishToDevice(
 
           if (aiDecision) {
             updateProgress(deviceId, { platform, stage: 'compose', step: `ИИ: ${aiDecision.reason || 'восстановление'}`, percent: 60 });
-            if (aiDecision.action === 'tap_coord' && aiDecision.x && aiDecision.y) {
-              logger.info({ deviceId, x: aiDecision.x, y: aiDecision.y, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
-              await adb.tap(deviceId, aiDecision.x, aiDecision.y);
-              await sleep(2000);
-              continue;
-            }
-            if (aiDecision.action === 'tap' && aiDecision.targetText) {
-              const target = aiDecision.targetText;
-              const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
-              if (el) {
-                logger.info({ deviceId, targetText: target, reason: aiDecision.reason }, 'publish: ИИ нажал элемент на рабочем столе');
-                await tapEl(adb, deviceId, el);
+            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
+              let targetEl = aiDecision.targetText
+                ? screen.els.find((e) => new RegExp(aiDecision.targetText!.trim(), 'i').test(`${e.text} ${e.desc}`))
+                : undefined;
+              let tx = aiDecision.x;
+              let ty = aiDecision.y;
+              if (tx != null && ty != null && tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
+                tx = Math.round(tx * sw);
+                ty = Math.round(ty * sh);
+              }
+              if (targetEl) {
+                logger.info({ deviceId, targetText: aiDecision.targetText, reason: aiDecision.reason }, 'publish: ИИ нажал элемент на рабочем столе');
+                await tapEl(adb, deviceId, targetEl);
+                await sleep(2000);
+                continue;
+              } else if (tx != null && ty != null && tx > 0 && ty > 0) {
+                logger.info({ deviceId, x: tx, y: ty, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
+                await adb.tap(deviceId, tx, ty);
                 await sleep(2000);
                 continue;
               }

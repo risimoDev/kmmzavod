@@ -83,14 +83,16 @@ export default function AutopilotDetailPage() {
   const inFlight = batches.filter((b) => !["ready", "failed"].includes(b.status));
 
   // Метрики публикаций: истинные агрегаты из базы данных (никогда не зависят от размера выборки)
-  const published = liveProgress?.publishedCount ?? posts.filter((p) => p.status === "published").length;
+  const unconfirmedPosts = posts.filter((p) => p.status === "published" && Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается")));
+  const basePublished = liveProgress?.publishedCount ?? posts.filter((p) => p.status === "published").length;
+  const published = Math.max(0, basePublished - unconfirmedPosts.length);
   const publishingCount = liveProgress?.publishingCount ?? posts.filter((p) => p.status === "publishing").length;
   const scheduledCount = liveProgress?.scheduledCount ?? posts.filter((p) => p.status === "scheduled").length;
-  const failedCount = liveProgress?.failedCount ?? posts.filter((p) => p.status === "failed" || p.status === "skipped").length;
+  const failedCount = (liveProgress?.failedCount ?? posts.filter((p) => p.status === "failed" || p.status === "skipped").length) + unconfirmedPosts.length;
 
   const publishingPosts = posts.filter((p) => p.status === "publishing");
   const scheduledPosts = posts.filter((p) => p.status === "scheduled");
-  const failedPosts = posts.filter((p) => p.status === "failed" || p.status === "skipped");
+  const failedPosts = posts.filter((p) => p.status === "failed" || p.status === "skipped" || Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается")));
 
   // Полный объём цикла: всё, что запланировано, публикуется, завершено или упало
   const totalCyclePosts = Math.max(liveProgress?.cycleTotal ?? (published + publishingCount + scheduledCount + failedCount), 1);
@@ -475,7 +477,8 @@ export default function AutopilotDetailPage() {
                     <Card>
                       <CardContent className="divide-y divide-border p-0">
                         {posts.map((p) => {
-                          const isFailed = p.status === "failed" || p.status === "skipped";
+                          const isUnconfirmed = p.status === "published" && Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается"));
+                          const isFailed = p.status === "failed" || p.status === "skipped" || isUnconfirmed;
                           const isPublishingThis = p.status === "publishing";
                           const errText = p.error ?? p.publishJob?.error;
 
@@ -534,7 +537,13 @@ export default function AutopilotDetailPage() {
                                     ↻ Повторить
                                   </Button>
                                 )}
-                                <StatusBadge status={p.status} />
+                                {isUnconfirmed ? (
+                                  <Badge variant="warning" dot className="text-xs">
+                                    Не подтверждено
+                                  </Badge>
+                                ) : (
+                                  <StatusBadge status={p.status} />
+                                )}
                               </div>
                             </div>
                           );
