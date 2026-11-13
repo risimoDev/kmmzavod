@@ -402,7 +402,9 @@ export default function AutopilotDetailPage() {
                 value={farmProxy?.configured ? `${farmProxy.balance != null ? `$${farmProxy.balance.toFixed(2)}` : "Подключен"}` : "Не настроен"}
                 sub={
                   farmProxy?.configured
-                    ? `${farmProxy.mode === "shared_sequential" ? "Shared Sequential" : farmProxy.mode === "private_parallel" ? "Private Parallel" : "AstroProxy"} · ротация IP`
+                    ? farmProxy.mode === "private_parallel"
+                      ? "Private Parallel · Безлимит VPS"
+                      : `${farmProxy.mode === "shared_sequential" ? "Shared Sequential" : "AstroProxy"} · ротация IP`
                     : "Требуется в /farm"
                 }
                 tone={farmProxy?.configured ? "ok" : "bad"}
