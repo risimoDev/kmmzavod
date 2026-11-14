@@ -193,6 +193,8 @@ export async function checkDeviceAgentHealth(): Promise<string | null> {
   }
 }
 
+let cachedProxyMode: { state: ProxyModeState; expiresAt: number } | null = null;
+
 export const deviceAgentService = {
   async publish(opts: {
     deviceId: string;
@@ -273,11 +275,20 @@ export const deviceAgentService = {
     return requestWithFallback((base) => agentClient.get(`${base}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 }));
   },
 
-  async getProxyMode(): Promise<ProxyModeState> {
-    return requestWithFallback((base) => agentClient.get(`${base}/proxy/mode`, { timeout: 8_000 }));
+  async getProxyMode(forceRefresh = false): Promise<ProxyModeState> {
+    const now = Date.now();
+    if (!forceRefresh && cachedProxyMode && cachedProxyMode.expiresAt > now) {
+      return cachedProxyMode.state;
+    }
+    const state = await requestWithFallback<ProxyModeState>((base) => agentClient.get(`${base}/proxy/mode`, { timeout: 8_000 }));
+    if (state && state.ok) {
+      cachedProxyMode = { state, expiresAt: now + 30_000 };
+    }
+    return state;
   },
 
   async switchActiveDevice(deviceId: string, force = true): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    cachedProxyMode = null;
     return requestWithFallback((base) => agentClient.post(`${base}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 }));
   },
 

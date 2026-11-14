@@ -134,7 +134,7 @@ export async function queryClaudeHubVision(params: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 30_000,
+        timeout: 15_000,
         maxBodyLength: 50 * 1024 * 1024,
         maxContentLength: 50 * 1024 * 1024,
       }
@@ -158,9 +158,10 @@ export async function queryClaudeHubVision(params: {
   ];
   if (base64Image) {
     const rawData = base64Image.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
+    const mediaType = base64Image.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
     anthropicUserContent.push({
       type: 'image',
-      source: { type: 'base64', media_type: 'image/png', data: rawData },
+      source: { type: 'base64', media_type: mediaType, data: rawData },
     });
   }
 
@@ -178,7 +179,7 @@ export async function queryClaudeHubVision(params: {
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
       },
-      timeout: 30_000,
+      timeout: 15_000,
       maxBodyLength: 50 * 1024 * 1024,
       maxContentLength: 50 * 1024 * 1024,
     }

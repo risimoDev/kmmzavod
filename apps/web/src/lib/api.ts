@@ -20,8 +20,10 @@ export function getRefreshToken(): string {
 export function setTokens(access: string, refresh: string) {
   localStorage.setItem('access_token', access);
   localStorage.setItem('refresh_token', refresh);
-  // Mirror to cookie for Next.js middleware auth guard
-  document.cookie = `access_token=${access}; path=/; max-age=86400; SameSite=Lax`;
+  // Mirror to cookies for Next.js middleware and SSR auth guard
+  const isSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  document.cookie = `access_token=${access}; path=/; max-age=86400; SameSite=Lax${isSecure ? '; Secure' : ''}`;
+  document.cookie = `refresh_token=${refresh}; path=/; max-age=604800; SameSite=Strict${isSecure ? '; Secure' : ''}`;
 }
 
 export function clearTokens() {
@@ -29,8 +31,9 @@ export function clearTokens() {
   localStorage.removeItem('refresh_token');
   localStorage.removeItem('user');
   localStorage.removeItem('tenant');
-  // Clear auth cookie
+  // Clear auth cookies
   document.cookie = 'access_token=; path=/; max-age=0';
+  document.cookie = 'refresh_token=; path=/; max-age=0';
 }
 
 export function getStoredUser(): AuthUser | null {

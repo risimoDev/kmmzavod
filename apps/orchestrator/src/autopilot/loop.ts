@@ -153,7 +153,7 @@ async function advanceBatches(deps: AutopilotLoopDeps, ap: Autopilot, now: Date)
         await deps.editorRenderQueue.add(
           `autopilot-render-${ep.id}`,
           { projectId: ep.id, tenantId: ap.tenantId },
-          QUEUES['editor-render'].defaultJobOptions as any,
+          { ...QUEUES['editor-render'].defaultJobOptions, jobId: `editor-render-${ep.id}` } as any,
         );
         await journal(db, ap, 'advance', `Монтаж #${b.id.slice(0, 8)}: раскадровка подтверждена, рендер`, { summary: { batchId: b.id, clipScore: Number(clips[0].score) } });
         continue;
@@ -202,6 +202,11 @@ async function advanceBatches(deps: AutopilotLoopDeps, ap: Autopilot, now: Date)
 async function startUniquify(deps: AutopilotLoopDeps, ap: Autopilot, batchId: string, editProjectId: string, now: Date): Promise<void> {
   const { db } = deps;
   const batch = await db.autopilotBatch.findUniqueOrThrow({ where: { id: batchId } });
+  if (batch.uniquifyJobId) {
+    logger.info({ batchId, uniquifyJobId: batch.uniquifyJobId }, 'startUniquify: batch already has uniquifyJobId, skipping duplicate creation');
+    return;
+  }
+
   const clip = await db.editClip.findFirst({
     where: { projectId: editProjectId, included: true, outputSourceVideoId: { not: null } },
   });
@@ -211,40 +216,43 @@ async function startUniquify(deps: AutopilotLoopDeps, ap: Autopilot, batchId: st
   const cfg = (ep?.config ?? {}) as Record<string, unknown>;
   const captions = Array.isArray(cfg.socialCaptions) ? cfg.socialCaptions : undefined;
 
-  const uj = await db.uniquifyJob.create({
-    data: {
-      tenantId: ap.tenantId,
-      sourceVideoId: clip.outputSourceVideoId,
-      status: 'pending',
-      variantCount: Math.max(1, batch.variantCount),
-      targetPlatforms: ap.platforms,
-      config: {
-        // Always preserve_context: remix_montage would re-voice the montage with a
-        // different TTS and throw away the autopilot's script + voiceover.
-        mode: 'preserve_context',
-        stealthLevel: ap.stealthLevel === 'standard' ? 'standard' : 'maximum',
-        // The montage already carries the AI voiceover, music and burned karaoke
-        // subtitles — uniquify only perturbs it, never re-voices or re-subtitles.
-        enableSubtitles: false,
-        enableBgm: false,
-        aspectRatio: ap.aspect,
-        fps: 30,
-        language: 'ru',
-        targetSeconds: ap.targetSeconds,
-        productInfo: ap.productInfo ?? undefined,
-        ...(captions ? { captions } : {}),
-        autopilotId: ap.id,
-        autopilotBatchId: batchId,
-      } as object,
-    },
+  const uj = await db.$transaction(async (tx) => {
+    const created = await tx.uniquifyJob.create({
+      data: {
+        tenantId: ap.tenantId,
+        sourceVideoId: clip.outputSourceVideoId!,
+        status: 'pending',
+        variantCount: Math.max(1, batch.variantCount),
+        targetPlatforms: ap.platforms,
+        config: {
+          mode: 'preserve_context',
+          stealthLevel: ap.stealthLevel === 'standard' ? 'standard' : 'maximum',
+          enableSubtitles: false,
+          enableBgm: false,
+          aspectRatio: ap.aspect,
+          fps: 30,
+          language: 'ru',
+          targetSeconds: ap.targetSeconds,
+          productInfo: ap.productInfo ?? undefined,
+          ...(captions ? { captions } : {}),
+          autopilotId: ap.id,
+          autopilotBatchId: batchId,
+        } as object,
+      },
+    });
+
+    await tx.autopilotBatch.update({
+      where: { id: batchId },
+      data: { status: 'uniquifying', uniquifyJobId: created.id, stageStartedAt: now },
+    });
+
+    return created;
   });
-  await db.autopilotBatch.update({
-    where: { id: batchId },
-    data: { status: 'uniquifying', uniquifyJobId: uj.id, stageStartedAt: now },
-  });
+
   await deps.uniquifyAnalyzeQueue.add(
     `uniquify-analyze-${uj.id}`,
     { sourceVideoId: clip.outputSourceVideoId, tenantId: ap.tenantId, uniquifyJobId: uj.id },
+    { jobId: `uniquify-analyze-${uj.id}` },
   );
   await journal(db, ap, 'advance', `Монтаж #${batchId.slice(0, 8)} отрендерен → уникализация в ${uj.variantCount} копий`, { summary: { batchId, uniquifyJobId: uj.id } });
 }

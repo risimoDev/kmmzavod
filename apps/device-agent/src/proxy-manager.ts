@@ -1255,9 +1255,15 @@ export class ProxyManager {
     const cached = this.geoCache.get(ip);
     if (cached) return cached;
     try {
-      const res = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city,isp`, { timeout: 5000 });
-      if (res.data?.status === 'success') {
-        const geo = { country: res.data.country, city: res.data.city, isp: res.data.isp };
+      const res = await axios.get(`https://api.ip.sb/geoip/${ip}`, { timeout: 4000 }).catch(() => null);
+      if (res?.data?.country) {
+        const geo = { country: res.data.country, city: res.data.city, isp: res.data.isp || res.data.organization };
+        this.geoCache.set(ip, geo);
+        return geo;
+      }
+      const fallback = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city,isp`, { timeout: 4000 }).catch(() => null);
+      if (fallback?.data?.status === 'success') {
+        const geo = { country: fallback.data.country, city: fallback.data.city, isp: fallback.data.isp };
         this.geoCache.set(ip, geo);
         return geo;
       }

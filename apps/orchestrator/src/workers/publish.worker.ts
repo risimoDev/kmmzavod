@@ -154,6 +154,46 @@ export async function finalizePublishFailure(db: PrismaClient, publishJobId: str
   await settleDistributeItem(db, publishJobId, { status: 'failed', error: errorMsg });
 }
 
+/** Idempotent success bookkeeping (M5): preserves dailyPostCount, lastPostAt, verifiedAt and healthScore. */
+export async function finalizePublishSuccess(
+  db: PrismaClient,
+  publishJobId: string,
+  socialAccountId: string,
+  data: {
+    externalPostId?: string | null;
+    verifiedAt?: Date | null;
+    publishNote?: string | null;
+  }
+): Promise<void> {
+  const now = new Date();
+  await db.publishJob.update({
+    where: { id: publishJobId },
+    data: {
+      status: 'published',
+      publishedAt: now,
+      externalPostId: data.externalPostId,
+      verifiedAt: data.verifiedAt,
+      error: data.publishNote,
+    },
+  }).catch(() => {});
+
+  await db.socialAccount.update({
+    where: { id: socialAccountId },
+    data: {
+      dailyPostCount: { increment: 1 },
+      lastPostAt: now,
+      healthScore: { increment: 5 },
+    },
+  }).catch(() => {});
+
+  await db.socialAccount.updateMany({
+    where: { id: socialAccountId, healthScore: { gt: 100 } },
+    data: { healthScore: 100 },
+  }).catch(() => {});
+
+  await settleDistributeItem(db, publishJobId, { status: 'published', at: now }).catch(() => {});
+}
+
 async function setAutopilotLiveProgress(
   redis: any,
   autopilotId: string | null | undefined,
@@ -730,26 +770,11 @@ export function createPublishWorker(deps: Deps): Worker {
 
         // Mark as published FIRST (on its own): if any later bookkeeping fails, the catch
         // block sees `posted` and will not hand the job back to BullMQ for a re-post.
-        const now = new Date();
-        await db.publishJob.update({
-          where: { id: publishJobId },
-          data: { status: 'published', publishedAt: now, externalPostId, verifiedAt, error: publishNote },
+        await finalizePublishSuccess(db, publishJobId, socialAccountId, {
+          externalPostId,
+          verifiedAt,
+          publishNote,
         });
-        await db.socialAccount.update({
-          where: { id: socialAccountId },
-          data: {
-            dailyPostCount: { increment: 1 },
-            lastPostAt: now,
-            healthScore: { increment: 5 },
-          },
-        });
-        // Clamp healthScore at 100 via a second update if needed (Prisma doesn't support cap in single update)
-        await db.socialAccount.updateMany({
-          where: { id: socialAccountId, healthScore: { gt: 100 } },
-          data: { healthScore: 100 },
-        });
-
-        await settleDistributeItem(db, publishJobId, { status: 'published', at: now });
 
         logger.info({ publishJobId, platform, externalPostId }, 'Publish: success');
 
@@ -787,12 +812,11 @@ export function createPublishWorker(deps: Deps): Worker {
           // The platform already has the post. Retrying would publish it twice, so only
           // make sure the job is recorded as published and swallow the error.
           logger.error({ publishJobId, platform, err: errorMsg }, 'Publish: posted, but bookkeeping failed — not retrying');
-          const now = new Date();
-          await db.publishJob.update({
-            where: { id: publishJobId },
-            data: { status: 'published', publishedAt: now, externalPostId, error: `Опубликовано; ошибка учёта: ${errorMsg}`.slice(0, 2000) },
-          }).catch(() => {});
-          await settleDistributeItem(db, publishJobId, { status: 'published', at: now }).catch(() => {});
+          await finalizePublishSuccess(db, publishJobId, socialAccountId, {
+            externalPostId,
+            verifiedAt,
+            publishNote: `Опубликовано; ошибка учёта: ${errorMsg}`.slice(0, 2000),
+          });
           return;
         }
 
@@ -814,7 +838,7 @@ export function createPublishWorker(deps: Deps): Worker {
 
         // Penalize the account once per job, and only for account/platform-side failures.
         if (!isInfrastructureError(errorMsg)) {
-          const isRateLimit = /rate.?limit|too.?many|429|action.?block/i.test(errorMsg);
+          const isRateLimit = /\b(rate_limit|rate.?limit|too_many_requests|status[:\s]+429|http\s*429|action.?block|spammer|spam)\b/i.test(errorMsg);
           await db.socialAccount.update({
             where: { id: socialAccountId },
             data: {

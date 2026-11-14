@@ -214,7 +214,8 @@ export async function recoverAndPublishDraft(params: {
     if (!draftTile) {
       // Ask ClaudeHub Vision to spot the Drafts card on profile
       const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-      const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+      const fastShot = await adb.takeScreenshotFast(deviceId).catch(() => null);
+      const base64Screenshot = fastShot?.data || await adb.takeScreenshot(deviceId).catch(() => undefined);
       const aiDecision = await consultAiAutopilot({
         platform,
         deviceId,
@@ -399,14 +400,19 @@ export async function recoverAndPublishDraft(params: {
   }
 }
 
+export interface PublishToDeviceDeps {
+  proxyManager?: any;
+  logger: Logger;
+}
+
 export async function publishToDevice(
   req: PublishRequest,
   adb: AdbClient,
-  arg3: any,
-  arg4?: Logger,
+  depsOrProxyManager: PublishToDeviceDeps | any,
+  maybeLogger?: Logger,
 ): Promise<PublishResult> {
-  const proxyManager = arg4 ? arg3 : undefined;
-  const logger: Logger = arg4 || arg3;
+  const proxyManager = maybeLogger ? depsOrProxyManager : (depsOrProxyManager?.proxyManager ?? undefined);
+  const logger: Logger = maybeLogger || depsOrProxyManager?.logger || depsOrProxyManager;
   const { deviceId, platform, videoUrl } = req;
   const caption = req.caption.trim();
   const username = req.username?.replace(/^@+/, '').trim() || undefined;
@@ -528,7 +534,7 @@ export async function publishToDevice(
     let captionTyped = !caption;
     let unknown = 0;
     let aiAdviceAttempts = 0;
-    const MAX_AI_ADVICE = 12;
+    const MAX_AI_ADVICE = 4; // cap AI calls per publish flow (budget & time protection)
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
     let lastScreen: any = null;
     const isLauncherOrSys = (p?: string) =>
@@ -576,7 +582,8 @@ export async function publishToDevice(
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: ИИ-автопилот анализирует экран рабочего стола/системы');
           updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: восстановление приложения с рабочего стола...', percent: 58 });
-          const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+          const fastShot = await adb.takeScreenshotFast(deviceId).catch(() => null);
+          const base64Screenshot = fastShot?.data || await adb.takeScreenshot(deviceId).catch(() => undefined);
           const aiDecision = await consultAiAutopilot({
             platform: flowPlatform,
             deviceId,
@@ -694,7 +701,8 @@ export async function publishToDevice(
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: asking AI Autopilot advisor to analyze stuck screen');
           updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: анализ экрана через Gemini Flash 3.8...', detail: 'Анализ снимка и разметки экрана', percent: 65 });
           const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-          const base64Screenshot = await adb.takeScreenshot(deviceId).catch(() => undefined);
+          const fastShot = await adb.takeScreenshotFast(deviceId).catch(() => null);
+          const base64Screenshot = fastShot?.data || await adb.takeScreenshot(deviceId).catch(() => undefined);
 
           const aiDecision = await consultAiAutopilot({
             platform: flowPlatform,
