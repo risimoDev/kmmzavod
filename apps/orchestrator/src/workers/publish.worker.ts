@@ -85,7 +85,7 @@ export async function releaseDeviceLock(redis: Redis, deviceId: string, owner: s
  * publisher outage drives every account below the 30-point safety floor.
  */
 const INFRA_ERROR_RE =
-  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят|не подтверждена|ADBKeyboard|не распознан|не удалось дойти|отклонило видео|не установлено|не автоматизирована|прокси|утечк|шлюз|без сети|не удалось проверить установленные/i;
+  /unreachable|did not answer in time|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|socket hang up|not configured|has no outputKey|has no outputUrl|NoSuchKey|cannot read stored session|занят|не подтверждена|ADBKeyboard|не распознан|не удалось дойти|отклонило видео|не установлено|не автоматизирована|прокси|утечк|шлюз|без сети|не удалось проверить установленные|disabled|health score too low|paused for safety|cancelled/i;
 
 export function isInfrastructureError(message: string): boolean {
   return INFRA_ERROR_RE.test(message);
@@ -173,7 +173,11 @@ async function setAutopilotLiveProgress(
       ...progress,
       updatedAt: Date.now(),
     });
-    await redis.set(`autopilot:live:${autopilotId}`, payload, 'EX', 120);
+    if (progress.deviceId) {
+      await redis.hset(`autopilot:live:${autopilotId}`, progress.deviceId, payload);
+      await redis.expire(`autopilot:live:${autopilotId}`, 180);
+    }
+    await redis.set(`autopilot:live:${autopilotId}`, payload, 'EX', 180);
   } catch {
     // Redis write failure shouldn't kill worker
   }
@@ -231,13 +235,25 @@ export function createPublishWorker(deps: Deps): Worker {
       /** Non-fatal remark from the publisher, kept in PublishJob.error of a published job. */
       let publishNote: string | null = null;
 
+      // Check early if linked distribution was cancelled before changing statuses
+      const linkedDistItem = await db.distributeItem.findFirst({
+        where: { publishJobId },
+        select: { id: true, distributeJobId: true, distributeJob: { select: { status: true, autopilotId: true } } },
+      });
+      const autopilotId = linkedDistItem?.distributeJob?.autopilotId ?? null;
+      if (linkedDistItem?.distributeJob?.status === 'cancelled') {
+        logger.info({ publishJobId, distributeJobId: linkedDistItem.distributeJobId }, 'Publish: distribution cancelled, aborting');
+        await finalizePublishFailure(db, publishJobId, 'Distribution cancelled');
+        return;
+      }
+
       // Mark as uploading
       await db.publishJob.update({
         where: { id: publishJobId },
         data: { status: 'uploading' },
       });
       await db.distributeItem.updateMany({
-        where: { publishJobId },
+        where: { publishJobId, status: { in: ['pending', 'scheduled'] } },
         data: { status: 'publishing' },
       });
 
@@ -267,10 +283,10 @@ export function createPublishWorker(deps: Deps): Worker {
         };
 
         if (!account.isActive) {
-          throw new Error(`Social account ${socialAccountId} is disabled`);
+          throw new UnrecoverableError(`Social account ${socialAccountId} is disabled`);
         }
         if ((accountRaw.healthScore ?? 100) < 30) {
-          throw new Error(`Social account ${socialAccountId} health score too low (${accountRaw.healthScore}) — paused for safety`);
+          throw new UnrecoverableError(`Social account ${socialAccountId} health score too low (${accountRaw.healthScore}) — paused for safety`);
         }
 
         // Set per-account proxy on all social clients (isolation: each tenant uses their own IP)
@@ -290,23 +306,6 @@ export function createPublishWorker(deps: Deps): Worker {
           where: { id: publishJobId },
           select: { caption: true, hashtags: true, variantId: true, uniqueVariantId: true },
         });
-
-        // Abort if this publish was scheduled from a distribution that got cancelled
-        const linkedDistItem = await db.distributeItem.findFirst({
-          where: { publishJobId },
-          select: { id: true, distributeJobId: true, distributeJob: { select: { status: true, autopilotId: true } } },
-        });
-        const autopilotId = linkedDistItem?.distributeJob?.autopilotId ?? null;
-        if (linkedDistItem) {
-          if (linkedDistItem.distributeJob?.status === 'cancelled') {
-            logger.info({ publishJobId, distributeJobId: linkedDistItem.distributeJobId }, 'Publish: distribution cancelled, aborting');
-            await db.publishJob.update({
-              where: { id: publishJobId },
-              data: { status: 'failed', error: 'Distribution cancelled' },
-            });
-            return;
-          }
-        }
 
         let storageKey: string;
 

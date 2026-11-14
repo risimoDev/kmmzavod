@@ -513,8 +513,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
     const cycleTotal = realScheduledCount + realPublishingCount + realPublishedCount + realFailedCount;
 
     const redis = getRedis();
-    const liveJson = await redis.get(`autopilot:live:${id}`).catch(() => null);
-    let liveAction: {
+    const liveHash = await redis.hgetall(`autopilot:live:${id}`).catch(() => null);
+    const liveActions: Array<{
       deviceId?: string;
       accountName?: string;
       platform?: string;
@@ -523,11 +523,29 @@ export async function autopilotRoutes(app: FastifyInstance) {
       percent?: number;
       stage?: string;
       updatedAt?: number;
-    } | null = null;
-    if (liveJson) {
-      try {
-        liveAction = JSON.parse(liveJson);
-      } catch {}
+    }> = [];
+
+    if (liveHash && Object.keys(liveHash).length > 0) {
+      const cutoff = Date.now() - 120_000;
+      for (const raw of Object.values(liveHash)) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.updatedAt && parsed.updatedAt > cutoff) {
+            liveActions.push(parsed);
+          }
+        } catch {}
+      }
+    }
+
+    let liveAction = liveActions[0] ?? null;
+    if (!liveAction) {
+      const liveJson = await redis.get(`autopilot:live:${id}`).catch(() => null);
+      if (liveJson) {
+        try {
+          liveAction = JSON.parse(liveJson);
+          if (liveAction) liveActions.push(liveAction);
+        } catch {}
+      }
     }
 
     const liveProgress = {
@@ -551,6 +569,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       activeDeviceId: farmProxy.activeDeviceId ?? null,
       currentAction: liveAction?.step ? `${liveAction.step}${liveAction.detail ? ` (${liveAction.detail})` : ''}` : null,
       liveAction,
+      liveActions,
     };
 
     return {

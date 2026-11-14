@@ -56,8 +56,10 @@ export function decrypt(encoded: string): string {
     const decipher = createDecipheriv(ALGORITHM, key, iv);
     decipher.setAuthTag(authTag);
     return decipher.update(ciphertext) + decipher.final('utf8');
-  } catch {
-    // Decryption failed — likely legacy plaintext token
+  } catch (err) {
+    if (/^[A-Za-z0-9+/=]+$/.test(encoded) && buf.length >= IV_LENGTH + AUTH_TAG_LENGTH + 16) {
+      throw new Error(`Failed to decrypt payload: authentication tag mismatch or invalid key`);
+    }
     return encoded;
   }
 }

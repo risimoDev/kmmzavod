@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     max_clips_per_project: int = 30
 
     # ── Service ───────────────────────────────────────────────────────
+    internal_service_token: str = ""
     log_level: str = "INFO"
     max_concurrent_jobs: int = 2
     work_dir_base: str = ""

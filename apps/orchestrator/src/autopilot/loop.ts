@@ -28,6 +28,7 @@ import { logger as rootLogger } from '../logger';
 import { nextWallClock, startOfZonedDay } from '../lib/tz';
 import { journal, failBatch } from './journal';
 import { deviceAgentService } from '../services/device-agent';
+import { settleDistributeItem } from '../workers/publish.worker';
 
 const logger = rootLogger.child({ worker: 'autopilot-loop' });
 
@@ -343,7 +344,13 @@ export async function countReadyVariants(db: PrismaClient, autopilotId: string):
   const jobIds = await readyJobIds(db, autopilotId);
   if (jobIds.length === 0) return 0;
   return db.uniqueVariant.count({
-    where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} }, ...NOT_WEAK },
+    where: {
+      uniquifyJobId: { in: jobIds },
+      status: 'completed',
+      outputKey: { not: null },
+      distributeItems: { none: { status: { not: 'skipped' } } },
+      ...NOT_WEAK,
+    },
   });
 }
 
@@ -470,18 +477,25 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
   const todayCount = new Map<string, number>();
   const inflight = new Set<string>();
   for (const r of recent) {
-    // Only count published items, active publishing items, or freshly scheduled items (within last 25 min or upcoming)
-    const isStaleScheduled = r.status === 'scheduled' && r.scheduledAt && r.scheduledAt.getTime() < now.getTime() - 25 * 60 * 1000;
-    if (r.createdAt >= sod && (ITEM_COUNTED as readonly string[]).includes(r.status) && !isStaleScheduled) {
+    if (r.createdAt >= sod && (ITEM_COUNTED as readonly string[]).includes(r.status)) {
       todayCount.set(r.socialAccountId, (todayCount.get(r.socialAccountId) ?? 0) + 1);
     }
-    if ((ITEM_INFLIGHT as readonly string[]).includes(r.status) && !isStaleScheduled) inflight.add(r.socialAccountId);
+    // Consider scheduled/publishing inflight so watchdog can recover or settle without double-booking
+    if ((ITEM_INFLIGHT as readonly string[]).includes(r.status)) {
+      inflight.add(r.socialAccountId);
+    }
   }
 
   const jobIds = await readyJobIds(db, ap.id);
   const variants = jobIds.length
     ? await db.uniqueVariant.findMany({
-        where: { uniquifyJobId: { in: jobIds }, status: 'completed', outputKey: { not: null }, distributeItems: { none: {} }, ...NOT_WEAK },
+        where: {
+          uniquifyJobId: { in: jobIds },
+          status: 'completed',
+          outputKey: { not: null },
+          distributeItems: { none: { status: { not: 'skipped' } } },
+          ...NOT_WEAK,
+        },
         select: { id: true, uniquifyJobId: true },
         orderBy: [{ createdAt: 'asc' }, { variantIndex: 'asc' }],
       })
@@ -491,12 +505,18 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
   const received = new Map<string, Set<string>>();
   if (jobIds.length) {
     const prior = await db.distributeItem.findMany({
-      where: { socialAccountId: { in: ids }, uniqueVariant: { uniquifyJobId: { in: jobIds } } },
+      where: {
+        socialAccountId: { in: ids },
+        uniqueVariant: { uniquifyJobId: { in: jobIds } },
+        status: { not: 'skipped' },
+      },
       select: { socialAccountId: true, uniqueVariant: { select: { uniquifyJobId: true } } },
     });
     for (const p of prior) {
       const set = received.get(p.socialAccountId) ?? new Set<string>();
-      set.add(p.uniqueVariant.uniquifyJobId);
+      if (p.uniqueVariant?.uniquifyJobId) {
+        set.add(p.uniqueVariant.uniquifyJobId);
+      }
       received.set(p.socialAccountId, set);
     }
   }
@@ -680,32 +700,63 @@ async function recoverStuckScheduledItems(deps: AutopilotLoopDeps, ap: Autopilot
     if (!item.socialAccount || !item.uniqueVariant) continue;
 
     if (item.publishJob?.status === 'published') {
-      await db.distributeItem.update({ where: { id: item.id }, data: { status: 'published', publishedAt: now } });
+      if (item.publishJobId) {
+        await settleDistributeItem(db, item.publishJobId, { status: 'published', at: now });
+      }
       continue;
     }
     if (item.publishJob?.status === 'failed') {
-      await db.distributeItem.update({ where: { id: item.id }, data: { status: 'failed', error: item.publishJob.error } });
+      if (item.publishJobId) {
+        await settleDistributeItem(db, item.publishJobId, { status: 'failed', error: item.publishJob.error || 'Failed' });
+      }
       continue;
     }
 
     // Space recovered items by 75s so physical boards sequentially process them without proxy lock collisions
     const newScheduledAt = new Date(now.getTime() + i * 75_000);
-    const jobId = item.publishJobId || item.id;
 
-    await db.distributeItem.update({
-      where: { id: item.id },
-      data: { scheduledAt: newScheduledAt },
-    });
-
-    if (item.publishJobId) {
+    let publishJobId = item.publishJobId;
+    if (!publishJobId) {
+      const pj = await db.publishJob.create({
+        data: {
+          tenantId: ap.tenantId,
+          socialAccountId: item.socialAccountId,
+          uniqueVariantId: item.uniqueVariantId,
+          platform: item.socialAccount.platform as any,
+          caption: item.caption || item.uniqueVariant.generatedCaption || '',
+          hashtags: (item.hashtags as string[]) || [],
+          scheduledAt: newScheduledAt,
+          status: 'scheduled',
+        },
+      });
+      publishJobId = pj.id;
+      await db.distributeItem.update({
+        where: { id: item.id },
+        data: { publishJobId, scheduledAt: newScheduledAt },
+      });
+    } else {
+      await db.distributeItem.update({
+        where: { id: item.id },
+        data: { scheduledAt: newScheduledAt },
+      });
       await db.publishJob.update({
-        where: { id: item.publishJobId },
+        where: { id: publishJobId },
         data: { scheduledAt: newScheduledAt, status: 'scheduled', error: null },
       });
     }
 
+    // Do not clobber a job that is already active (currently publishing) or delayed waiting for device
+    const existingJob = await publishQueue.getJob(publishJobId).catch(() => null);
+    if (existingJob) {
+      const state = await existingJob.getState().catch(() => 'unknown');
+      if (state === 'active' || state === 'delayed' || state === 'waiting') {
+        continue;
+      }
+      await existingJob.remove().catch(() => {});
+    }
+
     const payload: PublishJobPayload = {
-      publishJobId: item.publishJobId || jobId,
+      publishJobId,
       uniqueVariantId: item.uniqueVariantId,
       tenantId: ap.tenantId,
       platform: item.socialAccount.platform as any,
@@ -713,12 +764,9 @@ async function recoverStuckScheduledItems(deps: AutopilotLoopDeps, ap: Autopilot
       scheduledAt: newScheduledAt.toISOString(),
     };
 
-    const oldJob = await publishQueue.getJob(jobId).catch(() => null);
-    if (oldJob) await oldJob.remove().catch(() => {});
-
-    const bullJobId = `watchdog-${item.id}-${now.getTime()}-${i}`;
     const delay = Math.max(0, newScheduledAt.getTime() - now.getTime());
-    await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId }).catch((err) => {
+    // Deterministic job ID guarantees no duplicate phantom jobs
+    await publishQueue.add(`publish:${publishJobId}`, payload, { delay, jobId: publishJobId }).catch((err) => {
       logger.warn({ err: err.message, itemId: item.id }, 'autopilot watchdog: failed to re-enqueue publish job');
     });
   }

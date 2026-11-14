@@ -29,6 +29,30 @@ import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-st
 import { dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
 
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseAiCoordinates(
+  x: number | undefined,
+  y: number | undefined,
+  screenSize: { width: number; height: number }
+): { x: number; y: number } | null {
+  if (x == null || y == null || isNaN(x) || isNaN(y) || x <= 0 || y <= 0) return null;
+  let cx = x;
+  let cy = y;
+  if (cx <= 1 && cy <= 1) {
+    cx = cx * screenSize.width;
+    cy = cy * screenSize.height;
+  } else if (cx <= 1000 && cy <= 1000 && screenSize.width > 1000) {
+    cx = (cx / 1000) * screenSize.width;
+    cy = (cy / 1000) * screenSize.height;
+  }
+  cx = Math.max(0, Math.min(screenSize.width - 1, Math.round(cx)));
+  cy = Math.max(0, Math.min(screenSize.height - 1, Math.round(cy)));
+  return { x: cx, y: cy };
+}
+
 export interface PublishRequest {
   deviceId: string;
   platform: 'instagram' | 'tiktok' | 'youtube_shorts';
@@ -208,22 +232,17 @@ export async function recoverAndPublishDraft(params: {
 
       if (aiDecision && (aiDecision.action === 'tap' || aiDecision.action === 'tap_draft' || aiDecision.action === 'tap_coord')) {
         let draftEl = aiDecision.targetText
-          ? screen.els.find((e) => new RegExp(aiDecision.targetText!.trim(), 'i').test(`${e.text} ${e.desc}`))
+          ? screen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
           : undefined;
-        let tx = aiDecision.x;
-        let ty = aiDecision.y;
-        if (tx != null && ty != null && tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
-          tx = Math.round(tx * screenSize.width);
-          ty = Math.round(ty * screenSize.height);
-        }
+        const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
         if (draftEl) {
           logger.info({ deviceId, target: aiDecision.targetText, reason: aiDecision.reason }, 'publish: AI tapped Drafts element');
           await tapEl(adb, deviceId, draftEl);
           await sleep(3000);
           screen = await dumpScreen(adb, deviceId, 2);
-        } else if (tx != null && ty != null && tx > 0 && ty > 0) {
-          logger.info({ deviceId, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
-          await adb.tap(deviceId, tx, ty);
+        } else if (coords) {
+          logger.info({ deviceId, x: coords.x, y: coords.y, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
+          await adb.tap(deviceId, coords.x, coords.y);
           await sleep(3000);
           screen = await dumpScreen(adb, deviceId, 2);
         }
@@ -408,6 +427,7 @@ export async function publishToDevice(
   let stage: PublishStage = 'download';
   let posted: PublishResult['posted'] = 'no';
   let verifiedProfile = false;
+  const overallDeadline = Date.now() + 14 * 60_000;
 
   const result = (r: Omit<PublishResult, 'stage' | 'posted' | 'onDevicePath'> & Partial<PublishResult>): PublishResult =>
     ({ stage, posted, onDevicePath, ...r });
@@ -515,6 +535,10 @@ export async function publishToDevice(
       !p || /launcher|galaxyfinder|finder|nexuslauncher|trebuchet|miui\.home|touchwiz|systemui/i.test(p);
 
     while (!st.shareTapped) {
+      if (Date.now() > overallDeadline) {
+        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_overall_timeout`, lastScreen?.xml).catch(() => undefined);
+        return result({ ok: false, retryable: true, debugSnapshot: snap, detail: 'Превышен общий лимит времени публикации на устройстве (14 мин)' });
+      }
       if (Date.now() > composeDeadline) {
         const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_timeout`, lastScreen?.xml).catch(() => undefined);
         return result({ ok: false, retryable: true, debugSnapshot: snap, detail: 'Не удалось дойти до кнопки публикации за 3 мин' });
@@ -548,7 +572,7 @@ export async function publishToDevice(
         await adb.swipe(deviceId, Math.round(sw / 2), Math.round(sh * 0.8), Math.round(sw / 2), Math.round(sh * 0.25), 250).catch(() => {});
 
         // ── AI Autopilot Advisor on launcher/stuck screen ──
-        if (unknown >= 1 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+        if (unknown >= 3 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: ИИ-автопилот анализирует экран рабочего стола/системы');
           updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: восстановление приложения с рабочего стола...', percent: 58 });
@@ -575,22 +599,17 @@ export async function publishToDevice(
             updateProgress(deviceId, { platform, stage: 'compose', step: `ИИ: ${aiDecision.reason || 'восстановление'}`, percent: 60 });
             if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
               let targetEl = aiDecision.targetText
-                ? screen.els.find((e) => new RegExp(aiDecision.targetText!.trim(), 'i').test(`${e.text} ${e.desc}`))
+                ? screen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
                 : undefined;
-              let tx = aiDecision.x;
-              let ty = aiDecision.y;
-              if (tx != null && ty != null && tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
-                tx = Math.round(tx * sw);
-                ty = Math.round(ty * sh);
-              }
+              const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, { width: sw, height: sh });
               if (targetEl) {
                 logger.info({ deviceId, targetText: aiDecision.targetText, reason: aiDecision.reason }, 'publish: ИИ нажал элемент на рабочем столе');
                 await tapEl(adb, deviceId, targetEl);
                 await sleep(2000);
                 continue;
-              } else if (tx != null && ty != null && tx > 0 && ty > 0) {
-                logger.info({ deviceId, x: tx, y: ty, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
-                await adb.tap(deviceId, tx, ty);
+              } else if (coords) {
+                logger.info({ deviceId, x: coords.x, y: coords.y, reason: aiDecision.reason }, 'publish: ИИ нажал по координатам на экране');
+                await adb.tap(deviceId, coords.x, coords.y);
                 await sleep(2000);
                 continue;
               }
@@ -670,7 +689,7 @@ export async function publishToDevice(
         }
 
         // ── AI Autopilot Advisor Fallback (ClaudeHub Vision) ─────────────────
-        if (unknown >= 1 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+        if (unknown >= 3 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: asking AI Autopilot advisor to analyze stuck screen');
           updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: анализ экрана через Gemini Flash 3.8...', detail: 'Анализ снимка и разметки экрана', percent: 65 });
@@ -759,21 +778,18 @@ export async function publishToDevice(
               if (editField) {
                 logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption into detected EditText');
                 await tapEl(adb, deviceId, editField);
-              } else if (aiDecision.x && aiDecision.y && aiDecision.x > 0 && aiDecision.y > 0) {
-                let tx = aiDecision.x;
-                let ty = aiDecision.y;
-                if (tx <= 1 && ty <= 1) {
-                  tx = Math.round(tx * screenSize.width);
-                  ty = Math.round(ty * screenSize.height);
-                }
-                logger.info({ deviceId, platform, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
-                await adb.tap(deviceId, tx, ty);
-              } else if (aiDecision.targetText) {
-                const target = aiDecision.targetText.trim();
-                const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
-                if (el) {
-                  logger.info({ deviceId, platform, target, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption target');
-                  await tapEl(adb, deviceId, el);
+              } else {
+                const captionCoords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
+                if (captionCoords) {
+                  logger.info({ deviceId, platform, x: captionCoords.x, y: captionCoords.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
+                  await adb.tap(deviceId, captionCoords.x, captionCoords.y);
+                } else if (aiDecision.targetText) {
+                  const target = escapeRegExp(aiDecision.targetText.trim());
+                  const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
+                  if (el) {
+                    logger.info({ deviceId, platform, target, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption target');
+                    await tapEl(adb, deviceId, el);
+                  }
                 }
               }
               await sleep(800);
@@ -790,7 +806,7 @@ export async function publishToDevice(
             if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
               let targetEl: UiEl | undefined;
               if (aiDecision.targetText) {
-                const escaped = aiDecision.targetText.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const escaped = escapeRegExp(aiDecision.targetText.trim());
                 targetEl = screen.els.find((e) =>
                   (e.clickable || /Button|TextView|ImageView|View/i.test(e.cls)) &&
                   (new RegExp(`^${escaped}$`, 'i').test(e.text.trim()) || new RegExp(`^${escaped}$`, 'i').test(e.desc.trim()))
@@ -802,27 +818,30 @@ export async function publishToDevice(
                 }
               }
 
-              let tx = aiDecision.x;
-              let ty = aiDecision.y;
-              if (tx != null && ty != null) {
-                if (tx <= 1 && ty <= 1 && tx > 0 && ty > 0) {
-                  tx = Math.round(tx * screenSize.width);
-                  ty = Math.round(ty * screenSize.height);
-                }
-              }
+              const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
 
               if (targetEl) {
                 logger.info({ deviceId, platform, target: targetEl.text || targetEl.desc, reason: aiDecision.reason }, 'publish: AI Autopilot tapped element');
                 await tapEl(adb, deviceId, targetEl);
-              } else if (tx != null && ty != null && tx > 0 && ty > 0) {
-                logger.info({ deviceId, platform, x: tx, y: ty, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
-                await adb.tap(deviceId, tx, ty);
+              } else if (coords) {
+                logger.info({ deviceId, platform, x: coords.x, y: coords.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
+                await adb.tap(deviceId, coords.x, coords.y);
               }
 
-              if (targetEl || (tx != null && ty != null && tx > 0 && ty > 0)) {
+              if (targetEl || coords) {
+                const postButton = findPostButton(screen, flowPlatform);
+                const isPostTarget =
+                  aiDecision.marks === 'share' ||
+                  (targetEl && postButton && (targetEl.text === postButton.text || targetEl.desc === postButton.desc)) ||
+                  /опубликовать|поделиться|publish|share|post\b/i.test(aiDecision.targetText || '');
+
+                if (isPostTarget) {
+                  logger.info({ deviceId, platform }, 'publish: AI tapped share/publish target -> setting shareTapped = true, posted = unknown');
+                  st.shareTapped = true;
+                  posted = 'unknown';
+                }
                 if (aiDecision.marks === 'target') st.targetChosen = true;
                 if (aiDecision.marks === 'next') st.nextTaps++;
-                if (aiDecision.marks === 'share') { st.shareTapped = true; posted = 'unknown'; }
                 unknown = 0;
                 await sleep(2500);
                 continue;
@@ -874,7 +893,7 @@ export async function publishToDevice(
     let lastPctChange = Date.now();
     let lastActivity = Date.now();
     const uploadDeadline = Date.now() + UPLOAD_TIMEOUT_MS;
-    while (Date.now() < uploadDeadline && Date.now() - lastActivity < UPLOAD_QUIET_MS) {
+    while (Date.now() < uploadDeadline && Date.now() < overallDeadline && Date.now() - lastActivity < UPLOAD_QUIET_MS) {
       await sleep(3000);
       const screen = await dumpScreen(adb, deviceId, 1);
       const pct = screen ? uploadPercent(screen) : null;
@@ -951,7 +970,7 @@ export async function publishToDevice(
     const confirmed = canReadProfile && baseline
       ? profileVerified === true
       : profileVerified === true || (appConfirmed && stuckAt == null && !offline);
-    if (!confirmed) {
+    if (!confirmed && Date.now() < overallDeadline - 2 * 60_000) {
       // Automatic Drafts Recovery: if upload was dropped or stalled, TikTok/Instagram often saved it to Drafts
       logger.info({ deviceId, platform, offline, stuckAt, profileVerified }, 'publish: post unconfirmed — attempting automatic Drafts recovery');
       updateProgress(deviceId, { platform, stage: 'upload', step: 'Пост не подтверждён в ленте. Автопоиск в Черновиках...', percent: 90 });
@@ -1092,10 +1111,15 @@ async function resolveMediaId(
     await sleep(800);
   }
 
-  // 3. Fallback: newest video row in MediaStore
+  // 3. Fallback: check newest video row in MediaStore, verify _data matches onDevicePath or fileName
   const latestOut = await adb.fastShell(deviceId, `content query --uri ${MEDIA_URI} --projection _id:_data --sort "date_added DESC" --limit 1`).catch(() => '');
-  const mLatest = /_id=(\d+)/.exec(latestOut);
-  if (mLatest) return mLatest[1];
+  const mLatest = /_id=(\d+).*?_data=([^,\s\r\n]+)/.exec(latestOut);
+  if (mLatest && mLatest[1] && mLatest[2]) {
+    const rowPath = mLatest[2].trim();
+    if (rowPath === onDevicePath || path.basename(rowPath) === fileName) {
+      return mLatest[1];
+    }
+  }
 
   return null;
 }
