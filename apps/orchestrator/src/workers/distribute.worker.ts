@@ -173,9 +173,15 @@ export function createDistributeWorker(deps: Deps): Worker {
           });
           skippedCount++; itemIndex++; continue;
         }
-        // Calculate nominal scheduled time with jittered stagger (±15% randomness)
-        const baseDelay = itemIndex * staggerMs;
-        const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
+        // Calculate nominal scheduled time. In private_parallel mode across distinct phones,
+        // we don't force a linear 3-minute-per-phone stagger: different boards post simultaneously
+        // with small random jitter (0-60s). In shared mode, stagger linearly to share the modem.
+        const baseDelay = isSharedMode
+          ? itemIndex * staggerMs
+          : Math.floor(Math.random() * 60_000);
+        const jitteredDelay = isSharedMode
+          ? Math.round(baseDelay * (0.85 + Math.random() * 0.3))
+          : baseDelay;
         const nominalTimeMs = Date.now() + jitteredDelay;
 
         // Anti-ban guard: ensure at least 3 hours gap from the account's last post or previously scheduled post

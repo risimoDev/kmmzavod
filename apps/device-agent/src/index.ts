@@ -32,7 +32,18 @@ const PackageNameSchema = z.string().min(1).regex(/^[A-Za-z0-9_.]+$/, 'Неко�
 
 const app = Fastify({
   logger: false,
-  bodyLimit: 1024 * 1024 * 1024, // 1 GB limit for large APK transfers
+  bodyLimit: 2 * 1024 * 1024, // 2 MB default limit for JSON endpoints
+});
+
+app.addHook('onRequest', async (req, reply) => {
+  if (req.method === 'GET' && req.url === '/health') return;
+  if (!config.AGENT_TOKEN) return;
+  const gotStr = String(req.headers['x-agent-token'] ?? '');
+  const got = Buffer.from(gotStr);
+  const want = Buffer.from(config.AGENT_TOKEN);
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) {
+    return reply.code(401).send({ ok: false, error: 'Unauthorized: invalid or missing x-agent-token' });
+  }
 });
 
 app.addContentTypeParser(
@@ -1226,7 +1237,9 @@ const UploadAndInstallJsonBody = z.object({
   grantPermissions: z.boolean().default(true),
 });
 
-app.post('/device/apps/upload-and-install', async (req, reply) => {
+app.post('/device/apps/upload-and-install', {
+  bodyLimit: 1024 * 1024 * 1024, // 1 GB limit for large APK transfers
+}, async (req, reply) => {
   try {
     let targetDeviceIds: string[] = [];
     let reinstall = true;
@@ -1391,7 +1404,7 @@ const LISTEN_RETRY_TOTAL_MS = 5 * 60_000;
 
 async function listenWithRetry(): Promise<void> {
   const deadline = Date.now() + LISTEN_RETRY_TOTAL_MS;
-  const listenHost = '0.0.0.0';
+  const listenHost = config.HOST;
   for (let attempt = 1; ; attempt++) {
     try {
       await app.listen({ host: listenHost, port: config.PORT });

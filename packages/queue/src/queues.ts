@@ -79,7 +79,7 @@ export const QUEUE_DEFS = {
       removeOnComplete: { count: 500 },
       removeOnFail: { age: 7 * 86400, count: 1000 },
     },
-    concurrency: 2,
+    concurrency: Number(process.env.PUBLISH_CONCURRENCY || '24'),
   },
   SCHEDULER: {
     name: 'scheduler',

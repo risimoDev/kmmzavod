@@ -1,6 +1,14 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import { config } from '../config';
 
+export const agentClient = axios.create();
+agentClient.interceptors.request.use((reqConfig) => {
+  if (config.DEVICE_AGENT_TOKEN) {
+    reqConfig.headers['x-agent-token'] = config.DEVICE_AGENT_TOKEN;
+  }
+  return reqConfig;
+});
+
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
 
 let activeBaseUrl: string | null = null;
@@ -22,7 +30,7 @@ export async function getDeviceAgentBaseUrl(): Promise<string> {
 
   for (const c of candidates) {
     try {
-      const res = await axios.get(`${c}/health`, { timeout: 2500 });
+      const res = await agentClient.get(`${c}/health`, { timeout: 2500 });
       if (res.status === 200) {
         activeBaseUrl = c;
         lastBaseCheck = now;
@@ -49,7 +57,7 @@ export async function requestWithFallback<T>(fn: (base: string) => Promise<{ dat
     return res.data;
   } catch (err) {
     const alt = getAlternateUrl(base);
-    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
+    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
       try {
         const res = await fn(alt);
         activeBaseUrl = alt;
@@ -64,11 +72,11 @@ export async function requestWithFallback<T>(fn: (base: string) => Promise<{ dat
 }
 
 export async function agentGet<T = any>(path: string, options?: AxiosRequestConfig): Promise<T> {
-  return requestWithFallback((base) => axios.get(`${base}${path}`, options));
+  return requestWithFallback((base) => agentClient.get(`${base}${path}`, options));
 }
 
 export async function agentPost<T = any>(path: string, data?: any, options?: AxiosRequestConfig): Promise<T> {
-  return requestWithFallback((base) => axios.post(`${base}${path}`, data, options));
+  return requestWithFallback((base) => agentClient.post(`${base}${path}`, data, options));
 }
 
 export async function requestWithFallbackRaw<T>(fn: (base: string) => Promise<T>): Promise<T> {
@@ -368,7 +376,7 @@ export const deviceAgentClient = {
   async frame(deviceId: string): Promise<{ image: Buffer; contentType: string; width: number; height: number }> {
     try {
       const res = await requestWithFallbackRaw((base) =>
-        axios.post(`${base}/device/frame`, { deviceId }, { timeout: 15_000, responseType: 'arraybuffer' })
+        agentClient.post(`${base}/device/frame`, { deviceId }, { timeout: 15_000, responseType: 'arraybuffer' })
       );
       return {
         image: Buffer.from(res.data),

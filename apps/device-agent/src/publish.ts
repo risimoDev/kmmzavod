@@ -158,9 +158,10 @@ export async function recoverAndPublishDraft(params: {
   aiModel?: string;
   adb: AdbClient;
   logger: Logger;
+  baseline: ProfileSnapshot | null;
   updateProgress: (p: { platform: FlowPlatform; stage: PublishStage; step: string; detail?: string; percent?: number }) => void;
 }): Promise<PublishResult | null> {
-  const { deviceId, platform, pkg, caption, username, claudehubApiKey, aiModel, adb, logger, updateProgress } = params;
+  const { deviceId, platform, pkg, caption, username, claudehubApiKey, aiModel, adb, logger, baseline, updateProgress } = params;
 
   try {
     updateProgress({ platform, stage: 'compose', step: 'ИИ: поиск застрявшего ролика в Черновиках...', percent: 88 });
@@ -250,10 +251,8 @@ export async function recoverAndPublishDraft(params: {
       await tapEl(adb, deviceId, firstDraft);
       await sleep(4000);
     } else {
-      const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-      logger.info({ deviceId }, 'publish: tapping top-left draft grid coordinates');
-      await adb.tap(deviceId, Math.round(width * 0.25), Math.round(height * 0.35));
-      await sleep(4000);
+      logger.warn({ deviceId }, 'publish: draft recovery could not find a distinct draft tile — aborting to prevent publishing wrong video');
+      return null;
     }
 
     // 4. Walk the draft compose/editor screen to tap Post
@@ -342,25 +341,39 @@ export async function recoverAndPublishDraft(params: {
       }
     }
 
-    // 6. Profile verification
+    // 6. Profile verification (strict: must confirm new post against baseline)
     updateProgress({ platform, stage: 'verify', step: 'Верификация опубликованного черновика в профиле...', percent: 98 });
     await sleep(5000);
     const postCheck = await snapshotProfile(adb, deviceId, platform, username ?? '', pkg).catch(() => null);
-    const verified = { app: confirmedApp, profile: Boolean(postCheck?.onProfile) };
+    const isNew = Boolean(baseline && postCheck && isNewPostOnProfile(baseline, postCheck));
+    const verified = { app: confirmedApp, profile: isNew === true };
 
     await adb.home(deviceId).catch(() => {});
-    updateProgress({ platform, stage: 'done', step: 'Видеоролик успешно опубликован из Черновиков!', percent: 100 });
-    logger.info({ deviceId, platform, verified }, 'publish: draft successfully published and confirmed');
 
-    return {
-      ok: true,
-      stage: 'done',
-      posted: 'yes',
-      retryable: false,
-      verified,
-      captionTyped: true,
-      detail: 'Видеоролик успешно опубликован из Черновиков после авто-восстановления сети',
-    };
+    if (verified.profile) {
+      updateProgress({ platform, stage: 'done', step: 'Видеоролик успешно опубликован из Черновиков!', percent: 100 });
+      logger.info({ deviceId, platform, verified }, 'publish: draft successfully published and verified on profile');
+      return {
+        ok: true,
+        stage: 'done',
+        posted: 'yes',
+        retryable: false,
+        verified,
+        captionTyped: true,
+        detail: 'Видеоролик успешно опубликован из Черновиков и подтверждён в профиле',
+      };
+    } else {
+      logger.warn({ deviceId, platform, verified }, 'publish: draft post was tapped but new video did not appear on profile');
+      return {
+        ok: false,
+        stage: 'verify',
+        posted: 'unknown',
+        retryable: false,
+        verified,
+        captionTyped: true,
+        detail: 'Попытка выгрузки из черновиков завершена, но новый пост не подтверждён на профиле',
+      };
+    }
   } catch (err) {
     logger.warn({ deviceId, err: (err as Error).message }, 'publish: draft recovery encountered error');
     return null;
@@ -958,11 +971,13 @@ export async function publishToDevice(
         aiModel: req.aiModel,
         adb,
         logger,
+        baseline,
         updateProgress: (p) => updateProgress(deviceId, p),
       });
 
       if (draftResult && draftResult.ok) {
         logger.info({ deviceId, platform }, 'publish: successfully recovered and published video from drafts!');
+        verifiedProfile = true;
         return {
           ...result(draftResult),
           detail: 'Видеоролик успешно опубликован из Черновиков (авто-восстановление ИИ)',

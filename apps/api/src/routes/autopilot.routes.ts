@@ -758,25 +758,19 @@ export async function autopilotRoutes(app: FastifyInstance) {
     return { ok: true, message: 'Публикация готовых копий начнётся в течение минуты' };
   });
 
-  /** Retry all failed or skipped distribute items for this autopilot */
+  /** Retry truly failed distribute items for this autopilot */
   app.post('/:id/retry-failed', async (req, reply) => {
     const { tenantId } = req.user;
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const ap = await db.autopilot.findFirst({ where: { id, tenantId }, select: { id: true, name: true, status: true } });
     if (!ap) return reply.code(404).send({ error: 'NotFound' });
 
+    // Only retry genuinely failed items. Do NOT retry already published posts,
+    // and do NOT bypass safety limits by blindly publishing skipped items.
     const failedItems = await db.distributeItem.findMany({
       where: {
         distributeJob: { autopilotId: id },
-        OR: [
-          { status: { in: ['failed', 'skipped'] } },
-          {
-            status: 'published',
-            publishJob: {
-              error: { contains: 'появление в профиле ожидается' },
-            },
-          },
-        ],
+        status: 'failed',
       },
       include: {
         socialAccount: true,
@@ -786,19 +780,34 @@ export async function autopilotRoutes(app: FastifyInstance) {
       take: 100,
     });
 
-    if (!failedItems.length) {
-      return { ok: true, retriedCount: 0, message: 'Нет упавших публикаций для перезапуска' };
+    // Filter out posts whose failure reason indicates they might already be live on profile (unconfirmed)
+    // to prevent duplicate posting.
+    const safeToRetry = failedItems.filter((item) => {
+      const err = (item.error || item.publishJob?.error || '').toLowerCase();
+      const isUnconfirmed = err.includes('появление в профиле ожидается') || err.includes('не подтверждена');
+      return !isUnconfirmed;
+    });
+
+    if (!safeToRetry.length) {
+      return {
+        ok: true,
+        retriedCount: 0,
+        skippedUnconfirmedCount: failedItems.length - safeToRetry.length,
+        message: failedItems.length > 0
+          ? 'Упавшие посты имеют статус «не подтверждено» и требуют ручной проверки профиля во избежание дублирования.'
+          : 'Нет упавших публикаций для перезапуска',
+      };
     }
 
     let retriedCount = 0;
     const now = new Date();
 
-    for (let i = 0; i < failedItems.length; i++) {
-      const item = failedItems[i];
+    for (let i = 0; i < safeToRetry.length; i++) {
+      const item = safeToRetry[i];
       if (!item.socialAccount || !item.uniqueVariant) continue;
 
-      // Stagger retry by 75s so physical boards don't collide on proxy lock
-      const scheduledAt = new Date(now.getTime() + i * 75_000);
+      // Stagger retry so physical boards don't collide
+      const scheduledAt = new Date(now.getTime() + i * 45_000);
       let jobId = item.publishJobId;
 
       if (jobId && item.publishJob) {
@@ -838,6 +847,15 @@ export async function autopilotRoutes(app: FastifyInstance) {
         },
       });
 
+      // Decrement failedCount on the parent DistributeJob to keep totals consistent
+      await db.distributeJob.update({
+        where: { id: item.distributeJobId },
+        data: {
+          failedCount: { decrement: 1 },
+          status: 'distributing',
+        },
+      }).catch(() => {});
+
       const oldJob = await publishQueue.getJob(jobId).catch(() => null);
       if (oldJob) await oldJob.remove().catch(() => {});
 
@@ -850,8 +868,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
         scheduledAt: scheduledAt.toISOString(),
       };
       const delay = Math.max(0, scheduledAt.getTime() - Date.now());
-      const bullJobId = `retry-${jobId}-${Date.now()}-${i}`;
-      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId });
+      // Deterministic job ID avoids phantom duplicates
+      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId });
       retriedCount++;
     }
 

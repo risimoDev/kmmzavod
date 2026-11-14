@@ -7,6 +7,14 @@
  * session state to persist — the phone's own logged-in app IS the session.
  */
 import axios from 'axios';
+
+export const agentClient = axios.create();
+agentClient.interceptors.request.use((reqConfig) => {
+  if (config.DEVICE_AGENT_TOKEN) {
+    reqConfig.headers['x-agent-token'] = config.DEVICE_AGENT_TOKEN;
+  }
+  return reqConfig;
+});
 import { config } from '../config';
 
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
@@ -30,7 +38,7 @@ export async function getDeviceAgentBaseUrl(): Promise<string> {
 
   for (const c of candidates) {
     try {
-      const res = await axios.get(`${c}/health`, { timeout: 2500 });
+      const res = await agentClient.get(`${c}/health`, { timeout: 2500 });
       if (res.status === 200) {
         activeBaseUrl = c;
         lastBaseCheck = now;
@@ -57,7 +65,7 @@ export async function requestWithFallback<T>(fn: (base: string) => Promise<{ dat
     return res.data;
   } catch (err) {
     const alt = getAlternateUrl(base);
-    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
+    if (alt && axios.isAxiosError(err) && (err.code === 'ECONNREFUSED' || err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH')) {
       try {
         const res = await fn(alt);
         activeBaseUrl = alt;
@@ -178,7 +186,7 @@ export function describeDeviceAgentError(err: unknown): string {
 
 export async function checkDeviceAgentHealth(): Promise<string | null> {
   try {
-    await requestWithFallback((base) => axios.get(`${base}/health`, { timeout: 5_000 }));
+    await requestWithFallback((base) => agentClient.get(`${base}/health`, { timeout: 5_000 }));
     return null;
   } catch (err: unknown) {
     return describeDeviceAgentError(err);
@@ -196,7 +204,7 @@ export const deviceAgentService = {
     aiModel?: string;
   }): Promise<DevicePublishResult> {
     return requestWithFallback((base) =>
-      axios.post(`${base}/publish`, {
+      agentClient.post(`${base}/publish`, {
         deviceId: opts.deviceId,
         platform: opts.platform,
         videoUrl: opts.videoUrl,
@@ -211,50 +219,50 @@ export const deviceAgentService = {
   },
 
   async listDevices(): Promise<{ ok: boolean; raw?: unknown; proxies?: Record<string, DeviceProxyConfig>; apps?: Record<string, any>; error?: string }> {
-    return requestWithFallback((base) => axios.get(`${base}/devices`, { timeout: 30_000 }));
+    return requestWithFallback((base) => agentClient.get(`${base}/devices`, { timeout: 30_000 }));
   },
 
   async setProxy(deviceId: string, proxy: DeviceProxyConfig): Promise<{ ok: boolean; check?: DeviceIpCheckResult; error?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/proxy/set`, {
+    return requestWithFallback((base) => agentClient.post(`${base}/proxy/set`, {
       deviceId,
       ...proxy,
     }, { timeout: 120_000 }));
   },
 
   async clearProxy(deviceId: string): Promise<{ ok: boolean; error?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/proxy/clear`, { deviceId }, { timeout: 60_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/proxy/clear`, { deviceId }, { timeout: 60_000 }));
   },
 
   async checkDeviceIp(deviceId: string): Promise<DeviceIpCheckResult> {
-    return requestWithFallback((base) => axios.post(`${base}/proxy/check`, { deviceId }, { timeout: 90_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/proxy/check`, { deviceId }, { timeout: 90_000 }));
   },
 
   async viewTarget(opts: ViewTargetOptions): Promise<ViewTargetResult> {
-    return requestWithFallback((base) => axios.post(`${base}/view-target`, opts, { timeout: 660_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/view-target`, opts, { timeout: 660_000 }));
   },
 
   async reboot(deviceId: string): Promise<{ ok: boolean; message?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/device/reboot`, { deviceId }, { timeout: 10_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/device/reboot`, { deviceId }, { timeout: 10_000 }));
   },
 
   async wake(deviceId: string): Promise<{ ok: boolean; message?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/device/wake`, { deviceId }, { timeout: 10_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/device/wake`, { deviceId }, { timeout: 10_000 }));
   },
 
   async screenshot(deviceId: string): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/device/screenshot`, { deviceId }, { timeout: 15_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/device/screenshot`, { deviceId }, { timeout: 15_000 }));
   },
 
   async heal(deviceId: string): Promise<{ ok: boolean; message?: string; error?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/device/heal`, { deviceId }, { timeout: 15_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/device/heal`, { deviceId }, { timeout: 15_000 }));
   },
 
   async getHealth(deviceId: string): Promise<{ deviceId: string; online: boolean; batteryLevel?: number; batteryTemp?: number; freeRamMb?: number; error?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/device/health`, { deviceId }, { timeout: 10_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/device/health`, { deviceId }, { timeout: 10_000 }));
   },
 
   async optimizeFarm(deviceIds?: string[]): Promise<{ ok: boolean; total?: number; results?: Array<{ deviceId: string; ok: boolean; message: string }> }> {
-    return requestWithFallback((base) => axios.post(`${base}/farm/optimize`, { deviceIds }, { timeout: 30_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/farm/optimize`, { deviceIds }, { timeout: 30_000 }));
   },
 
   async checkApps(deviceId: string): Promise<{
@@ -262,15 +270,15 @@ export const deviceAgentService = {
     deviceId: string;
     apps: Record<string, { installed: boolean; packageName?: string; error?: string }>;
   }> {
-    return requestWithFallback((base) => axios.get(`${base}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 }));
+    return requestWithFallback((base) => agentClient.get(`${base}/device/${encodeURIComponent(deviceId)}/apps-check`, { timeout: 15_000 }));
   },
 
   async getProxyMode(): Promise<ProxyModeState> {
-    return requestWithFallback((base) => axios.get(`${base}/proxy/mode`, { timeout: 8_000 }));
+    return requestWithFallback((base) => agentClient.get(`${base}/proxy/mode`, { timeout: 8_000 }));
   },
 
   async switchActiveDevice(deviceId: string, force = true): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
-    return requestWithFallback((base) => axios.post(`${base}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 }));
   },
 
   async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
@@ -282,13 +290,13 @@ export const deviceAgentService = {
     check: DeviceIpCheckResult;
     error?: string;
   }> {
-    return requestWithFallback((base) => axios.post(`${base}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 }));
+    return requestWithFallback((base) => agentClient.post(`${base}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 }));
   },
 
   async getPublishProgress(deviceId: string): Promise<DevicePublishProgress | null> {
     try {
       const res = await requestWithFallback<{ ok: boolean; progress: DevicePublishProgress | null }>((base) =>
-        axios.get(`${base}/publish/progress/${encodeURIComponent(deviceId)}`, { timeout: 3000 })
+        agentClient.get(`${base}/publish/progress/${encodeURIComponent(deviceId)}`, { timeout: 3000 })
       );
       return res.progress ?? null;
     } catch {

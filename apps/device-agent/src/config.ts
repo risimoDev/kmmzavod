@@ -17,13 +17,13 @@ function detectTunnelHost(): string {
   for (const name of Object.keys(nets)) {
     for (const net of nets[name] || []) {
       if (net.family === 'IPv4' && !net.internal) {
-        if (net.address.startsWith('10.66.66.') || net.address.startsWith('10.13.13.')) {
+        if (net.address.startsWith('10.66.66.') || net.address.startsWith('10.13.13.') || net.address.startsWith('10.8.0.')) {
           return net.address;
         }
       }
     }
   }
-  return '10.66.66.2';
+  return '127.0.0.1';
 }
 
 function resolveScriptsDir(): string {
