@@ -8,6 +8,9 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
+
 Write-Host '================================================================' -ForegroundColor Cyan
 Write-Host '   KMMZAVOD - ОПТИМИЗАТОР ТРАФИКА И ЗАЩИТА БАЛАНСА ПРОКСИ       ' -ForegroundColor Cyan
 Write-Host '   Экономия до 98% платного трафика AstroProxy ($10 / 1 ГБ)     ' -ForegroundColor Cyan
@@ -36,7 +39,7 @@ $Body = @{
 
 foreach ($url in $AgentUrls) {
     try {
-        $res = Invoke-RestMethod -Uri "$url/proxy/traffic" -Method Post -Body $Body -ContentType 'application/json' -TimeoutSec 4 -ErrorAction Stop
+        $res = Invoke-RestMethod -Headers $AgentHeaders -Uri "$url/proxy/traffic" -Method Post -Body $Body -ContentType 'application/json' -TimeoutSec 4 -ErrorAction Stop
         if ($res.ok) {
             Write-Host "[OK] Режим шлюза успешно обновлен на: $($res.trafficSaver) (Standby: $($res.trafficStandby))" -ForegroundColor Green
             $AgentOk = $true

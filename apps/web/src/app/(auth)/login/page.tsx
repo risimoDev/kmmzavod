@@ -63,7 +63,7 @@ function LoginForm() {
         <div className="text-center mb-8">
         <h1 className="text-2xl font-bold text-text-primary">Sign in to your account</h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Don't have an account?{" "}
+          Don&apos;t have an account?{" "}
           <Link href="/register" className="text-brand-500 hover:text-brand-400 font-medium">
             Sign up
           </Link>

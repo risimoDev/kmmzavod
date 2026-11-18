@@ -6,6 +6,9 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
+
 $host.UI.RawUI.WindowTitle = "KMMZAVOD - Разблокировка Root в Magisk"
 
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -75,7 +78,7 @@ foreach ($serial in $problemSerials) {
             Write-Host "  [УСПЕХ] Root успешно активирован на плате $serial!" -ForegroundColor Green
             # Активация sing-box через агент
             try {
-                Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+                Invoke-RestMethod -Headers $AgentHeaders -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
             } catch {}
             break
         }

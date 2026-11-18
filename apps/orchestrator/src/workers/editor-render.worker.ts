@@ -100,7 +100,9 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         const workspaceProjectId = typeof config.workspaceProjectId === 'string' ? config.workspaceProjectId : null;
         // Autopilot masters are intermediate files: keep them out of project
         // libraries (and out of the autopilot source pool) via origin.
-        const isAutopilot = typeof config.autopilotBatchId === 'string';
+        const isAutopilot = typeof config.autopilotBatchId === 'string' && Boolean(await db.autopilotBatch.findFirst({
+          where: { id: config.autopilotBatchId, editProjectId: projectId, tenantId }, select: { id: true },
+        }));
 
         // Persist outputs onto the included clip rows (aligned by index).
         for (let i = 0; i < result.clips.length; i++) {

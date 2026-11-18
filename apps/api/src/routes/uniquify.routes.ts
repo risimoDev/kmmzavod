@@ -507,28 +507,17 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       }
     }
 
-    // Create the uniquify job
-    const uniquifyJob = await db.uniquifyJob.create({
-      data: {
-        tenantId,
-        sourceVideoId: body.sourceVideoId,
-        createdBy: userId,
-        status: 'pending',
-        variantCount: body.variantCount,
-        targetPlatforms: body.targetPlatforms as any,
-        config: body.config as any,
-      },
+    const uniquifyJob = await db.$transaction(async tx => {
+      const job = await tx.uniquifyJob.create({ data: {
+        tenantId, sourceVideoId: body.sourceVideoId, createdBy: userId, status: 'pending',
+        variantCount: body.variantCount, targetPlatforms: body.targetPlatforms, config: body.config,
+      } });
+      await tx.queueIntent.create({ data: {
+        queue: QUEUES['uniquify-analyze'].name, name: `uniquify-analyze-${job.id}`,
+        payload: { sourceVideoId: body.sourceVideoId, tenantId, uniquifyJobId: job.id },
+      } });
+      return job;
     });
-
-    // Enqueue the analyze job
-    await uniquifyAnalyzeQueue.add(
-      `uniquify-analyze-${uniquifyJob.id}`,
-      {
-        sourceVideoId: body.sourceVideoId,
-        tenantId,
-        uniquifyJobId: uniquifyJob.id,
-      } satisfies UniquifyAnalyzeJobPayload,
-    );
 
     logger.info(
       { uniquifyJobId: uniquifyJob.id, sourceVideoId: body.sourceVideoId, variantCount: body.variantCount },
@@ -685,22 +674,7 @@ export async function uniquifyRoutes(app: FastifyInstance) {
     const isPreserveContext = mode === 'preserve_context';
     const bgmVolume = typeof config.bgmVolume === 'number' ? config.bgmVolume : 0.16;
 
-    // Reset status of failed variants
-    await db.uniqueVariant.updateMany({
-      where: { uniquifyJobId: id, status: 'failed' },
-      data: { status: 'pending', error: null },
-    });
-
-    // Update job status if it was failed
-    await db.uniquifyJob.update({
-      where: { id },
-      data: {
-        status: 'generating',
-        error: null,
-        failedCount: { decrement: job.variants.length },
-      },
-    });
-
+    if (job.status === 'cancelled') return reply.code(409).send({ error: 'Conflict', message: 'Задача отменена' });
     const renderJobs = job.variants.map((v) => {
       const transforms = (v.transforms ?? {}) as Record<string, any>;
       const seed = typeof transforms.seed === 'number' ? transforms.seed : Math.floor(Math.random() * 1_000_000);
@@ -734,11 +708,25 @@ export async function uniquifyRoutes(app: FastifyInstance) {
       };
     });
 
-    await uniquifyRenderQueue.addBulk(renderJobs);
-
-    logger.info({ uniquifyJobId: id, retriedCount: renderJobs.length }, 'Retrying failed uniquify variants');
-
-    return reply.send({ status: 'ok', retriedCount: renderJobs.length });
+    const retriedCount = await db.$transaction(async tx => {
+      const claimed = await tx.uniquifyJob.updateMany({
+        where: { id, tenantId, status: { not: 'cancelled' }, updatedAt: job.updatedAt },
+        data: { status: 'generating', error: null },
+      });
+      if (!claimed.count) return 0;
+      const reset = await tx.uniqueVariant.updateMany({
+        where: { id: { in: job.variants.map(v => v.id) }, status: 'failed' },
+        data: { status: 'pending', error: null },
+      });
+      await tx.queueIntent.createMany({ data: renderJobs.map(task => ({
+        queue: QUEUES['uniquify-render'].name, name: task.name, payload: { ...task.data },
+      })) });
+      await tx.uniquifyJob.update({
+        where: { id }, data: { failedCount: Math.max(0, job.failedCount - reset.count) },
+      });
+      return reset.count;
+    });
+    return reply.send({ status: 'ok', retriedCount });
   });
 
   // ── Variants ────────────────────────────────────────────────────────────
@@ -916,14 +904,12 @@ export async function uniquifyRoutes(app: FastifyInstance) {
         })),
       });
 
+      await tx.queueIntent.create({ data: {
+        queue: QUEUES['uniquify-distribute'].name, name: `distribute-${dj.id}`,
+        payload: { distributeJobId: dj.id, tenantId },
+      } });
       return dj;
     });
-
-    // Enqueue distribute job
-    await distributeQueue.add(
-      `distribute-${distJob.id}`,
-      { distributeJobId: distJob.id, tenantId } satisfies DistributeJobPayload,
-    );
 
     logger.info(
       { distributeJobId: distJob.id, uniquifyJobId: id, items: items.length, accounts: accounts.length },

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import { isAccessTokenPayload } from '../plugins/auth.plugin';
+async function canReadProgress(userId: string, tenantId: string): Promise<boolean> {
+  return Boolean(await db.user.findFirst({
+    where: { id: userId, tenantId, isActive: true, tenant: { isActive: true } },
+    select: { id: true },
+  }));
+}
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { sseSubscriber } from '../lib/sse-subscriber';
@@ -50,40 +55,22 @@ export async function videoRoutes(app: FastifyInstance) {
   app.register(authedVideoRoutes);
 }
 
-// SSE endpoint — EventSource cannot set Authorization header, so we accept the token
-// from: 1) Authorization header, 2) httpOnly cookie, 3) ?token= query (last resort).
+// Native EventSource uses a cookie scoped to this API. Header clients use normal access tokens.
 async function videoProgressRoutes(app: FastifyInstance) {
   app.get('/:id/progress', {
     preHandler: async (req, reply) => {
-      // 1. Standard header (for SSE polyfills that support headers)
-      let token: string | undefined;
-      const authHeader = req.headers.authorization;
-      if (authHeader?.startsWith('Bearer ')) {
-        token = authHeader.slice(7);
-      }
-      // 2. httpOnly cookie
-      if (!token) {
-        const cookies = req.headers.cookie;
-        if (cookies) {
-          const match = cookies.match(/(?:^|;\s*)sse_token=([^\s;]+)/);
-          if (match) token = match[1];
-        }
-      }
-      // 3. Query param fallback (logged as warning)
-      if (!token) {
-        const { token: qToken } = req.query as { token?: string };
-        if (qToken) {
-          token = qToken;
-          req.log.warn({ url: req.url }, 'SSE auth via query param — migrate to cookie');
-        }
-      }
-      if (!token) return reply.code(401).send({ error: 'Unauthorized' });
+      if (req.headers.authorization) return app.authenticate(req, reply);
+      const cookie = req.headers.cookie?.match(/(?:^|;\s*)sse_token=([^\s;]+)/)?.[1];
+      if (!cookie) return reply.code(401).send({ error: 'Unauthorized' });
       try {
-        const decoded = app.jwt.verify(token);
-        if (!isAccessTokenPayload(decoded)) throw new Error('not an access token');
-        req.user = decoded as typeof req.user;
+        const decoded = app.jwt.verify<typeof req.user & { type?: string }>(cookie);
+        if (decoded.type !== 'sse') throw new Error('Invalid token purpose');
+        req.user = decoded;
       } catch {
-        return reply.code(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      if (!await canReadProgress(req.user.userId, req.user.tenantId)) {
+        return reply.code(403).send({ error: 'Forbidden' });
       }
     },
   }, async (req, reply) => {
@@ -93,27 +80,30 @@ async function videoProgressRoutes(app: FastifyInstance) {
     const video = await db.video.findFirst({ where: { id, tenantId }, select: { status: true, error: true } });
     if (!video) return reply.code(404).send({ error: 'NotFound' });
 
-    // Already terminal — send single event and close
-    if (video.status === 'completed' || video.status === 'failed') {
-      reply.raw.setHeader('Content-Type', 'text/event-stream');
-      reply.raw.setHeader('Cache-Control', 'no-cache');
-      reply.raw.setHeader('Connection', 'keep-alive');
+    reply.hijack();
+    for (const [name, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) reply.raw.setHeader(name, value);
+    }
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    if (['completed', 'failed', 'cancelled'].includes(video.status)) {
       reply.raw.write(`data: ${JSON.stringify({ stage: video.status, progress: video.status === 'completed' ? 100 : 0, isComplete: true, status: video.status, error: video.error ?? null, timestamp: new Date().toISOString() })}\n\n`);
       reply.raw.end();
       return;
     }
 
-    // SSE headers
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-cache');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no');
     reply.raw.flushHeaders();
 
     // Heartbeat
     let closed = false;
-    const heartbeat = setInterval(() => {
-      if (!closed && !reply.raw.writableEnded) reply.raw.write(':ping\n\n');
+    const heartbeat = setInterval(async () => {
+      if (closed || reply.raw.writableEnded) return;
+      const active = await canReadProgress(req.user.userId, tenantId).catch(() => false);
+      if (closed || reply.raw.writableEnded) return;
+      if (active) reply.raw.write(':ping\n\n');
+      else reply.raw.end();
     }, 25_000);
 
     // Shared Redis pub/sub — single connection multiplexed across all SSE clients

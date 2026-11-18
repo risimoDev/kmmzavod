@@ -229,7 +229,7 @@ export function AutopilotForm({
 
   // Live preview (debounced) of accounts/sources/posts-per-day.
   const previewKey = JSON.stringify([v.projectId, v.accountGroupId, v.socialAccountIds, v.platforms, v.minHealth, v.publishTimes, v.jitterMinutes, targetMode]);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {

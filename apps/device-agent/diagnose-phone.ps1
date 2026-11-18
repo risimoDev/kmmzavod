@@ -3,10 +3,13 @@
     KMMZAVOD - Глубокая диагностика и авто-починка конкретной платы (PowerShell)
 #>
 
+param([string]$Serial = "ce041714d383c0b70d")
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-param([string]$Serial = "ce041714d383c0b70d")
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
 
 $localPlatformTools = Join-Path $PSScriptRoot "platform-tools"
 $rootPlatformTools = Join-Path $PSScriptRoot "..\..\platform-tools"
@@ -88,7 +91,7 @@ if ($gwPing -match "KMM_GATEWAY_OK") {
 } else {
     Write-Host "  --> [ОШИБКА] Шлюз не отвечает. Перепривязка порта..." -ForegroundColor Yellow
     try {
-        Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $Serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+        Invoke-RestMethod -Headers $AgentHeaders -Uri "http://127.0.0.1:8300/proxy/apply-device" -Method Post -Body (@{ deviceId = $Serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
     } catch {}
 }
 

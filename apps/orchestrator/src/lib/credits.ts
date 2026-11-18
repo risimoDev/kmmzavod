@@ -11,18 +11,26 @@ interface ChargeParams {
   jobId:       string;
   credits:     number;   // positive integer — amount to deduct
   description: string;
+  operation: string;
 }
 
 /**
  * Deducts `credits` from the tenant's balance and records the transaction.
- * Returns the new balance.  The balance is floored at 0 in the transaction log
- * even if the account goes negative (handled at API layer with guards).
+ * Records the actual balance and charges each logical stage only once.
  */
 export async function chargeCredits(
   db: PrismaClient,
   params: ChargeParams,
 ): Promise<number> {
   return db.$transaction(async (tx) => {
+    const operationKey = `${params.jobId}:${params.operation}`;
+    await tx.$queryRaw`SELECT id FROM jobs WHERE id = ${params.jobId}::uuid FOR UPDATE`;
+    const existing = await tx.creditTransaction.findFirst({
+      where: { jobId: params.jobId, type: 'charge', OR: [
+        { operationKey }, { operationKey: null, description: params.description },
+      ] },
+    });
+    if (existing) return existing.balanceAfter;
     const updated = await tx.tenant.update({
       where: { id: params.tenantId },
       data:  { credits: { decrement: params.credits } },
@@ -34,12 +42,14 @@ export async function chargeCredits(
         tenantId:     params.tenantId,
         type:         'charge',
         amount:       -params.credits,
-        balanceAfter: Math.max(0, updated.credits),
+        balanceAfter: updated.credits,
         description:  params.description,
         jobId:        params.jobId,
+        operationKey,
       },
     });
 
+    await tx.job.update({ where: { id: params.jobId }, data: { creditsUsed: { increment: params.credits } } });
     return updated.credits;
   });
 }

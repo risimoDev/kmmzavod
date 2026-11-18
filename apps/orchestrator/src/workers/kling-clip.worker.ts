@@ -39,6 +39,7 @@ export function createKlingClipWorker(deps: Deps) {
     QUEUES['kling-clip'].name,
     async (job) => {
       const { jobId, sceneId, tenantId, prompt, durationSec } = job.data;
+      if (await db.job.count({ where: { id: jobId, status: 'cancelled' } })) return;
       const log     = logger.child({ jobId, sceneId, worker: 'kling-clip' });
       const startMs = Date.now();
 
@@ -102,10 +103,9 @@ export function createKlingClipWorker(deps: Deps) {
 
       // ─── 6. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
-        tenantId, jobId, credits: creditsCharged,
+        tenantId, jobId, credits: creditsCharged, operation: `kling-clip-${sceneId}`,
         description: `Kling clip — scene ${sceneId.slice(0, 8)}`,
       });
-      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

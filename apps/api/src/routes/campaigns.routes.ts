@@ -7,6 +7,7 @@
  * These routes own the DB rows + lifecycle transitions.
  */
 import { z } from 'zod';
+import { isValidCron, isValidTimeZone } from '@kmmzavod/queue';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { logger } from '../logger';
@@ -24,8 +25,8 @@ const CampaignShape = z.object({
   socialAccountIds: z.array(z.string().uuid()).default([]),
   platforms: z.array(z.enum(PLATFORMS)).default([]),
   postsPerAccountPerDay: z.number().int().min(1).max(20).default(1),
-  cronExpression: z.string().min(5).max(100),
-  timezone: z.string().max(50).default('Europe/Moscow'),
+  cronExpression: z.string().min(5).max(100).refine(isValidCron),
+  timezone: z.string().max(50).refine(isValidTimeZone).default('Europe/Moscow'),
   staggerMinutes: z.number().int().min(1).max(1440).default(15),
   captionTemplate: z.string().max(2000).optional(),
   hashtags: z.array(z.string().max(100)).max(30).default([]),

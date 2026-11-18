@@ -337,7 +337,8 @@ async function protectedPublishRoutes(app: FastifyInstance) {
     });
     const jobPayload: PublishJobPayload = { publishJobId: publishJob.id, videoId, tenantId, platform: account.platform, socialAccountId: account.id, scheduledAt: body.scheduledAt };
     const delay = body.scheduledAt ? Math.max(0, new Date(body.scheduledAt).getTime() - Date.now()) : undefined;
-    await publishQueue.add(`publish:${publishJob.id}`, jobPayload, { delay, jobId: publishJob.id });
+    await publishQueue.add(`publish:${publishJob.id}`, jobPayload, { delay, jobId: publishJob.id })
+      .catch(err => app.log.warn({ err, publishJobId: publishJob.id }, 'Publish intent stored for queue recovery'));
     return reply.code(201).send({ id: publishJob.id, platform: publishJob.platform, status: publishJob.status, scheduledAt: publishJob.scheduledAt, createdAt: publishJob.createdAt });
   });
 

@@ -12,18 +12,17 @@ export function getAccessToken(): string {
   return localStorage.getItem('access_token') ?? '';
 }
 
-export function getRefreshToken(): string {
+function getLegacyRefreshToken(): string {
   if (typeof window === 'undefined') return '';
   return localStorage.getItem('refresh_token') ?? '';
 }
 
-export function setTokens(access: string, refresh: string) {
+function setTokens(access: string) {
   localStorage.setItem('access_token', access);
-  localStorage.setItem('refresh_token', refresh);
-  // Mirror to cookies for Next.js middleware and SSR auth guard
+  localStorage.removeItem('refresh_token');
   const isSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
-  document.cookie = `access_token=${access}; path=/; max-age=86400; SameSite=Lax${isSecure ? '; Secure' : ''}`;
-  document.cookie = `refresh_token=${refresh}; path=/; max-age=604800; SameSite=Strict${isSecure ? '; Secure' : ''}`;
+  document.cookie = `kmm_session=1; path=/; max-age=2592000; SameSite=Lax${isSecure ? '; Secure' : ''}`;
+  document.cookie = 'access_token=; path=/; max-age=0';
 }
 
 export function clearTokens() {
@@ -33,6 +32,8 @@ export function clearTokens() {
   localStorage.removeItem('tenant');
   // Clear auth cookies
   document.cookie = 'access_token=; path=/; max-age=0';
+  document.cookie = 'kmm_session=; path=/; max-age=0';
+  // Remove the refresh_token cookie that an earlier build wrote for a short time.
   document.cookie = 'refresh_token=; path=/; max-age=0';
 }
 
@@ -88,7 +89,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 
   // Token expired — try refresh. If another request already rotated the tokens while
   // this one was in flight, just retry with the new access token.
-  if (res.status === 401 && getRefreshToken()) {
+  if (res.status === 401 && (sentToken || getLegacyRefreshToken())) {
     // refreshTokens() throws on network/5xx — tokens are kept and the request just fails
     const refreshed = getAccessToken() !== sentToken || await refreshTokens();
     if (!refreshed) {
@@ -119,7 +120,11 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 export function refreshTokens(): Promise<boolean> {
   if (!refreshInFlight) {
-    refreshInFlight = doRefreshTokens().finally(() => {
+    const accessBefore = getAccessToken();
+    const refresh = () => getAccessToken() !== accessBefore ? Promise.resolve(Boolean(getAccessToken())) : doRefreshTokens();
+    refreshInFlight = (typeof navigator !== 'undefined' && navigator.locks
+      ? Promise.resolve(navigator.locks.request('kmm-session-refresh', refresh))
+      : refresh()).finally(() => {
       refreshInFlight = null;
     });
   }
@@ -136,8 +141,9 @@ async function doRefreshTokens(): Promise<boolean> {
   try {
     res = await fetch(`${BASE}/api/v1/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken: getRefreshToken() }),
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'x-session-mode': 'cookie' },
+      body: JSON.stringify({ refreshToken: getLegacyRefreshToken() || undefined }),
     });
   } catch {
     throw new Error('Network error while refreshing session');
@@ -145,8 +151,8 @@ async function doRefreshTokens(): Promise<boolean> {
   if (res.status === 401 || res.status === 403) return false;
   if (!res.ok) throw new Error(`Session refresh failed (HTTP ${res.status})`);
   const data = await res.json().catch(() => null);
-  if (!data?.accessToken || !data?.refreshToken) throw new Error('Session refresh returned an invalid response');
-  setTokens(data.accessToken, data.refreshToken);
+  if (!data?.accessToken) throw new Error('Session refresh returned an invalid response');
+  setTokens(data.accessToken);
   return true;
 }
 
@@ -290,7 +296,8 @@ export const authApi = {
   login: async (email: string, password: string) => {
     const res = await fetch(`${BASE}/api/v1/auth/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'x-session-mode': 'cookie' },
       body: JSON.stringify({ email, password }),
     });
     if (!res.ok) {
@@ -298,16 +305,17 @@ export const authApi = {
       throw new Error((body as any).message ?? 'Login failed');
     }
     const data = await res.json();
-    setTokens(data.accessToken, data.refreshToken);
+    setTokens(data.accessToken);
     localStorage.setItem('user', JSON.stringify(data.user));
     localStorage.setItem('tenant', JSON.stringify(data.tenant));
-    return data as { user: AuthUser; tenant: AuthTenant; accessToken: string; refreshToken: string };
+    return data as { user: AuthUser; tenant: AuthTenant; accessToken: string };
   },
 
   register: async (email: string, password: string, tenantName: string, displayName?: string) => {
     const res = await fetch(`${BASE}/api/v1/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'x-session-mode': 'cookie' },
       body: JSON.stringify({ email, password, tenantName, displayName }),
     });
     if (!res.ok) {
@@ -315,21 +323,19 @@ export const authApi = {
       throw new Error((body as any).message ?? 'Registration failed');
     }
     const data = await res.json();
-    setTokens(data.accessToken, data.refreshToken);
+    setTokens(data.accessToken);
     localStorage.setItem('user', JSON.stringify(data.user));
     localStorage.setItem('tenant', JSON.stringify(data.tenant));
-    return data as { user: AuthUser; tenant: AuthTenant; accessToken: string; refreshToken: string };
+    return data as { user: AuthUser; tenant: AuthTenant; accessToken: string };
   },
 
   logout: async () => {
     try {
-      await fetch(`${BASE}/api/v1/auth/logout`, {
+      await apiFetch('/api/v1/auth/logout', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getAccessToken()}`,
-        },
-        body: JSON.stringify({ refreshToken: getRefreshToken() }),
+        credentials: 'include',
+        headers: { 'x-session-mode': 'cookie' },
+        body: JSON.stringify({ refreshToken: getLegacyRefreshToken() || undefined }),
       });
     } catch {}
     clearTokens();
@@ -862,7 +868,7 @@ export const accountFarmApi = {
     const url = `${BASE}/api/v1/farm/devices/${encodeURIComponent(deviceId)}/frame`;
     const get = () => fetch(url, { headers: { Authorization: `Bearer ${getAccessToken()}` }, signal, cache: 'no-store' });
     let res = await get();
-    if (res.status === 401 && getRefreshToken() && (await refreshTokens())) res = await get();
+    if (res.status === 401 && getAccessToken() && (await refreshTokens())) res = await get();
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error((body as any).error || (body as any).message || `HTTP ${res.status}`);

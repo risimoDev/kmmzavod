@@ -152,6 +152,7 @@ export class ProxyManager {
   private readonly root: RootTransparentProxy;
 
   /** Shared-mode lease: a running task (publish / warmup) owns the shared proxy until it finishes. */
+  private readonly publishTraffic = new Map<string, number>();
   private lease: { deviceId: string; count: number } | null = null;
   private leaseWaiters: Array<() => void> = [];
 
@@ -402,7 +403,7 @@ export class ProxyManager {
     }
 
     // Traffic Saver: eliminate heavy video CDN media streaming (-98% data usage)
-    if (targetHost && isHeavyMediaCdn(targetHost)) {
+    if (!this.publishTraffic.has(deviceId) && targetHost && isHeavyMediaCdn(targetHost)) {
       if (this.trafficSaver === 'block_media') {
         return { kind: 'block', reason: 'traffic saver: heavy video CDN stream blocked (-98% bandwidth)' };
       }
@@ -1065,13 +1066,19 @@ export class ProxyManager {
    * home IP while proxies are in use on this farm.
    */
   async preflight(deviceId: string): Promise<{ ok: boolean; detail?: string; ipCheck?: DeviceIpCheckResult }> {
-    const usingProxies = this.hasAnyProxy();
+    const usingProxies = Boolean(config.PROXY_UPSTREAM_VIA) || this.hasAnyProxy();
+    if (usingProxies && !this.devices.has(deviceId)) {
+      return { ok: false, detail: 'У платы нет назначенного прокси' };
+    }
     const net = await this.ensureDeviceInternet(deviceId);
     if (!net.ok) {
       if (!usingProxies) return { ok: true };
       return { ok: false, detail: `Не удалось подтвердить интернет на плате: ${net.error}` };
     }
     const ipCheck = await this.checkDeviceIp(deviceId);
+    if (usingProxies && (!ipCheck.ok || ipCheck.route !== 'proxy')) {
+      return { ok: false, ipCheck, detail: ipCheck.error ?? 'Маршрут через прокси платы не подтверждён' };
+    }
     if (ipCheck.leakDetected) {
       return { ok: false, ipCheck, detail: `Обнаружена утечка: плата выходит в интернет с IP фермы (${ipCheck.ip}), а не через прокси` };
     }
@@ -1086,6 +1093,15 @@ export class ProxyManager {
   }
 
   // ── IP checks ──────────────────────────────────────────────────────────────
+
+  allowPublishMedia(deviceId: string): () => void {
+    this.publishTraffic.set(deviceId, (this.publishTraffic.get(deviceId) ?? 0) + 1);
+    return () => {
+      const count = this.publishTraffic.get(deviceId) ?? 0;
+      if (count <= 1) this.publishTraffic.delete(deviceId);
+      else this.publishTraffic.set(deviceId, count - 1);
+    };
+  }
 
   /** Resolve public IP of the farm PC (used for leak detection). */
   async refreshHostIp(): Promise<string | null> {

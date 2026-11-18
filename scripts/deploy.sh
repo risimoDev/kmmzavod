@@ -9,7 +9,7 @@
 #    --no-migrate    Не применять миграции
 #    --service NAME  Пересобрать только один сервис (api | web | orchestrator...)
 #    --create-admin  Создать администратора после деплоя
-#    --rollback      Откатиться к предыдущей версии (git reset --hard HEAD~1)
+#    --rollback      Запустить сохранённые образы предыдущего релиза
 #    -h, --help      Показать помощь
 # =============================================================================
 set -euo pipefail
@@ -91,22 +91,26 @@ echo -e "  Директория: ${BOLD}$REPO_ROOT${RESET}"
 # =============================================================================
 # ROLLBACK
 # =============================================================================
+save_release_tag() {
+  if grep -q '^KMM_RELEASE_SHA=' .env; then
+    sed -i "s/^KMM_RELEASE_SHA=.*/KMM_RELEASE_SHA=$KMM_RELEASE_SHA/" .env
+  else
+    printf '\nKMM_RELEASE_SHA=%s\n' "$KMM_RELEASE_SHA" >> .env
+  fi
+}
+
 if $DO_ROLLBACK; then
-  header "Откат к предыдущей версии"
-  CURRENT=$(git rev-parse --short HEAD)
-  PREV=$(git rev-parse --short HEAD~1 2>/dev/null || echo "")
-  [ -z "$PREV" ] && error "Нет предыдущего коммита для отката"
-
-  warn "Текущий коммит: $CURRENT"
-  warn "Откат на: $PREV — $(git log -1 --pretty=format:'%s' HEAD~1)"
-  read -rp "  Продолжить откат? [y/N]: " CONFIRM
-  [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "Откат отменён."; exit 0; }
-
-  git reset --hard HEAD~1
-  success "Откат выполнен: $(git rev-parse --short HEAD)"
-
-  # Пересобрать и перезапустить после отката
-  DO_BUILD=true
+  [ -s .deploy-release.previous ] || error "Нет сохранённого предыдущего релиза"
+  export KMM_RELEASE_SHA="$(cat .deploy-release.previous)"
+  [[ "$KMM_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || error "Некорректный идентификатор релиза"
+  export COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+  for service in api orchestrator editor video-processor web; do
+    docker image inspect "kmmzavod-$service:$KMM_RELEASE_SHA" >/dev/null || error "Образ предыдущего релиза $service недоступен"
+  done
+  docker compose up -d --no-build --no-deps --wait api orchestrator editor video-processor web
+  save_release_tag
+  success "Запущен предыдущий релиз $KMM_RELEASE_SHA. Схема БД сохранена."
+  exit 0
 fi
 
 # =============================================================================
@@ -150,13 +154,8 @@ else
   fi
 fi
 
-# Удаляем dev-override — он отключает app-сервисы через profiles
-# git pull может вернуть его из репозитория
-if [ -f docker-compose.override.yml ]; then
-  info "Удаляем docker-compose.override.yml (dev-only, мешает на сервере)"
-  rm -f docker-compose.override.yml
-  success "override удалён"
-fi
+export COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+export KMM_RELEASE_SHA="$(git rev-parse HEAD)"
 
 # =============================================================================
 # 2. Проверка .env
@@ -164,10 +163,27 @@ fi
 header "2/6 · Проверка конфигурации"
 
 [ ! -f .env ] && error ".env не найден. Скопируйте .env.example → .env и заполните."
+if ! grep -qE '^INTERNAL_SERVICE_TOKEN=.+$' .env; then
+  command -v openssl >/dev/null || error "Для генерации INTERNAL_SERVICE_TOKEN нужен openssl"
+  token="$(openssl rand -hex 32)" || error "Не удалось сгенерировать INTERNAL_SERVICE_TOKEN"
+  (umask 077; printf '\nINTERNAL_SERVICE_TOKEN=%s\n' "$token" >> .env)
+  unset token
+fi
 
 # Проверяем что docker доступен
 docker info &>/dev/null 2>&1 || error "Docker daemon не запущен"
 docker compose version &>/dev/null 2>&1 || error "Docker Compose не найден"
+
+if ! grep -qE '^MINIO_IMAGE=.+$' .env; then
+  minio_container="$(docker compose ps -q minio)"
+  if [ -n "$minio_container" ]; then
+    minio_id="$(docker inspect --format '{{.Image}}' "$minio_container")"
+    minio_digest="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$minio_id")"
+    if [[ "$minio_digest" == *@sha256:* ]]; then
+      printf '\nMINIO_IMAGE=%s\n' "$minio_digest" >> .env
+    fi
+  fi
+fi
 
 success ".env найден, Docker доступен"
 
@@ -217,6 +233,14 @@ if $DO_MIGRATE; then
     [ "$WAIT" -ge 30 ] && error "PostgreSQL не ответил за 30 сек"
   done
 
+  info "Сохраняем резервную копию PostgreSQL перед миграциями..."
+  (umask 077
+    mkdir -p .deploy-backups &&
+    backup=".deploy-backups/pg-${KMM_RELEASE_SHA}-$(date +%s).dump" &&
+    docker compose exec -T postgres pg_dump -U kmmzavod -Fc kmmzavod > "$backup.tmp" &&
+    docker compose exec -T postgres pg_restore --list < "$backup.tmp" >/dev/null &&
+    mv -- "$backup.tmp" "$backup"
+  ) || error "Не удалось проверить резервную копию PostgreSQL"
   info "Применяем миграции Prisma..."
   if docker compose run --rm --no-deps api     sh -c 'cd /app && npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma' 2>&1; then
     success "Миграции применены"
@@ -252,7 +276,12 @@ else
   # nginx, farm-proxy-relay, ...) — без явного списка, чтобы новые сервисы не выпадали
   # из деплоя. Сервисы под profiles (publisher) стартуют только если профиль включён
   # через COMPOSE_PROFILES.
-  docker compose up -d --remove-orphans
+  docker compose up -d --remove-orphans --wait
+  if [ -s .deploy-release.current ] && [ "$(cat .deploy-release.current)" != "$KMM_RELEASE_SHA" ]; then
+    cp -- .deploy-release.current .deploy-release.previous
+  fi
+  printf '%s\n' "$KMM_RELEASE_SHA" > .deploy-release.current
+  save_release_tag
 
   success "Все сервисы обновлены"
 fi
@@ -285,7 +314,7 @@ if $CREATE_ADMIN; then
     # Безопасное обновление роли (SQL-инъекция предотвращена экранированием)
     SAFE_EMAIL="$(sql_escape "$ADMIN_EMAIL")"
     docker compose exec -T postgres psql -U kmmzavod -c \
-      "UPDATE \"User\" SET role='admin' WHERE email='${SAFE_EMAIL}';" 2>/dev/null
+      "UPDATE \"users\" SET role='admin' WHERE email='${SAFE_EMAIL}';"
     success "Администратор: $ADMIN_EMAIL"
   else
     warn "HTTP $HTTP_STATUS — создайте вручную через register API + UPDATE role"

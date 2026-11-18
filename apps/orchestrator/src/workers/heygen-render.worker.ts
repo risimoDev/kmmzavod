@@ -40,6 +40,7 @@ export function createHeygenRenderWorker(deps: Deps) {
     QUEUES['heygen-render'].name,
     async (job) => {
       const { jobId, sceneId, tenantId, avatarId, voiceId, script, isCombined, combinedSceneIds } = job.data;
+      if (await db.job.count({ where: { id: jobId, status: 'cancelled' } })) return;
       const log     = logger.child({ jobId, sceneId, worker: 'heygen-render', isCombined: !!isCombined });
       const startMs = Date.now();
 
@@ -253,12 +254,11 @@ export function createHeygenRenderWorker(deps: Deps) {
 
       // ─── 7. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
-        tenantId, jobId, credits: creditsCharged,
+        tenantId, jobId, credits: creditsCharged, operation: isCombined ? 'heygen-combined' : `heygen-${sceneId}`,
         description: isCombined
           ? `HeyGen combined avatar — ${combinedSceneIds!.length} scenes`
           : `HeyGen avatar — scene ${sceneId.slice(0, 8)}`,
       });
-      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

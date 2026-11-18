@@ -9,7 +9,7 @@ echo ================================================================
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8300/proxy/mode' -Method Post -Body '{\"mode\":\"private_parallel\"}' -ContentType 'application/json' -TimeoutSec 5; Write-Host '[OK] Private-режим успешно включен!' -ForegroundColor Green } catch { try { $r = Invoke-RestMethod -Uri 'http://10.66.66.2:8300/proxy/mode' -Method Post -Body '{\"mode\":\"private_parallel\"}' -ContentType 'application/json' -TimeoutSec 5; Write-Host '[OK] Private-режим успешно включен через tunnel!' -ForegroundColor Green } catch { Write-Host '[ИНФО] Служба агента обновит режим при следующем старте.' -ForegroundColor Yellow } }"
+  "$h=@{}; if($env:DEVICE_AGENT_TOKEN){$h['x-agent-token']=$env:DEVICE_AGENT_TOKEN}; try { $r = Invoke-RestMethod -Headers $h -Uri 'http://127.0.0.1:8300/proxy/mode' -Method Post -Body '{\"mode\":\"private_parallel\"}' -ContentType 'application/json' -TimeoutSec 5; Write-Host '[OK] Private-режим успешно включен!' -ForegroundColor Green } catch { try { $r = Invoke-RestMethod -Headers $h -Uri 'http://10.66.66.2:8300/proxy/mode' -Method Post -Body '{\"mode\":\"private_parallel\"}' -ContentType 'application/json' -TimeoutSec 5; Write-Host '[OK] Private-режим успешно включен через tunnel!' -ForegroundColor Green } catch { Write-Host '[ИНФО] Служба агента обновит режим при следующем старте.' -ForegroundColor Yellow } }"
 
 echo.
 pause

@@ -163,7 +163,20 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── QUEUE STATS ────────────────────────────────────────────────────────────
 
-  // GET /api/v1/admin/queue-stats
+  app.get('/queue-recovery', async () => {
+    const [awaitingDelivery, oldest, needsReview] = await Promise.all([
+      db.queueIntent.count(),
+      db.queueIntent.findFirst({ orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
+      db.publishJob.count({ where: { needsReview: true } }),
+    ]);
+    return {
+      awaitingDelivery,
+      oldestIntentAgeSec: oldest ? Math.floor((Date.now() - oldest.createdAt.getTime()) / 1000) : 0,
+      publicationsNeedingReview: needsReview,
+    };
+  });
+
+  // Queue counts
   app.get('/queue-stats', async (_req, reply) => {
     const counts = await Promise.all(
       Object.entries(ALL_QUEUES).map(async ([name, q]) => ({

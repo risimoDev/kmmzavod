@@ -14,11 +14,11 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
-import { editorAnalyzeQueue, editorRenderQueue, uniquifyAnalyzeQueue } from '../lib/queues';
+import { uniquifyAnalyzeQueue } from '../lib/queues';
 import { StoragePaths } from '@kmmzavod/storage';
 import { logger } from '../logger';
 import { assertOwnStorageKey, StorageKeyError } from '../lib/storage-keys';
-import type { EditorAnalyzeJobPayload, EditorRenderJobPayload, UniquifyAnalyzeJobPayload } from '@kmmzavod/queue';
+import { QUEUES, type UniquifyAnalyzeJobPayload } from '@kmmzavod/queue';
 import {
   writeScript, fishTts, fishSearchVoices, paceFor, voiceGender, voiceById, stripEmotionTags,
   FISH_VOICES, DEFAULT_VOICE_ID, LlmUnavailableError, FishError,
@@ -60,8 +60,12 @@ function randomSeed(): number {
   return Math.floor(Math.random() * 1_000_000_000);
 }
 
-/** Config fields only the server writes (generate-voice); a client must not inject them. */
-const SERVER_ONLY_CONFIG_KEYS = ['voiceoverKey'] as const;
+const clientConfigSchema = z.object({
+  bgmKey: z.string().optional(),
+  workspaceProjectId: z.string().uuid().nullish(),
+  seed: z.number().int().optional(),
+  excludeRanges: z.record(z.array(z.tuple([z.number(), z.number()]))).optional(),
+});
 
 /**
  * Client-supplied project config is merged into EditProject.config, which the render
@@ -73,8 +77,7 @@ async function sanitizeClientConfig(
   tenantId: string,
   input: Record<string, unknown> | undefined,
 ): Promise<Record<string, unknown>> {
-  const cfg: Record<string, unknown> = { ...(input ?? {}) };
-  for (const k of SERVER_ONLY_CONFIG_KEYS) delete cfg[k];
+  const cfg: Record<string, unknown> = clientConfigSchema.parse(input ?? {});
   for (const [k, v] of Object.entries(cfg)) {
     if (!/Keys?$/.test(k)) continue;
     const keys = Array.isArray(v) ? v : [v];
@@ -436,18 +439,21 @@ export async function editorRoutes(app: FastifyInstance) {
     // source analyses make the re-roll take seconds, not minutes.
     const { reroll } = z.object({ reroll: z.boolean().optional() }).parse(req.body ?? {});
     const cfg = (project.config as Record<string, unknown>) || {};
-    await db.editProject.update({
-      where: { id: projectId },
-      data: {
-        status: 'analyzing',
-        error: null,
-        ...(reroll || typeof cfg.seed !== 'number' ? { config: { ...cfg, seed: randomSeed() } as object } : {}),
-      },
+    const started = await db.$transaction(async tx => {
+      const claimed = await tx.editProject.updateMany({
+        where: { id: projectId, tenantId, updatedAt: project.updatedAt, status: { notIn: ['analyzing', 'rendering'] } },
+        data: {
+          status: 'analyzing', error: null,
+          ...(reroll || typeof cfg.seed !== 'number' ? { config: { ...cfg, seed: randomSeed() } as object } : {}),
+        },
+      });
+      if (!claimed.count) return false;
+      await tx.queueIntent.create({ data: {
+        queue: QUEUES['editor-analyze'].name, name: `editor-analyze-${projectId}`, payload: { projectId, tenantId },
+      } });
+      return true;
     });
-    await editorAnalyzeQueue.add(
-      `editor-analyze-${projectId}`,
-      { projectId, tenantId } satisfies EditorAnalyzeJobPayload,
-    );
+    if (!started) return reply.code(409).send({ error: 'Conflict', message: 'Проект занят или изменился. Обновите страницу.' });
     return reply.code(202).send({ status: 'analyzing' });
   });
 
@@ -699,11 +705,18 @@ export async function editorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'BadRequest', message: 'Нет выбранных клипов' });
     }
 
-    await db.editProject.update({ where: { id: projectId }, data: { status: 'rendering', error: null } });
-    await editorRenderQueue.add(
-      `editor-render-${projectId}`,
-      { projectId, tenantId } satisfies EditorRenderJobPayload,
-    );
+    const started = await db.$transaction(async tx => {
+      const claimed = await tx.editProject.updateMany({
+        where: { id: projectId, tenantId, status: { notIn: ['analyzing', 'rendering'] } },
+        data: { status: 'rendering', error: null },
+      });
+      if (!claimed.count) return false;
+      await tx.queueIntent.create({ data: {
+        queue: QUEUES['editor-render'].name, name: `editor-render-${projectId}`, payload: { projectId, tenantId },
+      } });
+      return true;
+    });
+    if (!started) return reply.code(409).send({ error: 'Conflict', message: 'Проект уже обрабатывается' });
     return reply.code(202).send({ status: 'rendering' });
   });
 
@@ -746,8 +759,8 @@ export async function editorRoutes(app: FastifyInstance) {
     if (!project) return reply.code(404).send({ error: 'NotFound' });
 
     const currentConfig = (project.config as Record<string, unknown>) || {};
-    const updated = await db.editProject.update({
-      where: { id },
+    const updated = await db.editProject.updateMany({
+      where: { id, tenantId, updatedAt: project.updatedAt },
       data: {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.geometry !== undefined ? { geometry: body.geometry } : {}),
@@ -771,7 +784,8 @@ export async function editorRoutes(app: FastifyInstance) {
         } as object,
       },
     });
-    return updated;
+    if (!updated.count) return reply.code(409).send({ error: 'Conflict', message: 'Проект изменился. Обновите страницу.' });
+    return db.editProject.findUniqueOrThrow({ where: { id } });
   });
 
   // ── Presets & Voices ────────────────────────────────────────────────────────
@@ -1204,7 +1218,16 @@ export async function editorRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const project = await db.editProject.findFirst({ where: { id, tenantId } });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
-    await db.editProject.delete({ where: { id } });
+    const deleted = await db.$transaction(async tx => {
+      const result = await tx.editProject.deleteMany({
+        where: { id, tenantId, status: { notIn: ['analyzing', 'rendering'] } },
+      });
+      if (result.count) await tx.queueIntent.create({ data: {
+        queue: 'editor-cleanup', name: 'editor-cleanup', payload: { projectId: id, tenantId },
+      } });
+      return result.count > 0;
+    });
+    if (!deleted) return reply.code(409).send({ error: 'Conflict', message: 'Проект ещё обрабатывается' });
     return reply.code(204).send();
   });
 }

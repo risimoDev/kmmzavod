@@ -6,6 +6,7 @@
  * session blob that the caller must persist (re-encrypted) on the SocialAccount.
  */
 import axios from 'axios';
+import { internalHttp } from './internal-http';
 import { config } from '../config';
 
 const BASE = config.PUBLISHER_URL.replace(/\/+$/, '');
@@ -42,7 +43,7 @@ export function describePublisherError(err: unknown): string {
 /** Liveness ping for the publisher service. Returns null if OK, else a reason. */
 export async function checkPublisherHealth(): Promise<string | null> {
   try {
-    await axios.get(`${BASE}/health`, { timeout: 5_000 });
+    await internalHttp.get(`${BASE}/health`, { timeout: 5_000 });
     return null;
   } catch (err: unknown) {
     return describePublisherError(err);
@@ -57,7 +58,7 @@ export const publisherService = {
     deviceFingerprint?: Record<string, unknown> | null;
     sessionData: Record<string, unknown>;
   }): Promise<PublishResult> {
-    const res = await axios.post(`${BASE}/instagram/publish`, {
+    const res = await internalHttp.post(`${BASE}/instagram/publish`, {
       video_url: opts.videoUrl,
       caption: opts.caption,
       proxy_url: opts.proxyUrl ?? null,
@@ -77,7 +78,7 @@ export const publisherService = {
     proxyUrl?: string | null;
     sessionData: Record<string, unknown>;
   }): Promise<PublishResult> {
-    const res = await axios.post(`${BASE}/tiktok/publish`, {
+    const res = await internalHttp.post(`${BASE}/tiktok/publish`, {
       video_url: opts.videoUrl,
       caption: opts.caption,
       proxy_url: opts.proxyUrl ?? null,
@@ -96,7 +97,7 @@ export const publisherService = {
     sessionData: Record<string, unknown>;
     likeCount?: number;
   }): Promise<WarmupResult> {
-    const res = await axios.post(`${BASE}/instagram/warmup`, {
+    const res = await internalHttp.post(`${BASE}/instagram/warmup`, {
       proxy_url: opts.proxyUrl ?? null,
       device_fingerprint: opts.deviceFingerprint ?? null,
       session_data: opts.sessionData,

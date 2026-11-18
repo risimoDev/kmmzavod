@@ -129,6 +129,7 @@ fix_secret REDIS_PASSWORD 24
 fix_secret MINIO_ROOT_PASSWORD 24
 fix_secret JWT_SECRET 48
 fix_secret ENCRYPTION_KEY
+fix_secret INTERNAL_SERVICE_TOKEN 48
 
 # Синхронизируем MINIO_SECRET_KEY с MINIO_ROOT_PASSWORD
 MINIO_PW=$(grep -E '^MINIO_ROOT_PASSWORD=' .env | cut -d= -f2-)
@@ -200,7 +201,7 @@ header "6/7 · Создание администратора"
 
 # Проверяем существует ли уже admin
 ADMIN_COUNT=$(docker compose exec -T postgres psql -U kmmzavod -tAc \
-  "SELECT COUNT(*) FROM \"User\" WHERE role='admin';" 2>/dev/null || echo "0")
+  "SELECT COUNT(*) FROM \"users\" WHERE role='admin';" 2>/dev/null || echo "0")
 
 if [ "${ADMIN_COUNT:-0}" -gt 0 ]; then
   success "Администратор уже существует — пропускаем"
@@ -216,7 +217,7 @@ else
   echo ""
   echo -e "  Затем повысьте роль:"
   echo -e "  ${CYAN}docker compose exec postgres psql -U kmmzavod -c \\"
-  echo -e "    \"UPDATE \\\\\"User\\\\\" SET role='admin' WHERE email='admin@kmmzavod.ru';\"${RESET}"
+  echo -e "    \"UPDATE \\\"users\\\" SET role='admin' WHERE email='admin@kmmzavod.ru';\"${RESET}"
 fi
 
 # =============================================================================

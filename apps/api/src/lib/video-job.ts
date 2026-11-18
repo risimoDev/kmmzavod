@@ -11,7 +11,7 @@ import type { Prisma } from '@prisma/client';
 import { db } from './db';
 import { pipelineQueue } from './queues';
 import { logger } from '../logger';
-import type { PipelineJobPayload } from '@kmmzavod/queue';
+import { QUEUES } from '@kmmzavod/queue';
 
 /**
  * Non-terminal Job statuses (see enum JobStatus). The orchestrator moves a job through
@@ -135,6 +135,10 @@ export async function createVideoJob(p: CreateVideoJobParams): Promise<CreateVid
         },
       });
 
+      await tx.queueIntent.create({ data: {
+        id: job.id, queue: QUEUES.pipeline.name, name: `pipeline:${job.id}`,
+        payload: { jobId: job.id, tenantId: p.tenantId },
+      } });
       return { video, job };
     });
   } catch (err) {
@@ -145,27 +149,6 @@ export async function createVideoJob(p: CreateVideoJobParams): Promise<CreateVid
   }
 
   const { video, job } = created;
-
-  // jobId = Job.id so cancel can find (and remove) the queued pipeline job.
-  const payload: PipelineJobPayload = { jobId: job.id, tenantId: p.tenantId };
-  try {
-    await pipelineQueue.add(`pipeline:${job.id}`, payload, { jobId: job.id });
-  } catch (queueErr: any) {
-    // Queue add failed — mark records failed (no zombie jobs) and give the reserve back.
-    try {
-      await db.$transaction([
-        db.job.update({ where: { id: job.id }, data: { status: 'failed', error: 'Queue unavailable' } }),
-        db.video.update({ where: { id: video.id }, data: { status: 'failed' } }),
-      ]);
-    } catch { /* best-effort cleanup */ }
-    try {
-      await releaseJobReserve(p.tenantId, job.id, estimatedCredits, 'Refund: pipeline could not be enqueued');
-    } catch (relErr: any) {
-      logger.error({ jobId: job.id, err: relErr.message }, 'Failed to release reserve after enqueue failure');
-    }
-    logger.error({ jobId: job.id, err: queueErr.message }, 'Failed to enqueue pipeline job — records marked failed');
-    return { ok: false, reason: 'queue_unavailable' };
-  }
 
   return { ok: true, video, job };
 }
@@ -246,6 +229,7 @@ export async function cancelJobAndRelease(
   if (job.videoId) {
     await db.video.update({ where: { id: job.videoId }, data: { status: 'cancelled' } });
   }
+  await db.queueIntent.deleteMany({ where: { id: job.id, queue: QUEUES.pipeline.name } });
   await removeQueuedPipelineJob(job.id);
   try {
     await releaseJobReserve(job.tenantId, job.id, reservedCreditsOf(job.payload), description);

@@ -113,8 +113,9 @@ export default function VideoDetailPage() {
 
   // Load social accounts when a variant is selected
   const selectedVariant = video?.variants?.find((v) => v.selectedAt);
+  const selectedVariantId = selectedVariant?.id;
   useEffect(() => {
-    if (selectedVariant) {
+    if (selectedVariantId) {
       setAccountsLoading(true);
       socialAccountsApi
         .list()
@@ -122,7 +123,7 @@ export default function VideoDetailPage() {
         .catch(() => {})
         .finally(() => setAccountsLoading(false));
     }
-  }, [selectedVariant?.id]);
+  }, [selectedVariantId]);
 
   /* ── Handlers ────────────────────────────────────────────────────────────── */
 

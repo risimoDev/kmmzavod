@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.config import settings
 
@@ -68,26 +70,40 @@ async def upload_file(key: str, local_path: str,
 
 async def resolve_source(url_or_path: str) -> tuple[str, bool]:
     """Return (local_path, is_temp). Local paths pass through; URLs are downloaded."""
-    if os.path.exists(url_or_path):
+    restricted = settings.require_internal_service_token
+    if not restricted and os.path.exists(url_or_path):
         return url_or_path, False
     if not url_or_path.lower().startswith(("http://", "https://")):
         raise FileNotFoundError(f"source not found and not a URL: {url_or_path}")
 
     import httpx
 
+    def origin(url: str):
+        parts = urlsplit(url)
+        return parts.scheme, parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+
+    if restricted:
+        internal = f"{'https' if settings.minio_secure else 'http'}://{settings.minio_endpoint}"
+        parts = urlsplit(url_or_path)
+        allowed = {origin(internal), origin(settings.minio_public_url)}
+        if parts.username or parts.password or origin(url_or_path) not in allowed:
+            raise ValueError("source must be hosted on configured object storage")
+
     fd, tmp = tempfile.mkstemp(prefix="src_", suffix=".mp4", dir=_work_dir())
     os.close(fd)
     written = 0
-    async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as client:
-        async with client.stream("GET", url_or_path) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as f:
-                async for chunk in resp.aiter_bytes(1024 * 256):
-                    written += len(chunk)
-                    if written > _MAX_BYTES:
-                        f.close()
-                        os.remove(tmp)
-                        raise ValueError("source exceeds max download size")
-                    f.write(chunk)
-    logger.info("Downloaded %s → %s (%d bytes)", url_or_path[:80], tmp, written)
+    try:
+        async with httpx.AsyncClient(timeout=600.0, follow_redirects=not restricted) as client:
+            async with client.stream("GET", url_or_path) as resp:
+                resp.raise_for_status()
+                with open(tmp, "wb") as f:
+                    async for chunk in resp.aiter_bytes(1024 * 256):
+                        written += len(chunk)
+                        if written > _MAX_BYTES:
+                            raise ValueError("source exceeds max download size")
+                        f.write(chunk)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    logger.info("Downloaded source (%d bytes)", written)
     return tmp, True

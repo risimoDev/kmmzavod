@@ -1,5 +1,11 @@
 # Root build context (api, orchestrator, web). Nothing here is COPYed by those Dockerfiles.
 .git
+backups
+.deploy-backups
+.deploy-release.*
+**/devices-proxy-state*.json
+**/vps-proxies*.txt
+**/vps-list.txt
 .claude
 .kilo
 .github

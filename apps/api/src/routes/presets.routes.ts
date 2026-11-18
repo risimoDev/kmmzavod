@@ -5,6 +5,7 @@
  * from one product. Flow: create preset → preview → activate factory.
  */
 import { z } from 'zod';
+import { isValidCron, isValidTimeZone } from '@kmmzavod/queue';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { logger } from '../logger';
@@ -13,39 +14,6 @@ import { createVideoJob } from '../lib/video-job';
 const EDIT_STYLES = ['dynamic', 'smooth', 'minimal', 'random'] as const;
 
 const SOCIAL_PLATFORMS = ['tiktok', 'instagram', 'youtube_shorts', 'postbridge'] as const;
-
-// Validates a 5-field standard cron expression (minute hour dom month dow)
-function isValidCron(expr: string): boolean {
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  // [min, max] for each cron field: minute, hour, dom, month, dow
-  const ranges: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
-  return fields.every((field, i) => {
-    const [lo, hi] = ranges[i];
-    if (field === '*') return true;
-    // Step: */n or base/n
-    if (field.includes('/')) {
-      const [left, right] = field.split('/');
-      const step = parseInt(right, 10);
-      if (isNaN(step) || step < 1) return false;
-      if (left === '*') return true;
-      const base = parseInt(left, 10);
-      return !isNaN(base) && base >= lo && base <= hi;
-    }
-    // List: n,m,k
-    if (field.includes(',')) {
-      return field.split(',').every(v => { const n = parseInt(v, 10); return !isNaN(n) && n >= lo && n <= hi; });
-    }
-    // Range: n-m
-    if (field.includes('-')) {
-      const parts = field.split('-').map(v => parseInt(v, 10));
-      return parts.length === 2 && parts.every(n => !isNaN(n)) && parts[0] >= lo && parts[1] <= hi && parts[0] <= parts[1];
-    }
-    // Single numeric value
-    const n = parseInt(field, 10);
-    return !isNaN(n) && n >= lo && n <= hi;
-  });
-}
 
 // Factory minimum interval is 1 hour: the minute field must be a single number
 // (not `*`, `*/n`, a list or a range), so the cron can fire at most once per hour.
@@ -65,7 +33,7 @@ const CreatePresetBody = z.object({
   targetDurationSec: z.number().int().min(15).max(90).default(30),
   customPrompt:     z.string().max(2000).optional(),
   cronExpression:   z.string().min(5).max(100).refine(isValidCron, CRON_REFINE).default('0 10 * * *'),
-  timezone:         z.string().default('Europe/Moscow'),
+  timezone:         z.string().refine(isValidTimeZone).default('Europe/Moscow'),
   autoPublish:      z.boolean().default(false),
   publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).default([]),
   socialAccountIds: z.array(z.string().uuid()).default([]),
@@ -80,7 +48,7 @@ const UpdatePresetBody = z.object({
   targetDurationSec: z.number().int().min(15).max(90).optional(),
   customPrompt:     z.string().max(2000).nullable().optional(),
   cronExpression:   z.string().min(5).max(100).refine(isValidCron, CRON_REFINE).optional(),
-  timezone:         z.string().optional(),
+  timezone:         z.string().refine(isValidTimeZone).optional(),
   autoPublish:      z.boolean().optional(),
   publishPlatforms: z.array(z.enum(SOCIAL_PLATFORMS)).optional(),
   socialAccountIds: z.array(z.string().uuid()).optional(),

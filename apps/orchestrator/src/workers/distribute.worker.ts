@@ -11,6 +11,7 @@ import { QUEUES, type DistributeJobPayload, type PublishJobPayload } from '@kmmz
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { ensureArticleInCaption } from '../lib/article';
+import { accountDay } from '../lib/tz';
 import { deviceAgentService } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'distribute' });
@@ -166,7 +167,8 @@ export function createDistributeWorker(deps: Deps): Worker {
           });
           skippedCount++; itemIndex++; continue;
         }
-        if ((item.socialAccount.dailyPostCount ?? 0) >= maxPosts) {
+        const day = accountDay(new Date(), item.socialAccount.accountGroup?.timezone);
+        if (item.socialAccount.lastPostAt && item.socialAccount.lastPostAt >= day && item.socialAccount.dailyPostCount >= maxPosts) {
           await db.distributeItem.update({
             where: { id: item.id },
             data: { status: 'skipped', error: `Daily post limit reached (${maxPosts})` },
@@ -259,29 +261,28 @@ export function createDistributeWorker(deps: Deps): Worker {
         }
         caption = ensureArticleInCaption(caption, productArticle);
 
-        // Create PublishJob
-        const publishJob = await db.publishJob.create({
-          data: {
-            tenantId,
-            socialAccountId: item.socialAccount.id,
-            uniqueVariantId: item.uniqueVariant.id,
-            platform: item.socialAccount.platform as any,
-            caption,
-            hashtags: resolvedHashtags,
-            scheduledAt,
-            status: 'scheduled',
-          },
+        const publishJob = await db.$transaction(async tx => {
+          const claimed = await tx.distributeItem.updateMany({
+            where: { id: item.id, status: 'pending', distributeJob: { status: { not: 'cancelled' } } },
+            data: { status: 'scheduled', scheduledAt },
+          });
+          if (!claimed.count) return null;
+          const post = await tx.publishJob.create({
+            data: {
+              tenantId, socialAccountId: item.socialAccount.id, uniqueVariantId: item.uniqueVariant.id,
+              platform: item.socialAccount.platform, caption, hashtags: resolvedHashtags, scheduledAt,
+              status: 'scheduled',
+            },
+          });
+          await tx.distributeItem.update({
+            where: { id: item.id }, data: { publishJobId: post.id },
+          });
+          return post;
         });
-
-        // Update DistributeItem with publish job reference
-        await db.distributeItem.update({
-          where: { id: item.id },
-          data: {
-            status: 'scheduled',
-            publishJobId: publishJob.id,
-            scheduledAt,
-          },
-        });
+        if (!publishJob) {
+          itemIndex++;
+          continue;
+        }
 
         // Enqueue publish job with effective delay
         const payload: PublishJobPayload = {
@@ -297,7 +298,7 @@ export function createDistributeWorker(deps: Deps): Worker {
           `publish-distribute:${publishJob.id}`,
           payload,
           { delay: effectiveDelayMs, jobId: publishJob.id },
-        );
+        ).catch(err => logger.warn({ err, publishJobId: publishJob.id }, 'Publish intent stored for queue recovery'));
 
         logger.info(
           {

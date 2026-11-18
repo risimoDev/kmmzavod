@@ -7,6 +7,9 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
+
 $host.UI.RawUI.WindowTitle = "KMMZAVOD - Диагностика и авто-восстановление стойки"
 
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -51,7 +54,7 @@ try {
 
 foreach ($ip in $candidateIps) {
     try {
-        $resp = Invoke-RestMethod -Uri "http://${ip}:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
+        $resp = Invoke-RestMethod -Headers $AgentHeaders -Uri "http://${ip}:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
         if ($resp -and ($resp.ok -or $resp.mode)) {
             $agentRunning = $true
             $agentStatus = $resp
@@ -245,7 +248,7 @@ foreach ($dev in $devices) {
     if (-not $hasReverse -and $agentRunning) {
         Write-Host "  [5/9] Шлюз агента: Реверс-порт 8888 отсутствует. Перепривязка через агент..." -ForegroundColor Yellow
         try {
-            Invoke-RestMethod -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+            Invoke-RestMethod -Headers $AgentHeaders -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Milliseconds 500
             $reverseList = (& adb -s $serial reverse --list 2>$null) -join " "
             $hasReverse = $reverseList -match "tcp:8888"
@@ -295,7 +298,7 @@ foreach ($dev in $devices) {
         Write-Host "  [7-8] sing-box / iptables не активны. Перезапуск прозрачного режима..." -ForegroundColor Yellow
         if ($agentRunning) {
             try {
-                Invoke-RestMethod -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+                Invoke-RestMethod -Headers $AgentHeaders -Uri "$agentUrl/proxy/apply-device" -Method Post -Body (@{ deviceId = $serial } | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
             } catch {}
         } else {
             & adb -s $serial shell "su -c 'sh /data/local/tmp/kmm-proxy.sh start' 2>&1" 2>$null | Out-Null
@@ -441,7 +444,7 @@ if ($agentStatus -and $agentStatus.mode -eq "shared_sequential" -or ($sharedDevi
     if ($ans -eq "" -or $ans -match "^[yYдД]") {
         Write-Host "Переключение в Private-режим..." -ForegroundColor Yellow
         try {
-            $switchRes = Invoke-RestMethod -Uri "$agentUrl/proxy/mode" -Method Post -Body '{"mode":"private_parallel"}' -ContentType 'application/json' -TimeoutSec 5
+            $switchRes = Invoke-RestMethod -Headers $AgentHeaders -Uri "$agentUrl/proxy/mode" -Method Post -Body '{"mode":"private_parallel"}' -ContentType 'application/json' -TimeoutSec 5
             Write-Host "[OK] Режим Private успешно активирован! Все 20 плат переведены на AstroProxy Казахстан!" -ForegroundColor Green
             Write-Host "Запустите diagnose-rack.bat снова, чтобы убедиться в 100% готовности всех плат." -ForegroundColor Cyan
         } catch {

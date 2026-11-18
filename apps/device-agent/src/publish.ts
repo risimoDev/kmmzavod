@@ -24,7 +24,7 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
-import { decide, findDraftsTile, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, isSavedToDrafts, uploadPercent, type FlowPlatform } from './publish-flow';
+import { decide, findPostButton, initialFlowState, isAppOffline, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
 import { dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
@@ -33,24 +33,27 @@ function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function parseAiCoordinates(
+/**
+ * AI coordinates → device pixels. The prompt (ai-autopilot.ts) asks for ONE scale: 0–1000
+ * relative to the screenshot. Guessing between "pixels" and "0–1000" is impossible for any
+ * point in the upper-left 1000×1000 px of a 1080×2400 screen, so nothing is guessed here.
+ * Fractions (both ≤ 1) are still accepted, because some models answer 0..1 regardless.
+ * Anything outside 0–1000 breaks the contract and is rejected rather than tapped blindly.
+ */
+export function parseAiCoordinates(
   x: number | undefined,
   y: number | undefined,
   screenSize: { width: number; height: number }
 ): { x: number; y: number } | null {
-  if (x == null || y == null || isNaN(x) || isNaN(y) || x <= 0 || y <= 0) return null;
-  let cx = x;
-  let cy = y;
-  if (cx <= 1 && cy <= 1) {
-    cx = cx * screenSize.width;
-    cy = cy * screenSize.height;
-  } else if (cx <= 1000 && cy <= 1000 && screenSize.width > 1000) {
-    cx = (cx / 1000) * screenSize.width;
-    cy = (cy / 1000) * screenSize.height;
-  }
-  cx = Math.max(0, Math.min(screenSize.width - 1, Math.round(cx)));
-  cy = Math.max(0, Math.min(screenSize.height - 1, Math.round(cy)));
-  return { x: cx, y: cy };
+  if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (x <= 0 || y <= 0 || x > 1000 || y > 1000) return null;
+  const fraction = x <= 1 && y <= 1;
+  const fx = fraction ? x : x / 1000;
+  const fy = fraction ? y : y / 1000;
+  return {
+    x: Math.max(0, Math.min(screenSize.width - 1, Math.round(fx * screenSize.width))),
+    y: Math.max(0, Math.min(screenSize.height - 1, Math.round(fy * screenSize.height))),
+  };
 }
 
 export interface PublishRequest {
@@ -137,7 +140,6 @@ const PROFILE_CHECKS = 3;
 /** App says "no network" and the upload percentage has not moved for this long → stop waiting. */
 const UPLOAD_STALL_MS = 90_000;
 /** Taps on the final Share/Post button before concluding it does not react. */
-const SHARE_TAP_ATTEMPTS = 3;
 const PROFILE_CHECK_GAP_MS = 20_000;
 const MEDIA_URI = 'content://media/external/video/media';
 
@@ -166,238 +168,6 @@ async function selfHealBoardInternet(
     return { ok: false, detail: res.error || 'Не удалось восстановить доступ в интернет на плате' };
   }
   return { ok: true };
-}
-
-/**
- * Automatically recovers an unsent video saved to Drafts (Черновики) in TikTok or Instagram
- * and publishes it to the feed.
- */
-export async function recoverAndPublishDraft(params: {
-  deviceId: string;
-  platform: FlowPlatform;
-  pkg: string;
-  caption: string;
-  username?: string;
-  claudehubApiKey?: string;
-  aiModel?: string;
-  adb: AdbClient;
-  logger: Logger;
-  baseline: ProfileSnapshot | null;
-  updateProgress: (p: { platform: FlowPlatform; stage: PublishStage; step: string; detail?: string; percent?: number }) => void;
-}): Promise<PublishResult | null> {
-  const { deviceId, platform, pkg, caption, username, claudehubApiKey, aiModel, adb, logger, baseline, updateProgress } = params;
-
-  try {
-    updateProgress({ platform, stage: 'compose', step: 'ИИ: поиск застрявшего ролика в Черновиках...', percent: 88 });
-    logger.info({ deviceId, platform }, 'publish: starting Drafts recovery flow');
-
-    // 1. Open app and navigate to Profile
-    if (platform === 'tiktok') {
-      await openProfile(adb, deviceId, platform, username ?? '', pkg).catch(() => {});
-    } else {
-      await adb.openApp(deviceId, pkg).catch(() => {});
-    }
-    await sleep(3500);
-
-    let screen = await dumpScreen(adb, deviceId, 2);
-    if (!screen) return null;
-
-    // 2. Locate Drafts tile
-    let draftTile = findDraftsTile(screen);
-    if (!draftTile) {
-      draftTile = screen.els.find((e) =>
-        isVisible(e) &&
-        (/drafts?|черновик(и)?/i.test(e.text.trim()) || /drafts?|черновик(и)?/i.test(e.desc.trim()) || /draft/i.test(e.resId))
-      );
-    }
-
-    if (!draftTile) {
-      // Ask ClaudeHub Vision to spot the Drafts card on profile
-      const screenSize = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-      const fastShot = await adb.takeScreenshotFast(deviceId).catch(() => null);
-      const base64Screenshot = fastShot?.data || await adb.takeScreenshot(deviceId).catch(() => undefined);
-      const aiDecision = await consultAiAutopilot({
-        platform,
-        deviceId,
-        stage: 'compose',
-        st: initialFlowState(),
-        hasCaption: true,
-        captionText: caption,
-        screen,
-        base64Screenshot,
-        screenSize,
-        apiKey: claudehubApiKey,
-        model: aiModel,
-        logger,
-      }).catch(() => null);
-
-      if (aiDecision && (aiDecision.action === 'tap' || aiDecision.action === 'tap_draft' || aiDecision.action === 'tap_coord')) {
-        let draftEl = aiDecision.targetText
-          ? screen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
-          : undefined;
-        const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
-        if (draftEl) {
-          logger.info({ deviceId, target: aiDecision.targetText, reason: aiDecision.reason }, 'publish: AI tapped Drafts element');
-          await tapEl(adb, deviceId, draftEl);
-          await sleep(3000);
-          screen = await dumpScreen(adb, deviceId, 2);
-        } else if (coords) {
-          logger.info({ deviceId, x: coords.x, y: coords.y, reason: aiDecision.reason }, 'publish: AI tapped Drafts tile coordinates');
-          await adb.tap(deviceId, coords.x, coords.y);
-          await sleep(3000);
-          screen = await dumpScreen(adb, deviceId, 2);
-        }
-      }
-    } else {
-      logger.info({ deviceId, label: draftTile.text || draftTile.desc }, 'publish: Drafts tile located, opening Drafts list');
-      updateProgress({ platform, stage: 'compose', step: 'ИИ: черновик обнаружен, открытие списка черновиков...', percent: 90 });
-      await tapEl(adb, deviceId, draftTile);
-      await sleep(3500);
-      screen = await dumpScreen(adb, deviceId, 2);
-    }
-
-    if (!screen) return null;
-
-    // 3. In Drafts list: tap the newest draft (first item)
-    updateProgress({ platform, stage: 'compose', step: 'ИИ: выбор видео из черновиков...', percent: 91 });
-    const firstDraft = screen.els.find((e) =>
-      isVisible(e) && e.bounds[1] >= 150 && e.bounds[1] <= 1400 &&
-      (e.clickable || /item|cover|thumb|cell|media/i.test(e.resId)) &&
-      !/back|назад|close|отмена/i.test(`${e.text} ${e.desc}`)
-    );
-
-    if (firstDraft) {
-      logger.info({ deviceId, resId: firstDraft.resId }, 'publish: tapped first draft item');
-      await tapEl(adb, deviceId, firstDraft);
-      await sleep(4000);
-    } else {
-      logger.warn({ deviceId }, 'publish: draft recovery could not find a distinct draft tile — aborting to prevent publishing wrong video');
-      return null;
-    }
-
-    // 4. Walk the draft compose/editor screen to tap Post
-    const deadline = Date.now() + 120_000;
-    const st = initialFlowState();
-    let shareTapped = false;
-
-    while (Date.now() < deadline && !shareTapped) {
-      const s = await dumpScreen(adb, deviceId, 2);
-      if (!s) { await sleep(1500); continue; }
-
-      // Check if on video editor screen (Next / Далее)
-      const nextBtn = s.els.find((e) =>
-        isVisible(e) && e.enabled &&
-        (/^(next|далее|дальше)$/i.test(e.text.trim()) || /^(next|далее|дальше)$/i.test(e.desc.trim()) || /next|action_bar_button_action/i.test(e.resId))
-      );
-      if (nextBtn) {
-        logger.info({ deviceId }, 'publish: draft editor — tapping Next');
-        updateProgress({ platform, stage: 'compose', step: 'ИИ: переход из редактора черновика («Далее»)...', percent: 92 });
-        await tapEl(adb, deviceId, nextBtn);
-        await sleep(3000);
-        continue;
-      }
-
-      // Check if on final post screen
-      const postBtn = findPostButton(s, platform);
-      if (postBtn) {
-        // If caption not typed yet
-        if (caption && !st.captionDone) {
-          updateProgress({ platform, stage: 'compose', step: 'ИИ: проверка описания черновика...', percent: 93 });
-          const hasCap = await captionLanded(adb, deviceId, caption);
-          if (!hasCap) {
-            const field = s.els.find((e) => /EditText/i.test(e.cls) || /caption|desc|input/i.test(e.resId));
-            if (field) {
-              await tapEl(adb, deviceId, field);
-              await sleep(600);
-              await typeText(adb, deviceId, caption).catch(() => {});
-              await hideKeyboard(adb, deviceId);
-            }
-          }
-          st.captionDone = true;
-        }
-
-        logger.info({ deviceId }, 'publish: tapping Post button for draft');
-        updateProgress({ platform, stage: 'compose', step: 'ИИ: нажатие кнопки «Опубликовать» для черновика...', percent: 94 });
-        await tapEl(adb, deviceId, postBtn);
-        shareTapped = true;
-        await sleep(4000);
-        break;
-      }
-
-      // Popups / confirmation dialogs
-      const confirm = s.els.find((e) => isVisible(e) && /^(post now|опубликовать сейчас|continue|продолжить|понятно|ok)$/i.test(e.text.trim()));
-      if (confirm) {
-        await tapEl(adb, deviceId, confirm);
-        await sleep(2000);
-        continue;
-      }
-
-      await sleep(2000);
-    }
-
-    if (!shareTapped) {
-      logger.warn({ deviceId }, 'publish: draft recovery did not reach Post button');
-      return null;
-    }
-
-    // 5. Wait for upload to complete
-    updateProgress({ platform, stage: 'upload', step: 'Загрузка видеоролика из черновиков на сервер...', percent: 95 });
-    const uploadDeadline = Date.now() + 5 * 60_000;
-    let confirmedApp = false;
-
-    while (Date.now() < uploadDeadline) {
-      await sleep(3000);
-      const s = await dumpScreen(adb, deviceId, 1);
-      const pct = s ? uploadPercent(s) : null;
-      if (pct != null) {
-        updateProgress({ platform, stage: 'upload', step: `Загрузка черновика на сервер (${pct}%)...`, percent: Math.min(98, 94 + Math.round(pct * 0.05)) });
-      }
-      if (s && !isAppOffline(s) && pct == null) {
-        const top = await adb.fastShell(deviceId, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp"').catch(() => '');
-        if (/MainActivity|MainTabActivity|TabActivity/i.test(top) && !/publish|edit|compose|record/i.test(top)) {
-          confirmedApp = true;
-          break;
-        }
-      }
-    }
-
-    // 6. Profile verification (strict: must confirm new post against baseline)
-    updateProgress({ platform, stage: 'verify', step: 'Верификация опубликованного черновика в профиле...', percent: 98 });
-    await sleep(5000);
-    const postCheck = await snapshotProfile(adb, deviceId, platform, username ?? '', pkg).catch(() => null);
-    const isNew = Boolean(baseline && postCheck && isNewPostOnProfile(baseline, postCheck));
-    const verified = { app: confirmedApp, profile: isNew === true };
-
-    await adb.home(deviceId).catch(() => {});
-
-    if (verified.profile) {
-      updateProgress({ platform, stage: 'done', step: 'Видеоролик успешно опубликован из Черновиков!', percent: 100 });
-      logger.info({ deviceId, platform, verified }, 'publish: draft successfully published and verified on profile');
-      return {
-        ok: true,
-        stage: 'done',
-        posted: 'yes',
-        retryable: false,
-        verified,
-        captionTyped: true,
-        detail: 'Видеоролик успешно опубликован из Черновиков и подтверждён в профиле',
-      };
-    } else {
-      logger.warn({ deviceId, platform, verified }, 'publish: draft post was tapped but new video did not appear on profile');
-      return {
-        ok: false,
-        stage: 'verify',
-        posted: 'unknown',
-        retryable: false,
-        verified,
-        captionTyped: true,
-        detail: 'Попытка выгрузки из черновиков завершена, но новый пост не подтверждён на профиле',
-      };
-    }
-  } catch (err) {
-    logger.warn({ deviceId, err: (err as Error).message }, 'publish: draft recovery encountered error');
-    return null;
-  }
 }
 
 export interface PublishToDeviceDeps {
@@ -868,30 +638,6 @@ export async function publishToDevice(
       await sleep(2000);
     }
 
-    // 5b. The tap must have left the compose screen. A tap that landed on a label, or was
-    // swallowed by an animation, leaves the video unposted with the button still there.
-    for (let attempt = 1; ; attempt++) {
-      await sleep(5000);
-      let screen = await dumpScreen(adb, deviceId, 2);
-      if (!screen || !isComposeScreen(flowPlatform, screen)) break;
-      // Slow phones can need a few more seconds to react to the first tap — look again
-      // before tapping a second time, so a slow transition never turns into a double post.
-      await sleep(3000);
-      screen = await dumpScreen(adb, deviceId, 2);
-      if (!screen || !isComposeScreen(flowPlatform, screen)) break;
-      if (attempt >= SHARE_TAP_ATTEMPTS) {
-        const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_post_button`, screen.xml).catch(() => undefined);
-        return result({
-          ok: false, retryable: false, debugSnapshot: snap, captionTyped,
-          detail: `Кнопка публикации нажата ${attempt} раза, но экран публикации не закрылся — проверьте телефон`,
-        });
-      }
-      const action = decide(flowPlatform, screen, { ...st, shareTapped: false }, false);
-      if (action.kind !== 'tap' || action.marks !== 'share') break;
-      logger.warn({ deviceId, platform, attempt }, 'publish: still on the compose screen after Share/Post — tapping again');
-      await tapEl(adb, deviceId, action.el);
-    }
-
     // 6. Upload: wait for the app's confirmation / the progress to finish
     stage = 'upload';
     updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер ${platform === 'tiktok' ? 'TikTok' : 'Instagram'}...`, percent: 86 });
@@ -951,11 +697,14 @@ export async function publishToDevice(
     let profileVerified: boolean | null = null;
     let stuckAt: number | null = null;
     if (baseline) {
-      for (let i = 0; i < PROFILE_CHECKS; i++) {
+      for (let i = 0; i < PROFILE_CHECKS && Date.now() < overallDeadline; i++) {
         let after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
         // TikTok shows the new post in the grid with a "96%" badge while it still uploads.
         // Confirm only once the upload has finished — a post stuck at 96% is not published.
-        const uploadWaitUntil = Date.now() + UPLOAD_TIMEOUT_MS;
+        // The wait is capped by both UPLOAD_TIMEOUT_MS and the overall publish deadline:
+        // without the cap 3 checks × 8 min keep the device mutex held far past the
+        // orchestrator's 20-min HTTP timeout.
+        const uploadWaitUntil = Math.min(Date.now() + UPLOAD_TIMEOUT_MS, overallDeadline);
         let lastUploadPct: number | null = null;
         let lastUploadChange = Date.now();
         while (after?.uploading != null && Date.now() < uploadWaitUntil) {
@@ -968,63 +717,28 @@ export async function publishToDevice(
         if (after?.uploading != null) { stuckAt = after.uploading; profileVerified = false; break; }
         if (after?.onProfile && isNewPostOnProfile(baseline, after)) { profileVerified = true; break; }
         profileVerified = false;
-        if (i < PROFILE_CHECKS - 1) await sleep(PROFILE_CHECK_GAP_MS);
+        if (i < PROFILE_CHECKS - 1 && Date.now() + PROFILE_CHECK_GAP_MS < overallDeadline) await sleep(PROFILE_CHECK_GAP_MS);
       }
     }
     if (profileVerified === true) verifiedProfile = true;
     const verified = { app: appConfirmed, profile: profileVerified };
     // For TikTok (and Instagram with username), profile verification is the ground truth.
     // An app returning to MainActivity is NEVER proof of publication if the video is missing from profile!
-    const confirmed = canReadProfile && baseline
-      ? profileVerified === true
-      : profileVerified === true || (appConfirmed && stuckAt == null && !offline);
-    if (!confirmed && Date.now() < overallDeadline - 2 * 60_000) {
-      // Automatic Drafts Recovery: if upload was dropped or stalled, TikTok/Instagram often saved it to Drafts
-      logger.info({ deviceId, platform, offline, stuckAt, profileVerified }, 'publish: post unconfirmed — attempting automatic Drafts recovery');
-      updateProgress(deviceId, { platform, stage: 'upload', step: 'Пост не подтверждён в ленте. Автопоиск в Черновиках...', percent: 90 });
-
-      // First restore internet if needed
-      await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'восстановление черновика', (msg) => {
-        updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 91 });
-      });
-
-      const draftResult = await recoverAndPublishDraft({
-        deviceId,
-        platform: flowPlatform,
-        pkg,
-        caption,
-        username,
-        claudehubApiKey: req.claudehubApiKey,
-        aiModel: req.aiModel,
-        adb,
-        logger,
-        baseline,
-        updateProgress: (p) => updateProgress(deviceId, p),
-      });
-
-      if (draftResult && draftResult.ok) {
-        logger.info({ deviceId, platform }, 'publish: successfully recovered and published video from drafts!');
-        verifiedProfile = true;
-        return {
-          ...result(draftResult),
-          detail: 'Видеоролик успешно опубликован из Черновиков (авто-восстановление ИИ)',
-        };
-      }
-
+    if (!verifiedProfile) {
       // Capture the screen the app is on now — before leaving it.
       const unconfirmedScreen = await dumpScreen(adb, deviceId, 1);
       const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`, unconfirmedScreen?.xml).catch(() => undefined);
       await adb.home(deviceId).catch(() => {});
       return result({
-        ok: false, retryable: false, verified, captionTyped, debugSnapshot: snap,
+        ok: false, posted: 'unknown', retryable: false, verified, captionTyped, debugSnapshot: snap,
         detail: stuckAt != null
           ? `Загрузка ролика остановилась на ${stuckAt}% (черновик не опубликован) — проверьте сеть/прокси платы.`
           : offline
           ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — черновик не опубликован. Проверьте прокси/интернет платы.`
           : profileVerified === false
-          ? 'Пост не появился на профиле после публикации и не найден в Черновиках — проверьте вручную'
+          ? 'Пост не подтверждён в профиле — проверьте профиль и черновики вручную'
           : canReadProfile
-            ? 'Приложение не подтвердило публикацию, черновик не найден — проверьте вручную'
+            ? 'Профиль не удалось проверить — проверьте публикацию вручную'
             : 'Приложение не подтвердило публикацию, а профиль Instagram проверить нельзя (у аккаунта не указан username) — проверьте вручную',
       });
     }

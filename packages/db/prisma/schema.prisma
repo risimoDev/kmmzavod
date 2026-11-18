@@ -631,6 +631,7 @@ model CreditTransaction {
   description  String?
   jobId        String?      @map("job_id") @db.Uuid
   invoiceId    String?      @map("invoice_id")
+  operationKey String?      @unique @map("operation_key")
   createdAt    DateTime     @default(now()) @map("created_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -639,6 +640,17 @@ model CreditTransaction {
   @@index([tenantId, type])
   @@index([jobId])
   @@map("credit_transactions")
+}
+
+model QueueIntent {
+  id        String   @id @default(uuid()) @db.Uuid
+  queue     String
+  name      String
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("queue_intents")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -921,6 +933,7 @@ model PublishJob {
   publishedAt     DateTime?      @map("published_at")
   externalPostId  String?        @map("external_post_id")
   error           String?
+  needsReview     Boolean        @default(false) @map("needs_review")
   // ── Метрики поста (последний снимок) + подтверждение публикации ──────────
   views           Int?
   likes           Int?

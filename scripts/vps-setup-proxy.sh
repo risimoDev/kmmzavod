@@ -24,6 +24,10 @@ PROXY_PORT=${1:-${PROXY_PORT:-1080}}
 PROXY_USER=${2:-${PROXY_USER:-kmmuser}}
 PROXY_PASS=${PROXY_PASS:-${3:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9_')}}
 ALLOW_IP=${4:-${PROXY_ALLOW_IP:-""}}
+if [[ -z "$ALLOW_IP" || "$ALLOW_IP" == "0.0.0.0/0" ]]; then
+    echo "Укажите внешний IP основного VPS в PROXY_ALLOW_IP или четвёртым аргументом." >&2
+    exit 1
+fi
 
 echo -e "${YELLOW}[1/4] Обновление пакетов и установка dante-server...${NC}"
 apt-get update -y
@@ -60,8 +64,14 @@ echo -e "${YELLOW}[3/4] Настройка конфигурации /etc/danted.
 
 CLIENT_RULE="from: 0.0.0.0/0 to: 0.0.0.0/0"
 if [ -n "$ALLOW_IP" ]; then
-    echo -e "${GREEN}[БЕЗОПАСНОСТЬ] Доступ к прокси ограничен только с IP: $ALLOW_IP${NC}"
-    CLIENT_RULE="from: ${ALLOW_IP} to: 0.0.0.0/0"
+    # Dante ждёт адрес с маской: одиночный IP записываем как /32.
+    ALLOW_CIDR="$ALLOW_IP"
+    case "$ALLOW_CIDR" in */*) ;; *) ALLOW_CIDR="${ALLOW_CIDR}/32" ;; esac
+    echo -e "${GREEN}[БЕЗОПАСНОСТЬ] Доступ к прокси ограничен только с адреса: $ALLOW_CIDR${NC}"
+    CLIENT_RULE="from: ${ALLOW_CIDR} to: 0.0.0.0/0"
+else
+    echo -e "${RED}[ВНИМАНИЕ] ALLOW_IP не задан: прокси будет открыт всему интернету (защита только паролем).${NC}"
+    echo -e "${RED}           Передайте 4-м аргументом внешний IP NL прод-сервера.${NC}"
 fi
 
 cat <<EOF > /etc/danted.conf
@@ -97,8 +107,14 @@ if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
     fi
 fi
 
-systemctl restart danted
-systemctl enable danted
+systemctl enable danted >/dev/null 2>&1 || true
+systemctl restart danted || true
+sleep 1
+if ! systemctl is-active --quiet danted; then
+    echo -e "${RED}[ОШИБКА] Служба danted не запустилась. Последние строки журнала:${NC}"
+    journalctl -u danted -n 20 --no-pager 2>/dev/null || tail -n 20 /var/log/danted.log 2>/dev/null || true
+    exit 1
+fi
 
 echo ""
 echo -e "${GREEN}================================================================${NC}"
@@ -107,12 +123,15 @@ echo -e "${GREEN}===============================================================
 echo -e "IP адрес:   ${CYAN}${SERVER_IP}${NC}"
 echo -e "Порт:       ${CYAN}${PROXY_PORT}${NC}"
 echo -e "Логин:      ${CYAN}${PROXY_USER}${NC}"
-echo -e "Пароль:     ${CYAN}${PROXY_PASS}${NC}"
 echo -e "Тип:        ${CYAN}socks5${NC}"
 if [ -n "$ALLOW_IP" ]; then
     echo -e "Защита:     ${GREEN}Разрешен только с IP ${ALLOW_IP}${NC}"
 fi
 echo ""
-echo -e "${YELLOW}Строка для файла vps-proxies.txt:${NC}"
-echo -e "${GREEN}${SERVER_IP}:${PROXY_PORT}:${PROXY_USER}:${PROXY_PASS}${NC}"
+# Пароль НЕ печатается в консоль/логи: он виден в выдаче vps-proxies.txt (600) ниже.
+# При запуске через tee/ssh он иначе осядет в истории сервера.
+echo -e "${YELLOW}Строка для файла vps-proxies.txt (создан с правами 600):${NC}"
+umask 077
+echo -e "${GREEN}${SERVER_IP}:${PROXY_PORT}:${PROXY_USER}:${PROXY_PASS}${NC}" > vps-proxies.txt
+echo -e "${GREEN}vps-proxies.txt записан в текущем каталоге.${NC}"
 echo -e "${GREEN}================================================================${NC}"

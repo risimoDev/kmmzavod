@@ -47,6 +47,7 @@ export function createRunwayClipWorker(deps: Deps) {
     QUEUES['runway-clip'].name,
     async (job) => {
       const { jobId, sceneId, tenantId, prompt, durationSec, referenceImageUrl } = job.data;
+      if (await db.job.count({ where: { id: jobId, status: 'cancelled' } })) return;
       const log     = logger.child({ jobId, sceneId, worker: 'runway-clip' });
       const startMs = Date.now();
 
@@ -215,10 +216,9 @@ export function createRunwayClipWorker(deps: Deps) {
 
       // ─── 6. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
-        tenantId, jobId, credits: creditsCharged,
+        tenantId, jobId, credits: creditsCharged, operation: `runway-clip-${sceneId}`,
         description: `Runway ${mode} (${actualModel}) — scene ${sceneId.slice(0, 8)}`,
       });
-      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

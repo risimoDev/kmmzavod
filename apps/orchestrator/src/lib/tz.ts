@@ -65,3 +65,10 @@ export function nextWallClock(times: string[], timeZone: string, after: Date): D
   }
   return best;
 }
+export function accountDay(now: Date, timezone?: string | null): Date {
+  try {
+    return startOfZonedDay(now, timezone || 'UTC');
+  } catch {
+    return startOfZonedDay(now, 'UTC');
+  }
+}

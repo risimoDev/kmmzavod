@@ -56,3 +56,8 @@ export function decrypt(encoded: string): string {
     return encoded; // legacy plaintext
   }
 }
+
+export function readProxyUrl(value: string | null | undefined): string | null {
+  const prefix = 'encrypted:';
+  return value?.startsWith(prefix) ? decrypt(value.slice(prefix.length)) : value ?? null;
+}

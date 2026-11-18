@@ -38,6 +38,7 @@ export interface AiAutopilotDecision {
   screenType: 'modal_dialog' | 'editor' | 'compose' | 'share_target' | 'drafts' | 'network_error' | 'blocker' | 'feed' | 'other';
   action: AiActionKind;
   targetText?: string;
+  /** Relative 0–1000 scale of the screenshot (see the prompt), not pixels. */
   x?: number;
   y?: number;
   marks?: 'next' | 'target' | 'share';
@@ -253,19 +254,23 @@ export async function consultAiAutopilot(input: AiAutopilotInput): Promise<AiAut
    - Если диалог требует опасных действий (удаление аккаунта, отвязка данных, сброс настроек):
      action = "require_human", reason = "Требуется подтверждение человека для критического действия на телефоне".
 
+КООРДИНАТЫ: "x" и "y" — ВСЕГДА в относительной шкале 0–1000 от размеров снимка
+(x: 0 = левый край, 1000 = правый; y: 0 = верх, 1000 = низ). НЕ пиксели.
+Пример: центр экрана = x 500, y 500. Если координаты не нужны — не указывай их.
+
 ФОРМАТ ОТВЕТА (ТОЛЬКО JSON, без разметки markdown):
 {
   "screenType": "modal_dialog" | "editor" | "compose" | "share_target" | "drafts" | "network_error" | "blocker" | "feed" | "other",
   "action": "tap" | "tap_coord" | "type_caption" | "tap_draft" | "retry_network" | "key_back" | "swipe_up" | "abort" | "require_human" | "none",
   "targetText": "текст или описание кнопки",
-  "x": 540,
-  "y": 1800,
+  "x": 500,
+  "y": 750,
   "marks": "next" | "target" | "share" | null,
   "reason": "Краткое объяснение на русском: что на экране и почему такое действие"
 }`;
 
   const userPrompt = `Платформа: ${input.platform}
-Разрешение экрана: ${input.screenSize.width}x${input.screenSize.height} px
+Разрешение экрана: ${input.screenSize.width}x${input.screenSize.height} px (координаты в ответе — в шкале 0–1000, не в пикселях)
 Текущий пакет приложения: ${input.screen.pkg || 'unknown'}
 Состояние публикации:
 - Подпись введена: ${input.st.captionDone ? 'Да' : 'Нет'} (текст подписи: "${input.captionText || ''}")

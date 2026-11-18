@@ -96,8 +96,10 @@ curl -X POST http://10.13.13.2:8300/wb/warmup -H "Content-Type: application/json
 1. На сервере: `docker compose up -d farm-proxy-relay` (слушает только `10.66.66.1:3129` внутри туннеля).
    Если включён ufw: `sudo ufw allow in on awg0 to any port 3129 proto tcp`.
    Проверка с ПК фермы: `curl.exe http://10.66.66.1:3129/health`.
-2. На ПК фермы перезапустите `start-farm.bat` — он сам найдёт relay и включит `DEVICE_AGENT_UPSTREAM_VIA`
-   (или задайте `DEVICE_AGENT_UPSTREAM_VIA=http://10.66.66.1:3129` в `.env` вручную).
+2. На ПК фермы задайте `DEVICE_AGENT_UPSTREAM_VIA=http://10.66.66.1:3129` с адресом своего VPS.
+   `start-farm.bat` также умеет искать реле в известных подсетях туннеля. Для самостоятельного
+   DNAT-маршрута в PowerShell задайте `$env:DEVICE_AGENT_ALLOW_DIRECT = '1'` и назначьте платам
+   соответствующие адреса и порты туннеля.
 
 Сайты по-прежнему видят IP мобильного прокси, а не сервера.
 
@@ -106,6 +108,8 @@ curl -X POST http://10.13.13.2:8300/wb/warmup -H "Content-Type: application/json
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `DEVICE_AGENT_UPSTREAM_VIA` | авто (`start-farm.bat`) | relay на сервере для подключения к прокси |
+| `DEVICE_AGENT_TOKEN` | обязательный для сетевого агента | одинаковое значение на ПК фермы и основном VPS |
+| `DEVICE_AGENT_ALLOW_DIRECT` | выключено | явный запуск без CONNECT-реле для отдельно настроенного маршрута |
 | `DEVICE_AGENT_PROXY_BASE_PORT` | `18800` | первый порт шлюзов плат на ПК |
 | `DEVICE_AGENT_PROXY_MAX_CONNECTIONS` | `45` | одновременных соединений на один прокси |
 | `DEVICE_AGENT_PROXY_ROOT_MODE` | `auto` | `off` — не использовать sing-box даже на root |

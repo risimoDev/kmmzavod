@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { TopBar } from "@/components/layout/AppShell";
 import {
   Button,
@@ -28,7 +28,8 @@ import {
   type SocialAccount,
 } from "@/lib/api";
 
-export default function JobDetailPage({ params }: { params: { id: string } }) {
+export default function JobDetailPage() {
+  const { id } = useParams<{ id: string }>();
   return (
     <Suspense
       fallback={
@@ -40,7 +41,7 @@ export default function JobDetailPage({ params }: { params: { id: string } }) {
         </>
       }
     >
-      <JobDetailContent jobId={params.id} />
+      <JobDetailContent jobId={id} />
     </Suspense>
   );
 }

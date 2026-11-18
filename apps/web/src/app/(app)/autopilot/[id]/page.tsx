@@ -5,7 +5,7 @@
  * мониторинг в реальном времени, живой прогресс-бар, быстрое ручное управление,
  * перезапуск упавших публикаций, готовность телефонов, журнал и настройки.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { TopBar } from "@/components/layout/AppShell";
@@ -25,17 +25,23 @@ export default function AutopilotDetailPage() {
   const [notice, setNotice] = useState<{ tone: "ok" | "warn" | "err"; text: string } | null>(null);
   const [editing, setEditing] = useState(false);
 
+  const loadingAutopilotId = useRef<string | null>(null);
   const load = useCallback(async () => {
+    if (loadingAutopilotId.current === id) return;
+    loadingAutopilotId.current = id;
     try {
       const res = await autopilotApi.get(id);
+      if (loadingAutopilotId.current !== id) return;
       setData(res);
       setLoadError(null);
     } catch (e: any) {
-      setLoadError(e?.message ?? "Не удалось загрузить данные автопилота");
+      if (loadingAutopilotId.current === id) setLoadError(e?.message ?? "Не удалось загрузить данные автопилота");
+    } finally {
+      if (loadingAutopilotId.current === id) loadingAutopilotId.current = null;
     }
   }, [id]);
 
-  // Вычисляем, активен ли сейчас процесс (для динамического живого опроса каждые 2.5 секунды)
+  // Активная публикация обновляется чаще.
   const isPublishingNow = Boolean(
     data?.posts.some((p) => p.status === "publishing") ||
     data?.liveProgress?.isPublishing ||
@@ -45,7 +51,7 @@ export default function AutopilotDetailPage() {
 
   useEffect(() => {
     void load();
-    const interval = isPublishingNow ? 2_500 : 7_000;
+    const interval = isPublishingNow ? 3_000 : 15_000;
     const t = setInterval(() => {
       if (!document.hidden && !editing) void load();
     }, interval);

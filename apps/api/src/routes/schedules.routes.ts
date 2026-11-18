@@ -2,6 +2,7 @@
  * Schedule routes — CRUD for VideoSchedule (auto-generation + auto-publish).
  */
 import { z } from 'zod';
+import { isValidCron, isValidTimeZone, nextCronDate } from '@kmmzavod/queue';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { logger } from '../logger';
@@ -9,8 +10,8 @@ import { logger } from '../logger';
 const CreateScheduleBody = z.object({
   productId: z.string().uuid(),
   name: z.string().min(1).max(100).default('Auto-schedule'),
-  cronExpression: z.string().min(5).max(100), // e.g. "0 10 * * 1,3,5"
-  timezone: z.string().default('Europe/Moscow'),
+  cronExpression: z.string().min(5).max(100).refine(isValidCron), // e.g. "0 10 * * 1,3,5"
+  timezone: z.string().refine(isValidTimeZone).default('Europe/Moscow'),
   autoPublish: z.boolean().default(false),
   publishPlatforms: z.array(z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge'])).default([]),
   socialAccountIds: z.array(z.string().uuid()).default([]),
@@ -23,8 +24,8 @@ const CreateScheduleBody = z.object({
 
 const UpdateScheduleBody = z.object({
   name: z.string().min(1).max(100).optional(),
-  cronExpression: z.string().min(5).max(100).optional(),
-  timezone: z.string().optional(),
+  cronExpression: z.string().min(5).max(100).refine(isValidCron).optional(),
+  timezone: z.string().refine(isValidTimeZone).optional(),
   isActive: z.boolean().optional(),
   autoPublish: z.boolean().optional(),
   publishPlatforms: z.array(z.enum(['tiktok', 'instagram', 'youtube_shorts', 'postbridge'])).optional(),
@@ -84,8 +85,7 @@ export async function scheduleRoutes(app: FastifyInstance) {
       }
     }
 
-    // Compute first next_run_at (naive: assume it's sometime in the next 7 days)
-    const now = new Date();
+    const nextRunAt = nextCronDate(body.cronExpression, body.timezone, new Date());
 
     const schedule = await db.videoSchedule.create({
       data: {
@@ -102,7 +102,7 @@ export async function scheduleRoutes(app: FastifyInstance) {
         durationSec: body.durationSec,
         language: body.language,
         bgmEnabled: body.bgmEnabled,
-        nextRunAt: now, // scheduler worker will compute the accurate next run
+        nextRunAt,
       },
     });
 
@@ -131,7 +131,7 @@ export async function scheduleRoutes(app: FastifyInstance) {
 
     const existing = await db.videoSchedule.findFirst({
       where: { id, tenantId },
-      select: { id: true },
+      select: { id: true, cronExpression: true, timezone: true },
     });
     if (!existing) return reply.code(404).send({ error: 'Schedule not found' });
 
@@ -146,7 +146,12 @@ export async function scheduleRoutes(app: FastifyInstance) {
 
     const schedule = await db.videoSchedule.update({
       where: { id },
-      data: body,
+      data: {
+        ...body,
+        ...(body.cronExpression || body.timezone || body.isActive === true ? {
+          nextRunAt: nextCronDate(body.cronExpression ?? existing.cronExpression, body.timezone ?? existing.timezone, new Date()),
+        } : {}),
+      },
     });
 
     return { schedule };

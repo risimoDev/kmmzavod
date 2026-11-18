@@ -328,12 +328,7 @@ fi
 
 cd "$APP_DIR"
 
-# Удаляем dev-override — он отключает app-сервисы через profiles
-if [ -f "$APP_DIR/docker-compose.override.yml" ]; then
-  info "Удаляем docker-compose.override.yml (dev-only)"
-  rm -f "$APP_DIR/docker-compose.override.yml"
-  success "override удалён — все сервисы будут работать в Docker"
-fi
+export COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 
 # =============================================================================
 # 6/13. Конфигурация .env
@@ -380,6 +375,8 @@ JWT_SECRET=${JWT_SEC}
 JWT_ACCESS_TTL=15m
 JWT_REFRESH_TTL=30d
 ENCRYPTION_KEY=${ENCRYPT_KEY}
+INTERNAL_SERVICE_TOKEN=$(openssl rand -hex 32)
+REDIS_APPENDONLY=yes
 
 # ── AI Keys ───────────────────────────────────────────────────────────────────
 GPTUNNEL_API_KEY=${_GPTUNNEL_API_KEY}
@@ -658,6 +655,9 @@ cd "$APP_DIR"
 
 info "Сборка Docker-образов (5–15 минут)..."
 BUILD_LOG="/tmp/kmmzavod-build.log"
+if ! grep -qE '^INTERNAL_SERVICE_TOKEN=.+$' .env; then
+  (umask 077; printf '\nINTERNAL_SERVICE_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env)
+fi
 if ! docker compose build --progress=plain 2>&1 | tee "$BUILD_LOG"; then
   error "Сборка образов не удалась. Лог: $BUILD_LOG"
 fi
@@ -786,7 +786,7 @@ done
 
 if [ "$API_READY" = true ]; then
   ADMIN_COUNT=$(docker compose exec -T postgres psql -U kmmzavod -tAc \
-    "SELECT COUNT(*) FROM \"User\" WHERE role='admin';" 2>/dev/null || echo "0")
+    "SELECT COUNT(*) FROM \"users\" WHERE role='admin';" 2>/dev/null || echo "0")
 
   if [ "${ADMIN_COUNT:-0}" -gt 0 ]; then
     success "Администратор уже существует"
@@ -808,7 +808,7 @@ if [ "$API_READY" = true ]; then
       # Повышаем до admin — SQL-инъекция предотвращена экранированием
       SAFE_EMAIL="$(sql_escape "$ADMIN_EMAIL")"
       docker compose exec -T postgres psql -U kmmzavod -c \
-        "UPDATE \"User\" SET role='admin' WHERE email='${SAFE_EMAIL}';" 2>/dev/null
+        "UPDATE \"users\" SET role='admin' WHERE email='${SAFE_EMAIL}';"
       success "Администратор создан: $ADMIN_EMAIL"
     else
       warn "Не удалось создать админа (HTTP $HTTP_STATUS)."

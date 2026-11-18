@@ -13,6 +13,9 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
+
 $host.UI.RawUI.WindowTitle = "KMMZAVOD - Глубокий анализатор сети и приложений"
 
 Write-Host "================================================================================" -ForegroundColor Cyan
@@ -66,7 +69,7 @@ try {
 
 foreach ($ip in $candidateIps) {
     try {
-        $resp = Invoke-RestMethod -Uri "http://${ip}:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
+        $resp = Invoke-RestMethod -Headers $AgentHeaders -Uri "http://${ip}:8300/proxy/status" -TimeoutSec 3 -ErrorAction SilentlyContinue
         if ($resp -and ($resp.ok -or $resp.mode)) {
             $agentRunning = $true
             $agentStatus = $resp
@@ -270,7 +273,7 @@ foreach ($dev in $selectedDevices) {
         Write-Host "         Восстановление adb reverse..." -ForegroundColor Yellow
         & adb -s $s reverse tcp:8888 tcp:8888 2>$null | Out-Null
         try {
-            Invoke-RestMethod -Uri "$agentUrl/proxy/reapply" -Method Post -TimeoutSec 3 -ErrorAction SilentlyContinue | Out-Null
+            Invoke-RestMethod -Headers $AgentHeaders -Uri "$agentUrl/proxy/reapply" -Method Post -TimeoutSec 3 -ErrorAction SilentlyContinue | Out-Null
         } catch {}
     }
 

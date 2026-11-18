@@ -141,19 +141,29 @@ if ($ipconfig -match "10\.66\.66\.2" -or $ipconfig -match "10\.13\.13\.2") {
 }
 
 # 4a. Relay мобильных прокси через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
-if (-not $env:DEVICE_AGENT_UPSTREAM_VIA) {
-    & curl.exe -s -m 4 -o NUL http://10.66.66.1:3129/health
-    if ($LASTEXITCODE -eq 0) {
-        $env:DEVICE_AGENT_UPSTREAM_VIA = "http://10.66.66.1:3129"
-        Write-Host "[OK] Прокси плат будут подключаться через сервер: $env:DEVICE_AGENT_UPSTREAM_VIA" -ForegroundColor Green
-    } else {
-        Write-Host "[ВНИМАНИЕ] Relay прокси на сервере 10.66.66.1:3129 недоступен - прокси подключаются напрямую." -ForegroundColor Yellow
+$agentEnvPath = Join-Path $PSScriptRoot '.env'
+$relayConfigured = $env:DEVICE_AGENT_UPSTREAM_VIA -or (
+    (Test-Path -LiteralPath $agentEnvPath) -and
+    (Select-String -LiteralPath $agentEnvPath -Pattern '^\s*DEVICE_AGENT_UPSTREAM_VIA\s*=\s*[^#\s]' -Quiet)
+)
+if (-not $relayConfigured -and $env:DEVICE_AGENT_ALLOW_DIRECT -ne '1') {
+    foreach ($relayAddress in @('10.66.66.1', '10.13.13.1', '10.8.0.1')) {
+        $relayUrl = "http://${relayAddress}:3129"
+        & curl.exe -fsS -m 4 -o NUL "$relayUrl/health" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $env:DEVICE_AGENT_UPSTREAM_VIA = $relayUrl
+            break
+        }
+    }
+    if (-not $env:DEVICE_AGENT_UPSTREAM_VIA) {
+        Write-Host '[ОШИБКА] Реле VPS недоступно. Проверьте туннель или задайте DEVICE_AGENT_UPSTREAM_VIA в .env агента.' -ForegroundColor Red
+        exit 1
     }
 }
 
 # 4b. Автоматическое обновление конфигурации прокси на AstroProxy
 $proxyStateFile = Join-Path $PSScriptRoot "devices-proxy-state.json"
-$astroStateFile = Join-Path $PSScriptRoot "devices-proxy-state.astroproxy.json"
+$astroStateFile = Join-Path $PSScriptRoot "devices-proxy-state.astroproxy.local.json"
 if (Test-Path $proxyStateFile) {
     $content = Get-Content $proxyStateFile -Raw -ErrorAction SilentlyContinue
     if ($content -and $content.Contains("37.27.123.90")) {

@@ -341,6 +341,20 @@ export async function runDeviceAccountLogin(
 
     logger.info({ deviceId, platform, user, success: finalProfile }, 'device-agent: login flow completed');
 
+    if (!finalProfile) {
+      // A missing error dialog does not mean success: if neither feed nor profile is
+      // visible, the flow stalled on some unexpected screen — report failure so the
+      // orchestrator does not mark the account as authorized.
+      return {
+        ok: false,
+        deviceId,
+        platform,
+        codeRetrieved,
+        detail: 'Вход не подтверждён: лента/профиль не появились на экране. Проверьте телефон вручную.',
+        error: 'Login flow finished without reaching feed/profile',
+      };
+    }
+
     return {
       ok: true,
       deviceId,

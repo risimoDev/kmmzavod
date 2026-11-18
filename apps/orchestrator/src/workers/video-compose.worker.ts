@@ -9,6 +9,7 @@
 
 import { Worker, type ConnectionOptions } from 'bullmq';
 import axios from 'axios';
+import { internalHttp } from '../services/internal-http';
 import { QUEUES, type VideoComposeJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { COMPOSE_PRESETS, DEFAULT_VARIANT_PRESETS, type ComposePreset } from '../pipeline/compose-presets';
@@ -34,8 +35,9 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       const [scenes, jobRow] = await Promise.all([
         db.scene.findMany({ where: { jobId }, orderBy: { sceneIndex: 'asc' } }),
-        db.job.findUniqueOrThrow({ where: { id: jobId }, select: { payload: true, videoId: true, creditsUsed: true } }),
+        db.job.findUniqueOrThrow({ where: { id: jobId }, select: { payload: true, videoId: true, creditsUsed: true, status: true } }),
       ]);
+      if (jobRow.status === 'cancelled' || jobRow.status === 'completed') return;
 
       // ── Pre-flight: verify all required assets are in MinIO ────────────────
       // If compose was triggered before all workers finished (race condition), fail
@@ -116,7 +118,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
       } else if (isCombinedMode) {
         // Combined mode: transcribe the single combined avatar video → accurate subtitles
         try {
-          const transcribeRes = await axios.post(`${videoProcessorUrl}/transcribe`, {
+          const transcribeRes = await internalHttp.post(`${videoProcessorUrl}/transcribe`, {
             storage_key: combinedAvatarUrl,
             language: 'ru',
             max_words_per_chunk: 12,
@@ -144,7 +146,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
           const sceneIdx = scenes.indexOf(scene);
           const sceneOffset = sceneOffsets[sceneIdx];
           try {
-            const transcribeRes = await axios.post(`${videoProcessorUrl}/transcribe`, {
+            const transcribeRes = await internalHttp.post(`${videoProcessorUrl}/transcribe`, {
               storage_key: scene.avatarUrl,
               language: 'ru',
               max_words_per_chunk: 12,
@@ -323,7 +325,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
             if (bgScenes.length === 0) {
               // Pure avatar video — no layout composition needed, use /compose directly
-              const composeRes = await axios.post(`${videoProcessorUrl}/compose`, {
+              const composeRes = await internalHttp.post(`${videoProcessorUrl}/compose`, {
                 job_id:     jobId,
                 tenant_id:  tenantId,
                 output_key: outputKey,
@@ -384,7 +386,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
               // NOTE: Both /compose and /compose-layout receive RAW subtitles.
               // The Python pipelines adjust subtitle timings based on actual clip
               // durations and xfade overlaps — the only place with access to probed data.
-              const layoutRes = await axios.post(`${videoProcessorUrl}/compose-layout`, {
+              const layoutRes = await internalHttp.post(`${videoProcessorUrl}/compose-layout`, {
                 job_id:              jobId,
                 tenant_id:           tenantId,
                 output_key:          outputKey,
@@ -420,7 +422,7 @@ export function createVideoComposeWorker(deps: Deps): Worker {
             }
           } else {
             // ── LEGACY/SLIDESHOW MODE: /compose ────────────────────────────────
-            const composeRes = await axios.post(`${videoProcessorUrl}/compose`, {
+            const composeRes = await internalHttp.post(`${videoProcessorUrl}/compose`, {
               job_id:     jobId,
               tenant_id:  tenantId,
               output_key: outputKey,
@@ -494,25 +496,46 @@ export function createVideoComposeWorker(deps: Deps): Worker {
 
       const thumbnailKey = firstOk.value.response.thumbnail_key ?? null;
 
-      await db.$transaction([
-        db.job.update({
-          where: { id: jobId },
-          data:  { status: 'completed', completedAt: new Date() },
-        }),
-        ...(jobRow.videoId ? [
-          db.video.update({
-            where: { id: jobRow.videoId },
-            data: {
-              status: 'completed',
-              outputUrl: firstOk.value.outputKey,
-              thumbnailUrl: thumbnailKey,
-              durationSec: firstOk.value.response.duration_sec,
-              fileSizeBytes: BigInt(firstOk.value.response.file_size_bytes ?? 0),
-              completedAt: new Date(),
-            },
-          }),
-        ] : []),
-      ]);
+      const completed = await db.$transaction(async tx => {
+        const claimed = await tx.job.updateMany({
+          where: { id: jobId, status: { notIn: ['cancelled', 'completed'] } },
+          data: { status: 'completed', completedAt: new Date() },
+        });
+        if (!claimed.count) return false;
+        const videoId = jobRow.videoId;
+        if (!videoId) return true;
+        const video = await tx.video.update({
+          where: { id: videoId },
+          data: {
+            status: 'completed', outputUrl: firstOk.value.outputKey, thumbnailUrl: thumbnailKey,
+            durationSec: firstOk.value.response.duration_sec,
+            fileSizeBytes: BigInt(firstOk.value.response.file_size_bytes ?? 0),
+            completedAt: new Date(),
+          },
+          select: { title: true, description: true },
+        });
+        const scheduleId = (jobRow.payload as { scheduleId?: unknown } | null)?.scheduleId;
+        if (typeof scheduleId === 'string') {
+          const schedule = await tx.videoSchedule.findFirst({ where: { id: scheduleId, tenantId, isActive: true, autoPublish: true } });
+          if (schedule && (schedule.socialAccountIds.length || schedule.publishPlatforms.length)) {
+            const accounts = await tx.socialAccount.findMany({
+              where: { tenantId, isActive: true,
+                ...(schedule.socialAccountIds.length ? { id: { in: schedule.socialAccountIds } } : {}),
+                ...(schedule.publishPlatforms.length ? { platform: { in: schedule.publishPlatforms } } : {}),
+              },
+              select: { id: true, platform: true },
+            });
+            if (accounts.length) await tx.publishJob.createMany({
+              data: accounts.map(account => ({
+                tenantId, videoId, platform: account.platform, socialAccountId: account.id,
+                caption: video.description ?? video.title, status: 'pending',
+              })),
+            });
+          }
+        }
+        return true;
+      });
+      if (!completed) return;
 
       const okCount   = results.filter((r) => r.status === 'fulfilled').length;
       const failCount = results.length - okCount;

@@ -42,6 +42,7 @@ const schema = z.object({
   // Real phone-farm bridge (apps/device-agent), reached over AmneziaWG
   DEVICE_AGENT_URL: z.string().url().default('http://10.66.66.2:8300'),
   DEVICE_AGENT_TOKEN: z.string().default(''),
+  INTERNAL_SERVICE_TOKEN: z.string().default(''),
   // Tenants (comma-separated UUIDs) allowed to drive the physical phone farm in addition
   // to super_admins. The farm is one shared rack, so ordinary tenants never get it.
   FARM_TENANT_IDS: z.string().default('').transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean)),

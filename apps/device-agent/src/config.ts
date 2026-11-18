@@ -11,7 +11,7 @@ function env(name: string, fallback?: string): string {
   return v;
 }
 
-function detectTunnelHost(): string {
+function detectTunnelHost(): string | null {
   if (process.env.DEVICE_AGENT_HOST) return process.env.DEVICE_AGENT_HOST;
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
@@ -23,7 +23,9 @@ function detectTunnelHost(): string {
       }
     }
   }
-  return '127.0.0.1';
+  // No tunnel interface yet: the caller retries. Never fall back to loopback here — the
+  // listen would succeed and the agent would stay unreachable for the orchestrator.
+  return null;
 }
 
 function resolveScriptsDir(): string {
@@ -46,7 +48,8 @@ export const config = {
   // Bind to the AmneziaWG interface IP only — never 0.0.0.0. See infra/amneziawg/README.md.
   // (Phones reach their proxy gateways via `adb reverse`, which is unaffected by this.)
   // Getter: re-detected on every read, so a listen retry at boot picks up the tunnel IP once it appears.
-  get HOST(): string { return detectTunnelHost(); },
+  // null = the tunnel interface is not up (and DEVICE_AGENT_HOST is not set).
+  get HOST(): string | null { return detectTunnelHost(); },
   PORT: Number(env('DEVICE_AGENT_PORT', '8300')),
   // Path to Google adb executable (prioritizes local platform-tools)
   ADB_PATH: resolveAdbPath(),

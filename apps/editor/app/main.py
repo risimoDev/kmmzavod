@@ -26,7 +26,11 @@ async def require_internal_token(request: Request) -> None:
     service open (backward compatible). /health stays public for probes.
     """
     expected = settings.internal_service_token
-    if not expected or request.url.path in ("/health", "/metrics"):
+    if request.url.path in ("/health", "/metrics"):
+        return
+    if not expected:
+        if settings.require_internal_service_token:
+            raise HTTPException(status_code=503, detail="Internal service token is not configured")
         return
     provided = request.headers.get("x-internal-token", "")
     if not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):

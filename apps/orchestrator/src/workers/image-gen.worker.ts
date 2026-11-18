@@ -45,6 +45,7 @@ export function createImageGenWorker(deps: Deps) {
     QUEUES['image-gen'].name,
     async (job) => {
       const { jobId, sceneId, tenantId, prompt, referenceImageKeys, purpose, clipDurationSec } = job.data;
+      if (await db.job.count({ where: { id: jobId, status: 'cancelled' } })) return;
       const isFrame = purpose === 'runway-frame';
       const log     = logger.child({ jobId, sceneId, worker: 'image-gen', purpose: purpose ?? 'scene-image' });
       const startMs = Date.now();
@@ -204,10 +205,9 @@ export function createImageGenWorker(deps: Deps) {
 
       // ─── 5. Списываем кредиты ─────────────────────────────────────────────
       await chargeCredits(db, {
-        tenantId, jobId, credits: creditsCharged,
+        tenantId, jobId, credits: creditsCharged, operation: `image-${sceneId}-${isFrame ? 'frame' : 'image'}`,
         description: `Image gen (${usedProvider}) — ${isFrame ? 'frame' : 'image'} ${sceneId.slice(0, 8)}`,
       });
-      await db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: creditsCharged } } });
 
       await db.jobEvent.create({
         data: {

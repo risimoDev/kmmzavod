@@ -1033,7 +1033,7 @@ export default function EditorProjectDetailPage() {
                     <p className="font-mono break-all">Причина: {transcriptError}</p>
                   ) : (
                     <p>Либо в видео нет голоса, либо Whisper недоступен в editor-сервисе
-                      (см. GET /health editor'а).</p>
+                      (см. GET /health editor&apos;а).</p>
                   )}
                   <p>Субтитры можно вписать вручную через «✎ правка» на клипе.</p>
                 </div>

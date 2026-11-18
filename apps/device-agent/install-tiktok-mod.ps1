@@ -22,6 +22,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# adb пишет служебные сообщения и ошибки установки в stderr. При $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 превращает такую строку в завершающую ошибку, и скрипт падает раньше,
+# чем успевает разобрать причину (например INSTALL_FAILED_UPDATE_INCOMPATIBLE). Глушим локально.
+function Invoke-Adb {
+    $ErrorActionPreference = 'Continue'
+    & adb @args 2>&1 | ForEach-Object { "$_" }
+}
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -75,7 +83,7 @@ if ($ExpectedModSha256 -and (Test-Path $modPath)) {
 
 # Опрос активных плат
 Write-Host "Поиск активных плат через ADB..." -ForegroundColor Gray
-$rawDevices = & adb devices -l 2>&1
+$rawDevices = Invoke-Adb devices -l
 $onlineDevices = @()
 foreach ($l in $rawDevices) {
     if ($l -match '^([a-zA-Z0-9_\-.:]+)\s+device(\s|$)') {
@@ -99,10 +107,10 @@ Write-Host "[ТЕСТ] Проверка совместимости устано�
 
 if ($UninstallFirst) {
     Write-Host "  [ВНИМАНИЕ] Флаг -UninstallFirst активен: удаление старого пакета на $testDev..." -ForegroundColor Yellow
-    & adb -s $testDev uninstall $PKG 2>&1 | Out-Null
+    Invoke-Adb -s $testDev uninstall $PKG | Out-Null
 }
 
-$testOut = & adb -s $testDev install -r -d -g $targetApks[0].FullName 2>&1 | Out-String
+$testOut = Invoke-Adb -s $testDev install -r -d -g $targetApks[0].FullName | Out-String
 
 if ($testOut -match "INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
     Write-Host ""
@@ -137,13 +145,13 @@ foreach ($dev in $onlineDevices) {
     }
 
     if ($UninstallFirst -and $dev -ne $testDev) {
-        & adb -s $dev uninstall $PKG 2>&1 | Out-Null
+        Invoke-Adb -s $dev uninstall $PKG | Out-Null
     }
 
     $devSuccess = $true
     foreach ($apk in $targetApks) {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $installOut = & adb -s $dev install -r -d -g $apk.FullName 2>&1 | Out-String
+        $installOut = Invoke-Adb -s $dev install -r -d -g $apk.FullName | Out-String
         $sw.Stop()
 
         if ($installOut -match "Success") {

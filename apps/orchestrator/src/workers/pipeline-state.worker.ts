@@ -51,7 +51,8 @@ export function createPipelineStateWorker(deps: Deps): Worker {
       });
 
       // Публикуем промежуточный прогресс при каждом обновлении сцены
-      const jobRow0 = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true } });
+      const jobRow0 = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, status: true } });
+      if (!jobRow0 || ['cancelled', 'completed'].includes(jobRow0.status)) return;
       if (jobRow0?.videoId) {
         const pct = calcSceneProgress(scenes);
         const doneCount = scenes.filter((s: SceneRow) =>
@@ -88,12 +89,8 @@ export function createPipelineStateWorker(deps: Deps): Worker {
           .join('; ');
         const errorMsg = `${failedScenes.length} scene(s) failed: ${errorSummary}`;
 
-        await db.$transaction([
-          db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-          ...(jobRow?.videoId ? [
-            db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: errorMsg } }),
-          ] : []),
-        ]);
+        const failed = await setPipelineStatus(db, jobId, jobRow?.videoId, 'failed', errorMsg);
+        if (!failed) return;
 
         await db.jobEvent.create({
           data: { jobId, tenantId, stage: 'pipeline-state', status: 'failed', message: 'One or more scenes failed' },
@@ -113,12 +110,7 @@ export function createPipelineStateWorker(deps: Deps): Worker {
       }
 
       // All scenes completed successfully — enqueue video composition
-      await db.$transaction([
-        db.job.update({ where: { id: jobId }, data: { status: 'composing' } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'composing' } }),
-        ] : []),
-      ]);
+      if (!await setPipelineStatus(db, jobId, jobRow?.videoId, 'composing')) return;
 
       await db.jobEvent.create({
         data: { jobId, tenantId, stage: 'pipeline-state', status: 'completed', message: 'All scenes done, composing' },
@@ -137,4 +129,19 @@ export function createPipelineStateWorker(deps: Deps): Worker {
     },
     { connection, concurrency: QUEUES['pipeline-state'].concurrency },
   );
+}
+export function setPipelineStatus(db: PrismaClient, jobId: string, videoId: string | null | undefined, status: 'failed' | 'composing', error?: string) {
+  return db.$transaction(async tx => {
+    const claimed = await tx.job.updateMany({
+      where: { id: jobId, status: { notIn: ['cancelled', 'completed'] } },
+      data: { status, error },
+    });
+    if (claimed.count && videoId) {
+      await tx.video.updateMany({
+        where: { id: videoId, status: { notIn: ['cancelled', 'completed'] } },
+        data: { status, error },
+      });
+    }
+    return claimed.count > 0;
+  });
 }

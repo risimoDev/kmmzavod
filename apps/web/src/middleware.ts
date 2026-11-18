@@ -42,9 +42,8 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check for access_token cookie (set by frontend on login)
-  const token = request.cookies.get('access_token')?.value;
-  if (!token) {
+  const hasSession = request.cookies.has('kmm_session') || request.cookies.has('access_token');
+  if (!hasSession) {
     const loginUrl = new URL('/login', request.url);
     loginUrl.searchParams.set('redirect', pathname);
     return NextResponse.redirect(loginUrl);

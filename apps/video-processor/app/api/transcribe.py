@@ -6,6 +6,7 @@ POST /transcribe — Extract speech timestamps from a stored video.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -63,6 +64,8 @@ def _get_storage() -> StorageClient:
 def create_router() -> APIRouter:
     router = APIRouter(tags=["transcribe"])
 
+    slots = asyncio.Semaphore(1)
+
     @router.post(
         "/transcribe",
         response_model=TranscribeResponse,
@@ -87,7 +90,7 @@ def create_router() -> APIRouter:
             logger.info("Transcribing %s (lang=%s)", req.storage_key, req.language)
 
             await storage.download(req.storage_key, video_path)
-            extract_audio(video_path, audio_path)
+            await asyncio.to_thread(extract_audio, video_path, audio_path)
 
             # Probe the real audio duration up front so callers always get it,
             # even if Whisper fails (e.g. model not cached). This lets the
@@ -95,13 +98,15 @@ def create_router() -> APIRouter:
             audio_duration = 0.0
             try:
                 from app.services.ffmpeg import probe
-                audio_duration = round(probe(audio_path).duration, 2)
+                media_info = await asyncio.to_thread(probe, audio_path)
+                audio_duration = round(media_info.duration, 2)
             except Exception as e:
                 logger.warning("Audio duration probe failed: %s", e)
 
             # Whisper must never hard-fail the request — degrade to no subtitles.
             try:
-                words = transcribe_audio(audio_path, language=req.language)
+                async with slots:
+                    words = await asyncio.to_thread(transcribe_audio, audio_path, language=req.language)
             except Exception as e:
                 logger.warning("Whisper transcription failed (continuing without subtitles): %s", e)
                 words = []

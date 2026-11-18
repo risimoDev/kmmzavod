@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { db } from '../lib/db';
 import { config } from '../config';
 import { logger } from '../logger';
@@ -24,8 +24,29 @@ const LoginBody = z.object({
 });
 
 const RefreshBody = z.object({
-  refreshToken: z.string(),
+  refreshToken: z.string().max(4096).optional(),
 });
+
+const refreshCookie = 'kmm_refresh';
+
+function readRefresh(req: FastifyRequest): string {
+  const body = RefreshBody.parse(req.body ?? {});
+  if (req.headers['x-session-mode'] === 'cookie') {
+    return req.headers.cookie?.match(/(?:^|;\s*)kmm_refresh=([\w-]+)/)?.[1] || body.refreshToken || '';
+  }
+  return body.refreshToken || '';
+}
+
+function setRefreshCookie(reply: FastifyReply, secret: string, maxAge: number) {
+  reply.header('Set-Cookie', `${refreshCookie}=${secret}; HttpOnly; SameSite=Strict; Path=/api/v1/auth/; Max-Age=${maxAge}`
+    + (config.NODE_ENV === 'production' ? '; Secure' : ''));
+}
+
+function sessionResponse(req: FastifyRequest, reply: FastifyReply, tokens: ReturnType<typeof generateTokens>) {
+  if (req.headers['x-session-mode'] !== 'cookie') return tokens;
+  setRefreshCookie(reply, tokens.refreshToken, Math.floor(ttlToMs(config.JWT_REFRESH_TTL) / 1000));
+  return { accessToken: tokens.accessToken };
+}
 
 export async function authRoutes(app: FastifyInstance) {
   // Strict rate limits for auth endpoints (brute-force protection)
@@ -89,7 +110,7 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.code(201).send({
       user: { id: user.id, email: user.email, role: user.role, platformRole: user.platformRole },
       tenant: { id: tenant.id, slug: tenant.slug },
-      ...tokens,
+      ...sessionResponse(req, reply, tokens),
     });
   });
 
@@ -135,13 +156,13 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({
       user: { id: user.id, email: user.email, role: user.role, platformRole: user.platformRole, displayName: user.displayName },
       tenant: { id: user.tenant.id, slug: user.tenant.slug, plan: user.tenant.plan },
-      ...tokens,
+      ...sessionResponse(req, reply, tokens),
     });
   });
 
   // POST /api/v1/auth/refresh
   app.post('/refresh', async (req, reply) => {
-    const { refreshToken } = RefreshBody.parse(req.body);
+    const refreshToken = readRefresh(req);
 
     const tokenHash = hashRefreshToken(refreshToken);
     const session = await db.userSession.findUnique({
@@ -162,24 +183,24 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Аккаунт заблокирован' });
     }
 
-    // Ротация: удаляем старый, выдаём новый. Параллельный refresh тем же токеном
-    // увидит count = 0 и получит 401, а не 404 от Prisma.
-    const { count } = await db.userSession.deleteMany({ where: { id: session.id } });
+    const tokens = generateTokens(app, session.user, session.user.tenant.id);
+    const { count } = await db.userSession.updateMany({
+      where: { id: session.id, refreshToken: tokenHash, expiresAt: { gte: new Date() } },
+      data: { refreshToken: hashRefreshToken(tokens.refreshToken), expiresAt: new Date(Date.now() + ttlToMs(config.JWT_REFRESH_TTL)) },
+    });
     if (count === 0) {
       return reply.code(401).send({ error: 'Unauthorized', message: 'Refresh token невалиден' });
     }
-    const tokens = generateTokens(app, session.user, session.user.tenant.id);
-    await saveRefreshToken(session.user.id, tokens.refreshToken, req);
-
-    return reply.send(tokens);
+    return reply.send(sessionResponse(req, reply, tokens));
   });
 
   // POST /api/v1/auth/logout
   app.post('/logout', { preHandler: app.authenticate }, async (req, reply) => {
-    const { refreshToken } = RefreshBody.parse(req.body);
+    const refreshToken = readRefresh(req);
     await db.userSession.deleteMany({
       where: { refreshToken: hashRefreshToken(refreshToken), userId: req.user.userId },
     });
+    if (req.headers['x-session-mode'] === 'cookie') setRefreshCookie(reply, '', 0);
     return reply.code(204).send();
   });
 
@@ -192,7 +213,7 @@ export async function authRoutes(app: FastifyInstance) {
       role: req.user.role,
       platformRole: req.user.platformRole,
     };
-    const sseToken = app.jwt.sign(payload, { expiresIn: '15m' });
+    const sseToken = app.jwt.sign({ ...payload, type: 'sse' } as typeof payload, { expiresIn: '15m' });
 
     reply.header('Set-Cookie',
       `sse_token=${sseToken}; HttpOnly; SameSite=Strict; Path=/api/v1/videos/; Max-Age=900` +

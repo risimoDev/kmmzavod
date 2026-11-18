@@ -63,3 +63,13 @@ export function decrypt(encoded: string): string {
     return encoded;
   }
 }
+
+const encryptedProxyPrefix = 'encrypted:';
+
+export function protectProxyUrl(value: string): string {
+  return config.ENCRYPTION_KEY ? encryptedProxyPrefix + encrypt(value) : value;
+}
+
+export function readProxyUrl(value: string | null | undefined): string | null {
+  return value?.startsWith(encryptedProxyPrefix) ? decrypt(value.slice(encryptedProxyPrefix.length)) : value ?? null;
+}

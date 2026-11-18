@@ -1,0 +1,58 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kmmzavod
+          POSTGRES_PASSWORD: test-db-password
+          POSTGRES_DB: kmmzavod
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U kmmzavod" --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://kmmzavod:test-db-password@127.0.0.1:5432/kmmzavod
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @kmmzavod/db migrate:deploy
+      - name: Validate backup and restore on PostgreSQL
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" pg_dump -U kmmzavod -Fc kmmzavod > "$RUNNER_TEMP/smoke.dump"
+          docker exec "$POSTGRES_CONTAINER" createdb -U kmmzavod kmmzavod_restore
+          docker exec -i "$POSTGRES_CONTAINER" pg_restore -U kmmzavod -d kmmzavod_restore --exit-on-error < "$RUNNER_TEMP/smoke.dump"
+      - run: pnpm lint
+      - run: pnpm build
+      - name: TypeScript unit tests
+        run: pnpm exec tsx --test $(find apps/device-agent/test apps/orchestrator/test packages/ai/test packages/queue/test -name '*.test.ts')
+      - name: Syntax checks for Python and shell scripts
+        run: |
+          python -m compileall -q apps/editor/app apps/publisher/app apps/video-processor/app
+          find infra scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: Keep local proxy state out of Git
+        run: |
+          if git ls-files 'apps/device-agent/devices-proxy-state*.json' | grep -q .; then
+            echo "Local device proxy state cannot be committed"
+            exit 1
+          fi

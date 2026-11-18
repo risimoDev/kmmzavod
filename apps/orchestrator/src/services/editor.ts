@@ -8,6 +8,7 @@
  *   • render  → final clip(s) for the user-confirmed, possibly-edited EDL.
  */
 import axios from 'axios';
+import { internalHttp } from './internal-http';
 import { config } from '../config';
 
 const BASE = config.EDITOR_URL.replace(/\/+$/, '');
@@ -154,7 +155,7 @@ export const editorService = {
     /** Per source: reusable previous analysis (null = analyse). */
     cachedAnalyses?: (SourceAnalysis | null)[];
   }): Promise<AnalyzeResult> {
-    const res = await axios.post(`${BASE}/analyze`, {
+    const res = await internalHttp.post(`${BASE}/analyze`, {
       project_id: opts.projectId,
       tenant_id: opts.tenantId,
       mode: opts.mode,
@@ -196,7 +197,7 @@ export const editorService = {
     seed?: number;
     voiceoverText?: string;
   }): Promise<RenderResult> {
-    const res = await axios.post(`${BASE}/render`, {
+    const res = await internalHttp.post(`${BASE}/render`, {
       project_id: opts.projectId,
       tenant_id: opts.tenantId,
       mode: opts.mode,

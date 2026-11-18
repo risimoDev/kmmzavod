@@ -558,6 +558,78 @@ if [ -n "$ACTIVE_FARM_URL" ]; then
       warn "device-agent отвечает, но подключенных Android-плат не обнаружено (adb devices пуст)"
     fi
   fi
+
+  # Прокси плат: режим + утечки внешнего IP (private_parallel = у каждой платы свой VPS).
+  DEVICE_AGENT_TOKEN_VALUE="$(env_get DEVICE_AGENT_TOKEN 2>/dev/null || true)"
+  AGENT_AUTH=()
+  [ -n "$DEVICE_AGENT_TOKEN_VALUE" ] && AGENT_AUTH=(-H "x-agent-token: $DEVICE_AGENT_TOKEN_VALUE")
+  if [ ${#AGENT_AUTH[@]} -gt 0 ]; then
+    MODE_RESP=$(curl -sf --connect-timeout 3 --max-time 5 "${AGENT_AUTH[@]}" "$ACTIVE_FARM_URL/proxy/mode" 2>/dev/null || true)
+    case "$MODE_RESP" in
+      *'"private_parallel"'*)
+        ok "Прокси-режим фермы: private_parallel (каждая плата — свой выделенный IP)"
+        ;;
+      *'"shared_sequential"'*)
+        warn "Прокси-режим фермы: shared_sequential (все платы через один модем/прокси)"
+        info "Для перехода на «плата = свой VPS» запустите apply-vps-proxies.ps1 на ПК фермы"
+        ;;
+      "")
+        warn "Не удалось прочитать прокси-режим фермы ($ACTIVE_FARM_URL/proxy/mode)"
+        ;;
+      *)
+        warn "Неизвестный прокси-режим фермы: $MODE_RESP"
+        ;;
+    esac
+
+    SERIALS=$(echo "$DEVICES_RESP" | grep -o '"serial":"[^"]*"' | cut -d'"' -f4 | head -10)
+    if [ -n "$SERIALS" ]; then
+      BODY='{"deviceIds":['
+      FIRST=1
+      for s in $SERIALS; do
+        [ $FIRST -eq 0 ] && BODY="$BODY,"
+        BODY="$BODY\"$s\""; FIRST=0
+      done
+      BODY="$BODY]}"
+      CHECK_RESP=$(curl -sf --connect-timeout 3 --max-time 60 -X POST \
+        -H "Content-Type: application/json" "${AGENT_AUTH[@]}" \
+        -d "$BODY" "$ACTIVE_FARM_URL/proxy/batch-check" 2>/dev/null || true)
+      if [ -n "$CHECK_RESP" ]; then
+        echo "$CHECK_RESP" | python3 - <<'PYEOF' || warn "Не удалось разобрать ответ batch-check (проверьте IP плат вручную: apply-vps-proxies.ps1)"
+import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+res=data.get('results') or []
+bad=[]
+ok_count=0
+for r in res:
+    ip=(r.get('ip') or '').strip()
+    country=(r.get('country') or '').strip().lower()
+    leak=r.get('leakDetected', False)
+    serial=r.get('deviceId') or '?'
+    if leak or (r.get('ok') and not ip):
+        bad.append((serial, ip or 'нет IP', 'leak' if leak else 'no-ip'))
+    elif country in ('russia','russian federation','ru'):
+        bad.append((serial, ip, f'RU exit ({country})'))
+    elif r.get('ok'):
+        ok_count+=1
+if bad:
+    for s,ip,why in bad:
+        print(f'  WARN {s}: {ip} — {why}')
+if ok_count:
+    print(f'  OK: {ok_count} плат имеют не-РФ внешний IP, утечек нет')
+if not bad and not ok_count:
+    print('  WARN: ни одна плата не ответила корректным внешним IP')
+    sys.exit(1)
+PYEOF
+      else
+        warn "batch-check плат не ответил (прокси плат, возможно, не настроены)"
+      fi
+    fi
+  else
+    info "DEVICE_AGENT_TOKEN не задан в .env прод-сервера — проверка прокси плат пропущена"
+  fi
 else
   warn "device-agent на ПК фермы (${CANDIDATE_URLS[*]}) не отвечает"
   info "Для проверки запустите bash scripts/diagnose-vps-farm.sh на сервере"

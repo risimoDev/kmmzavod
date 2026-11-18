@@ -119,6 +119,29 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
           throw new DelayedError();
         }
 
+        // Shared farm proxy lock (same gate as the publish worker): in shared_sequential
+        // mode only one board may use the shared modem at a time — a warmup running through
+        // it in parallel mixes traffic of different accounts behind one IP and doubles
+        // proxy spend. In private_parallel every board has its own proxy, no gate needed.
+        let farmProxyLockOwner: string | null = null;
+        try {
+          const modeState = await deviceAgentService.getProxyMode();
+          if (modeState?.mode !== 'private_parallel') {
+            farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(660_000 / 1000) + 120, 150_000);
+            if (!farmProxyLockOwner) {
+              logger.info({ socialAccountId, deviceId: account.deviceId }, 'Warmup: shared farm proxy busy, delaying');
+              await releaseDeviceLock(redis, account.deviceId, lockOwner);
+              await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+              throw new DelayedError();
+            }
+          }
+        } catch (e) {
+          if (e instanceof DelayedError) throw e;
+          // Proxy mode unknown (device-agent unreachable): keep the per-device lock only —
+          // publish does the same, and view-target checks IP before acting (checkIpFirst).
+          logger.warn({ socialAccountId, err: String(e) }, 'Warmup: could not read proxy mode, proceeding without farm lock');
+        }
+
         try {
           const result = await deviceAgentService.viewTarget({
             deviceId: account.deviceId,
@@ -156,9 +179,15 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
               warmupStartedAt,
               lastWarmupAt: now,
               warmupCount,
-              healthScore: Math.min(100, (account.healthScore ?? 90) + 2),
+              // Atomic increment + clamp: a parallel publish (+5) or a duplicate warmup
+              // job would be lost by a read-modify-write on a stale snapshot.
+              healthScore: { increment: 2 },
               lastError: null,
             },
+          });
+          await db.socialAccount.updateMany({
+            where: { id: socialAccountId, healthScore: { gt: 100 } },
+            data: { healthScore: 100 },
           });
 
           logger.info(
@@ -172,6 +201,7 @@ export function createAccountWarmupWorker(deps: Deps): Worker {
           logger.error({ socialAccountId, deviceId: account.deviceId, err: errorMsg }, 'Warmup: physical board session failed');
           throw new Error(`warmup-device: ${errorMsg}`);
         } finally {
+          if (farmProxyLockOwner) await releaseDeviceLock(redis, 'farm:shared-proxy', farmProxyLockOwner);
           await releaseDeviceLock(redis, account.deviceId, lockOwner);
         }
       }

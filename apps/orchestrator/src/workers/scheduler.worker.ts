@@ -13,15 +13,19 @@
 import { Worker, type ConnectionOptions, type Queue } from 'bullmq';
 import {
   QUEUES,
+  nextCronDate,
   type SchedulerTickPayload,
   type PipelineJobPayload,
   type AccountWarmupPayload,
   type DistributeJobPayload,
+  type PublishJobPayload,
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { runAutopilotsTick, type AutopilotLoopDeps } from '../autopilot/loop';
 import { scoreUniquifyJob } from './uniquify-state.worker';
+import { recoverPublishes } from '../lib/recover-publish';
+import { runScheduledVideoJobs } from '../lib/scheduled-video';
 
 const logger = rootLogger.child({ worker: 'scheduler' });
 
@@ -30,70 +34,10 @@ interface Deps {
   pipelineQueue: Queue<PipelineJobPayload>;
   warmupQueue?: Queue<AccountWarmupPayload>;
   distributeQueue?: Queue<DistributeJobPayload>;
+  publishQueue: Queue<PublishJobPayload>;
   /** Autopilot loop (montage → uniquify → phone farm); omitted → disabled. */
   autopilot?: Omit<AutopilotLoopDeps, 'db'>;
   connection: ConnectionOptions;
-}
-
-/**
- * Parse a cron expression and compute the next occurrence after `after`.
- * Minimal built-in parser for standard 5-field cron (min hour dom mon dow).
- */
-function nextCronDate(cron: string, timezone: string, after: Date): Date | null {
-  try {
-    const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return null;
-
-    const start = new Date(after.getTime() + 60_000);
-    const end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    const matchField = (field: string, value: number): boolean => {
-      if (field === '*') return true;
-
-      if (field.includes('/')) {
-        const [range, stepStr] = field.split('/');
-        const step = parseInt(stepStr, 10);
-        if (range === '*') return value % step === 0;
-        const [lo, hi] = range.split('-').map(Number);
-        return value >= lo && value <= hi && (value - lo) % step === 0;
-      }
-
-      if (field.includes('-')) {
-        const [lo, hi] = field.split('-').map(Number);
-        return value >= lo && value <= hi;
-      }
-
-      if (field.includes(',')) {
-        return field.split(',').map(Number).includes(value);
-      }
-
-      return parseInt(field, 10) === value;
-    };
-
-    for (let t = start.getTime(); t < end.getTime(); t += 60_000) {
-      const d = new Date(t);
-      const inTz = new Date(d.toLocaleString('en-US', { timeZone: timezone }));
-      const min = inTz.getMinutes();
-      const hour = inTz.getHours();
-      const dom = inTz.getDate();
-      const mon = inTz.getMonth() + 1;
-      const dow = inTz.getDay();
-
-      if (
-        matchField(parts[0], min) &&
-        matchField(parts[1], hour) &&
-        matchField(parts[2], dom) &&
-        matchField(parts[3], mon) &&
-        matchField(parts[4], dow)
-      ) {
-        return d;
-      }
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 /** Pick effective editStyle, resolving "random" to a concrete value. */
@@ -148,6 +92,12 @@ export function createSchedulerWorker(deps: Deps): Worker {
       }
 
       // ── Self-heal uniquify jobs stuck in generating/analyzing ────────────
+      try {
+        await recoverPublishes(db, deps.publishQueue, now);
+      } catch (err) {
+        logger.error({ err }, 'Scheduler: publish recovery failed');
+      }
+
       // Safety net: if a state event was ever lost, finalize jobs whose variants
       // are all done. Idempotent and cheap (only touches active jobs).
       try {
@@ -155,116 +105,26 @@ export function createSchedulerWorker(deps: Deps): Worker {
       } catch (err: any) {
         logger.error({ err: err.message }, 'Scheduler: uniquify reconcile failed');
       }
-
-      // ── Daily reset of per-account post counters ──────────────────────────
-      // The distribute worker blocks accounts once dailyPostCount >= maxPostsPerDay.
-      // Nothing else resets it, so without this accounts would stay blocked forever.
-      // Idempotent: only touches accounts whose last post was before today (UTC).
       try {
-        const startOfTodayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-        const reset = await db.socialAccount.updateMany({
-          where: {
-            dailyPostCount: { gt: 0 },
-            OR: [{ lastPostAt: null }, { lastPostAt: { lt: startOfTodayUTC } }],
-          },
-          data: { dailyPostCount: 0 },
-        });
-        if (reset.count > 0) logger.info({ reset: reset.count }, 'Scheduler: daily post counters reset');
-      } catch (err: any) {
-        logger.error({ err: err.message }, 'Scheduler: daily reset failed');
+        await db.$executeRaw`
+          UPDATE social_accounts AS account SET daily_post_count = 0
+          WHERE daily_post_count > 0 AND (
+            last_post_at IS NULL OR EXISTS (
+              SELECT 1 FROM (SELECT COALESCE((
+                SELECT zone.name FROM account_groups AS grp
+                JOIN pg_timezone_names AS zone ON zone.name = grp.timezone
+                WHERE grp.id = account.account_group_id
+              ), 'UTC') AS name) AS tz
+              WHERE (last_post_at AT TIME ZONE 'UTC' AT TIME ZONE tz.name)::date
+                < (${now}::timestamptz AT TIME ZONE tz.name)::date
+            )
+          )
+        `;
+      } catch (err) {
+        logger.error({ err }, 'Scheduler: daily reset failed');
       }
 
-      // Find all due presets
-      const duePresets = await db.videoPreset.findMany({
-        where: {
-          status: 'active',
-          nextRunAt: { lte: now },
-        },
-        include: {
-          product: {
-            select: { id: true, name: true, tenantId: true },
-          },
-        },
-      });
-
-      if (duePresets.length === 0) return;
-
-      logger.info({ count: duePresets.length }, 'Scheduler: found due presets');
-
-      for (const preset of duePresets) {
-        try {
-          if (!preset.product) {
-            logger.warn({ presetId: preset.id }, 'Scheduler: product not found, skipping');
-            continue;
-          }
-
-          const effectiveEditStyle = resolveEditStyle(preset.editStyle);
-
-          // Create Video linked to preset
-          const video = await db.video.create({
-            data: {
-              tenantId: preset.tenantId,
-              productId: preset.productId,
-              presetId: preset.id,
-              title: `${preset.product.name} — авто`,
-              status: 'pending',
-              metadata: {
-                presetId: preset.id,
-                autoPublish: preset.autoPublish,
-                editStyle: effectiveEditStyle,
-              },
-            },
-          });
-
-          // Create Job
-          const job = await db.job.create({
-            data: {
-              tenantId: preset.tenantId,
-              videoId: video.id,
-              status: 'pending',
-              payload: {
-                scriptPrompt: '',
-                productId: preset.productId,
-                presetId: preset.id,
-                settings: {
-                  avatar_id: preset.heygenAvatarId,
-                  voice_id: preset.heygenVoiceId,
-                  durationSec: preset.targetDurationSec,
-                  editStyle: effectiveEditStyle,
-                  bgm_enabled: true,
-                },
-              },
-            },
-          });
-
-          // Enqueue pipeline
-          await pipelineQueue.add(
-            `preset:${preset.id}:${job.id}`,
-            { jobId: job.id, tenantId: preset.tenantId },
-            { attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
-          );
-
-          // Update preset: timing + run counter
-          const nextRun = preset.cronExpression
-            ? nextCronDate(preset.cronExpression, preset.timezone ?? 'Europe/Moscow', now)
-            : null;
-          await db.videoPreset.update({
-            where: { id: preset.id },
-            data: {
-              lastRunAt: now,
-              nextRunAt: nextRun,
-              totalRuns: { increment: 1 },
-            },
-          });
-
-          logger.info(
-            { presetId: preset.id, jobId: job.id, videoId: video.id, nextRun, editStyle: effectiveEditStyle },
-            'Scheduler: created pipeline job from preset',
-          );
-        } catch (err: any) {
-          logger.error({ presetId: preset.id, err: err.message }, 'Scheduler: failed to process preset');
-        }
-      }
+      await runScheduledVideoJobs(db, pipelineQueue, now);
     },
     {
       connection,
@@ -529,13 +389,12 @@ async function runDistributeSchedulesTick(
               status: 'pending' as const,
             })),
           });
+          await tx.queueIntent.create({ data: {
+            queue: distributeQueue.name, name: `distribute-${dj.id}`,
+            payload: { distributeJobId: dj.id, tenantId: schedule.tenantId },
+          } });
           return dj;
         });
-
-        await distributeQueue.add(
-          `distribute-${distJob.id}`,
-          { distributeJobId: distJob.id, tenantId: schedule.tenantId } satisfies DistributeJobPayload,
-        );
 
         logger.info(
           { scheduleId: schedule.id, distributeJobId: distJob.id, uniquifyJobId, items: items.length, nextRun },
@@ -734,7 +593,7 @@ async function runCampaignsTick(
 
       let created = 0;
       for (const [uniquifyJobId, items] of byJob) {
-        const distJob = await db.$transaction(async (tx) => {
+        await db.$transaction(async (tx) => {
           const dj = await tx.distributeJob.create({
             data: {
               tenantId: c.tenantId,
@@ -755,12 +614,11 @@ async function runCampaignsTick(
               status: 'pending' as const,
             })),
           });
-          return dj;
+          await tx.queueIntent.create({ data: {
+            queue: distributeQueue.name, name: `distribute-${dj.id}`,
+            payload: { distributeJobId: dj.id, tenantId: c.tenantId },
+          } });
         });
-        await distributeQueue.add(
-          `distribute-${distJob.id}`,
-          { distributeJobId: distJob.id, tenantId: c.tenantId } satisfies DistributeJobPayload,
-        );
         created += items.length;
       }
 

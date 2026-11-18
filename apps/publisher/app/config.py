@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # Shared secret for service-to-service calls. Empty = auth disabled.
     # When set, every request except /health must send X-Internal-Token.
     internal_service_token: str = ""
+    require_internal_service_token: bool = False
     # Cap simultaneous publishes (each TikTok upload spins a headless browser).
     max_concurrent: int = 2
     # Reject videos larger than this when downloading the presigned URL.

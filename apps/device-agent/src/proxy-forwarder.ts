@@ -829,21 +829,27 @@ export function isWildberriesHost(host: string): boolean {
 
 /**
  * Returns true if the host is a heavy video CDN stream (feed playback).
- * Crucial: API, login, passport, TOS storage and upload endpoints are NEVER treated as media CDN.
+ * Crucial: API, login, passport and upload endpoints are NEVER treated as media CDN.
+ * Object-storage hosts (ibytedtos, *.byteoversea.net) are heavy media traffic and ARE
+ * classified as CDN; the oversea *API* domain byteoversea.com stays protected.
  */
 export function isTikTokMediaCdn(host: string): boolean {
   if (!host) return false;
   const h = host.toLowerCase().trim();
 
-  // 1. Safeguard: Critical API, passport/auth, upload endpoints, ByteDance TOS storage must ALWAYS pass
+  // 0. Heavy media object storage first: it must be classified as CDN even though some
+  //    of its substrings also appear in API-domain names below.
+  if (h.includes('ibytedtos') || h.endsWith('.byteoversea.net') || h === 'byteoversea.net') {
+    return true;
+  }
+
+  // 1. Safeguard: Critical API, passport/auth, upload endpoints must ALWAYS pass (not CDN)
   if (
     h.includes('passport') ||
     h.includes('login') ||
     h.includes('auth') ||
     h.includes('upload') ||
-    h.includes('tos') ||             // ByteDance TOS (Target Object Storage) used for video uploads!
-    h.includes('ibytedtos') ||       // ByteDance TOS domain (*.ibytedtos.com)
-    h.includes('byteoversea') ||     // TikTok oversea configuration endpoints
+    h.includes('byteoversea') ||     // TikTok oversea configuration endpoints (.com APIs)
     h.includes('byteintl') ||        // ByteDance international endpoints
     h.includes('bytegoofy') ||       // ByteDance dynamic client configurations
     h.includes('sgpstatp') ||        // ByteDance static assets / configs

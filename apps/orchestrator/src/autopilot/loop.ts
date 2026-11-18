@@ -21,14 +21,12 @@ import {
   type EditorRenderJobPayload,
   type UniquifyAnalyzeJobPayload,
   type DistributeJobPayload,
-  type PublishJobPayload,
 } from '@kmmzavod/queue';
 import type { PrismaClient, Autopilot } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { nextWallClock, startOfZonedDay } from '../lib/tz';
 import { journal, failBatch } from './journal';
 import { deviceAgentService } from '../services/device-agent';
-import { settleDistributeItem } from '../workers/publish.worker';
 
 const logger = rootLogger.child({ worker: 'autopilot-loop' });
 
@@ -38,7 +36,6 @@ export interface AutopilotLoopDeps {
   editorRenderQueue: Queue<EditorRenderJobPayload>;
   uniquifyAnalyzeQueue: Queue<UniquifyAnalyzeJobPayload>;
   distributeQueue: Queue<DistributeJobPayload>;
-  publishQueue?: Queue<PublishJobPayload>;
 }
 
 const MIN = 60_000;
@@ -75,7 +72,6 @@ export async function runAutopilotsTick(deps: AutopilotLoopDeps, now: Date): Pro
 async function tickOne(deps: AutopilotLoopDeps, ap: Autopilot, now: Date): Promise<void> {
   const { db } = deps;
   await advanceBatches(deps, ap, now);
-  await recoverStuckScheduledItems(deps, ap, now);
 
   // Re-read: advancing may have flipped the autopilot to `error`.
   const fresh = await db.autopilot.findUnique({ where: { id: ap.id } });
@@ -674,108 +670,4 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
   return out;
-}
-
-/**
- * Watchdog: finds scheduled distribute items that missed their window by >25 min,
- * reschedules them, and ensures BullMQ jobs are active.
- */
-async function recoverStuckScheduledItems(deps: AutopilotLoopDeps, ap: Autopilot, now: Date): Promise<void> {
-  const { db, publishQueue } = deps;
-  if (!publishQueue) return;
-
-  const staleThreshold = new Date(now.getTime() - 25 * 60 * 1000);
-  const stuck = await db.distributeItem.findMany({
-    where: {
-      distributeJob: { autopilotId: ap.id },
-      status: 'scheduled',
-      scheduledAt: { lt: staleThreshold },
-    },
-    include: {
-      publishJob: true,
-      socialAccount: true,
-      uniqueVariant: true,
-    },
-    take: 25,
-  });
-
-  if (!stuck.length) return;
-
-  logger.warn({ autopilotId: ap.id, count: stuck.length }, 'autopilot watchdog: recovering past-due scheduled items');
-
-  for (let i = 0; i < stuck.length; i++) {
-    const item = stuck[i];
-    if (!item.socialAccount || !item.uniqueVariant) continue;
-
-    if (item.publishJob?.status === 'published') {
-      if (item.publishJobId) {
-        await settleDistributeItem(db, item.publishJobId, { status: 'published', at: now });
-      }
-      continue;
-    }
-    if (item.publishJob?.status === 'failed') {
-      if (item.publishJobId) {
-        await settleDistributeItem(db, item.publishJobId, { status: 'failed', error: item.publishJob.error || 'Failed' });
-      }
-      continue;
-    }
-
-    // Space recovered items by 75s so physical boards sequentially process them without proxy lock collisions
-    const newScheduledAt = new Date(now.getTime() + i * 75_000);
-
-    let publishJobId = item.publishJobId;
-    if (!publishJobId) {
-      const pj = await db.publishJob.create({
-        data: {
-          tenantId: ap.tenantId,
-          socialAccountId: item.socialAccountId,
-          uniqueVariantId: item.uniqueVariantId,
-          platform: item.socialAccount.platform as any,
-          caption: item.caption || item.uniqueVariant.generatedCaption || '',
-          hashtags: (item.hashtags as string[]) || [],
-          scheduledAt: newScheduledAt,
-          status: 'scheduled',
-        },
-      });
-      publishJobId = pj.id;
-      await db.distributeItem.update({
-        where: { id: item.id },
-        data: { publishJobId, scheduledAt: newScheduledAt },
-      });
-    } else {
-      await db.distributeItem.update({
-        where: { id: item.id },
-        data: { scheduledAt: newScheduledAt },
-      });
-      await db.publishJob.update({
-        where: { id: publishJobId },
-        data: { scheduledAt: newScheduledAt, status: 'scheduled', error: null },
-      });
-    }
-
-    // Do not clobber a job that is already active (currently publishing) or delayed waiting for device
-    const existingJob = await publishQueue.getJob(publishJobId).catch(() => null);
-    if (existingJob) {
-      const state = await existingJob.getState().catch(() => 'unknown');
-      if (state === 'active' || state === 'delayed' || state === 'waiting') {
-        continue;
-      }
-      await existingJob.remove().catch(() => {});
-    }
-
-    const payload: PublishJobPayload = {
-      publishJobId,
-      uniqueVariantId: item.uniqueVariantId,
-      tenantId: ap.tenantId,
-      platform: item.socialAccount.platform as any,
-      socialAccountId: item.socialAccountId,
-      scheduledAt: newScheduledAt.toISOString(),
-    };
-
-    const delay = Math.max(0, newScheduledAt.getTime() - now.getTime());
-    // Deterministic job ID guarantees no duplicate phantom jobs
-    await publishQueue.add(`publish:${publishJobId}`, payload, { delay, jobId: publishJobId }).catch((err) => {
-      logger.warn({ err: err.message, itemId: item.id }, 'autopilot watchdog: failed to re-enqueue publish job');
-    });
-  }
 }

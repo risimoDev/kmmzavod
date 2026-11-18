@@ -40,9 +40,10 @@ import { createHeygenRenderWorker } from './workers/heygen-render.worker';
 import { createRunwayClipWorker } from './workers/runway-clip.worker';
 import { createImageGenWorker } from './workers/image-gen.worker';
 import { createVideoComposeWorker } from './workers/video-compose.worker';
-import { createPipelineStateWorker } from './workers/pipeline-state.worker';
+import { createPipelineStateWorker, setPipelineStatus } from './workers/pipeline-state.worker';
 import { createPublishWorker } from './workers/publish.worker';
 import { createSchedulerWorker } from './workers/scheduler.worker';
+import { deliverQueueIntents } from './lib/queue-intents';
 import { createUniquifyAnalyzeWorker } from './workers/uniquify-analyze.worker';
 import { createUniquifyRenderWorker } from './workers/uniquify-render.worker';
 import { createUniquifyStateWorker } from './workers/uniquify-state.worker';
@@ -190,12 +191,12 @@ async function main() {
     pipelineQueue,
     warmupQueue: accountWarmupQueue,
     distributeQueue,
+    publishQueue,
     autopilot: {
       produceQueue: autopilotProduceQueue,
       editorRenderQueue,
       uniquifyAnalyzeQueue,
       distributeQueue,
-      publishQueue,
     },
     connection,
   });
@@ -283,12 +284,7 @@ async function main() {
     const errorMsg = err.message || `${stage} failed`;
     try {
       const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
-      await db.$transaction([
-        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[${stage}] ${errorMsg}` } }),
-        ] : []),
-      ]);
+      if (!await setPipelineStatus(db, jobId, jobRow?.videoId, 'failed', errorMsg)) return;
       await db.jobEvent.create({
         data: { jobId, tenantId, stage, status: 'failed', message: errorMsg },
       });
@@ -319,13 +315,8 @@ async function main() {
     try {
       const jobRow = await db.job.findUnique({ where: { id: jobId }, select: { videoId: true, payload: true } });
       const errorMsg = err.message || 'Unknown error';
-      await db.$transaction([
-        db.scene.update({ where: { id: sceneId }, data: { status: 'failed', error: errorMsg } }),
-        db.job.update({ where: { id: jobId }, data: { status: 'failed', error: errorMsg } }),
-        ...(jobRow?.videoId ? [
-          db.video.update({ where: { id: jobRow.videoId }, data: { status: 'failed', error: `[${stage}] ${errorMsg}` } }),
-        ] : []),
-      ]);
+      if (!await setPipelineStatus(db, jobId, jobRow?.videoId, 'failed', errorMsg)) return;
+      await db.scene.updateMany({ where: { id: sceneId, jobId }, data: { status: 'failed', error: errorMsg } });
       await db.jobEvent.create({
         data: { jobId, tenantId, stage, status: 'failed', message: errorMsg },
       });
@@ -358,7 +349,8 @@ async function main() {
     const { publishJobId, tenantId } = j.data;
     try {
       const { finalizePublishFailure } = await import('./workers/publish.worker');
-      await finalizePublishFailure(db, publishJobId, err.message);
+      const post = await db.publishJob.findUnique({ where: { id: publishJobId }, select: { status: true } });
+      await finalizePublishFailure(db, publishJobId, err.message, post?.status === 'uploading');
       logger.error({ publishJobId, tenantId, err: err.message }, 'Publish: final failure after retries');
     } catch (dbErr) {
       logger.error({ dbErr, publishJobId }, 'Publish failed handler: DB error');
@@ -458,7 +450,18 @@ async function main() {
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
+  const intentQueues = new Map<string, Queue>(
+    [pipelineQueue, autopilotProduceQueue, editorAnalyzeQueue, editorRenderQueue, uniquifyAnalyzeQueue, uniquifyRenderQueue, distributeQueue].map(q => [q.name, q]),
+  );
+  let delivery: Promise<void> | undefined;
+  const intentTimer = setInterval(() => {
+    delivery ??= deliverQueueIntents(db, intentQueues, storage)
+      .catch(err => logger.error({ err }, 'Queue intent delivery failed'))
+      .finally(() => { delivery = undefined; });
+  }, 5_000);
+
   const shutdown = async (signal: string) => {
+    clearInterval(intentTimer);
     logger.info({ signal }, 'Получен сигнал завершения, закрываем workers...');
     clearInterval(hbTimer);
     clearInterval(publisherHealthTimer);

@@ -18,6 +18,8 @@ import { assertOwnStorageKey } from '../lib/storage-keys';
 import { getAstroProxySummary } from '../lib/astroproxy';
 import { deviceAgentClient } from '../lib/device-agent';
 import { publishQueue } from '../lib/queues';
+import { addOrReplace } from '@kmmzavod/queue';
+import type { Prisma } from '@kmmzavod/db';
 import { getRedis } from '../lib/redis';
 import type { PublishJobPayload } from '@kmmzavod/queue';
 
@@ -718,41 +720,29 @@ export async function autopilotRoutes(app: FastifyInstance) {
       let retriggeredCount = 0;
       const now = new Date();
 
-      for (let i = 0; i < scheduledItems.length; i++) {
-        const item = scheduledItems[i];
-        if (!item.socialAccount || !item.uniqueVariant) continue;
-
-        // Sequence with 75s gap between physical boards (allowing full upload & IP rotation)
-        const scheduledAt = new Date(now.getTime() + i * 75_000);
-        const jobId = item.publishJobId || item.id;
-
-        await db.distributeItem.update({
-          where: { id: item.id },
-          data: { scheduledAt, status: 'scheduled', error: null },
-        });
-
-        if (item.publishJobId) {
-          await db.publishJob.update({
-            where: { id: item.publishJobId },
-            data: { scheduledAt, status: 'scheduled', error: null },
-          });
+      for (const item of scheduledItems) {
+        const post = item.publishJob;
+        if (!post || post.needsReview || (post.status !== 'pending' && post.status !== 'scheduled')) continue;
+        const queued = await publishQueue.getJob(post.id);
+        const delay = retriggeredCount * 75_000;
+        const scheduledAt = new Date(now.getTime() + delay);
+        if (queued) {
+          if (await queued.getState() !== 'delayed') continue;
+          try { await queued.changeDelay(delay); }
+          catch (err) {
+            if (await queued.getState() !== 'delayed') continue;
+            throw err;
+          }
+        } else {
+          await enqueuePublish({ ...post, scheduledAt });
         }
-
-        const payload: PublishJobPayload = {
-          publishJobId: item.publishJobId || jobId,
-          uniqueVariantId: item.uniqueVariantId,
-          tenantId,
-          platform: item.socialAccount.platform as any,
-          socialAccountId: item.socialAccountId,
-          scheduledAt: scheduledAt.toISOString(),
-        };
-
-        const oldJob = await publishQueue.getJob(jobId).catch(() => null);
-        if (oldJob) await oldJob.remove().catch(() => {});
-
-        const bullJobId = `publish-now-${item.id}-${Date.now()}-${i}`;
-        const delay = Math.max(0, scheduledAt.getTime() - Date.now());
-        await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId: bullJobId }).catch(() => {});
+        await db.$transaction([
+          db.publishJob.updateMany({
+            where: { id: post.id, status: { in: ['pending', 'scheduled'] } },
+            data: { scheduledAt },
+          }),
+          db.distributeItem.updateMany({ where: { id: item.id, status: 'scheduled' }, data: { scheduledAt } }),
+        ]);
         retriggeredCount++;
       }
 
@@ -801,11 +791,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
 
     // Filter out posts whose failure reason indicates they might already be live on profile (unconfirmed)
     // to prevent duplicate posting.
-    const safeToRetry = failedItems.filter((item) => {
-      const err = (item.error || item.publishJob?.error || '').toLowerCase();
-      const isUnconfirmed = err.includes('появление в профиле ожидается') || err.includes('не подтверждена');
-      return !isUnconfirmed;
-    });
+    const safeToRetry = failedItems.filter(item => canRetryPublish(item.publishJob, item.error));
 
     if (!safeToRetry.length) {
       return {
@@ -821,75 +807,9 @@ export async function autopilotRoutes(app: FastifyInstance) {
     let retriedCount = 0;
     const now = new Date();
 
-    for (let i = 0; i < safeToRetry.length; i++) {
-      const item = safeToRetry[i];
-      if (!item.socialAccount || !item.uniqueVariant) continue;
-
-      // Stagger retry so physical boards don't collide
-      const scheduledAt = new Date(now.getTime() + i * 45_000);
-      let jobId = item.publishJobId;
-
-      if (jobId && item.publishJob) {
-        await db.publishJob.update({
-          where: { id: jobId },
-          data: {
-            status: 'scheduled',
-            scheduledAt,
-            error: null,
-            publishedAt: null,
-          },
-        });
-      } else {
-        const pj = await db.publishJob.create({
-          data: {
-            tenantId,
-            socialAccountId: item.socialAccountId,
-            uniqueVariantId: item.uniqueVariantId,
-            platform: item.socialAccount.platform as any,
-            caption: item.caption || item.uniqueVariant.generatedCaption || '',
-            hashtags: (item.hashtags as string[]) || [],
-            scheduledAt,
-            status: 'scheduled',
-          },
-        });
-        jobId = pj.id;
-      }
-
-      await db.distributeItem.update({
-        where: { id: item.id },
-        data: {
-          status: 'scheduled',
-          publishJobId: jobId,
-          scheduledAt,
-          error: null,
-          publishedAt: null,
-        },
-      });
-
-      // Decrement failedCount on the parent DistributeJob to keep totals consistent
-      await db.distributeJob.update({
-        where: { id: item.distributeJobId },
-        data: {
-          failedCount: { decrement: 1 },
-          status: 'distributing',
-        },
-      }).catch(() => {});
-
-      const oldJob = await publishQueue.getJob(jobId).catch(() => null);
-      if (oldJob) await oldJob.remove().catch(() => {});
-
-      const payload: PublishJobPayload = {
-        publishJobId: jobId,
-        uniqueVariantId: item.uniqueVariantId,
-        tenantId,
-        platform: item.socialAccount.platform as any,
-        socialAccountId: item.socialAccountId,
-        scheduledAt: scheduledAt.toISOString(),
-      };
-      const delay = Math.max(0, scheduledAt.getTime() - Date.now());
-      // Deterministic job ID avoids phantom duplicates
-      await publishQueue.add(`publish:${jobId}`, payload, { delay, jobId });
-      retriedCount++;
+    for (const item of safeToRetry) {
+      const scheduledAt = new Date(now.getTime() + retriedCount * 45_000);
+      if (await retryPublishItem(item, scheduledAt)) retriedCount++;
     }
 
     await db.autopilotRun.create({
@@ -929,59 +849,11 @@ export async function autopilotRoutes(app: FastifyInstance) {
     });
     if (!item) return reply.code(404).send({ error: 'NotFound', message: 'Публикация не найдена' });
 
-    const scheduledAt = new Date();
-    let jobId = item.publishJobId;
-
-    if (jobId && item.publishJob) {
-      await db.publishJob.update({
-        where: { id: jobId },
-        data: {
-          status: 'scheduled',
-          scheduledAt,
-          error: null,
-          publishedAt: null,
-        },
-      });
-    } else {
-      const pj = await db.publishJob.create({
-        data: {
-          tenantId,
-          socialAccountId: item.socialAccountId,
-          uniqueVariantId: item.uniqueVariantId,
-          platform: item.socialAccount.platform as any,
-          caption: item.caption || item.uniqueVariant.generatedCaption || '',
-          hashtags: (item.hashtags as string[]) || [],
-          scheduledAt,
-          status: 'scheduled',
-        },
-      });
-      jobId = pj.id;
+    if (item.status !== 'failed' || !canRetryPublish(item.publishJob, item.error)) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Доступен только повтор подтверждённого сбоя. Проверьте профиль.' });
     }
-
-    await db.distributeItem.update({
-      where: { id: item.id },
-      data: {
-        status: 'scheduled',
-        publishJobId: jobId,
-        scheduledAt,
-        error: null,
-        publishedAt: null,
-      },
-    });
-
-    const oldJob = await publishQueue.getJob(jobId).catch(() => null);
-    if (oldJob) await oldJob.remove().catch(() => {});
-
-    const payload: PublishJobPayload = {
-      publishJobId: jobId,
-      uniqueVariantId: item.uniqueVariantId,
-      tenantId,
-      platform: item.socialAccount.platform as any,
-      socialAccountId: item.socialAccountId,
-      scheduledAt: scheduledAt.toISOString(),
-    };
-    const bullJobId = `single-retry-${jobId}-${Date.now()}`;
-    await publishQueue.add(`publish:${jobId}`, payload, { jobId: bullJobId });
+    const jobId = await retryPublishItem(item, new Date());
+    if (!jobId) return reply.code(409).send({ error: 'Conflict', message: 'Статус публикации уже изменился' });
 
     await db.autopilotRun.create({
       data: {
@@ -1006,4 +878,70 @@ export async function autopilotRoutes(app: FastifyInstance) {
     await db.autopilot.delete({ where: { id } });
     return reply.code(204).send();
   });
+}
+
+type RetryItem = Prisma.DistributeItemGetPayload<{ include: { publishJob: true; socialAccount: true; uniqueVariant: true } }>;
+
+function canRetryPublish(post: RetryItem['publishJob'], error: string | null) {
+  return (!post || (post.status === 'failed' && !post.needsReview))
+    && !/не подтвержд|появление в профиле ожидается|проверьте профиль вручную/i.test(`${error ?? ''} ${post?.error ?? ''}`);
+}
+
+async function retryPublishItem(item: RetryItem, scheduledAt: Date): Promise<string | null> {
+  const previous = item.publishJob;
+  if (previous) {
+    const queued = await publishQueue.getJob(previous.id);
+    if (queued && !['completed', 'failed', 'unknown'].includes(await queued.getState())) return null;
+  }
+  const post = await db.$transaction(async tx => {
+    let job = previous;
+    if (previous) {
+      const claimed = await tx.publishJob.updateMany({
+        where: { id: previous.id, status: 'failed', needsReview: false },
+        data: { status: 'scheduled', scheduledAt, error: null, publishedAt: null },
+      });
+      if (!claimed.count) return null;
+      job = { ...previous, scheduledAt };
+    }
+    const claimed = await tx.distributeItem.updateMany({
+      where: { id: item.id, status: 'failed', distributeJob: { status: { not: 'cancelled' } } },
+      data: { status: 'scheduled', scheduledAt, error: null, publishedAt: null },
+    });
+    if (!claimed.count) {
+      if (previous) throw new PublishRetryConflict();
+      return null;
+    }
+    if (!job) {
+      job = await tx.publishJob.create({
+        data: {
+          tenantId: item.socialAccount.tenantId, socialAccountId: item.socialAccountId,
+          uniqueVariantId: item.uniqueVariantId, platform: item.socialAccount.platform,
+          caption: item.caption || item.uniqueVariant.generatedCaption || '',
+          hashtags: item.hashtags, scheduledAt, status: 'scheduled',
+        },
+      });
+      await tx.distributeItem.update({ where: { id: item.id }, data: { publishJobId: job.id } });
+    }
+    await tx.distributeJob.updateMany({
+      where: { id: item.distributeJobId, status: { not: 'cancelled' }, failedCount: { gt: 0 } },
+      data: { failedCount: { decrement: 1 }, status: 'distributing', completedAt: null },
+    });
+    return job;
+  }).catch(err => {
+    if (err instanceof PublishRetryConflict) return null;
+    throw err;
+  });
+  if (!post) return null;
+  await enqueuePublish(post).catch(err => logger.warn({ err, publishJobId: post.id }, 'Publish retry stored for queue recovery'));
+  return post.id;
+}
+
+class PublishRetryConflict extends Error {}
+
+function enqueuePublish(post: Pick<NonNullable<RetryItem['publishJob']>, 'id' | 'tenantId' | 'videoId' | 'uniqueVariantId' | 'socialAccountId' | 'platform' | 'scheduledAt'>) {
+  return addOrReplace(publishQueue, `publish:${post.id}`, {
+    publishJobId: post.id, tenantId: post.tenantId, platform: post.platform,
+    socialAccountId: post.socialAccountId, videoId: post.videoId ?? undefined,
+    uniqueVariantId: post.uniqueVariantId ?? undefined, scheduledAt: post.scheduledAt?.toISOString(),
+  }, { jobId: post.id, delay: Math.max(0, (post.scheduledAt?.getTime() ?? 0) - Date.now()) });
 }

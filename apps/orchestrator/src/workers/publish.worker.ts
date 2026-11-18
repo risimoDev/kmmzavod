@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import axios from 'axios';
 import { Worker, Queue, DelayedError, UnrecoverableError, type ConnectionOptions } from 'bullmq';
 import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
-import type { PrismaClient } from '@kmmzavod/db';
+import type { Prisma, PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
 import { TikTokClient } from '../clients/social/tiktok.client';
 import { InstagramClient } from '../clients/social/instagram.client';
@@ -25,6 +25,7 @@ import { config } from '../config';
 import { logger as rootLogger } from '../logger';
 import { decrypt, encrypt } from '../lib/crypto';
 import { normalizeCaption } from '../lib/caption';
+import { accountDay } from '../lib/tz';
 import { getRedisConnection } from '../lib/redis';
 import type Redis from 'ioredis';
 import { publisherService, describePublisherError } from '../services/publisher';
@@ -106,92 +107,85 @@ export function isOutcomeUnknown(err: unknown, serverErrorsUnknown: boolean): bo
   return !PRE_CONNECT_CODES.has(err.code ?? '');
 }
 
-const DIST_ITEM_OPEN = ['pending', 'scheduled', 'publishing'] as const;
+type PublishOutcome = { status: 'published'; at: Date } | { status: 'failed'; error: string };
 
-/**
- * Records the final outcome of a publish on its DistributeItem (if any) exactly once:
- * the item is claimed with a conditional update, so retries, the worker and the
- * BullMQ `failed` handler can all call this without double-counting.
- */
-export async function settleDistributeItem(
-  db: PrismaClient,
-  publishJobId: string,
-  outcome: { status: 'published'; at: Date } | { status: 'failed'; error: string },
-): Promise<void> {
-  const item = await db.distributeItem.findFirst({
+class PublishOutcomeUnknownError extends UnrecoverableError {}
+
+async function settleItem(tx: Prisma.TransactionClient, publishJobId: string, outcome: PublishOutcome) {
+  const item = await tx.distributeItem.findFirst({
     where: { publishJobId },
     select: { id: true, distributeJobId: true },
   });
   if (!item) return;
 
-  const claimed = await db.distributeItem.updateMany({
-    where: { id: item.id, status: { in: [...DIST_ITEM_OPEN] } },
+  const claimed = await tx.distributeItem.updateMany({
+    where: { id: item.id, status: { in: ['pending', 'scheduled', 'publishing'] } },
     data: outcome.status === 'published'
       ? { status: 'published', publishedAt: outcome.at, error: null }
       : { status: 'failed', error: outcome.error },
   });
-  if (claimed.count === 0) return; // already settled
+  if (!claimed.count) return;
 
-  const distJob = await db.distributeJob.update({
+  const distJob = await tx.distributeJob.update({
     where: { id: item.distributeJobId },
     data: outcome.status === 'published' ? { publishedCount: { increment: 1 } } : { failedCount: { increment: 1 } },
     select: { publishedCount: true, failedCount: true, totalItems: true },
   });
   if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
-    await db.distributeJob.update({
-      where: { id: item.distributeJobId },
+    await tx.distributeJob.updateMany({
+      where: { id: item.distributeJobId, status: { in: ['pending', 'distributing'] } },
       data: { status: 'completed', completedAt: new Date() },
     });
   }
 }
 
-/** Final (all attempts used) failure bookkeeping. Idempotent. */
-export async function finalizePublishFailure(db: PrismaClient, publishJobId: string, errorMsg: string): Promise<void> {
-  await db.publishJob.updateMany({
-    where: { id: publishJobId, status: { not: 'published' } },
-    data: { status: 'failed', error: errorMsg },
-  });
-  await settleDistributeItem(db, publishJobId, { status: 'failed', error: errorMsg });
+export function settleDistributeItem(db: PrismaClient, publishJobId: string, outcome: PublishOutcome) {
+  return db.$transaction(tx => settleItem(tx, publishJobId, outcome));
 }
 
-/** Idempotent success bookkeeping (M5): preserves dailyPostCount, lastPostAt, verifiedAt and healthScore. */
-export async function finalizePublishSuccess(
+export function finalizePublishFailure(db: PrismaClient, publishJobId: string, error: string, unknown = false) {
+  return db.$transaction(async tx => {
+    const claimed = await tx.publishJob.updateMany({
+      where: { id: publishJobId, status: { in: ['pending', 'scheduled', 'uploading'] } },
+      data: { status: 'failed', error, needsReview: unknown },
+    });
+    if (claimed.count) await settleItem(tx, publishJobId, { status: 'failed', error });
+    return claimed.count > 0;
+  });
+}
+
+export function finalizePublishSuccess(
   db: PrismaClient,
   publishJobId: string,
   socialAccountId: string,
-  data: {
-    externalPostId?: string | null;
-    verifiedAt?: Date | null;
-    publishNote?: string | null;
-  }
-): Promise<void> {
-  const now = new Date();
-  await db.publishJob.update({
-    where: { id: publishJobId },
-    data: {
-      status: 'published',
-      publishedAt: now,
-      externalPostId: data.externalPostId,
-      verifiedAt: data.verifiedAt,
-      error: data.publishNote,
-    },
-  }).catch(() => {});
-
-  await db.socialAccount.update({
-    where: { id: socialAccountId },
-    data: {
-      dailyPostCount: { increment: 1 },
-      lastPostAt: now,
-      healthScore: { increment: 5 },
-    },
-  }).catch(() => {});
-
-  await db.socialAccount.updateMany({
-    where: { id: socialAccountId, healthScore: { gt: 100 } },
-    data: { healthScore: 100 },
-  }).catch(() => {});
-
-  await settleDistributeItem(db, publishJobId, { status: 'published', at: now }).catch(() => {});
+  data: { externalPostId?: string | null; verifiedAt?: Date | null; publishNote?: string | null },
+) {
+  return db.$transaction(async tx => {
+    const now = new Date();
+    const claimed = await tx.publishJob.updateMany({
+      where: { id: publishJobId, status: 'uploading' },
+      data: {
+        status: 'published', publishedAt: now, externalPostId: data.externalPostId,
+        verifiedAt: data.verifiedAt, error: data.publishNote, needsReview: false,
+      },
+    });
+    if (!claimed.count) return;
+    await tx.$queryRaw`SELECT id FROM social_accounts WHERE id = ${socialAccountId}::uuid FOR UPDATE`;
+    const account = await tx.socialAccount.findUniqueOrThrow({
+      where: { id: socialAccountId },
+      select: { lastPostAt: true, accountGroup: { select: { timezone: true } } },
+    });
+    const sameDay = account.lastPostAt && account.lastPostAt >= accountDay(now, account.accountGroup?.timezone);
+    await tx.socialAccount.update({
+      where: { id: socialAccountId },
+      data: { dailyPostCount: sameDay ? { increment: 1 } : 1, lastPostAt: now, healthScore: { increment: 5 } },
+    });
+    await tx.socialAccount.updateMany({
+      where: { id: socialAccountId, healthScore: { gt: 100 } },
+      data: { healthScore: 100 },
+    });
+    await settleItem(tx, publishJobId, { status: 'published', at: now });
+  });
 }
 
 async function setAutopilotLiveProgress(
@@ -252,19 +246,43 @@ export function createPublishWorker(deps: Deps): Worker {
         logger.warn({ publishJobId }, 'Publish: PublishJob not found, skipping');
         return;
       }
-      if (existing.status === 'published') {
-        logger.warn({ publishJobId }, 'Publish: already published, skipping duplicate run');
+      if (existing.status !== 'pending' && existing.status !== 'scheduled') return;
+
+      // Claim the job atomically: a duplicate run (stalled job, duplicate enqueue) that lost
+      // the race must not proceed to a second post. findUnique above is only for diagnostics —
+      // the claim below is the real gate against the check-then-act race.
+      const claimed = await db.$transaction(async tx => {
+        const result = await tx.publishJob.updateMany({
+          where: { id: publishJobId, status: existing.status, needsReview: false },
+          data: { status: 'uploading' },
+        });
+        if (!result.count) return 'busy';
+        // Serialize reservations for automated posts on this account.
+        await tx.$queryRaw`SELECT id FROM social_accounts WHERE id = ${socialAccountId}::uuid FOR UPDATE`;
+        const automated = await tx.distributeItem.count({ where: { publishJobId } });
+        if (!automated) return 'claimed';
+        const account = await tx.socialAccount.findUniqueOrThrow({
+          where: { id: socialAccountId },
+          select: { lastPostAt: true, dailyPostCount: true, accountGroup: { select: { timezone: true, maxPostsPerDay: true } } },
+        });
+        const day = accountDay(new Date(), account.accountGroup?.timezone);
+        const published = account.lastPostAt && account.lastPostAt >= day ? account.dailyPostCount : 0;
+        const uploading = await tx.publishJob.count({
+          where: { id: { not: publishJobId }, socialAccountId, status: 'uploading', updatedAt: { gte: day } },
+        });
+        if (published + uploading < (account.accountGroup?.maxPostsPerDay ?? 3)) return 'claimed';
+        await tx.publishJob.update({ where: { id: publishJobId }, data: { status: existing.status } });
+        return 'limited';
+      });
+      if (claimed === 'limited') {
+        await finalizePublishFailure(db, publishJobId, 'Дневной лимит публикаций аккаунта исчерпан');
         return;
       }
-      // Every handled exit resets 'uploading' (pending/failed/published), so seeing it here
-      // means the previous run died mid-upload (crash, SIGKILL, stalled job). The post may
-      // already be live — re-running could publish it twice.
-      if (existing.status === 'uploading') {
-        const msg = 'Публикация прервана перезапуском во время загрузки и не подтверждена — проверьте профиль вручную';
-        logger.error({ publishJobId, platform }, 'Publish: found in uploading state on entry, not re-running');
-        await finalizePublishFailure(db, publishJobId, msg);
+      if (claimed === 'busy') {
+        logger.warn({ publishJobId, platform }, 'Publish: lost the status race to a duplicate run, skipping');
         return;
       }
+      // The job is ours now — the unconditional 'uploading' update below was folded into the claim.
 
       let accountName = socialAccountId;
       /** Set the moment the platform accepted the post — from then on, never retry. */
@@ -287,11 +305,7 @@ export function createPublishWorker(deps: Deps): Worker {
         return;
       }
 
-      // Mark as uploading
-      await db.publishJob.update({
-        where: { id: publishJobId },
-        data: { status: 'uploading' },
-      });
+      // (Job already claimed as 'uploading' by the atomic updateMany above.)
       await db.distributeItem.updateMany({
         where: { publishJobId, status: { in: ['pending', 'scheduled'] } },
         data: { status: 'publishing' },
@@ -420,8 +434,10 @@ export function createPublishWorker(deps: Deps): Worker {
               });
             }
           } catch (err: unknown) {
-            if (isOutcomeUnknown(err, false)) {
-              throw new UnrecoverableError(`publisher-${platform}: ${describePublisherError(err)}. Публикация не подтверждена — проверьте профиль вручную`);
+            // The publisher (instagrapi/tiktok-uploader) may die mid-upload: a 5xx there
+            // means the outcome is unknown, same as on the device path — never retry blindly.
+            if (isOutcomeUnknown(err, true)) {
+              throw new PublishOutcomeUnknownError(`publisher-${platform}: ${describePublisherError(err)}. Публикация не подтверждена — проверьте профиль вручную`);
             }
             throw new Error(`publisher-${platform}: ${describePublisherError(err)}`);
           }
@@ -580,7 +596,7 @@ export function createPublishWorker(deps: Deps): Worker {
             }
             // Transport failure. A timeout means the agent may still be mid-upload → not safe to retry.
             if (/did not answer in time/i.test(msg) || isOutcomeUnknown(err, true)) {
-              throw new UnrecoverableError(`device-${platform}: ${msg}. Публикация не подтверждена — проверьте профиль вручную`);
+              throw new PublishOutcomeUnknownError(`device-${platform}: ${msg}. Публикация не подтверждена — проверьте профиль вручную`);
             }
             throw new Error(`device-${platform}: ${msg}`);
           } finally {
@@ -589,6 +605,9 @@ export function createPublishWorker(deps: Deps): Worker {
             await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
 
+          if (result.ok && !result.verified?.profile) {
+            throw new PublishOutcomeUnknownError(`device-${platform}: Публикация не подтверждена в профиле`);
+          }
           if (!result.ok) {
             await setAutopilotLiveProgress(redis, autopilotId, {
               deviceId: accountRaw.deviceId,
@@ -601,7 +620,7 @@ export function createPublishWorker(deps: Deps): Worker {
             const where = result.debugSnapshot ? ` [снимок экрана: ${result.debugSnapshot}]` : '';
             const msg = `device-${platform}: ${result.detail ?? 'device-agent reported failure'}${where}`;
             // Share was tapped but the post was not confirmed → never retry (could post twice).
-            if (result.posted === 'unknown') throw new UnrecoverableError(`${msg} (публикация не подтверждена)`);
+            if (result.posted === 'unknown') throw new PublishOutcomeUnknownError(`${msg} (публикация не подтверждена)`);
             if (result.retryable === false) throw new UnrecoverableError(msg);
             throw new Error(msg);
           }
@@ -834,10 +853,11 @@ export function createPublishWorker(deps: Deps): Worker {
           throw err;
         }
 
-        await finalizePublishFailure(db, publishJobId, errorMsg);
+        const unknown = err instanceof PublishOutcomeUnknownError;
+        const settled = await finalizePublishFailure(db, publishJobId, errorMsg, unknown);
 
         // Penalize the account once per job, and only for account/platform-side failures.
-        if (!isInfrastructureError(errorMsg)) {
+        if (settled && !unknown && !isInfrastructureError(errorMsg)) {
           const isRateLimit = /\b(rate_limit|rate.?limit|too_many_requests|status[:\s]+429|http\s*429|action.?block|spammer|spam)\b/i.test(errorMsg);
           await db.socialAccount.update({
             where: { id: socialAccountId },

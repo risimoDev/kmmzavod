@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     # Shared secret for service-to-service calls. Empty = auth disabled.
     # When set, every request except /health must send X-Internal-Token.
     internal_service_token: str = ""
+    require_internal_service_token: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(".env", str(_root_env)),

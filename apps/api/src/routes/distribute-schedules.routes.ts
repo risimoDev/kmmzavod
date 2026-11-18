@@ -7,14 +7,15 @@
  * the orchestrator's scheduler worker.
  */
 import { z } from 'zod';
+import { isValidCron, isValidTimeZone } from '@kmmzavod/queue';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../lib/db';
 import { logger } from '../logger';
 
 const CreateBody = z.object({
   name: z.string().min(1).max(200).default('Auto-distribute'),
-  cronExpression: z.string().min(5).max(100), // e.g. "0 12,18 * * *"
-  timezone: z.string().max(50).default('Europe/Moscow'),
+  cronExpression: z.string().min(5).max(100).refine(isValidCron), // e.g. "0 12,18 * * *"
+  timezone: z.string().max(50).refine(isValidTimeZone).default('Europe/Moscow'),
   isActive: z.boolean().default(true),
   uniquifyJobId: z.string().uuid().optional(),
   socialAccountIds: z.array(z.string().uuid()).default([]),
@@ -29,8 +30,8 @@ const CreateBody = z.object({
 
 const UpdateBody = z.object({
   name: z.string().min(1).max(200).optional(),
-  cronExpression: z.string().min(5).max(100).optional(),
-  timezone: z.string().max(50).optional(),
+  cronExpression: z.string().min(5).max(100).refine(isValidCron).optional(),
+  timezone: z.string().max(50).refine(isValidTimeZone).optional(),
   isActive: z.boolean().optional(),
   uniquifyJobId: z.string().uuid().nullable().optional(),
   socialAccountIds: z.array(z.string().uuid()).optional(),

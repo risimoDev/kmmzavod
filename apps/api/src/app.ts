@@ -170,6 +170,7 @@ export async function buildApp() {
       const { getRedis } = await import('./lib/redis');
       const pong = await getRedis().ping();
       checks.redis = pong === 'PONG' ? 'ok' : 'error';
+      healthy &&= pong === 'PONG';
     } catch {
       checks.redis = 'error';
       healthy = false;

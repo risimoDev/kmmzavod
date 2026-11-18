@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "kmmzavod"
+    minio_public_url: str = ""
     minio_secure: bool = False
     minio_region: str = "us-east-1"
 
@@ -62,6 +63,7 @@ class Settings(BaseSettings):
 
     # ── Service ───────────────────────────────────────────────────────
     internal_service_token: str = ""
+    require_internal_service_token: bool = False
     log_level: str = "INFO"
     max_concurrent_jobs: int = 2
     work_dir_base: str = ""

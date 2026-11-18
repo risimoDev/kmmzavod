@@ -1,6 +1,9 @@
 ﻿# KMMZAVOD - Применение AstroProxy на все платы стойки
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# x-agent-token для запросов к device-agent (см. agent-auth.ps1)
+. "$PSScriptRoot\agent-auth.ps1"
+
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  KMMZAVOD - ПРИМЕНЕНИЕ ASTROPROXY НА ВСЕ ПЛАТЫ СТОЙКИ" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -15,7 +18,7 @@ Write-Host "  Логин: LevrurisimoiY7"
 Write-Host "  Гео: Казахстан (Residential, JSC Kazakhtelecom)"
 Write-Host ""
 
-$astroStateFile = Join-Path $ScriptDir "devices-proxy-state.astroproxy.json"
+$astroStateFile = Join-Path $ScriptDir "devices-proxy-state.astroproxy.local.json"
 $proxyStateFile = Join-Path $ScriptDir "devices-proxy-state.json"
 if (Test-Path $astroStateFile) {
     Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
@@ -24,10 +27,10 @@ if (Test-Path $astroStateFile) {
 
 Write-Host "[2/3] Отправка команды переподключения в device-agent (порт 8300)..." -ForegroundColor Yellow
 try {
-    $res = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/reapply" -Method Post -TimeoutSec 5 -ErrorAction Stop
+    $res = Invoke-RestMethod -Headers $AgentHeaders -Uri "http://127.0.0.1:8300/proxy/reapply" -Method Post -TimeoutSec 5 -ErrorAction Stop
     Write-Host "[OK] Служба device-agent обновила настройки прокси на всех платах: $($res.restored) восстановлено." -ForegroundColor Green
     
-    $modeRes = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/mode" -Method Post -ContentType "application/json" -Body '{"mode":"shared_sequential","inactivePolicy":"direct"}' -TimeoutSec 5 -ErrorAction SilentlyContinue
+    $modeRes = Invoke-RestMethod -Headers $AgentHeaders -Uri "http://127.0.0.1:8300/proxy/mode" -Method Post -ContentType "application/json" -Body '{"mode":"shared_sequential","inactivePolicy":"direct"}' -TimeoutSec 5 -ErrorAction SilentlyContinue
     Write-Host "[OK] Режим: Shared-Sequential. Неактивные платы: прямой интернет (direct)." -ForegroundColor Green
 } catch {
     Write-Host "[ИНФО] device-agent сейчас не запущен на порту 8300." -ForegroundColor Gray
@@ -37,7 +40,7 @@ try {
 Write-Host ""
 Write-Host "[3/3] Тестирование внешнего IP активной платы..." -ForegroundColor Yellow
 try {
-    $check = Invoke-RestMethod -Uri "http://127.0.0.1:8300/proxy/check" -Method Post -ContentType "application/json" -Body '{"deviceId":"98891a37534e534d32"}' -TimeoutSec 15 -ErrorAction Stop
+    $check = Invoke-RestMethod -Headers $AgentHeaders -Uri "http://127.0.0.1:8300/proxy/check" -Method Post -ContentType "application/json" -Body '{"deviceId":"98891a37534e534d32"}' -TimeoutSec 15 -ErrorAction Stop
     if ($check.ok) {
         Write-Host "[OK] Внешний IP платы: $($check.ip) ($($check.country), $($check.isp))" -ForegroundColor Green
         Write-Host "[OK] Утечка DNS/IP фермы: $(if ($check.leakDetected) {'ОБНАРУЖЕНА!'} else {'НЕТ (защищено)'})" -ForegroundColor $(if ($check.leakDetected) {'Red'} else {'Green'})

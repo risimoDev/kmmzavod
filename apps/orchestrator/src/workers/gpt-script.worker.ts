@@ -284,8 +284,9 @@ export function createGptScriptWorker(deps: Deps): Worker {
 
       const jobRow = await deps.db.job.findUniqueOrThrow({
         where:  { id: jobId },
-        select: { videoId: true },
+        select: { videoId: true, status: true },
       });
+      if (jobRow.status === 'cancelled') return;
 
       // ── Resolve speaker gender ─────────────────────────────────────────────
       const voiceIdForGender = (projectSettings as any)?.voice_id ?? '';
@@ -387,8 +388,7 @@ export function createGptScriptWorker(deps: Deps): Worker {
           completedAt: new Date(),
         },
       });
-      await chargeCredits(deps.db, { tenantId, jobId, credits: ideaCredits, description: 'GPT idea generation' });
-      await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: ideaCredits } } });
+      await chargeCredits(deps.db, { tenantId, jobId, credits: ideaCredits, operation: 'idea', description: 'GPT idea generation' });
 
       // ── Save idea to video + update preset usedIdeaHashes ──────────────────
       if (jobRow.videoId) {
@@ -540,8 +540,7 @@ The improved_hook must be 6-12 words of spoken Russian, conversational, with a p
               const hookUsage = hookEvalRes.usage!;
               const hookCostUsd = gptunnelCostUsd(hookUsage.prompt_tokens, hookUsage.completion_tokens);
               const hookCredits = creditsFromUsd(hookCostUsd);
-              await chargeCredits(deps.db, { tenantId, jobId, credits: hookCredits, description: 'Hook quality evaluation + rewrite' });
-              await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: hookCredits } } });
+              await chargeCredits(deps.db, { tenantId, jobId, credits: hookCredits, operation: 'hook', description: 'Hook quality evaluation + rewrite' });
             } else {
               logger.info({ jobId, hookScore: evalData.score }, 'Hook passed quality check');
             }
@@ -573,8 +572,7 @@ The improved_hook must be 6-12 words of spoken Russian, conversational, with a p
           completedAt: new Date(),
         },
       });
-      await chargeCredits(deps.db, { tenantId, jobId, credits: scriptCredits, description: 'GPT script generation' });
-      await deps.db.job.update({ where: { id: jobId }, data: { creditsUsed: { increment: scriptCredits } } });
+      await chargeCredits(deps.db, { tenantId, jobId, credits: scriptCredits, operation: 'script', description: 'GPT script generation' });
 
       // ── Persist scenes ────────────────────────────────────────────────────
       await deps.db.$transaction(
@@ -594,7 +592,10 @@ The improved_hook must be 6-12 words of spoken Russian, conversational, with a p
         )
       );
 
-      await deps.db.job.update({ where: { id: jobId }, data: { status: 'scenes_ready' } });
+      const staged = await deps.db.job.updateMany({
+        where: { id: jobId, status: { not: 'cancelled' } }, data: { status: 'scenes_ready' },
+      });
+      if (!staged.count) return;
 
       if (jobRow.videoId && output.title) {
         const socialMeta = output.social_metadata;
