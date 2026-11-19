@@ -297,6 +297,18 @@ export class ProxyManager {
       if (!this.sharedProxy && this.devices.size > 0) {
         this.sharedProxy = this.devices.values().next().value!.proxy;
       }
+
+      // Older releases saved provider-generated rotation links in otherwise generic proxy profiles.
+      let stateChanged = false;
+      for (const proxy of [this.sharedProxy, ...Array.from(this.devices.values(), (entry) => entry.proxy)]) {
+        if (!proxy?.rotateUrl || !URL.canParse(proxy.rotateUrl)) continue;
+        const hostname = new URL(proxy.rotateUrl).hostname.replace(/\.$/, '');
+        if (/(^|\.)astroproxy\.com$/.test(hostname)) {
+          delete proxy.rotateUrl;
+          stateChanged = true;
+        }
+      }
+      if (stateChanged) this.saveState();
     } catch (err) {
       this.logger.warn({ err: String(err), file }, 'proxy-manager: failed to load state file, starting fresh');
     }
@@ -384,7 +396,7 @@ export class ProxyManager {
     }
 
     // Bypass non-web background services (Google FCM push 5228-5230, Apple push 5223)
-    // AstroProxy and mobile proxies strictly forbid non-HTTP/HTTPS ports
+    // Some upstream proxies restrict non-HTTP/HTTPS ports.
     if (targetPort && [5228, 5229, 5230, 5223].includes(targetPort)) {
       return { kind: 'direct' };
     }
@@ -921,7 +933,7 @@ export class ProxyManager {
     if (!this.devices.has(targetDeviceId)) {
       const proxy = this.sharedProxy ?? (previousDeviceId ? this.devices.get(previousDeviceId)?.proxy : undefined);
       if (!proxy) throw new Error('Нет сохранённой конфигурации прокси для передачи');
-      this.devices.set(targetDeviceId, { proxy });
+      this.devices.set(targetDeviceId, { proxy: { ...proxy } });
       await this.applyDevice(targetDeviceId);
     } else {
       // Ensure the activated phone is wired with root/transparent mode active
@@ -996,13 +1008,12 @@ export class ProxyManager {
   private async freshIpForTask(deviceId: string): Promise<void> {
     const isRecentSameDevice = this.lastRotatedFor === deviceId && Date.now() - this.lastRotatedAt < 60_000;
     if (this.mode !== 'shared_sequential' || isRecentSameDevice) return;
-    const rotateUrl = this.devices.get(deviceId)?.proxy.rotateUrl || this.sharedProxy?.rotateUrl;
-    if (!rotateUrl) return;
+    if (!this.devices.get(deviceId)?.proxy.rotateUrl) return;
     this.lastRotatedFor = deviceId;
     this.lastRotatedAt = Date.now();
     try {
       // Mobile modems take 5–25 s to come back; the gateway rides out the rest.
-      const r = await this.rotateProxyIp(deviceId, rotateUrl, 10_000);
+      const r = await this.rotateProxyIp(deviceId, undefined, 10_000);
       this.logger.info({ deviceId, ip: r.check.ip, ok: r.check.ok }, 'proxy-manager: fresh IP for the next task');
     } catch (err) {
       this.logger.warn({ deviceId, err: err instanceof Error ? err.message : String(err) }, 'proxy-manager: IP rotation before task failed — continuing with the current IP');
@@ -1037,10 +1048,8 @@ export class ProxyManager {
       return { ok: true, ip: check.ip };
     }
 
-    // 4. If mobile proxy has rotation URL (or shared AstroProxy), rotate IP to reset carrier radio/tunnel
-    const entry = this.devices.get(deviceId);
-    const hasRotate = Boolean(entry?.proxy.rotateUrl || this.sharedProxy?.rotateUrl);
-    if (hasRotate) {
+    // 4. Rotate only the proxy assigned to this device.
+    if (this.devices.get(deviceId)?.proxy.rotateUrl) {
       this.logger.info({ deviceId }, 'proxy-manager: rotating mobile proxy IP to clear carrier stall');
       try {
         const rot = await this.rotateProxyIp(deviceId, undefined, 4000);
@@ -1306,35 +1315,24 @@ export class ProxyManager {
     error?: string;
   }> {
     const entry = this.devices.get(deviceId);
-    let url = rotateUrlOverride || entry?.proxy.rotateUrl || this.sharedProxy?.rotateUrl;
+    const url = rotateUrlOverride || entry?.proxy.rotateUrl;
     if (!url) {
       const check = await this.checkDeviceIp(deviceId);
       return {
         ok: check.ok,
         deviceId,
         rotateUrl: 'timer-rotation',
-        rotateResponse: 'Ссылка ротации не задана — IP меняется по таймеру провайдера',
+        rotateResponse: 'Ссылка ротации не задана. Проверен текущий IP.',
         check,
       };
     }
 
-    if (rotateUrlOverride) {
-      if (entry && entry.proxy.rotateUrl !== rotateUrlOverride) {
-        entry.proxy.rotateUrl = rotateUrlOverride;
-      }
-      if (this.sharedProxy && this.sharedProxy.rotateUrl !== rotateUrlOverride) {
-        this.sharedProxy.rotateUrl = rotateUrlOverride;
-      }
+    if (rotateUrlOverride && entry && entry.proxy.rotateUrl !== rotateUrlOverride) {
+      entry.proxy = { ...entry.proxy, rotateUrl: rotateUrlOverride };
       this.saveState();
     }
 
-    // If calling AstroProxy and token is missing in the query param, auto-append process.env.ASTROPROXY_API_TOKEN
-    if (url.includes('astroproxy.com') && !url.includes('token=') && process.env.ASTROPROXY_API_TOKEN) {
-      const sep = url.includes('?') ? '&' : '?';
-      url = `${url}${sep}token=${encodeURIComponent(process.env.ASTROPROXY_API_TOKEN)}`;
-    }
-
-    this.logger.info({ deviceId, url }, 'proxy-manager: triggering IP rotation webhook');
+    this.logger.info({ deviceId }, 'proxy-manager: triggering IP rotation webhook');
     let statusCode: number | undefined;
     let rotateResponse = '';
     try {

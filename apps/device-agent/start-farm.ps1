@@ -140,7 +140,7 @@ if ($ipconfig -match "10\.66\.66\.2" -or $ipconfig -match "10\.13\.13\.2") {
     Write-Host "Убедитесь, что клиент AmneziaWG запущен и подключен." -ForegroundColor Yellow
 }
 
-# 4a. Relay мобильных прокси через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
+# 4a. Relay HTTP/SOCKS5 через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
 $agentEnvPath = Join-Path $PSScriptRoot '.env'
 $relayConfigured = $env:DEVICE_AGENT_UPSTREAM_VIA -or (
     (Test-Path -LiteralPath $agentEnvPath) -and
@@ -161,26 +161,7 @@ if (-not $relayConfigured -and $env:DEVICE_AGENT_ALLOW_DIRECT -ne '1') {
     }
 }
 
-# 4b. Автоматическое обновление конфигурации прокси на AstroProxy
-$proxyStateFile = Join-Path $PSScriptRoot "devices-proxy-state.json"
-$astroStateFile = Join-Path $PSScriptRoot "devices-proxy-state.astroproxy.local.json"
-if (Test-Path $proxyStateFile) {
-    $content = Get-Content $proxyStateFile -Raw -ErrorAction SilentlyContinue
-    if ($content -and $content.Contains("37.27.123.90")) {
-        Write-Host "[PROXIES] Обнаружен устаревший прокси 37.27.123.90!" -ForegroundColor Yellow
-        if (Test-Path $astroStateFile) {
-            Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
-            Write-Host "[OK] Конфигурация прокси обновлена на AstroProxy (45.81.32.208:10018)." -ForegroundColor Green
-        }
-    }
-} else {
-    if (Test-Path $astroStateFile) {
-        Copy-Item -Path $astroStateFile -Destination $proxyStateFile -Force
-        Write-Host "[OK] Создана конфигурация AstroProxy для всех 20 плат." -ForegroundColor Green
-    }
-}
-
-# 4c. Проверка правила Брандмауэра Windows для порта 8300
+# 4b. Проверка правила Брандмауэра Windows для порта 8300
 try {
     $fw = netsh advfirewall firewall show rule name="DeviceAgent 8300" 2>$null
     if ($LASTEXITCODE -ne 0) {

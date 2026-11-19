@@ -204,7 +204,7 @@ export function parseSni(buf: Buffer): string | null {
 }
 
 /**
- * AstroProxy and some restrictive residential providers reject connections to raw IP addresses
+ * Some restrictive residential providers reject connections to raw IP addresses
  * (HTTP 403 / SOCKS5 error 2: "connection not allowed by ruleset").
  * When a target is a numeric IP, resolve its PTR hostname so the upstream proxy accepts it.
  */
@@ -1165,7 +1165,7 @@ export class DeviceProxyListener {
       return;
     }
 
-    // Target host is a raw IP and route is 'proxy' (e.g. AstroProxy or mobile proxy).
+    // Target host is a raw IP and route is 'proxy'.
     // Residential/mobile proxies reject raw IPs (SOCKS5 0x02 "connection not allowed by ruleset").
     // We reply 200 Connection Established immediately, read the first packet (TLS SNI or HTTP Host),
     // and connect to upstream with the resolved domain name.

@@ -293,25 +293,6 @@ if [ -n "$ACTIVE_URL" ]; then
 fi
 
 # =============================================================================
-# 7. Конфигурация AstroProxy и прокси
-# =============================================================================
-header "7. Конфигурация прокси (AstroProxy)"
-
-ASTRO_TOKEN="$(env_get ASTROPROXY_API_TOKEN 2>/dev/null || true)"
-if [ -n "$ASTRO_TOKEN" ]; then
-  ok "ASTROPROXY_API_TOKEN задан в .env"
-  # Быстрая проверка токена
-  ASTRO_CHECK=$(curl -sf --connect-timeout 4 "https://api.astroproxy.com/v1/user?token=$ASTRO_TOKEN" 2>/dev/null || true)
-  if [ -n "$ASTRO_CHECK" ] && ! echo "$ASTRO_CHECK" | grep -qi "error"; then
-    ok "AstroProxy API токен валиден и отвечает"
-  else
-    warn "AstroProxy API вернул ошибку или недоступен"
-  fi
-else
-  info "ASTROPROXY_API_TOKEN не настроен в .env (используется локальный или статический прокси)"
-fi
-
-# =============================================================================
 # Итоги и рекомендации
 # =============================================================================
 header "Итоги диагностики"

@@ -80,25 +80,13 @@ foreach ($ip in $candidateIps) {
 }
 
 if ($agentRunning) {
-    $modeDesc = if ($agentStatus.mode -eq "shared_sequential") { "Shared (поочередный: 1 плата)" } else { "Private (параллельный: ВСЕ 20 плат)" }
+    $modeDesc = if ($agentStatus.mode -eq "shared_sequential") { "Shared (поочередный: 1 плата)" } else { "Private (параллельный)" }
     Write-Host "  [OK] Служба farm-agent активна ($agentUrl отвечает, режим: $modeDesc)" -ForegroundColor Green
 } else {
     Write-Host "  [ВНИМАНИЕ] Служба farm-agent (start-farm.bat) не отвечает на порту 8300" -ForegroundColor Yellow
 }
 
-# 3. Прямая проверка AstroProxy Казахстан с самого ПК
-Write-Host "  [ТЕСТ ASTROPROXY С ПК] Проверка связи с казахстанским шлюзом 45.81.32.208:10018..." -ForegroundColor Yellow
-$pcProxyTest = ""
-try {
-    $pcProxyTest = (& curl.exe --ssl-no-revoke --noproxy "" -s -S -m 12 -x "http://LevrurisimoiY7:e59326cB1@45.81.32.208:10018" "https://api.ipify.org" 2>&1) -join " "
-} catch {}
-
-if ($pcProxyTest -match '\b(?:\d{1,3}\.){3}\d{1,3}\b') {
-    Write-Host "  --> [ОТЛИЧНО] AstroProxy отвечает с ПК! Внешний IP: $pcProxyTest (Казахстан)" -ForegroundColor Green
-} else {
-    Write-Host "  --> [ПРЕДУПРЕЖДЕНИЕ] AstroProxy с ПК вернул: $pcProxyTest" -ForegroundColor Yellow
-    Write-Host "      (Возможно временная ротация IP на стороне мобильного оператора Казахстана)" -ForegroundColor Gray
-}
+# 3. Статус настроенных прокси в агенте
 if ($agentStatus -and $agentStatus.upstreams) {
     foreach ($up in $agentStatus.upstreams) {
         $upErr = if ($up.lastError) { " | Ошибка: $($up.lastError)" } else { "" }

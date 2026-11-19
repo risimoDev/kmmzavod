@@ -13,7 +13,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host '================================================================' -ForegroundColor Cyan
 Write-Host '   KMMZAVOD - ОПТИМИЗАТОР ТРАФИКА И ЗАЩИТА БАЛАНСА ПРОКСИ       ' -ForegroundColor Cyan
-Write-Host '   Экономия до 98% платного трафика AstroProxy ($10 / 1 ГБ)     ' -ForegroundColor Cyan
+Write-Host '   Сокращение трафика через прокси фермы     ' -ForegroundColor Cyan
 Write-Host '================================================================' -ForegroundColor Cyan
 Write-Host ''
 

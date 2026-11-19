@@ -586,7 +586,7 @@ async function distributeWindow(deps: AutopilotLoopDeps, ap: Autopilot, accounts
     where: { id: ap.id },
     data: { postsScheduled: { increment: assignments.length } },
   });
-  let proxyModeNote = 'Shared Sequential (поочередная публикация с ротацией IP AstroProxy)';
+  let proxyModeNote = 'Shared Sequential (поочередная публикация)';
   try {
     const pm = await deviceAgentService.getProxyMode();
     if (pm?.mode === 'private_parallel') {

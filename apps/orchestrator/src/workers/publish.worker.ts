@@ -35,7 +35,6 @@ import {
   DEVICE_PUBLISH_TIMEOUT_MS,
   type DevicePublishResult,
 } from '../services/device-agent';
-import { rotateIpForFarmDevice } from '../lib/astroproxy';
 
 /** Username the device-agent opens to verify the post: from stored device credentials, else accountName. */
 function deviceUsername(sessionData: string | null, accountName: string): string | undefined {
@@ -493,10 +492,10 @@ export function createPublishWorker(deps: Deps): Worker {
               deviceId: accountRaw.deviceId,
               accountName,
               platform,
-              step: 'Ожидание общего модема стойки AstroProxy...',
+              step: 'Ожидание общего прокси стойки...',
               percent: 8,
             });
-            // Shared farm proxy lock: serializes posts across phones to save expensive AstroProxy traffic
+            // The agent switches and leases the shared proxy when it starts the task.
             // Wait up to 150 seconds for previous phone to finish upload & release proxy lock
             farmProxyLockOwner = await acquireDeviceLock(redis, 'farm:shared-proxy', Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 60, 150_000);
             if (!farmProxyLockOwner) {
@@ -512,39 +511,6 @@ export function createPublishWorker(deps: Deps): Worker {
               });
               await job.moveToDelayed(Date.now() + 60_000, token);
               throw new DelayedError();
-            }
-
-            // In shared mode: move proxy to target device
-            logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: переключение общего прокси фермы на целевую плату...');
-            await setAutopilotLiveProgress(redis, autopilotId, {
-              deviceId: accountRaw.deviceId,
-              accountName,
-              platform,
-              step: 'Переключение мобильного модема AstroProxy на целевую плату...',
-              percent: 10,
-            });
-            try {
-              await deviceAgentService.switchActiveDevice(accountRaw.deviceId, true);
-            } catch (switchErr) {
-              logger.warn({ err: String(switchErr), deviceId: accountRaw.deviceId }, 'Publish: предупреждение switchActiveDevice');
-            }
-
-            // In shared mode: rotate IP so account receives a clean mobile IP before posting
-            logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: ротация IP AstroProxy для платы перед публикацией...');
-            await setAutopilotLiveProgress(redis, autopilotId, {
-              deviceId: accountRaw.deviceId,
-              accountName,
-              platform,
-              step: 'Ротация мобильного IP через AstroProxy...',
-              percent: 12,
-            });
-            try {
-              const rot = await rotateIpForFarmDevice(db, accountRaw.deviceId, accountRaw.proxyUrl);
-              if (rot.newIp) {
-                logger.info({ deviceId: accountRaw.deviceId, newIp: rot.newIp }, 'Publish: получен свежий IP AstroProxy для платы');
-              }
-            } catch (rotErr) {
-              logger.warn({ err: String(rotErr), deviceId: accountRaw.deviceId }, 'Publish: ротация IP вернула предупреждение, продолжаем с текущим IP');
             }
           } else {
             logger.info({ deviceId: accountRaw.deviceId, platform }, 'Publish: режим Private Parallel — параллельная публикация без блокировки стойки');

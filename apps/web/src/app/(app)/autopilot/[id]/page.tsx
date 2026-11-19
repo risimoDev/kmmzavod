@@ -129,7 +129,7 @@ export default function AutopilotDetailPage() {
     if (liveProgress?.currentAction) {
       currentActionDetail = `[${devShort}] ${liveProgress.currentAction}${liveAct?.percent != null ? ` (${liveAct.percent}%)` : ""}`;
     } else if (active) {
-      currentActionDetail = `[${devShort}] передача ролика в ${platformName} (с ротацией IP и ИИ-контролем)...`;
+      currentActionDetail = `[${devShort}] передача ролика в ${platformName} (с проверкой сети)...`;
     } else {
       liveStatusSubtitle = "В процессе: обработка задачи на стойке...";
       currentActionDetail = "Плата загружает видео и проверяет сетевое окружение...";
@@ -245,11 +245,11 @@ export default function AutopilotDetailPage() {
           </p>
         )}
 
-        {farmProxy && !farmProxy.configured && (
+        {farmProxy?.configured === false && (
           <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
-            AstroProxy не подключен в Стойке плат — публикации могут быть заблокированы без мобильного прокси.{" "}
+            У плат стойки нет настроенных прокси.{" "}
             <Link href="/farm" className="underline hover:text-warning/80">
-              Настроить AstroProxy
+              Настроить прокси
             </Link>
             .
           </p>
@@ -405,15 +405,9 @@ export default function AutopilotDetailPage() {
               <Flow label="Телефоны" value={`${okPhones}/${accounts.length}`} sub="готовы публиковать" tone={okPhones ? "ok" : "bad"} />
               <Flow
                 label="Прокси стойки"
-                value={farmProxy?.configured ? `${farmProxy.balance != null ? `$${farmProxy.balance.toFixed(2)}` : "Подключен"}` : "Не настроен"}
-                sub={
-                  farmProxy?.configured
-                    ? farmProxy.mode === "private_parallel"
-                      ? "Private Parallel · Безлимит VPS"
-                      : `${farmProxy.mode === "shared_sequential" ? "Shared Sequential" : "AstroProxy"} · ротация IP`
-                    : "Требуется в /farm"
-                }
-                tone={farmProxy?.configured ? "ok" : "bad"}
+                value={farmProxy?.configured == null ? "Статус недоступен" : farmProxy.configured ? "Настроен" : "Не настроен"}
+                sub={farmProxy?.mode === "private_parallel" ? "Параллельный режим" : farmProxy?.mode === "shared_sequential" ? "Поочерёдный режим" : "Статус от агента фермы"}
+                tone={farmProxy?.configured ? "ok" : farmProxy?.configured === false ? "bad" : undefined}
               />
               <Flow
                 label="Следующее окно"

@@ -33,8 +33,6 @@ import {
   type RunScriptBatchResult,
   type FarmSchedule,
   type FarmScheduleRunLog,
-  type AstroProxyStatusResponse,
-  type AstroProxyPortItem,
 } from "@/lib/api";
 
 const TABS = [
@@ -426,11 +424,11 @@ function parseSingleProxyString(rawLine: string): {
   const scheme = mainPart.match(/^(https?|socks5h?|socks):\/\//i)?.[1].toLowerCase();
   if (scheme) {
     try {
-      const u = new URL(mainPart.replace(/^[a-z0-9]+:\/\//i, 'http://'));
+      const u = new URL(mainPart);
       const isSocks = scheme.startsWith('socks');
       return {
         host: u.hostname,
-        port: Number(u.port) || (isSocks ? 1080 : 8080),
+        port: Number(u.port) || (isSocks ? 1080 : scheme === 'https' ? 443 : 80),
         username: u.username ? decodeURIComponent(u.username) : undefined,
         password: u.password ? decodeURIComponent(u.password) : undefined,
         type: isSocks ? 'socks5' : 'http',
@@ -449,7 +447,7 @@ function parseSingleProxyString(rawLine: string): {
     const looksLikeHost = (p: string[]) => /^\d+$/.test(p[1] ?? '') && /[.\-]|^localhost$/i.test(p[0] ?? '');
     const [hostPart, authPart] = looksLikeHost(right) ? [right, left] : looksLikeHost(left) ? [left, right] : [right, left];
     const port = Number(hostPart[1]);
-    if (hostPart[0] && port) {
+    if (hostPart[0] && Number.isInteger(port) && port >= 1 && port <= 65535) {
       return {
         host: hostPart[0].trim(),
         port,
@@ -465,7 +463,7 @@ function parseSingleProxyString(rawLine: string): {
   if (tokens.length >= 2) {
     const host = tokens[0].trim();
     const port = Number(tokens[1].trim());
-    if (!host || isNaN(port)) return null;
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 
     let username: string | undefined;
     let password: string | undefined;
@@ -2073,7 +2071,7 @@ function DevicesTab() {
   const [batchProxyText, setBatchProxyText] = useState('');
   // 'auto' = farm detects HTTP vs SOCKS5 per proxy
   const [batchProxyType, setBatchProxyType] = useState<'auto' | 'http' | 'socks5' | 'mobile' | 'residential'>('auto');
-  const [batchProxyDistributionMode, setBatchProxyDistributionMode] = useState<'shared_cycle' | 'one_to_one'>('shared_cycle');
+  const [batchProxyDistributionMode, setBatchProxyDistributionMode] = useState<'shared_cycle' | 'one_to_one'>('one_to_one');
   const [batchProxyTargets, setBatchProxyTargets] = useState<string[]>([]);
   const [batchProxyApplying, setBatchProxyApplying] = useState(false);
   const [batchCheckingIps, setBatchCheckingIps] = useState(false);
@@ -2096,28 +2094,17 @@ function DevicesTab() {
   const [optimizingDataSaver, setOptimizingDataSaver] = useState<boolean>(false);
   const [dataSaverFeedback, setDataSaverFeedback] = useState<string | null>(null);
 
-  // AstroProxy API state
-  const [astroStatus, setAstroStatus] = useState<AstroProxyStatusResponse | null>(null);
-  const [showAstroTokenInput, setShowAstroTokenInput] = useState(false);
-  const [astroTokenInput, setAstroTokenInput] = useState('');
-  const [savingAstroToken, setSavingAstroToken] = useState(false);
-  const [rotatingAstro, setRotatingAstro] = useState(false);
-  const [applyingAstroToFarm, setApplyingAstroToFarm] = useState(false);
-  const [astroFeedback, setAstroFeedback] = useState<string | null>(null);
-
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [devRes, proxyRes, accRes, modeRes, astroRes] = await Promise.allSettled([
+      const [devRes, proxyRes, accRes, modeRes] = await Promise.allSettled([
         accountFarmApi.listDevices(),
         accountFarmApi.listProxies(),
         accountFarmApi.listAccounts({ limit: 100 }),
         accountFarmApi.getProxyMode(),
-        accountFarmApi.getAstroProxyStatus(),
       ]);
 
-      if (astroRes.status === 'fulfilled') setAstroStatus(astroRes.value);
       if (proxyRes.status === 'fulfilled') setProxies(proxyRes.value);
       if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
       if (modeRes.status === 'fulfilled' && modeRes.value?.ok) {
@@ -2242,17 +2229,21 @@ function DevicesTab() {
   };
 
   /** Current modal input as an API payload (pool record or manual fields). */
-  const proxyModalPayload = () =>
-    selectedProxyId
-      ? { proxyId: selectedProxyId, rotateUrl: customRotateUrl.trim() || undefined }
-      : {
-          host: customHost.trim(),
-          port: Number(customPort),
-          type: customType === 'auto' ? undefined : customType,
-          username: customUsername.trim() || undefined,
-          password: customPassword || undefined,
-          rotateUrl: customRotateUrl.trim() || undefined,
-        };
+  const proxyModalPayload = () => {
+    if (selectedProxyId) return { proxyId: selectedProxyId };
+    const host = customHost.trim();
+    const port = Number(customPort);
+    const username = customUsername.trim() || undefined;
+    const rotateUrl = customRotateUrl.trim() || undefined;
+    const previous = selectedDevice?.proxy;
+    const changedEndpoint = previous && (host !== previous.host || port !== previous.port || username !== (previous.username || undefined));
+    return {
+      host, port, username,
+      type: customType === 'auto' ? undefined : customType,
+      password: customPassword || undefined,
+      rotateUrl: changedEndpoint && rotateUrl === previous.rotateUrl ? undefined : rotateUrl,
+    };
+  };
 
   const handleTestProxy = async () => {
     setProxyTesting(true);
@@ -3299,60 +3290,6 @@ function DevicesTab() {
     }
   };
 
-  const handleSaveAstroToken = async () => {
-    if (!astroTokenInput.trim()) return;
-    setSavingAstroToken(true);
-    setAstroFeedback(null);
-    try {
-      const res = await accountFarmApi.saveAstroProxyToken(astroTokenInput.trim());
-      if (res.ok) {
-        setShowAstroTokenInput(false);
-        setAstroTokenInput('');
-        setAstroFeedback(`AstroProxy успешно подключен! Баланс: $${res.balance?.toFixed(2) ?? '0.00'}`);
-        await loadData();
-      }
-    } catch (err: any) {
-      alert(`Ошибка подключения AstroProxy: ${err.message}`);
-    } finally {
-      setSavingAstroToken(false);
-    }
-  };
-
-  const handleRotateAstro = async () => {
-    setRotatingAstro(true);
-    setAstroFeedback(null);
-    try {
-      const res = await accountFarmApi.rotateAstroProxy();
-      if (res.ok) {
-        setAstroFeedback(res.newIp ? `IP успешно изменен на: ${res.newIp}` : res.msg);
-        await loadData();
-      } else {
-        setAstroFeedback(res.msg);
-      }
-    } catch (err: any) {
-      alert(`Ошибка ротации AstroProxy: ${err.message}`);
-    } finally {
-      setRotatingAstro(false);
-    }
-  };
-
-  const handleApplyAstroToFarm = async () => {
-    setApplyingAstroToFarm(true);
-    setAstroFeedback(null);
-    try {
-      const portId = astroStatus?.ports?.[0]?.id;
-      const res = await accountFarmApi.applyAstroProxyToFarm({ portId });
-      if (res.ok) {
-        setAstroFeedback(`Прокси AstroProxy успешно применен на ${res.deviceCount} плат фермы!`);
-        await loadData();
-      }
-    } catch (err: any) {
-      alert(`Ошибка применения прокси: ${err.message}`);
-    } finally {
-      setApplyingAstroToFarm(false);
-    }
-  };
-
   const handleToggleProxyMode = () =>
     applyProxyMode(proxyMode === 'shared_sequential' ? 'private_parallel' : 'shared_sequential', inactivePolicy);
 
@@ -3475,57 +3412,35 @@ function DevicesTab() {
     }
   };
 
-  const parseBatchProxyLines = (text: string) => {
-    return text
-      .split('\n')
-      .map((l) => parseSingleProxyString(l))
-      .filter((p): p is NonNullable<typeof p> => p !== null);
-  };
+  const batchProxyLines = batchProxyText.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+  const batchProxies = batchProxyLines.map(parseSingleProxyString).filter((proxy) => proxy !== null);
+  let batchProxyError: string | undefined;
+  if (batchProxies.length !== batchProxyLines.length) {
+    batchProxyError = `Не распознано строк: ${batchProxyLines.length - batchProxies.length}. Проверьте формат и порт.`;
+  } else if (batchProxies.length && !batchProxyTargets.length) {
+    batchProxyError = 'Выберите платы для назначения прокси.';
+  } else if (batchProxyDistributionMode === 'one_to_one' && batchProxies.length) {
+    const proxyKeys = new Set(batchProxies.map(({ host, port, username }) => JSON.stringify([host.toLowerCase().replace(/\.$/, ''), port, username ?? ''])));
+    if (batchProxies.length !== batchProxyTargets.length) {
+      batchProxyError = `Для схемы 1-к-1 число прокси и плат должно совпадать. Прокси: ${batchProxies.length}, плат: ${batchProxyTargets.length}.`;
+    } else if (proxyKeys.size !== batchProxies.length) {
+      batchProxyError = 'В списке есть повторяющиеся прокси. Укажите отдельный прокси для каждой платы.';
+    }
+  }
 
   const handleApplyBatchProxies = async () => {
-    const parsed = parseBatchProxyLines(batchProxyText);
-    if (parsed.length === 0) {
-      alert('Не удалось распознать ни одного прокси в введенном тексте');
-      return;
-    }
-    if (batchProxyTargets.length === 0) {
-      alert('Выберите целевые платы для распределения');
-      return;
-    }
+    if (!batchProxies.length || batchProxyError) return;
 
-    const assignments =
-      batchProxyDistributionMode === 'shared_cycle'
-        ? batchProxyTargets.map((devId, idx) => {
-            const p = parsed[idx % parsed.length];
-            return {
-              deviceId: devId,
-              host: p.host,
-              port: p.port,
-              username: p.username,
-              password: p.password,
-              type: (p.type || (batchProxyType === 'auto' ? undefined : batchProxyType)) as any,
-              rotateUrl: p.rotateUrl,
-            };
-          })
-        : batchProxyTargets.slice(0, parsed.length).map((devId, idx) => ({
-            deviceId: devId,
-            host: parsed[idx].host,
-            port: parsed[idx].port,
-            username: parsed[idx].username,
-            password: parsed[idx].password,
-            type: (parsed[idx].type || (batchProxyType === 'auto' ? undefined : batchProxyType)) as any,
-            rotateUrl: parsed[idx].rotateUrl,
-          }));
-
-    if (assignments.length === 0) {
-      alert('Нет совпадений между списком прокси и выбранными платами');
-      return;
-    }
+    const defaultType = batchProxyType === 'auto' ? undefined : batchProxyType;
+    const assignments = batchProxyTargets.map((deviceId, idx) => {
+      const proxy = batchProxies[idx % batchProxies.length];
+      return { ...proxy, deviceId, type: proxy.type ?? defaultType };
+    });
 
     setBatchProxyApplying(true);
     setNetworkFeedbackMsg(
       batchProxyDistributionMode === 'shared_cycle'
-        ? `Назначение ${parsed.length} Shared-прокси циклически на ${assignments.length} плат...`
+        ? `Назначение ${batchProxies.length} Shared-прокси циклически на ${assignments.length} плат...`
         : `Назначение прокси 1-к-1 на ${assignments.length} плат...`
     );
     try {
@@ -3714,150 +3629,6 @@ function DevicesTab() {
         </div>
       </div>
 
-      {/* ── AstroProxy API Integration Card ── */}
-      <div className="p-4 bg-surface-2/90 border border-brand-500/30 rounded-xl shadow-sm space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-brand-500/20 border border-brand-500/40 flex items-center justify-center text-lg shadow-sm">
-              🛰️
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-text-primary">AstroProxy API Hub</span>
-                {astroStatus?.configured ? (
-                  <Badge variant="success" className="text-2xs font-semibold">
-                    ✓ API подключен
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="text-2xs text-amber-300 border-amber-500/40">
-                    Не настроен
-                  </Badge>
-                )}
-                {astroStatus?.balance !== undefined && (
-                  <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded">
-                    Баланс: ${astroStatus.balance.toFixed(2)} {astroStatus.currency || 'USD'}
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-text-secondary mt-0.5">
-                Автоматическая ротация IP перед каждой публикацией TikTok и мониторинг баланса прокси.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {astroStatus?.configured ? (
-              <>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  loading={rotatingAstro}
-                  onClick={handleRotateAstro}
-                  className="text-xs border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 font-semibold"
-                  title="Запросить новый IP адрес у AstroProxy по API"
-                >
-                  🔄 Сменить IP (Ротация)
-                </Button>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  loading={applyingAstroToFarm}
-                  onClick={handleApplyAstroToFarm}
-                  className="text-xs font-semibold"
-                  title="Привязать порт AstroProxy ко всем платам фермы"
-                >
-                  ⚡ Применить на все платы
-                </Button>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => setShowAstroTokenInput(!showAstroTokenInput)}
-                  className="text-text-tertiary"
-                  title="Настройки токена"
-                >
-                  ⚙️
-                </Button>
-              </>
-            ) : (
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => setShowAstroTokenInput(!showAstroTokenInput)}
-                className="text-xs font-semibold"
-              >
-                🔑 Подключить API Токен
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Port info if configured */}
-        {astroStatus?.configured && astroStatus.ports && astroStatus.ports.length > 0 && (
-          <div className="p-2.5 rounded-lg bg-surface-1 border border-border/80 flex flex-wrap items-center justify-between text-xs gap-2">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-text-primary">
-                Порт #{astroStatus.ports[0].id} ({astroStatus.ports[0].name || 'kmmzavod'}):
-              </span>
-              <code className="text-brand-400 font-mono">
-                {astroStatus.ports[0].host}:{astroStatus.ports[0].port}
-              </code>
-              <Badge variant="outline" className="text-2xs">
-                {astroStatus.ports[0].country || 'Kazakhstan'} ({astroStatus.ports[0].networkType || 'Residential'})
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
-              <span>Логин: <strong className="text-text-secondary">{astroStatus.ports[0].username || 'LevrurisimoiY7'}</strong></span>
-              <span>•</span>
-              <span>Ротация по API активна</span>
-            </div>
-          </div>
-        )}
-
-        {/* Token Input Form */}
-        {(showAstroTokenInput || !astroStatus?.configured) && (
-          <div className="p-3 bg-surface-1 border border-border rounded-lg space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-text-primary">API Токен AstroProxy</span>
-              <a
-                href="https://astroproxy.com/settings/api"
-                target="_blank"
-                rel="noreferrer"
-                className="text-[11px] text-brand-400 hover:underline"
-              >
-                Где взять токен в кабинете AstroProxy ↗
-              </a>
-            </div>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Вставьте токен AstroProxy..."
-                value={astroTokenInput}
-                onChange={(e) => setAstroTokenInput(e.target.value)}
-                className="text-xs font-mono"
-              />
-              <Button
-                size="sm"
-                variant="primary"
-                loading={savingAstroToken}
-                onClick={handleSaveAstroToken}
-                disabled={!astroTokenInput.trim()}
-              >
-                Сохранить
-              </Button>
-            </div>
-            <p className="text-[11px] text-text-tertiary">
-              Токен позволит системе проверять баланс и автоматически менять IP адрес фермы перед выкладкой видео.
-            </p>
-          </div>
-        )}
-
-        {astroFeedback && (
-          <div className="p-2.5 rounded bg-brand-500/10 border border-brand-500/30 text-xs text-brand-300 flex items-center justify-between">
-            <span>{astroFeedback}</span>
-            <button onClick={() => setAstroFeedback(null)} className="text-text-tertiary hover:text-text-primary">✕</button>
-          </div>
-        )}
-      </div>
-
       {/* ── Proxy Allocation Mode Banner ── */}
       <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-surface-2/80 border border-border rounded-xl shadow-sm">
         <div className="flex items-center gap-3">
@@ -3878,7 +3649,7 @@ function DevicesTab() {
                   ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
                   : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
               )}>
-                {proxyMode === 'shared_sequential' ? "Защита от лимита 50 сокетов" : "Безлимитный канал"}
+                {proxyMode === 'shared_sequential' ? "Одна активная плата" : "Параллельная работа"}
               </span>
             </div>
             <div className="text-[11px] text-text-secondary mt-0.5">
@@ -3976,8 +3747,8 @@ function DevicesTab() {
                   : trafficSaver === 'block_media'
                   ? "Видеопотоки TikTok CDN заблокированы: авторизация, логин, профили и посты работают 100%, расход падает с 40 МБ до 200 КБ!"
                   : trafficSaver === 'direct_media'
-                  ? "Видео скачивается бесплатно через локальный интернет ПК фермы, а токены, API и геолокация идут через AstroProxy Казахстан."
-                  : "Весь трафик (включая тяжелые видео) транслируется через AstroProxy ($10/ГБ)."}
+                  ? "Тяжёлые медиафайлы скачиваются через интернет ПК фермы. API и публикация используют прокси платы."
+                  : "Тяжёлые медиафайлы тоже загружаются через прокси платы."}
               </p>
             </div>
           </div>
@@ -7742,7 +7513,7 @@ function DevicesTab() {
                       Вставьте список прокси (один на строку):
                     </label>
                     <span className="text-[11px] text-text-tertiary">
-                      Распознано: <strong className="text-cyan-300">{parseBatchProxyLines(batchProxyText).length}</strong> шт.
+                      Распознано: <strong className="text-cyan-300">{batchProxies.length}</strong> шт.
                     </span>
                   </div>
                   <Textarea
@@ -7821,8 +7592,10 @@ function DevicesTab() {
                   </div>
                 )}
 
+                {batchProxyError && <p role="alert" className="text-xs text-danger">{batchProxyError}</p>}
+
                 {/* Preview Table */}
-                {parseBatchProxyLines(batchProxyText).length > 0 && (
+                {batchProxies.length > 0 && (
                   <div className="space-y-1.5">
                     <span className="font-semibold text-text-primary text-[11px]">
                       {batchProxyDistributionMode === 'shared_cycle'
@@ -7843,11 +7616,10 @@ function DevicesTab() {
                         <tbody className="divide-y divide-border/40">
                           {(batchProxyDistributionMode === 'shared_cycle'
                             ? batchProxyTargets.map((targetId, idx) => {
-                                const parsed = parseBatchProxyLines(batchProxyText);
-                                const item = parsed[idx % parsed.length];
+                                const item = batchProxies[idx % batchProxies.length];
                                 return { targetId, item, idx };
                               })
-                            : parseBatchProxyLines(batchProxyText).map((item, idx) => {
+                            : batchProxies.map((item, idx) => {
                                 const targetId = batchProxyTargets[idx] || `— (Плат меньше, чем прокси)`;
                                 return { targetId, item, idx };
                               })
@@ -7858,7 +7630,7 @@ function DevicesTab() {
                               <td className="p-2 text-cyan-300 font-bold">{item.host}:{item.port}</td>
                               <td className="p-2 text-text-secondary">{item.username ? `${item.username}:***` : 'Без логина'}</td>
                               <td className="p-2 text-[10px] truncate max-w-[180px] text-text-tertiary">
-                                {item.rotateUrl || 'Авторотация по таймеру (Shared)'}
+                                {item.rotateUrl ? 'По ссылке' : 'Без ссылки ротации'}
                               </td>
                             </tr>
                           ))}
@@ -7874,13 +7646,13 @@ function DevicesTab() {
                     size="sm"
                     variant="primary"
                     loading={batchProxyApplying}
-                    disabled={parseBatchProxyLines(batchProxyText).length === 0}
+                    disabled={!batchProxies.length || Boolean(batchProxyError)}
                     onClick={handleApplyBatchProxies}
                     className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
                   >
                     {batchProxyDistributionMode === 'shared_cycle'
                       ? `🚀 Применить Shared-прокси ко всем ${batchProxyTargets.length} платам`
-                      : `🚀 Применить прокси 1-к-1 (${Math.min(parseBatchProxyLines(batchProxyText).length, batchProxyTargets.length)} плат)`}
+                      : `🚀 Применить прокси 1-к-1 (${Math.min(batchProxies.length, batchProxyTargets.length)} плат)`}
                   </Button>
                 </div>
               </div>

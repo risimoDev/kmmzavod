@@ -287,23 +287,6 @@ export const deviceAgentService = {
     return state;
   },
 
-  async switchActiveDevice(deviceId: string, force = true): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
-    cachedProxyMode = null;
-    return requestWithFallback((base) => agentClient.post(`${base}/proxy/switch-active`, { deviceId, force }, { timeout: 60_000 }));
-  },
-
-  async rotateProxyIp(deviceId: string, rotateUrl?: string, cooldownMs?: number): Promise<{
-    ok: boolean;
-    deviceId: string;
-    rotateUrl: string;
-    statusCode?: number;
-    rotateResponse?: string;
-    check: DeviceIpCheckResult;
-    error?: string;
-  }> {
-    return requestWithFallback((base) => agentClient.post(`${base}/proxy/rotate-ip`, { deviceId, rotateUrl, cooldownMs }, { timeout: 120_000 }));
-  },
-
   async getPublishProgress(deviceId: string): Promise<DevicePublishProgress | null> {
     try {
       const res = await requestWithFallback<{ ok: boolean; progress: DevicePublishProgress | null }>((base) =>

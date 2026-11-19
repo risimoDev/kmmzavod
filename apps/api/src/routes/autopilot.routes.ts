@@ -15,7 +15,6 @@ import { aiStatus, getFishConfig } from '../lib/ai';
 import { logger } from '../logger';
 import { config } from '../config';
 import { assertOwnStorageKey } from '../lib/storage-keys';
-import { getAstroProxySummary } from '../lib/astroproxy';
 import { deviceAgentClient } from '../lib/device-agent';
 import { publishQueue } from '../lib/queues';
 import { addOrReplace } from '@kmmzavod/queue';
@@ -409,7 +408,6 @@ export async function autopilotRoutes(app: FastifyInstance) {
       accounts,
       sources,
       ready,
-      farmProxySummary,
       farmProxyMode,
       totalDistCount,
       realPublishedCount,
@@ -424,7 +422,6 @@ export async function autopilotRoutes(app: FastifyInstance) {
       scopeAccounts({ ...ap, tenantId }),
       sourceStats(tenantId, ap.projectId, ap.id),
       readyVariants(ap.id),
-      getAstroProxySummary().catch(() => ({ configured: false })),
       deviceAgentClient.getProxyMode().catch(() => null),
       db.distributeItem.count({ where: { distributeJob: { autopilotId: id } } }),
       db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'published' } }),
@@ -464,8 +461,8 @@ export async function autopilotRoutes(app: FastifyInstance) {
     ]);
 
     const farmProxy = {
-      ...farmProxySummary,
-      mode: farmProxyMode?.mode ?? (farmProxySummary?.configured ? 'shared_sequential' : undefined),
+      configured: farmProxyMode?.hasSharedProxy ?? null,
+      mode: farmProxyMode?.mode,
       trafficSaver: farmProxyMode?.trafficSaver,
       activeDeviceId: farmProxyMode?.activeDeviceId,
     };
@@ -654,7 +651,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
     }
     const accounts = await scopeAccounts({ ...ap, tenantId });
     const eligible = accounts.filter((a) => a.ok).length;
-    const proxySummary = await getAstroProxySummary().catch(() => ({ configured: false }));
+    const proxyMode = await deviceAgentClient.getProxyMode().catch(() => null);
 
     const updated = await db.autopilot.update({
       where: { id },
@@ -668,7 +665,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       warnings: [
         ...(eligible === 0 ? ['Нет готовых телефонов — монтаж начнётся, как только появится хотя бы один'] : []),
         ...(!keys.openrouter ? ['Ключ OpenRouter не задан — сценарии будут шаблонными'] : []),
-        ...(!proxySummary.configured ? ['AstroProxy не подключен в Стойке плат — настройте прокси для безопасной ротации IP'] : []),
+        ...(proxyMode?.hasSharedProxy === false ? ['У плат стойки нет настроенных прокси'] : []),
       ],
     };
   });
