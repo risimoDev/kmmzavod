@@ -1,194 +1,135 @@
 ﻿<#
 .SYNOPSIS
-    Безопасная установка TikTok Mod и TikTok Plugin на платы стойки через ADB.
+    Устанавливает TikTok Mod и плагин через ADB. По умолчанию сохраняет данные и сессии.
 .DESCRIPTION
-    1. Проверяет наличие конкретных файлов TikTok_Mod.apk и TikTok_Plugin.apk (с опциональной сверкой SHA-256).
-    2. Выполняет тестовую установку на первой плате для проверки совместимости подписи ключа.
-    3. При несовпадении подписи (INSTALL_FAILED_UPDATE_INCOMPATIBLE) предупреждает о необходимости флага -UninstallFirst.
-    4. По умолчанию сохраняет сессии аккаунтов (флаг -WipeData выключен).
-    5. Пакетно устанавливает APK и выдает необходимые системные разрешения.
+    Проверяет APK в apps/device-agent/apks до установки. Продолжает установку
+    на остальных платах после успешной первой. Пустой -PluginApkName
+    позволяет установить только основной APK.
 #>
 
 [CmdletBinding()]
 param(
-    [string]$ApkFolder = "$PSScriptRoot\apks",
-    [string]$ModApkName = "TikTok_Mod.apk",
-    [string]$PluginApkName = "TikTok_Plugin.apk",
-    [string]$ExpectedModSha256 = "",
-    [switch]$WipeData = $false,
-    [switch]$UninstallFirst = $false
+    [string]$ApkFolder,
+    [string]$ModApkName = 'TikTok_MC_1.0.3-Beta(47.5.3)_Fix.apk',
+    [AllowEmptyString()]
+    [string]$PluginApkName = '2.46a1_plugin.apk',
+    [string]$ExpectedModSha256 = '',
+    [switch]$WipeData,
+    [switch]$UninstallFirst
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# adb пишет служебные сообщения и ошибки установки в stderr. При $ErrorActionPreference = 'Stop'
-# Windows PowerShell 5.1 превращает такую строку в завершающую ошибку, и скрипт падает раньше,
-# чем успевает разобрать причину (например INSTALL_FAILED_UPDATE_INCOMPATIBLE). Глушим локально.
-function Invoke-Adb {
-    $ErrorActionPreference = 'Continue'
-    & adb @args 2>&1 | ForEach-Object { "$_" }
+if (-not $ApkFolder) { $ApkFolder = Join-Path $PSScriptRoot 'apks' }
+$apkFiles = @(Join-Path $ApkFolder $ModApkName)
+if ($PluginApkName) {
+    $apkFiles += (Join-Path $ApkFolder $PluginApkName)
 }
-
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "   KMMZAVOD - УСТАНОВКА TIKTOK MOD НА ПЛАТЫ СТОЙКИ (ADB)        " -ForegroundColor Cyan
-Write-Host "   Обход блокировок РФ с сохранением сессий аккаунтов           " -ForegroundColor Cyan
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host ""
-
-if (-not (Test-Path $ApkFolder)) {
-    New-Item -ItemType Directory -Path $ApkFolder -Force | Out-Null
-}
-
-$modPath = Join-Path $ApkFolder $ModApkName
-$pluginPath = Join-Path $ApkFolder $PluginApkName
-
-$targetApks = @()
-
-if (Test-Path $modPath) {
-    $targetApks += (Get-Item $modPath)
-}
-if (Test-Path $pluginPath) {
-    $targetApks += (Get-Item $pluginPath)
-}
-
-if ($targetApks.Count -eq 0) {
-    Write-Host "[!] В папке '$ApkFolder' не найдено целевых APK-файлов ($ModApkName / $PluginApkName)!" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "ИНСТРУКЦИЯ ПО УСТАНОВКЕ TIKTOK MOD:" -ForegroundColor Green
-    Write-Host "1. Скачайте проверенный TikTok Mod и TikTok Plugin (сборки BReaaker или Дмитрия Нечипоренко)." -ForegroundColor White
-    Write-Host "2. Положите файлы в папку:" -ForegroundColor Cyan
-    Write-Host "   $ApkFolder\$ModApkName" -ForegroundColor DarkGray
-    Write-Host "   $ApkFolder\$PluginApkName (опционально)" -ForegroundColor DarkGray
-    Write-Host "3. Запустите скрипт повторно." -ForegroundColor Green
-    Write-Host ""
-    exit 0
-}
-
-# Опциональная проверка SHA-256 для защиты от поврежденных файлов
-if ($ExpectedModSha256 -and (Test-Path $modPath)) {
-    Write-Host "Проверка контрольной суммы SHA-256 для $ModApkName..." -ForegroundColor Gray
-    $actualHash = (Get-FileHash -Path $modPath -Algorithm SHA256).Hash
-    if ($actualHash -ne $ExpectedModSha256) {
-        Write-Host "[ОШИБКА] Хеш $ModApkName не совпадает с ожидаемым!" -ForegroundColor Red
-        Write-Host "  Ожидался: $ExpectedModSha256" -ForegroundColor Yellow
-        Write-Host "  Получен:  $actualHash" -ForegroundColor Red
+foreach ($apkPath in $apkFiles) {
+    if (-not (Test-Path -LiteralPath $apkPath -PathType Leaf)) {
+        Write-Host "[ОШИБКА] APK не найден: $apkPath" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[OK] Хеш SHA-256 проверен успешно." -ForegroundColor Green
+}
+$apkFiles = @($apkFiles | ForEach-Object { (Get-Item -LiteralPath $_).FullName })
+if ($ExpectedModSha256 -and (Get-FileHash -LiteralPath $apkFiles[0] -Algorithm SHA256).Hash -ne $ExpectedModSha256) {
+    Write-Host "[ОШИБКА] SHA-256 файла $ModApkName не совпадает с ожидаемым." -ForegroundColor Red
+    exit 1
 }
 
-# Опрос активных плат
-Write-Host "Поиск активных плат через ADB..." -ForegroundColor Gray
-$rawDevices = Invoke-Adb devices -l
-$onlineDevices = @()
-foreach ($l in $rawDevices) {
-    if ($l -match '^([a-zA-Z0-9_\-.:]+)\s+device(\s|$)') {
-        $onlineDevices += $matches[1]
+$adbPath = Join-Path $PSScriptRoot 'platform-tools\adb.exe'
+if (-not (Test-Path -LiteralPath $adbPath -PathType Leaf)) {
+    $adb = Get-Command adb -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $adb) {
+        Write-Host '[ОШИБКА] ADB не найден в platform-tools рядом со скриптом или в PATH.' -ForegroundColor Red
+        exit 1
     }
+    $adbPath = $adb.Source
 }
 
+function Invoke-Adb {
+    # ADB uses stderr for diagnostics, including successful native commands.
+    $ErrorActionPreference = 'Continue'
+    $output = & $adbPath @args 2>&1 | ForEach-Object { "$_" }
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output -join [Environment]::NewLine) }
+}
+
+$devices = Invoke-Adb devices -l
+if ($devices.ExitCode -ne 0) {
+    Write-Host "[ОШИБКА] Не удалось получить список плат: $($devices.Output)" -ForegroundColor Red
+    exit 1
+}
+$onlineDevices = @(
+    foreach ($line in $devices.Output -split '\r?\n') {
+        if ($line -match '^(\S+)\s+device(?:\s|$)') { $matches[1] }
+    }
+)
 if ($onlineDevices.Count -eq 0) {
-    Write-Host "[ОШИБКА] Ни одна Android-плата не подключена в режиме 'device'!" -ForegroundColor Red
+    Write-Host "[ОШИБКА] Нет подключённых плат в состоянии 'device'." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "[OK] Найдено подключенных плат: $($onlineDevices.Count)" -ForegroundColor Green
-Write-Host ""
-
-$PKG = "com.zhiliaoapp.musically"
-
-# ТЕСТОВАЯ УСТАНОВКА НА ПЕРВОЙ ПЛАТЕ ДЛЯ ПРОВЕРКИ СОВМЕСТИМОСТИ ПОДПИСИ
-$testDev = $onlineDevices[0]
-Write-Host "[ТЕСТ] Проверка совместимости установки на плате $testDev..." -ForegroundColor Yellow
-
-if ($UninstallFirst) {
-    Write-Host "  [ВНИМАНИЕ] Флаг -UninstallFirst активен: удаление старого пакета на $testDev..." -ForegroundColor Yellow
-    Invoke-Adb -s $testDev uninstall $PKG | Out-Null
-}
-
-$testOut = Invoke-Adb -s $testDev install -r -d -g $targetApks[0].FullName | Out-String
-
-if ($testOut -match "INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
-    Write-Host ""
-    Write-Host "[ОШИБКА] Несовпадение подписи APK (INSTALL_FAILED_UPDATE_INCOMPATIBLE)!" -ForegroundColor Red
-    Write-Host "На платах установлен официальный TikTok с другой цифровой подписью." -ForegroundColor Red
-    Write-Host "Для перехода на мод требуется сначала удалить официальную версию." -ForegroundColor Yellow
-    Write-Host "Запустите скрипт с флагом удаления старой версии:" -ForegroundColor Cyan
-    Write-Host "  .\install-tiktok-mod.ps1 -UninstallFirst" -ForegroundColor Green
-    Write-Host "(Внимание: это потребует повторного входа в аккаунты!)" -ForegroundColor DarkGray
-    exit 1
-} elseif ($testOut -notmatch "Success") {
-    Write-Host "[ОШИБКА] Тестовая установка на $testDev завершилась неудачей: $($testOut.Trim())" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "[OK] Тестовая установка успешна! Подпись APK совместима." -ForegroundColor Green
-Write-Host ""
-
-# ОСНОВНОЙ ЦИКЛ УСТАНОВКИ НА ВСЕ ПЛАТЫ
-$failedDevices = @()
-$successDevices = @()
-
-foreach ($dev in $onlineDevices) {
-    Write-Host "----------------------------------------------------------------" -ForegroundColor Gray
-    Write-Host "[Плата $dev] Установка..." -ForegroundColor Cyan
-
-    & adb -s $dev shell "am force-stop $PKG 2>/dev/null" | Out-Null
-
-    if ($WipeData) {
-        Write-Host "  [!] Очистка данных приложения (флаг -WipeData)..." -ForegroundColor Yellow
-        & adb -s $dev shell "pm clear $PKG 2>/dev/null" | Out-Null
-    }
-
-    if ($UninstallFirst -and $dev -ne $testDev) {
-        Invoke-Adb -s $dev uninstall $PKG | Out-Null
-    }
-
-    $devSuccess = $true
-    foreach ($apk in $targetApks) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $installOut = Invoke-Adb -s $dev install -r -d -g $apk.FullName | Out-String
-        $sw.Stop()
-
-        if ($installOut -match "Success") {
-            Write-Host "  [✓] $($apk.Name) установлен ($([math]::Round($sw.Elapsed.TotalSeconds, 1))с)" -ForegroundColor Green
-        } else {
-            Write-Host "  [✗] Ошибка $($apk.Name): $($installOut.Trim())" -ForegroundColor Red
-            $devSuccess = $false
+$package = 'com.zhiliaoapp.musically'
+function Install-ForDevice([string]$Serial) {
+    Write-Host "[$Serial] Установка TikTok..." -ForegroundColor Cyan
+    if ($UninstallFirst) {
+        $installed = Invoke-Adb -s $Serial shell pm list packages $package
+        if ($installed.ExitCode -ne 0) {
+            Write-Host "[ОШИБКА] $($Serial): не удалось проверить установленное приложение. $($installed.Output)" -ForegroundColor Red
+            return $false
+        }
+        if (($installed.Output -split '\r?\n') -contains "package:$package") {
+            $uninstalled = Invoke-Adb -s $Serial uninstall $package
+            if ($uninstalled.ExitCode -ne 0 -or $uninstalled.Output -notmatch '(?m)^\s*Success\s*$') {
+                Write-Host "[ОШИБКА] $($Serial): не удалось удалить старый пакет. $($uninstalled.Output)" -ForegroundColor Red
+                return $false
+            }
         }
     }
 
-    if ($devSuccess) {
-        # Выдача необходимых разрешений и отключение Doze
-        & adb -s $dev shell "pm grant $PKG android.permission.READ_EXTERNAL_STORAGE 2>/dev/null" | Out-Null
-        & adb -s $dev shell "pm grant $PKG android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null" | Out-Null
-        & adb -s $dev shell "pm grant $PKG android.permission.RECORD_AUDIO 2>/dev/null" | Out-Null
-        & adb -s $dev shell "pm grant $PKG android.permission.CAMERA 2>/dev/null" | Out-Null
-        & adb -s $dev shell "pm grant $PKG android.permission.POST_NOTIFICATIONS 2>/dev/null" | Out-Null
-        & adb -s $dev shell "dumpsys deviceidle whitelist +$PKG 2>/dev/null" | Out-Null
-        $successDevices += $dev
+    foreach ($apkPath in $apkFiles) {
+        $name = Split-Path -Leaf $apkPath
+        $install = Invoke-Adb -s $Serial install -r -d -g $apkPath
+        if ($install.ExitCode -ne 0 -or $install.Output -notmatch '(?m)^\s*Success\s*$') {
+            Write-Host "[ОШИБКА] $($Serial): $name. $($install.Output)" -ForegroundColor Red
+            if ($install.Output -match 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' -and $apkPath -eq $apkFiles[0] -and -not $UninstallFirst) {
+                Write-Host 'Подписи TikTok различаются. -UninstallFirst удалит старый TikTok вместе с данными и сессиями.' -ForegroundColor Yellow
+            }
+            return $false
+        }
+        Write-Host "[OK] $($Serial): $name установлен." -ForegroundColor Green
+    }
+
+    if ($WipeData) {
+        $cleared = Invoke-Adb -s $Serial shell pm clear $package
+        if ($cleared.ExitCode -ne 0 -or $cleared.Output -notmatch '(?m)^\s*Success\s*$') {
+            Write-Host "[ОШИБКА] $($Serial): APK установлены, но данные не очищены. $($cleared.Output)" -ForegroundColor Red
+            return $false
+        }
+    }
+    foreach ($permission in @('READ_EXTERNAL_STORAGE', 'WRITE_EXTERNAL_STORAGE', 'RECORD_AUDIO', 'CAMERA', 'POST_NOTIFICATIONS')) {
+        Invoke-Adb -s $Serial shell pm grant $package "android.permission.$permission" | Out-Null
+    }
+    Invoke-Adb -s $Serial shell dumpsys deviceidle whitelist "+$package" | Out-Null
+    return $true
+}
+
+$failed = @()
+$completed = 0
+foreach ($serial in $onlineDevices) {
+    if (Install-ForDevice $serial) {
+        $completed++
     } else {
-        $failedDevices += $dev
+        $failed += $serial
+        if ($serial -eq $onlineDevices[0]) {
+            Write-Host 'Установка на остальных платах остановлена после ошибки на первой.' -ForegroundColor Yellow
+            break
+        }
     }
 }
-
-Write-Host ""
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "   ИТОГИ УСТАНОВКИ TIKTOK MOD:                                 " -ForegroundColor Cyan
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "Успешно: $($successDevices.Count) из $($onlineDevices.Count)" -ForegroundColor $(if ($successDevices.Count -eq $onlineDevices.Count) { 'Green' } else { 'Yellow' })
-
-if ($failedDevices.Count -gt 0) {
-    Write-Host "Ошибки на платах: $($failedDevices -join ', ')" -ForegroundColor Red
+Write-Host "Установка завершена на $completed из $($onlineDevices.Count) плат."
+if ($failed.Count) {
+    Write-Host "Ошибки на платах: $($failed -join ', ')" -ForegroundColor Red
     exit 1
 }
-
-Write-Host ""
-Write-Host "================================================================" -ForegroundColor Green
-Write-Host "   [УСПЕХ] TIKTOK MOD УСПЕШНО УСТАНОВЛЕН НА ВСЕ ПЛАТЫ!           " -ForegroundColor Green
-Write-Host "================================================================" -ForegroundColor Green
-Write-Host ""

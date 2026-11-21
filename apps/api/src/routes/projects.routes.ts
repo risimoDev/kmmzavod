@@ -92,11 +92,23 @@ export async function projectRoutes(app: FastifyInstance) {
     });
     if (!project) return reply.code(404).send({ error: 'NotFound' });
 
-    // 2. Master clips from Smart Editor (editClips with outputKey, linked to project)
-    const allEditorClips = await db.editClip.findMany({
+    const rawVideos = await db.sourceVideo.findMany({
+      where: { projectId: id, tenantId, isArchived: false },
+      orderBy: { createdAt: 'desc' },
+      include: { _count: { select: { uniquifyJobs: true } } },
+    });
+    const sourceIds = new Set(rawVideos.map((video) => video.id));
+
+    // A promoted master belongs to its source video's project. The editor's saved
+    // project covers renders that have no linked source video in the library yet.
+    const candidates = await db.editClip.findMany({
       where: {
         outputKey: { not: null },
         project: { tenantId },
+        OR: [
+          { outputSourceVideoId: { in: [...sourceIds] } },
+          { project: { config: { path: ['workspaceProjectId'], equals: id } } },
+        ],
       },
       orderBy: { createdAt: 'desc' },
       include: {
@@ -104,23 +116,23 @@ export async function projectRoutes(app: FastifyInstance) {
       },
     });
 
-    const editorClips = allEditorClips.filter((c) => {
-      const cfg = (c.project.config ?? {}) as Record<string, unknown>;
-      return cfg.workspaceProjectId === id || (c.project.name && project.name && c.project.name.toLowerCase().includes(project.name.toLowerCase()));
-    });
+    const remainingIds = candidates.flatMap((clip) =>
+      clip.outputSourceVideoId && !sourceIds.has(clip.outputSourceVideoId) ? [clip.outputSourceVideoId] : [],
+    );
+    const excludedIds = new Set(remainingIds.length ? (await db.sourceVideo.findMany({
+      where: {
+        id: { in: remainingIds },
+        NOT: { tenantId, OR: [{ projectId: id }, { projectId: null }] },
+      },
+      select: { id: true },
+    })).map((video) => video.id) : []);
+    const editorClips = candidates.filter((clip) =>
+      !clip.outputSourceVideoId || !excludedIds.has(clip.outputSourceVideoId),
+    );
 
     const masterClipSourceIds = new Set(
       editorClips.map((c) => c.outputSourceVideoId).filter((vid): vid is string => Boolean(vid)),
     );
-
-    // 1. Raw source videos uploaded to this project (excluding master clips to avoid duplication between tabs)
-    const rawVideos = await db.sourceVideo.findMany({
-      where: { projectId: id, tenantId, isArchived: false },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        _count: { select: { uniquifyJobs: true } },
-      },
-    });
 
     const trulyRawVideos = rawVideos.filter((v) => !masterClipSourceIds.has(v.id));
 
@@ -147,7 +159,9 @@ export async function projectRoutes(app: FastifyInstance) {
     const uniqueVariants = projectSourceIds.length > 0
       ? await db.uniqueVariant.findMany({
           where: {
+            tenantId,
             uniquifyJob: {
+              tenantId,
               sourceVideoId: { in: projectSourceIds },
             },
           },
@@ -172,7 +186,9 @@ export async function projectRoutes(app: FastifyInstance) {
     const distributeJobs = projectSourceIds.length > 0
       ? await db.distributeJob.findMany({
           where: {
+            tenantId,
             uniquifyJob: {
+              tenantId,
               sourceVideoId: { in: projectSourceIds },
             },
           },

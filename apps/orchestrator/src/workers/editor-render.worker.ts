@@ -33,7 +33,7 @@ export function createEditorRenderWorker(deps: Deps): Worker {
       const { projectId, tenantId } = job.data;
       logger.info({ projectId }, 'Editor-render: starting');
 
-      const project = await db.editProject.findUniqueOrThrow({ where: { id: projectId } });
+      const project = await db.editProject.findUniqueOrThrow({ where: { id: projectId, tenantId } });
       const sources = await db.editSource.findMany({ where: { projectId }, orderBy: { order: 'asc' } });
       const clipRows = await db.editClip.findMany({
         where: { projectId, included: true },
@@ -98,8 +98,7 @@ export function createEditorRenderWorker(deps: Deps): Worker {
         });
 
         const workspaceProjectId = typeof config.workspaceProjectId === 'string' ? config.workspaceProjectId : null;
-        // Autopilot masters are intermediate files: keep them out of project
-        // libraries (and out of the autopilot source pool) via origin.
+        // Autopilot masters are visible in the project; the source pool uses uploads only.
         const isAutopilot = typeof config.autopilotBatchId === 'string' && Boolean(await db.autopilotBatch.findFirst({
           where: { id: config.autopilotBatchId, editProjectId: projectId, tenantId }, select: { id: true },
         }));
@@ -115,7 +114,7 @@ export function createEditorRenderWorker(deps: Deps): Worker {
           // retry (or re-render) of this project reuses the SourceVideo of that file instead
           // of piling up duplicates.
           const svData = {
-            projectId: isAutopilot ? null : workspaceProjectId,
+            projectId: workspaceProjectId,
             origin: isAutopilot ? 'autopilot' : 'editor',
             title: out.title || `${project.name} (Мастер #${i + 1})`,
             status: 'ready' as const,

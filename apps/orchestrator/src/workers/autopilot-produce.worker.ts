@@ -11,7 +11,7 @@
  * advanced by the scheduler loop (autopilot/loop.ts) by polling entity status,
  * so a lost event or a restarted container never strands a batch.
  */
-import { Worker, type ConnectionOptions, type Queue } from 'bullmq';
+import { UnrecoverableError, Worker, type ConnectionOptions, type Queue } from 'bullmq';
 import { QUEUES, type AutopilotProducePayload, type EditorAnalyzeJobPayload } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import type { MinioStorageClient } from '@kmmzavod/storage';
@@ -107,13 +107,18 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
       try {
         const sources = await db.sourceVideo.findMany({
           where: { id: { in: batch.sourceVideoIds }, tenantId: ap.tenantId },
-          select: { id: true, storageKey: true, title: true },
+          select: { id: true, projectId: true, storageKey: true, title: true },
         });
         // Keep the batch's chosen order (freshest first).
         const ordered = batch.sourceVideoIds
           .map((id) => sources.find((s) => s.id === id))
           .filter((s): s is NonNullable<typeof s> => Boolean(s?.storageKey));
         if (ordered.length === 0) throw new Error('Исходники батча удалены или недоступны');
+        // The batch may have been queued before the autopilot changed its project.
+        const workspaceProjectId = ordered[0].projectId;
+        if (!workspaceProjectId || ordered.some((source) => source.projectId !== workspaceProjectId)) {
+          throw new UnrecoverableError('Исходники батча должны принадлежать одному проекту');
+        }
 
         // ── 1. Script ───────────────────────────────────────────────────────
         // Sequence number of this batch → deterministic rotation of styles/voices/music.
@@ -262,6 +267,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
             config: {
               autopilotId: ap.id,
               autopilotBatchId: batchId,
+              workspaceProjectId,
               // Variety: a per-batch seed + fragments earlier montages used.
               seed: seedFromId(batchId),
               pace: ap.pace,
@@ -316,7 +322,7 @@ export function createAutopilotProduceWorker(deps: Deps): Worker {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error({ batchId, err: msg }, 'Autopilot: produce failed');
         // Retry transient errors once (BullMQ attempts); on the final attempt fail the batch.
-        const final = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+        const final = err instanceof UnrecoverableError || job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
         if (final) {
           await failBatch(db, batchId, `Сценарий/озвучка: ${msg}`);
           return;

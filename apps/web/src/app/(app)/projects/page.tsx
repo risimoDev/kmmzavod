@@ -55,7 +55,10 @@ function ProjectsContent() {
   const [activeTab, setActiveTab] = useState<HubTab>("raw");
   const [loading, setLoading] = useState(true);
   const [hubLoading, setHubLoading] = useState(false);
-  const [hub, setHub] = useState<ProjectHubDetail | null>(null);
+  const [loadedHub, setHub] = useState<ProjectHubDetail | null>(null);
+  const hub = loadedHub?.project.id === selectedId ? loadedHub : null;
+  const activeProject = useRef<string | null>(null);
+  const hubRequest = useRef(0);
 
   // Search & Project creation modal
   const [search, setSearch] = useState("");
@@ -96,25 +99,29 @@ function ProjectsContent() {
   // Load hub details when selected project changes
   const loadHub = useCallback(
     async (id: string, silent = false) => {
+      if (activeProject.current !== id) return;
+      const request = ++hubRequest.current;
       if (!silent) setHubLoading(true);
       try {
         const data = await projectsApi.hub(id);
-        setHub(data);
+        if (hubRequest.current === request && activeProject.current === id) setHub(data);
       } catch {
         // ignore
       } finally {
-        if (!silent) setHubLoading(false);
+        if (hubRequest.current === request && activeProject.current === id) setHubLoading(false);
       }
     },
     [],
   );
 
   useEffect(() => {
+    activeProject.current = selectedId;
     if (selectedId) {
       loadHub(selectedId);
       setSelectedRawVideoIds([]);
     } else {
       setHub(null);
+      setHubLoading(false);
     }
   }, [selectedId, loadHub]);
 
@@ -178,7 +185,7 @@ function ProjectsContent() {
     try {
       await projectsApi.deleteSourceVideo(selectedId, videoId);
       setHub((prev) =>
-        prev ? { ...prev, rawVideos: prev.rawVideos.filter((v) => v.id !== videoId) } : null,
+        prev?.project.id === selectedId ? { ...prev, rawVideos: prev.rawVideos.filter((v) => v.id !== videoId) } : prev,
       );
       setSelectedRawVideoIds((prev) => prev.filter((id) => id !== videoId));
     } catch (e: any) {
