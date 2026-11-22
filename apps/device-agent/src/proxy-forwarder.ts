@@ -35,6 +35,9 @@ export interface UpstreamProxyConfig {
 export type ProxyErrorCode =
   | 'unreachable'
   | 'timeout'
+  | 'relay_unavailable'
+  | 'relay_upstream'
+  | 'relay_denied'
   | 'auth_failed'
   | 'rejected'
   | 'target_failed'
@@ -53,7 +56,7 @@ export class ProxyError extends Error {
 
   /** Transient failures worth another attempt (rate-limit bursts, resets, flaky mobile modems). */
   get retryable(): boolean {
-    if (this.code === 'timeout' || this.code === 'unreachable') return true;
+    if (['timeout', 'unreachable', 'relay_unavailable', 'relay_upstream'].includes(this.code)) return true;
     if (this.code === 'rejected') {
       return this.status === undefined || [403, 429, 500, 502, 503, 504].includes(this.status);
     }
@@ -75,7 +78,7 @@ export function declaredProtocol(type?: ProxyType): UpstreamProtocol | undefined
 
 /** Identity of an upstream proxy: same server + same credentials share one connection pool. */
 export function upstreamKey(cfg: UpstreamProxyConfig): string {
-  return [cfg.host.trim().toLowerCase(), cfg.port, cfg.username ?? '', cfg.password ?? ''].join('|');
+  return JSON.stringify([cfg.host.trim().toLowerCase(), cfg.port, cfg.username ?? '', cfg.password ?? '', declaredProtocol(cfg.type)]);
 }
 
 /** Pull the first IPv4/IPv6 address out of a service response. */
@@ -309,6 +312,7 @@ function openTcp(host: string, port: number, via: { host: string; port: number }
   return new Promise((resolve, reject) => {
     const sock = net.connect(via ? { host: via.host, port: via.port } : { host, port });
     sock.setNoDelay(true);
+    let relayConnected = false;
     let settled = false;
     const finish = (err?: Error) => {
       if (settled) return;
@@ -328,7 +332,10 @@ function openTcp(host: string, port: number, via: { host: string; port: number }
       () =>
         finish(
           via
-            ? new ProxyError(`Relay ${via.host}:${via.port} не ответил (туннель AmneziaWG поднят?)`, 'timeout')
+            ? new ProxyError(
+                relayConnected ? `Relay не завершил CONNECT к ${host}:${port} вовремя` : `Таймаут подключения к relay ${via.host}:${via.port}`,
+                relayConnected ? 'relay_upstream' : 'relay_unavailable',
+              )
             : new ProxyError(`Прокси ${host}:${port} не отвечает (таймаут подключения)`, 'timeout'),
         ),
       timeoutMs,
@@ -339,25 +346,37 @@ function openTcp(host: string, port: number, via: { host: string; port: number }
           via
             ? `Нет соединения с relay ${via.host}:${via.port}: ${err.message}`
             : `Нет соединения с прокси ${host}:${port}: ${err.message}`,
-          'unreachable',
+          via ? 'relay_unavailable' : 'unreachable',
         ),
       );
-    const onClose = () => finish(new ProxyError(`Relay закрыл соединение к ${host}:${port}`, 'unreachable'));
+    const onClose = () => finish(new ProxyError(
+      via ? `Relay закрыл соединение к ${host}:${port}` : `Прокси ${host}:${port} закрыл соединение`,
+      via ? 'relay_unavailable' : 'unreachable',
+    ));
     sock.on('error', onError);
     sock.on('close', onClose);
     sock.once('connect', () => {
       if (!via) return finish();
-      sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+      relayConnected = true;
+      const target = net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`;
+      sock.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
       let buf = Buffer.alloc(0);
       const onData = (chunk: Buffer) => {
         buf = Buffer.concat([buf, chunk]);
         const end = buf.indexOf('\r\n\r\n');
-        if (end === -1) return;
+        if (end === -1) {
+          if (buf.length > 16_384) finish(new ProxyError('Relay прислал некорректный ответ CONNECT', 'protocol'));
+          return;
+        }
         sock.removeListener('data', onData);
-        const firstLine = buf.subarray(0, end).toString('latin1').split('\r\n')[0];
-        if (!/^HTTP\/\d(?:\.\d)?\s+200/.test(firstLine)) {
-          const body = buf.subarray(end + 4).toString('utf-8').trim();
-          finish(new ProxyError(`Relay не смог подключиться к прокси ${host}:${port}: ${body || firstLine}`, 'unreachable'));
+        const headers = buf.subarray(0, end).toString('latin1');
+        const firstLine = headers.split('\r\n')[0];
+        const status = Number(firstLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s|$)/)?.[1]);
+        if (status !== 200) {
+          const body = buf.subarray(end + 4).toString('utf-8').trim().slice(0, 200);
+          const reason = headers.match(/^X-Relay-Error:\s*([a-z0-9_]+)\r?$/im)?.[1];
+          const code = status === 403 ? 'relay_denied' : status === 502 || status === 504 ? 'relay_upstream' : 'protocol';
+          finish(new ProxyError(`Relay → ${host}:${port}: ${reason || body || firstLine}`, code, status || undefined));
           return;
         }
         sock.pause();
@@ -377,7 +396,25 @@ function parseVia(via?: string): { host: string; port: number } | undefined {
 }
 
 /** test() fails fast: a 403/whitelist error must reach the caller, not hide behind the IP-switch retry window. */
-const TEST_RETRY_WINDOW_MS = 3_000;
+function timeLeft(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new ProxyError('Истекло время подключения через прокси', 'timeout');
+  return remaining;
+}
+
+async function withinDeadline<T>(pending: Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ProxyError('Истекло время подключения через прокси', 'timeout')), Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const IP_ECHO_ENDPOINTS = [
   { host: 'api.ipify.org', path: '/' },
@@ -433,58 +470,61 @@ export class UpstreamProxy {
     return `Basic ${creds}`;
   }
 
+  connectionDeadline(): number {
+    return Date.now() + this.retryWindowMs;
+  }
+
   /** Raw TCP connection to the proxy itself (through the relay if configured), for absolute-URI HTTP. */
-  connectRaw(): Promise<net.Socket> {
-    return openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs).then((sock) => {
+  connectRaw(deadline: number): Promise<net.Socket> {
+    return openTcp(this.config.host, this.config.port, this.via, Math.min(this.connectTimeoutMs, timeLeft(deadline))).then((sock) => {
       sock.on('error', noop);
       return sock;
     });
   }
 
   /** Reserve a slot for a plain-HTTP request forwarded in absolute-URI form. */
-  acquireSlot(): Promise<() => void> {
-    return this.limiter.acquire(this.queueTimeoutMs);
+  acquireSlot(deadline: number): Promise<() => void> {
+    return this.limiter.acquire(Math.min(this.queueTimeoutMs, timeLeft(deadline)));
   }
 
   /** Detect whether the upstream speaks SOCKS5 or HTTP (cached). */
-  async resolveProtocol(): Promise<UpstreamProtocol> {
+  async resolveProtocol(deadline = Date.now() + this.connectTimeoutMs + 3_000): Promise<UpstreamProtocol> {
     if (this.protocol) return this.protocol;
     if (!this.probing) {
-      this.probing = this.probe()
-        .then((p) => {
-          this.protocol = p;
-          return p;
-        })
+      this.probing = this.probe(deadline)
         .finally(() => {
           this.probing = null;
         });
     }
-    return this.probing;
+    return withinDeadline(this.probing, deadline);
   }
 
   /**
    * Sends a SOCKS5 greeting: a SOCKS5 server answers `05 xx`, an HTTP proxy answers
    * `HTTP/1.x 400`. Silence or a closed socket falls back to the declared type.
    */
-  private async probe(): Promise<UpstreamProtocol> {
+  private async probe(deadline: number): Promise<UpstreamProtocol> {
     const fallback = declaredProtocol(this.config.type) ?? 'http';
-    const sock = await openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs);
+    const sock = await openTcp(this.config.host, this.config.port, this.via, Math.min(this.connectTimeoutMs, timeLeft(deadline)));
     return new Promise((resolve) => {
       let settled = false;
-      const finish = (proto: UpstreamProtocol, detail: string) => {
+      const finish = (proto: UpstreamProtocol, detail: string, confirmed = false) => {
         if (settled) return;
         settled = true;
         clearTimeout(replyTimer);
         sock.on('error', noop);
         sock.destroy();
-        this.logger.info({ upstream: this.label, protocol: proto, detail }, 'proxy: upstream protocol detected');
+        if (confirmed) {
+          this.protocol = proto;
+          this.logger.info({ upstream: this.label, protocol: proto, detail }, 'proxy: upstream protocol detected');
+        }
         resolve(proto);
       };
-      const replyTimer = setTimeout(() => finish(fallback, 'no reply to SOCKS5 greeting'), 3_000);
+      const replyTimer = setTimeout(() => finish(fallback, 'no reply to SOCKS5 greeting'), Math.min(3_000, Math.max(0, deadline - Date.now())));
       sock.on('error', () => finish(fallback, 'error after greeting'));
       sock.once('data', (chunk: Buffer) => {
-        if (chunk[0] === 0x05) finish('socks5', `reply 0x${chunk.subarray(0, 2).toString('hex')}`);
-        else if (chunk.toString('latin1', 0, 5) === 'HTTP/') finish('http', chunk.toString('latin1', 0, 20).trim());
+        if (chunk[0] === 0x05) finish('socks5', `reply 0x${chunk.subarray(0, 2).toString('hex')}`, true);
+        else if (chunk.toString('latin1', 0, 5) === 'HTTP/') finish('http', chunk.toString('latin1', 0, 20).trim(), true);
         else finish(fallback, `unrecognised reply 0x${chunk.subarray(0, 4).toString('hex')}`);
       });
       sock.once('close', () => finish(fallback, 'closed without reply'));
@@ -504,16 +544,19 @@ export class UpstreamProxy {
    * `retryWindowMs` overrides the window for one call (the pre-flight test() uses a short one).
    */
   async openTunnel(host: string, port: number, retryWindowMs?: number): Promise<net.Socket> {
-    const release = await this.limiter.acquire(this.queueTimeoutMs);
+    const deadline = retryWindowMs === undefined ? this.connectionDeadline() : Date.now() + retryWindowMs;
+    const release = await this.limiter.acquire(Math.min(this.queueTimeoutMs, timeLeft(deadline)));
     try {
-      const targetHost = await resolveHostForUpstream(host);
-      const protocol = await this.resolveProtocol();
-      const deadline = Date.now() + (retryWindowMs ?? this.retryWindowMs);
+      const targetHost = await withinDeadline(resolveHostForUpstream(host), deadline);
       let lastErr: ProxyError | undefined;
       for (let attempt = 1; ; attempt++) {
         try {
+          const protocol = await this.resolveProtocol(deadline);
+          const attemptDeadline = Date.now() + Math.min(this.connectTimeoutMs, timeLeft(deadline));
           const sock =
-            protocol === 'socks5' ? await this.socks5Connect(targetHost, port) : await this.httpConnect(targetHost, port);
+            protocol === 'socks5' ? await this.socks5Connect(targetHost, port, attemptDeadline) : await this.httpConnect(targetHost, port, attemptDeadline);
+          this.protocol = protocol;
+          this.lastError = undefined;
           sock.once('close', release);
           return sock;
         } catch (err) {
@@ -526,7 +569,7 @@ export class UpstreamProxy {
           if (!lastErr.retryable || Date.now() + backoff > deadline) break;
           if (attempt === 3 && Date.now() - this.waitingLoggedAt > 30_000) {
             this.waitingLoggedAt = Date.now();
-            this.logger.info({ upstream: this.label, err: lastErr.message }, 'proxy: upstream refusing — waiting it out (IP rotation?)');
+            this.logger.info({ upstream: this.label, code: lastErr.code }, 'proxy: retrying transient upstream failure');
           }
           await delay(backoff);
         }
@@ -542,8 +585,8 @@ export class UpstreamProxy {
   }
 
   /** Connected socket to the upstream (through the relay if configured) + handshake helpers. */
-  private async dial(): Promise<{ sock: net.Socket; fail: (e: ProxyError) => void; done: (rest: Buffer) => void; promise: Promise<net.Socket> }> {
-    const sock = await openTcp(this.config.host, this.config.port, this.via, this.connectTimeoutMs);
+  private async dial(deadline: number): Promise<{ sock: net.Socket; fail: (e: ProxyError) => void; done: (rest: Buffer) => void; promise: Promise<net.Socket> }> {
+    const sock = await openTcp(this.config.host, this.config.port, this.via, timeLeft(deadline));
     let resolveFn!: (s: net.Socket) => void;
     let rejectFn!: (e: ProxyError) => void;
     const promise = new Promise<net.Socket>((res, rej) => {
@@ -552,8 +595,8 @@ export class UpstreamProxy {
     });
     let settled = false;
     const timer = setTimeout(
-      () => fail(new ProxyError(`Прокси ${this.label} не ответил за ${Math.round(this.connectTimeoutMs / 1000)} с`, 'timeout')),
-      this.connectTimeoutMs,
+      () => fail(new ProxyError(`Таймаут рукопожатия с прокси ${this.label}`, 'timeout')),
+      Math.max(0, deadline - Date.now()),
     );
     const onError = (err: Error) => fail(new ProxyError(`Нет соединения с прокси ${this.label}: ${err.message}`, 'unreachable'));
     const onClose = () => fail(new ProxyError(`Прокси ${this.label} закрыл соединение во время рукопожатия`, 'rejected'));
@@ -586,8 +629,8 @@ export class UpstreamProxy {
     return { sock, fail, done, promise };
   }
 
-  private async httpConnect(host: string, port: number): Promise<net.Socket> {
-    const { sock, fail, done, promise } = await this.dial();
+  private async httpConnect(host: string, port: number, deadline: number): Promise<net.Socket> {
+    const { sock, fail, done, promise } = await this.dial(deadline);
     const target = net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`;
     const auth = this.authHeader();
     const request =
@@ -624,8 +667,8 @@ export class UpstreamProxy {
     return promise;
   }
 
-  private async socks5Connect(host: string, port: number): Promise<net.Socket> {
-    const { sock, fail, done, promise } = await this.dial();
+  private async socks5Connect(host: string, port: number, deadline: number): Promise<net.Socket> {
+    const { sock, fail, done, promise } = await this.dial(deadline);
     const connectRequest = Buffer.concat([Buffer.from([0x05, 0x01, 0x00]), socksAddress(host, port)]);
     let stage: 'greeting' | 'auth' | 'connect' = 'greeting';
     let buf = Buffer.alloc(0);
@@ -697,25 +740,20 @@ export class UpstreamProxy {
   /** End-to-end check from the PC: HTTPS through the proxy to an IP-echo service. */
   async test(timeoutMs = 20_000): Promise<UpstreamTestResult> {
     const started = Date.now();
+    const deadline = started + timeoutMs;
     let lastErr: ProxyError | undefined;
-    try {
-      await this.resolveProtocol();
-    } catch (err) {
-      const e = toProxyError(err);
-      return { ok: false, error: e.message, code: e.code, latencyMs: Date.now() - started };
-    }
     for (const endpoint of IP_ECHO_ENDPOINTS) {
       try {
-        const raw = await this.openTunnel(endpoint.host, 443, TEST_RETRY_WINDOW_MS);
-        const body = await httpsGetOverSocket(raw, endpoint.host, endpoint.path, timeoutMs);
-        const ip = extractIp(body);
-        if (!ip) throw new ProxyError(`Сервис ${endpoint.host} вернул неожиданный ответ: ${body.slice(0, 80)}`, 'target_failed');
+        const raw = await this.openTunnel(endpoint.host, 443, timeLeft(deadline));
+        const body = await httpsGetOverSocket(raw, endpoint.host, endpoint.path, Math.max(1, deadline - Date.now()));
+        const ip = body.trim();
+        if (!net.isIP(ip)) throw new ProxyError(`Сервис ${endpoint.host} вернул некорректный IP`, 'target_failed');
         this.lastError = undefined;
         return { ok: true, protocol: this.protocol ?? undefined, ip, latencyMs: Date.now() - started };
       } catch (err) {
         lastErr = toProxyError(err);
         // Credentials / protocol problems won't get better with another endpoint.
-        if (lastErr.code === 'auth_failed' || lastErr.code === 'unreachable' || lastErr.code === 'protocol') break;
+        if (lastErr.code !== 'target_failed' || Date.now() >= deadline) break;
       }
     }
     return {
@@ -742,7 +780,8 @@ function httpsGetOverSocket(raw: net.Socket, host: string, path: string, timeout
         return secure;
       },
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new ProxyError(`Таймаут ответа от ${host} через прокси`, 'timeout')));
+    const timer = setTimeout(() => req.destroy(new ProxyError(`Таймаут ответа от ${host} через прокси`, 'timeout')), timeoutMs);
+    req.once('close', () => clearTimeout(timer));
     req.on('response', (res) => {
       let body = '';
       res.setEncoding('utf-8');
@@ -976,6 +1015,7 @@ export interface ListenerStats {
   lastActivityAt?: string;
   lastError?: string;
   lastErrorAt?: string;
+  lastErrorCode?: ProxyErrorCode;
 }
 
 export interface ListenerOptions {
@@ -1010,6 +1050,7 @@ export class DeviceProxyListener {
   private lastError?: string;
   private lastErrorAt?: number;
   private lastErrorLogAt = 0;
+  private lastErrorCode?: ProxyErrorCode;
 
   constructor(
     readonly deviceId: string,
@@ -1028,6 +1069,7 @@ export class DeviceProxyListener {
       bytesDown: this.counters.bytesDown,
       lastActivityAt: this.lastActivityAt ? new Date(this.lastActivityAt).toISOString() : undefined,
       lastError: this.lastError,
+      lastErrorCode: this.lastErrorCode,
       lastErrorAt: this.lastErrorAt ? new Date(this.lastErrorAt).toISOString() : undefined,
     };
   }
@@ -1097,7 +1139,8 @@ export class DeviceProxyListener {
     }
   }
 
-  private recordError(message: string): void {
+  private recordError(message: string, code?: ProxyErrorCode): void {
+    this.lastErrorCode = code;
     this.counters.failed++;
     this.lastError = message;
     this.lastErrorAt = Date.now();
@@ -1158,7 +1201,7 @@ export class DeviceProxyListener {
         (err) => {
           const e = toProxyError(err);
           this.logger.warn({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, err: e.message }, 'proxy: tunnel failed');
-          this.recordError(`${target.host}:${target.port} — ${e.message}`);
+          this.recordError(`${target.host}:${target.port} — ${e.message}`, e.code);
           this.rejectSocket(client, e.code === 'busy' ? 503 : 502, e.message);
         },
       );
@@ -1233,7 +1276,7 @@ export class DeviceProxyListener {
             { deviceId: this.deviceId, target: `${resolvedDomain}:${target.port}`, originalIp: target.host, err: e.message },
             'proxy: peeked tunnel failed',
           );
-          this.recordError(`${resolvedDomain}:${target.port} — ${e.message}`);
+          this.recordError(`${resolvedDomain}:${target.port} — ${e.message}`, e.code);
         },
       );
     };
@@ -1348,6 +1391,11 @@ export class DeviceProxyListener {
     this.inflight++;
     let finished = false;
     const releases: Array<() => void> = [];
+    const trackRelease = (release: () => void) => {
+      if (finished) { release(); return false; }
+      releases.push(release);
+      return true;
+    };
     res.once('close', () => {
       if (finished) return;
       finished = true;
@@ -1357,12 +1405,14 @@ export class DeviceProxyListener {
 
     (async () => {
       let upstreamReq: http.ClientRequest;
-      if (route.kind === 'proxy' && url.protocol === 'http:' && (await route.upstream.resolveProtocol()) === 'http') {
-        const release = await route.upstream.acquireSlot();
-        releases.push(release);
-        const auth = route.upstream.authHeader();
-        const proxySock = await route.upstream.connectRaw();
-        releases.push(() => proxySock.destroy());
+      const upstream = route.kind === 'proxy' ? route.upstream : undefined;
+      const deadline = upstream?.connectionDeadline();
+      const absoluteProxy = upstream && deadline !== undefined && url.protocol === 'http:' && (await upstream.resolveProtocol(deadline)) === 'http';
+      if (absoluteProxy && upstream && deadline !== undefined) {
+        if (!trackRelease(await upstream.acquireSlot(deadline))) return;
+        const auth = upstream.authHeader();
+        const proxySock = await upstream.connectRaw(deadline);
+        if (!trackRelease(() => proxySock.destroy())) return;
         upstreamReq = http.request({
           method: req.method,
           path: url.href,
@@ -1373,8 +1423,10 @@ export class DeviceProxyListener {
           },
         } as any);
       } else {
-        const sock = await this.open(route, host, port);
-        releases.push(() => sock.destroy());
+        const sock = upstream && deadline !== undefined
+          ? await upstream.openTunnel(host, port, timeLeft(deadline))
+          : await this.open(route, host, port);
+        if (!trackRelease(() => sock.destroy())) return;
         const createConnection = () => {
           setImmediate(() => sock.resume());
           if (url.protocol === 'https:') {
@@ -1390,6 +1442,13 @@ export class DeviceProxyListener {
 
       upstreamReq.setTimeout(this.opts.idleTimeoutMs, () => upstreamReq.destroy(new Error('таймаут ответа')));
       upstreamReq.on('response', (upRes) => {
+        if (absoluteProxy && upstream && upRes.statusCode === 407) {
+          const error = `HTTP-прокси ${upstream.label} отклонил авторизацию`;
+          this.recordError(`${url.host} — ${error}`, 'auth_failed');
+          upRes.resume();
+          this.replyError(res, 502, error);
+          return;
+        }
         upRes.on('data', (d: Buffer) => {
           this.counters.bytesDown += d.length;
         });
@@ -1406,7 +1465,7 @@ export class DeviceProxyListener {
       req.pipe(upstreamReq);
     })().catch((err) => {
       const e = toProxyError(err);
-      this.recordError(`${url.host} — ${e.message}`);
+      this.recordError(`${url.host} — ${e.message}`, e.code);
       this.replyError(res, e.code === 'busy' ? 503 : 502, e.message);
     });
   }

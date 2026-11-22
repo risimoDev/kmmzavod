@@ -549,82 +549,68 @@ if [ -n "$ACTIVE_FARM_URL" ]; then
     info "Запустите sudo bash infra/amneziawg/setup-server-routing.sh"
   fi
 
-  DEVICES_RESP=$(curl -sf --connect-timeout 3 --max-time 5 "$ACTIVE_FARM_URL/devices" 2>/dev/null || true)
-  if [ -n "$DEVICES_RESP" ]; then
-    DEVICES_COUNT=$(echo "$DEVICES_RESP" | grep -o '"serial":"[^"]*"' | wc -l | tr -d ' ' || echo "0")
-    if [ "$DEVICES_COUNT" -gt 0 ]; then
-      ok "Обнаружено $DEVICES_COUNT подключенных плат/телефонов на ПК фермы"
-    else
-      warn "device-agent отвечает, но подключенных Android-плат не обнаружено (adb devices пуст)"
-    fi
-  fi
-
-  # Прокси плат: режим + утечки внешнего IP (private_parallel = у каждой платы свой VPS).
   DEVICE_AGENT_TOKEN_VALUE="$(env_get DEVICE_AGENT_TOKEN 2>/dev/null || true)"
-  AGENT_AUTH=()
-  [ -n "$DEVICE_AGENT_TOKEN_VALUE" ] && AGENT_AUTH=(-H "x-agent-token: $DEVICE_AGENT_TOKEN_VALUE")
-  if [ ${#AGENT_AUTH[@]} -gt 0 ]; then
+  if [ -n "$DEVICE_AGENT_TOKEN_VALUE" ]; then
+    AGENT_AUTH=(-H "x-agent-token: $DEVICE_AGENT_TOKEN_VALUE")
     MODE_RESP=$(curl -sf --connect-timeout 3 --max-time 5 "${AGENT_AUTH[@]}" "$ACTIVE_FARM_URL/proxy/mode" 2>/dev/null || true)
     case "$MODE_RESP" in
-      *'"private_parallel"'*)
-        ok "Прокси-режим фермы: private_parallel (каждая плата — свой выделенный IP)"
-        ;;
-      *'"shared_sequential"'*)
-        warn "Прокси-режим фермы: shared_sequential (все платы через один модем/прокси)"
-        info "Для перехода на «плата = свой VPS» запустите apply-vps-proxies.ps1 на ПК фермы"
-        ;;
-      "")
-        warn "Не удалось прочитать прокси-режим фермы ($ACTIVE_FARM_URL/proxy/mode)"
-        ;;
-      *)
-        warn "Неизвестный прокси-режим фермы: $MODE_RESP"
-        ;;
+      *'"private_parallel"'*) ok "Прокси-режим фермы: private_parallel" ;;
+      *'"shared_sequential"'*) warn "Прокси-режим фермы: shared_sequential, прокси доступен активной плате" ;;
+      *) warn "Не удалось подтвердить прокси-режим фермы" ;;
     esac
 
-    SERIALS=$(echo "$DEVICES_RESP" | grep -o '"serial":"[^"]*"' | cut -d'"' -f4 | head -10)
-    if [ -n "$SERIALS" ]; then
-      BODY='{"deviceIds":['
-      FIRST=1
-      for s in $SERIALS; do
-        [ $FIRST -eq 0 ] && BODY="$BODY,"
-        BODY="$BODY\"$s\""; FIRST=0
-      done
-      BODY="$BODY]}"
-      CHECK_RESP=$(curl -sf --connect-timeout 3 --max-time 60 -X POST \
+    DEVICES_RESP=$(curl -sf --connect-timeout 3 --max-time 5 "${AGENT_AUTH[@]}" "$ACTIVE_FARM_URL/devices" 2>/dev/null || true)
+    BODY=$(python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+online = [b["serial"] for b in d.get("raw", []) if b.get("state") == "device" and b.get("serial")]
+ids = list(dict.fromkeys([*online, *(d.get("proxies") or {})]))
+if not ids:
+    sys.exit(1)
+print(json.dumps({"deviceIds": ids}))
+' <<< "$DEVICES_RESP" 2>/dev/null || true)
+    if [ -z "$BODY" ]; then
+      warn "Не удалось получить список подключённых или настроенных плат"
+    else
+      CHECK_RESP=$(curl -sf --connect-timeout 3 --max-time 600 -X POST \
         -H "Content-Type: application/json" "${AGENT_AUTH[@]}" \
         -d "$BODY" "$ACTIVE_FARM_URL/proxy/batch-check" 2>/dev/null || true)
-      if [ -n "$CHECK_RESP" ]; then
-        echo "$CHECK_RESP" | python3 - <<'PYEOF' || warn "Не удалось разобрать ответ batch-check (проверьте IP плат вручную: apply-vps-proxies.ps1)"
-import json,sys
-try:
-    data=json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-res=data.get('results') or []
-bad=[]
-ok_count=0
-for r in res:
-    ip=(r.get('ip') or '').strip()
-    country=(r.get('country') or '').strip().lower()
-    leak=r.get('leakDetected', False)
-    serial=r.get('deviceId') or '?'
-    if leak or (r.get('ok') and not ip):
-        bad.append((serial, ip or 'нет IP', 'leak' if leak else 'no-ip'))
-    elif country in ('russia','russian federation','ru'):
-        bad.append((serial, ip, f'RU exit ({country})'))
-    elif r.get('ok'):
-        ok_count+=1
-if bad:
-    for s,ip,why in bad:
-        print(f'  WARN {s}: {ip} — {why}')
-if ok_count:
-    print(f'  OK: {ok_count} плат имеют не-РФ внешний IP, утечек нет')
-if not bad and not ok_count:
-    print('  WARN: ни одна плата не ответила корректным внешним IP')
-    sys.exit(1)
-PYEOF
+      if [ -z "$CHECK_RESP" ]; then
+        warn "Агент не завершил проверку IP плат"
+      elif PROXY_CHECK_REQUEST="$BODY" PROXY_CHECK_MODE="$MODE_RESP" python3 -c '
+import collections, ipaddress, json, os, sys
+expected = json.loads(os.environ["PROXY_CHECK_REQUEST"])["deviceIds"]
+mode = json.loads(os.environ["PROXY_CHECK_MODE"] or "{}").get("mode")
+results = {r["deviceId"]: r for r in json.load(sys.stdin).get("results", [])}
+by_ip = collections.defaultdict(list)
+confirmed = 0
+for serial in expected:
+    r = results.get(serial, {})
+    try:
+        ip = ipaddress.ip_address(r.get("ip") or "")
+        host_ip = ipaddress.ip_address(r.get("hostIp") or "")
+    except ValueError:
+        ip = host_ip = None
+    country = (r.get("country") or "").strip().lower()
+    if r.get("ok") and r.get("route") == "proxy" and ip and host_ip and ip != host_ip and not (r.get("leakDetected") or r.get("exposesHostIp")) and country not in ("russia", "russian federation", "ru"):
+        by_ip[str(ip)].append(serial)
+        confirmed += 1
+        print(f"  OK {serial}: {ip}")
+    else:
+        reason = r.get("error") or "маршрут или внешний IP не подтверждены"
+        print(f"  WARN {serial}: {reason}")
+duplicate = False
+if mode == "private_parallel":
+    for ip, ids in by_ip.items():
+        if len(ids) > 1:
+            duplicate = True
+            print("  WARN одинаковый IP {}: {}".format(ip, ", ".join(ids)))
+print(f"  Подтверждено: {confirmed}/{len(expected)}, уникальных IP: {len(by_ip)}")
+sys.exit(1 if confirmed != len(expected) or duplicate else 0)
+' <<< "$CHECK_RESP"; then
+        ok "Выход плат через назначенные прокси подтверждён"
       else
-        warn "batch-check плат не ответил (прокси плат, возможно, не настроены)"
+        warn "Проверка показала проблемы с выходными IP плат"
       fi
     fi
   else

@@ -705,13 +705,13 @@ export const accountFarmApi = {
 
   /** Agent verifies the proxy from the farm PC first; a dead / wrong-password proxy is rejected with a clear error. */
   setDeviceProxy: (deviceId: string, body: Partial<DeviceProxyInput> & { proxyId?: string; activate?: boolean }) =>
-    apiFetch<{ ok: boolean; check?: DeviceIpCheck; upstream?: ProxyTestResult; proxyId?: string; linkedAccounts?: number }>(
+    apiFetch<{ ok: boolean; check?: DeviceIpCheck; upstream?: ProxyTestResult; proxyId?: string; linkedAccounts?: number; syncError?: string }>(
       `/api/v1/farm/devices/${deviceId}/proxy`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
 
   /** Check a proxy from the farm PC without touching any phone. */
-  testFarmProxy: (body: Partial<DeviceProxyInput> & { proxyId?: string }) =>
+  testFarmProxy: (body: Partial<DeviceProxyInput> & { proxyId?: string; deviceId?: string }) =>
     apiFetch<ProxyTestResult>('/api/v1/farm/devices/proxy/test', { method: 'POST', body: JSON.stringify(body) }),
 
   clearDeviceProxy: (deviceId: string) =>
@@ -766,7 +766,9 @@ export const accountFarmApi = {
       results: Array<{
         deviceId: string;
         ok: boolean;
+        saved?: boolean;
         error?: string;
+        syncError?: string;
         upstream?: { ip?: string; protocol?: 'http' | 'socks5' };
       }>;
     }>('/api/v1/farm/devices/proxy/batch-set', { method: 'POST', body: JSON.stringify({ assignments }) }),

@@ -149,7 +149,7 @@ $relayConfigured = $env:DEVICE_AGENT_UPSTREAM_VIA -or (
 if (-not $relayConfigured -and $env:DEVICE_AGENT_ALLOW_DIRECT -ne '1') {
     foreach ($relayAddress in @('10.66.66.1', '10.13.13.1', '10.8.0.1')) {
         $relayUrl = "http://${relayAddress}:3129"
-        & curl.exe -fsS -m 4 -o NUL "$relayUrl/health" 2>$null
+        & curl.exe -fsS --noproxy '*' -m 4 -o NUL "$relayUrl/health" 2>$null
         if ($LASTEXITCODE -eq 0) {
             $env:DEVICE_AGENT_UPSTREAM_VIA = $relayUrl
             break
@@ -192,3 +192,4 @@ if ($pkgManager -eq "pnpm") {
 } else {
     & npm run dev
 }
+exit $LASTEXITCODE

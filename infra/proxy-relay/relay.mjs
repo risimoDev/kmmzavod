@@ -54,19 +54,23 @@ const server = http.createServer((req, res) => {
 
 server.on('connect', (req, client, head) => {
   client.on('error', () => {});
+  const reject = (status, reason) => {
+    client.end(`HTTP/1.1 ${status}\r\nX-Relay-Error: ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  };
   if (!allowed(client.remoteAddress)) {
     log('denied', client.remoteAddress, req.url);
-    client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    reject('403 Forbidden', 'relay_access_denied');
     return;
   }
-  const m = /^\[?([^\]]+)\]?:(\d+)$/.exec(req.url || '');
-  if (!m) {
-    client.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+  const m = /^(?:\[([a-f0-9:.]+)\]|([a-z0-9._-]+)):(\d+)$/i.exec(req.url || '');
+  const port = Number(m?.[3]);
+  if (!m || (m[1] && !net.isIPv6(m[1])) || port < 1 || port > 65535) {
+    reject('400 Bad Request', 'invalid_connect_target');
     return;
   }
-  const upstream = net.connect({ host: m[1], port: Number(m[2]) });
+  const upstream = net.connect({ host: m[1] || m[2], port });
   let established = false;
-  upstream.setTimeout(15_000, () => upstream.destroy(new Error('connect timeout')));
+  upstream.setTimeout(15_000, () => upstream.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })));
   upstream.once('connect', () => {
     upstream.setTimeout(0);
     established = true;
@@ -86,11 +90,13 @@ server.on('connect', (req, client, head) => {
   };
   upstream.on('error', (err) => {
     if (!established && !client.destroyed) {
-      client.end(`HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nrelay: ${err.message}\n`);
+      const timeout = err.code === 'ETIMEDOUT';
+      reject(timeout ? '504 Gateway Timeout' : '502 Bad Gateway', timeout ? 'upstream_connect_timeout' : 'upstream_connect_failed');
+      return;
     }
     close();
   });
-  upstream.on('close', close);
+  upstream.on('close', () => { if (established) close(); });
   client.on('close', close);
 });
 

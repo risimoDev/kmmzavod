@@ -19,6 +19,7 @@
  * re-applies the system proxy and restarts sing-box when needed.
  */
 import fs from 'node:fs';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import axios from 'axios';
 import type { Logger } from 'pino';
@@ -28,7 +29,6 @@ import {
   DeviceProxyListener,
   ProxyError,
   UpstreamProxy,
-  extractIp,
   isBypassedHost,
   isWildberriesHost,
   isBlackholeHost,
@@ -37,6 +37,7 @@ import {
   upstreamKey,
   type ListenerStats,
   type ProxyType,
+  type ProxyErrorCode,
   type RouteDecision,
   type UpstreamProtocol,
   type UpstreamTestResult,
@@ -82,6 +83,7 @@ export interface DeviceIpCheckResult {
   hostIp?: string;
   route: DeviceRoute;
   method?: CaptureMethod;
+  code?: ProxyErrorCode;
   error?: string;
 }
 
@@ -314,7 +316,7 @@ export class ProxyManager {
     }
   }
 
-  private saveState(): void {
+  private saveState(): boolean {
     const state: PersistedStateV2 = {
       version: 2,
       mode: this.mode,
@@ -331,8 +333,10 @@ export class ProxyManager {
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf-8');
       fs.renameSync(tmp, file);
+      return true;
     } catch (err) {
       this.logger.error({ err: String(err), file }, 'proxy-manager: failed to save state file');
+      return false;
     }
   }
 
@@ -738,16 +742,15 @@ export class ProxyManager {
       rotateUrl: input.rotateUrl?.trim() || undefined,
     };
     if (proxy.username && !proxy.password) {
-      const candidates = [deviceId ? this.devices.get(deviceId)?.proxy : undefined, this.sharedProxy ?? undefined, ...[...this.devices.values()].map((e) => e.proxy)];
-      const match = candidates.find((c) => sameEndpoint(c, proxy) && c?.password);
-      if (match) proxy.password = match.password;
+      const previous = deviceId ? this.devices.get(deviceId)?.proxy : undefined;
+      if (previous && sameEndpoint(previous, proxy)) proxy.password = previous.password;
     }
     return proxy;
   }
 
   /** Check a proxy from the PC (HTTPS to an IP-echo service) without touching any phone. */
-  async testProxy(input: DeviceProxyConfig): Promise<UpstreamTestResult & { upstream: string }> {
-    const proxy = this.normalize(null, input);
+  async testProxy(input: DeviceProxyConfig, deviceId?: string): Promise<UpstreamTestResult & { upstream: string }> {
+    const proxy = this.normalize(deviceId ?? null, input);
     const up = this.getUpstream(proxy);
     const res = await up.test();
     this.pruneUpstreams();
@@ -779,12 +782,22 @@ export class ProxyManager {
     }
 
     const previous = this.devices.get(deviceId);
+    const previousShared = this.sharedProxy;
+    const previousActive = this.activeDeviceId;
     this.devices.set(deviceId, { proxy, listenPort: previous?.listenPort });
-    this.sharedProxy = proxy;
+    if (this.mode === 'shared_sequential') this.sharedProxy = proxy;
     if (this.mode === 'shared_sequential' && opts.activate !== false && !this.isLeasedByOther(deviceId)) {
-      this.setActive(deviceId);
+      this.activeDeviceId = deviceId;
     }
-    this.saveState();
+    if (!this.saveState()) {
+      if (previous) this.devices.set(deviceId, previous);
+      else this.devices.delete(deviceId);
+      this.sharedProxy = previousShared;
+      this.activeDeviceId = previousActive;
+      this.pruneUpstreams();
+      throw new Error('Не удалось записать конфигурацию агента на диск');
+    }
+    if (previousActive !== this.activeDeviceId && previousActive) this.listeners.get(previousActive)?.dropConnections();
     this.listeners.get(deviceId)?.dropConnections();
     this.pruneUpstreams();
 
@@ -812,49 +825,68 @@ export class ProxyManager {
     total: number;
     successful: number;
     failed: number;
-    results: Array<{ deviceId: string; ok: boolean; error?: string; upstream?: { ip?: string; protocol?: UpstreamProtocol } }>;
+    results: Array<{ deviceId: string; ok: boolean; saved: boolean; error?: string; upstream?: { ip?: string; protocol?: UpstreamProtocol } }>;
   }> {
+    if (new Set(assignments.map((a) => a.deviceId)).size !== assignments.length) {
+      throw new ProxyError('В пакете несколько назначений для одной платы', 'protocol');
+    }
     const normalized = assignments.map((a) => ({ deviceId: a.deviceId, proxy: this.normalize(a.deviceId, a.proxy) }));
     const tests = new Map<string, UpstreamTestResult>();
-    await Promise.all(
-      [...new Map(normalized.map((a) => [upstreamKey(a.proxy), a.proxy])).entries()].map(async ([key, proxy]) => {
+    const upstreams = [...new Map(normalized.map((a) => [upstreamKey(a.proxy), a.proxy]))];
+    for (let i = 0; i < upstreams.length; i += 5) {
+      await Promise.all(upstreams.slice(i, i + 5).map(async ([key, proxy]) => {
         tests.set(key, await this.getUpstream(proxy).test());
-      }),
-    );
+      }));
+    }
 
-    const results: Array<{ deviceId: string; ok: boolean; error?: string; upstream?: { ip?: string; protocol?: UpstreamProtocol } }> = [];
-    const toApply: string[] = [];
+    const results: Awaited<ReturnType<ProxyManager['batchSetProxy']>>['results'] = [];
+    const toApply: Array<{ deviceId: string; previous?: DeviceEntry; test: UpstreamTestResult }> = [];
+    const previousShared = this.sharedProxy;
+    const previousActive = this.activeDeviceId;
     for (const { deviceId, proxy } of normalized) {
       const test = tests.get(upstreamKey(proxy))!;
       if (!test.ok) {
-        results.push({ deviceId, ok: false, error: `Прокси ${proxy.host}:${proxy.port} не работает: ${test.error}` });
+        results.push({ deviceId, ok: false, saved: false, error: `Прокси ${proxy.host}:${proxy.port} не работает: ${test.error}` });
         continue;
       }
       const previous = this.devices.get(deviceId);
       this.devices.set(deviceId, { proxy, listenPort: previous?.listenPort });
-      this.listeners.get(deviceId)?.dropConnections();
-      this.sharedProxy = proxy;
-      toApply.push(deviceId);
+      if (this.mode === 'shared_sequential') this.sharedProxy = proxy;
+      toApply.push({ deviceId, previous, test });
     }
-    if (this.mode === 'shared_sequential' && toApply.length > 0 && !toApply.includes(this.activeDeviceId ?? '') && !this.lease) {
-      this.setActive(toApply[0]);
+    if (this.mode === 'shared_sequential' && toApply.length > 0 && !toApply.some(({ deviceId }) => deviceId === this.activeDeviceId) && !this.lease) {
+      this.activeDeviceId = toApply[0].deviceId;
     }
-    this.saveState();
+    if (toApply.length && !this.saveState()) {
+      for (const { deviceId, previous } of toApply) {
+        if (previous) this.devices.set(deviceId, previous);
+        else this.devices.delete(deviceId);
+        results.push({ deviceId, ok: false, saved: false, error: 'Не удалось записать конфигурацию агента на диск' });
+      }
+      this.sharedProxy = previousShared;
+      this.activeDeviceId = previousActive;
+      this.pruneUpstreams();
+      return { ok: false, total: assignments.length, successful: 0, failed: assignments.length, results };
+    }
+    for (const { deviceId } of toApply) this.listeners.get(deviceId)?.dropConnections();
+    if (previousActive !== this.activeDeviceId && previousActive) this.listeners.get(previousActive)?.dropConnections();
     this.pruneUpstreams();
 
     // 4 phones at a time keeps the Windows ADB server responsive.
     for (let i = 0; i < toApply.length; i += 4) {
       const chunk = toApply.slice(i, i + 4);
-      const settled = await Promise.allSettled(chunk.map((id) => this.applyDevice(id)));
+      const settled = await Promise.allSettled(chunk.map(({ deviceId }) => this.applyDevice(deviceId)));
       settled.forEach((r, j) => {
-        const deviceId = chunk[j];
-        const test = tests.get(upstreamKey(this.devices.get(deviceId)!.proxy));
+        const { deviceId, test } = chunk[j];
+        const upstream = { ip: test.ip, protocol: test.protocol };
         results.push(
           r.status === 'fulfilled'
-            ? { deviceId, ok: true, upstream: { ip: test?.ip, protocol: test?.protocol } }
+            ? { deviceId, ok: true, saved: true, upstream }
             : {
                 deviceId,
                 ok: false,
+                saved: true,
+                upstream,
                 error: `Прокси сохранён, но не применён на плате (повторим автоматически): ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
               },
         );
@@ -901,12 +933,16 @@ export class ProxyManager {
    * gateways route — open connections are cut so the new rule applies immediately.
    */
   async setMode(mode: ProxyMode, inactivePolicy?: InactivePolicy): Promise<ReturnType<ProxyManager['getMode']> & { ok: boolean }> {
+    const previousMode = this.mode;
     this.mode = mode;
     if (inactivePolicy) this.inactivePolicy = inactivePolicy;
     if (mode === 'shared_sequential' && (!this.activeDeviceId || !this.devices.has(this.activeDeviceId))) {
       const online = new Set((await this.adb.listDevices()).filter((d) => d.state === 'device').map((d) => d.serial));
       const ids = [...this.devices.keys()];
       this.activeDeviceId = ids.find((id) => online.has(id)) ?? ids[0] ?? null;
+    }
+    if (mode === 'shared_sequential' && previousMode !== mode) {
+      this.sharedProxy = this.activeDeviceId ? this.devices.get(this.activeDeviceId)?.proxy ?? null : null;
     }
     for (const l of this.listeners.values()) l.dropConnections();
     this.saveState();
@@ -1028,9 +1064,11 @@ export class ProxyManager {
    *   3. If mobile proxy has a rotate URL, rotates IP to clear carrier stall.
    *   4. Re-probes internet.
    */
-  async ensureDeviceInternet(deviceId: string): Promise<{ ok: boolean; ip?: string; error?: string }> {
+  async ensureDeviceInternet(deviceId: string): Promise<DeviceIpCheckResult> {
     let check = await this.checkDeviceIp(deviceId);
-    if (check.ok) return { ok: true, ip: check.ip };
+    if (check.ok || check.route === 'block' || (check.code && [
+      'auth_failed', 'relay_denied', 'relay_unavailable', 'relay_upstream', 'protocol',
+    ].includes(check.code))) return check;
 
     this.logger.warn({ deviceId, error: check.error }, 'proxy-manager: device has no internet — initiating active self-healing');
 
@@ -1045,7 +1083,7 @@ export class ProxyManager {
     check = await this.checkDeviceIp(deviceId);
     if (check.ok) {
       this.logger.info({ deviceId, ip: check.ip }, 'proxy-manager: internet restored after reapplyDevice');
-      return { ok: true, ip: check.ip };
+      return check;
     }
 
     // 4. Rotate only the proxy assigned to this device.
@@ -1055,7 +1093,7 @@ export class ProxyManager {
         const rot = await this.rotateProxyIp(deviceId, undefined, 4000);
         if (rot.ok && rot.check?.ok) {
           this.logger.info({ deviceId, ip: rot.check.ip }, 'proxy-manager: internet restored after IP rotation');
-          return { ok: true, ip: rot.check.ip };
+          return rot.check;
         }
       } catch (rotErr) {
         this.logger.warn({ err: String(rotErr), deviceId }, 'proxy-manager: rotation failed during self-healing');
@@ -1064,9 +1102,7 @@ export class ProxyManager {
 
     // 5. Final check
     check = await this.checkDeviceIp(deviceId);
-    if (check.ok) return { ok: true, ip: check.ip };
-
-    return { ok: false, error: check.error || 'Плата не имеет доступа в интернет после всех попыток авто-восстановления' };
+    return check;
   }
 
   /**
@@ -1079,12 +1115,7 @@ export class ProxyManager {
     if (usingProxies && !this.devices.has(deviceId)) {
       return { ok: false, detail: 'У платы нет назначенного прокси' };
     }
-    const net = await this.ensureDeviceInternet(deviceId);
-    if (!net.ok) {
-      if (!usingProxies) return { ok: true };
-      return { ok: false, detail: `Не удалось подтвердить интернет на плате: ${net.error}` };
-    }
-    const ipCheck = await this.checkDeviceIp(deviceId);
+    const ipCheck = await this.ensureDeviceInternet(deviceId);
     if (usingProxies && (!ipCheck.ok || ipCheck.route !== 'proxy')) {
       return { ok: false, ipCheck, detail: ipCheck.error ?? 'Маршрут через прокси платы не подтверждён' };
     }
@@ -1097,6 +1128,12 @@ export class ProxyManager {
         ipCheck,
         detail: `Плата выходит в интернет с домашнего IP фермы (${ipCheck.ip}) — назначьте ей прокси или включите режим Private`,
       };
+    }
+    if (usingProxies && (!ipCheck.hostIp || (config.PROXY_ROOT_MODE === 'auto' && ipCheck.method !== 'transparent'))) {
+      const detail = !ipCheck.hostIp
+        ? 'Не удалось определить внешний IP ПК фермы для проверки утечки'
+        : 'Прозрачное проксирование не подтверждено. Проверьте root и перенаправление трафика на плате';
+      return { ok: false, ipCheck, detail };
     }
     return { ok: true, ipCheck };
   }
@@ -1137,8 +1174,8 @@ export class ProxyManager {
     const port = config.PROXY_DEVICE_PORT;
     const url = `http://${host}${pathname}`;
     const curl = viaGateway
-      ? `curl -s -S -m ${timeoutSec} -x http://127.0.0.1:${port} ${url}`
-      : `curl -s -S -m ${timeoutSec} ${url}`;
+      ? `curl -fsS -m ${timeoutSec} --noproxy '' -x http://127.0.0.1:${port} ${url}`
+      : `curl -fsS -m ${timeoutSec} --noproxy '*' ${url}`;
     const request = viaGateway ? `GET ${url} HTTP/1.0\\r\\nHost: ${host}\\r\\n\\r\\n` : `GET ${pathname} HTTP/1.0\\r\\nHost: ${host}\\r\\n\\r\\n`;
     const nc = viaGateway
       ? `(printf '${request}'; sleep ${Math.min(timeoutSec, 6)}) | toybox nc 127.0.0.1 ${port}`
@@ -1149,7 +1186,8 @@ export class ProxyManager {
   private static responseBody(output: string): string {
     const text = output.trim();
     const sep = text.search(/\r?\n\r?\n/);
-    return /^HTTP\/\d/.test(text) && sep !== -1 ? text.slice(sep).trim() : text;
+    if (!/^HTTP\/\d/.test(text)) return text;
+    return sep !== -1 && /^HTTP\/\S+\s+2\d\d\b/.test(text) ? text.slice(sep).trim() : '';
   }
 
   /** Phone → adb reverse → gateway leg, plus the system proxy setting. */
@@ -1190,18 +1228,19 @@ export class ProxyManager {
         await this.applyDevice(deviceId).catch(() => {});
         probe = await this.probeGateway(deviceId);
       }
-      if (!probe.ok) {
+      if (!probe.ok || (!probe.systemProxyOk && this.runtimes.get(deviceId)?.method !== 'transparent')) {
         const rt = this.runtimes.get(deviceId);
         return {
           ...base(),
           ok: false,
           error:
-            `Плата не достаёт до шлюза агента (127.0.0.1:${config.PROXY_DEVICE_PORT} через adb reverse): ${probe.detail}` +
+            (probe.ok ? 'Системный HTTP-прокси платы не указывает на шлюз агента' :
+              `Плата не достаёт до шлюза агента (127.0.0.1:${config.PROXY_DEVICE_PORT} через adb reverse): ${probe.detail}`) +
             (rt?.applyError ? `. Последняя ошибка настройки: ${rt.applyError}` : ''),
         };
       }
       if (this.routeKind(deviceId) === 'block') {
-        return { ...base(), ok: false, error: 'Режим Shared: плата ждёт общий прокси, её трафик заблокирован' };
+        return { ...base(), ok: false, error: this.trafficStandby ? 'Трафик плат на паузе' : 'Режим Shared: плата ждёт общий прокси' };
       }
     }
 
@@ -1212,33 +1251,30 @@ export class ProxyManager {
     ];
     let ip: string | undefined;
     let lastOutput = '';
+    const started = Date.now();
     for (const ep of endpoints) {
       try {
-        let out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, viaGateway, 10), 30_000);
-        let body = ProxyManager.responseBody(out);
-        ip = extractIp(body);
-        if (!ip && !viaGateway) {
-          // If transparent mode failed (e.g. DNS timeout on phone), fallback to explicit gateway
-          out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, true, 10), 30_000);
-          body = ProxyManager.responseBody(out);
-          ip = extractIp(body);
-        }
-        if (ip) break;
-        lastOutput = body;
+        const out = await this.adb.shell(deviceId, this.deviceFetchCmd(ep.host, ep.path, viaGateway, 10), 20_000);
+        const body = ProxyManager.responseBody(out);
+        if (isIP(body)) { ip = body; break; }
+        lastOutput = out;
       } catch (err) {
         lastOutput = err instanceof Error ? err.message : String(err);
       }
     }
 
     if (!ip) {
-      const gatewayError = configured ? this.listeners.get(deviceId)?.stats.lastError : undefined;
+      const stats = configured ? this.listeners.get(deviceId)?.stats : undefined;
+      const relatedError = stats?.lastErrorAt && Date.parse(stats.lastErrorAt) >= started &&
+        endpoints.some(({ host }) => stats.lastError?.startsWith(`${host} —`) || stats.lastError?.startsWith(`${host}:`)) ? stats : undefined;
       const output = lastOutput.trim().slice(0, 300);
       return {
         ...base(),
         ok: false,
-        error: gatewayError
-          ? `Прокси не пропускает трафик: ${gatewayError}`
-          : `Не удалось получить IP с платы: ${output || 'пустой ответ'}`,
+        code: relatedError?.lastErrorCode,
+        error: relatedError?.lastError
+          ? `Прокси не пропускает трафик: ${relatedError.lastError}`
+          : `Не удалось получить IP по ${viaGateway ? 'явному шлюзу' : 'маршруту платы'}: ${output || 'пустой ответ'}`,
       };
     }
 

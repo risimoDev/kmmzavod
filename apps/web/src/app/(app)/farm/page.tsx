@@ -2250,7 +2250,7 @@ function DevicesTab() {
     setProxyTestResult(null);
     setProxyModalError(null);
     try {
-      setProxyTestResult(await accountFarmApi.testFarmProxy(proxyModalPayload()));
+      setProxyTestResult(await accountFarmApi.testFarmProxy({ ...proxyModalPayload(), deviceId: selectedDevice?.deviceId }));
     } catch (err: any) {
       setProxyModalError(err.message);
     } finally {
@@ -2286,9 +2286,11 @@ function DevicesTab() {
       if (res.upstream) setProxyTestResult(res.upstream);
       if (res.check) setIpResults((prev) => ({ ...prev, [deviceId]: res.check! }));
       if (res.check && !res.check.ok) {
-        setProxyModalError(res.check.error || 'Прокси применён, но проверка IP на плате не прошла');
+        setProxyModalError([res.check.error || 'Проверка IP на плате не прошла', res.syncError].filter(Boolean).join('. '));
       } else if (res.check?.leakDetected) {
         setProxyModalError(`Утечка: плата выходит с IP фермы (${res.check.ip})`);
+      } else if (res.syncError) {
+        setProxyModalError(res.syncError);
       } else {
         setProxyModalOpen(false);
       }
@@ -3360,11 +3362,12 @@ function DevicesTab() {
     await Promise.allSettled(targets.map((d) => handleRotateIp(d.deviceId, editingRotateUrl[d.deviceId])));
   };
 
-  const handleBatchCheckIps = async () => {
+  const handleBatchCheckIps = async (summary?: string) => {
     const ids = devices.map((d) => d.deviceId);
     if (ids.length === 0) return;
     setBatchCheckingIps(true);
-    setNetworkFeedbackMsg('Проверка IP и Anti-Leak на всех 20 платах...');
+    const report = (message: string) => setNetworkFeedbackMsg(summary ? `${summary}\n${message}` : message);
+    report(`Проверка выхода через прокси на ${ids.length} платах...`);
     try {
       const res = await accountFarmApi.batchCheckDeviceIps(ids);
       if (res.ok && Array.isArray(res.results)) {
@@ -3373,15 +3376,25 @@ function DevicesTab() {
           nextResults[item.deviceId] = item;
         });
         setIpResults((prev) => ({ ...prev, ...nextResults }));
-        const leaks = res.results.filter((r) => r.leakDetected).length;
-        setNetworkFeedbackMsg(
-          leaks > 0
-            ? `⚠️ Проверка завершена! Обнаружено ${leaks} плат с утечкой прямого IP!`
-            : `✓ Все ${res.results.length} плат проверены. Утечек прямого IP не обнаружено.`
-        );
+        const byIp = new Map<string, string[]>();
+        let confirmed = 0;
+        for (const r of res.results) {
+          if (!r.ok || r.route !== 'proxy' || !r.ip || !r.hostIp || r.leakDetected || r.exposesHostIp) continue;
+          confirmed++;
+          byIp.set(r.ip, [...(byIp.get(r.ip) ?? []), r.deviceId]);
+        }
+        const repeated = [...byIp].filter(([, deviceIds]) => deviceIds.length > 1);
+        const leaks = res.results.filter((r) => r.leakDetected || r.exposesHostIp).length;
+        report([
+          `Подтверждён выход через прокси: ${confirmed} из ${ids.length} плат. Уникальных IP: ${byIp.size}.`,
+          ...(leaks ? [`Плат с IP фермы: ${leaks}.`] : []),
+          ...(proxyMode === 'private_parallel' ? repeated.map(([ip, deviceIds]) => `Одинаковый IP ${ip}: ${deviceIds.join(', ')}`) : []),
+        ].join('\n'));
+      } else {
+        report('Агент вернул неполный ответ проверки IP.');
       }
     } catch (err: any) {
-      alert(`Ошибка проверки IP: ${err.message}`);
+      report(`Ошибка проверки IP: ${err.message}`);
     } finally {
       setBatchCheckingIps(false);
     }
@@ -3445,16 +3458,16 @@ function DevicesTab() {
     );
     try {
       const res = await accountFarmApi.batchSetDeviceProxies(assignments);
-      const failures = res.results.filter((r) => !r.ok);
+      const failures = res.results.filter((r) => !r.ok || r.syncError);
+      const saved = new Set(res.results.filter((r) => r.saved ?? r.ok).map((r) => r.deviceId));
       const failureText = failures.length
-        ? `\nНе применено (${failures.length}):\n` + failures.slice(0, 8).map((f) => `• ${f.deviceId}: ${f.error}`).join('\n')
+        ? `\nЗамечания (${failures.length}):\n` + failures.map((f) => `• ${f.deviceId}: ${[f.error, f.syncError].filter(Boolean).join('. ')}`).join('\n')
         : '';
-      if (res.ok) {
-        setNetworkFeedbackMsg(`Прокси применены к ${res.successful} из ${res.total} плат. Перепроверка IP...${failureText}`);
-        const applied = new Set(res.results.filter((r) => r.ok).map((r) => r.deviceId));
+      if (saved.size) {
+        setIpResults((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !saved.has(id))));
         setDevices((prev) =>
           prev.map((d) => {
-            const match = applied.has(d.deviceId) ? assignments.find((a) => a.deviceId === d.deviceId) : undefined;
+            const match = saved.has(d.deviceId) ? assignments.find((a) => a.deviceId === d.deviceId) : undefined;
             if (match) {
               return {
                 ...d,
@@ -3469,7 +3482,7 @@ function DevicesTab() {
             return d;
           })
         );
-        await handleBatchCheckIps();
+        await handleBatchCheckIps(`Сохранено: ${saved.size} из ${res.total}. Применено на платах: ${res.successful}.${failureText}`);
         loadData();
       } else {
         setNetworkFeedbackMsg(`Ни один прокси не применён.${failureText}`);
@@ -7179,7 +7192,7 @@ function DevicesTab() {
                       size="sm"
                       variant="outline"
                       loading={batchCheckingIps}
-                      onClick={handleBatchCheckIps}
+                      onClick={() => void handleBatchCheckIps()}
                       className="border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10"
                     >
                       🔍 Проверить IP на всех 20 платах

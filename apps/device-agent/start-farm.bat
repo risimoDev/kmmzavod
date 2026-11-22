@@ -11,10 +11,12 @@ if not errorlevel 1 (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-farm.ps1"
     if errorlevel 1 (
         echo.
-        echo [ОШИБКА] start-farm.ps1 завершился с кодом ошибки: %errorlevel%
+        set "EXIT_CODE=!errorlevel!"
+        echo [ОШИБКА] start-farm.ps1 завершился с кодом ошибки: !EXIT_CODE!
         pause
+        exit /b !EXIT_CODE!
     )
-    exit /b %errorlevel%
+    exit /b 0
 )
 
 echo [ОШИБКА] PowerShell не найден в системе.

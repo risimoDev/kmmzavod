@@ -161,7 +161,7 @@ app.post('/proxy/set', async (req, reply) => {
   }
 });
 
-const TestProxyBody = z.object(ProxyFields);
+const TestProxyBody = z.object({ ...ProxyFields, deviceId: z.string().min(1).optional() });
 
 app.post('/proxy/test', async (req, reply) => {
   const parsed = TestProxyBody.safeParse(req.body);
@@ -170,7 +170,7 @@ app.post('/proxy/test', async (req, reply) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   try {
-    return await proxyManager.testProxy(parsed.data);
+    return await proxyManager.testProxy(parsed.data, parsed.data.deviceId);
   } catch (err) {
     return sendError(reply, err);
   }
@@ -533,7 +533,9 @@ app.post('/publish', async (req, reply) => {
       country = guard.ipCheck?.country;
       if (!guard.ok) {
         return {
-          ok: false, stage: 'prepare', posted: 'no', retryable: true, ipCheck: guard.ipCheck,
+          ok: false, stage: 'prepare', posted: 'no',
+          retryable: !['auth_failed', 'relay_denied', 'protocol'].includes(guard.ipCheck?.code ?? ''),
+          ipCheck: guard.ipCheck,
           detail: `${guard.detail}. Публикация отменена для защиты аккаунта.`,
         };
       }

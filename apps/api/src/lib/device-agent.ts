@@ -258,7 +258,7 @@ export const deviceAgentClient = {
   },
 
   /** Check a proxy from the farm PC without touching any phone. */
-  async testProxy(proxy: DeviceProxyConfig): Promise<UpstreamTestResult> {
+  async testProxy(proxy: DeviceProxyConfig & { deviceId?: string }): Promise<UpstreamTestResult> {
     return agentPost('/proxy/test', proxy, { timeout: 60_000 });
   },
 
@@ -340,7 +340,9 @@ export const deviceAgentClient = {
     results: Array<{
       deviceId: string;
       ok: boolean;
+      saved?: boolean;
       error?: string;
+      syncError?: string;
       upstream?: { ip?: string; protocol?: 'http' | 'socks5' };
     }>;
   }> {

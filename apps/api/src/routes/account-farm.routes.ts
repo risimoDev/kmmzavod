@@ -135,7 +135,7 @@ const SetDeviceProxyBody = z.object({
   message: 'Either proxyId or both host and port must be provided',
 });
 
-const TestProxyBody = z.object(ProxySourceFields).refine(hasProxySource, {
+const TestProxyBody = z.object({ ...ProxySourceFields, deviceId: z.string().min(1).optional() }).refine(hasProxySource, {
   message: 'Either proxyId or both host and port must be provided',
 });
 
@@ -1638,9 +1638,9 @@ export async function accountFarmRoutes(app: FastifyInstance) {
     } catch (err) {
       return reply.status(deviceAgentErrorStatus(err)).send({ error: describeDeviceAgentError(err) });
     }
-    // Mirror successfully applied proxies into the pool and link the phones' accounts.
+    // A saved assignment can be applied later by the agent watchdog.
     const records = new Map<string, ProxyRow>();
-    for (const r of res.results.filter((x) => x.ok)) {
+    for (const r of res.results.filter((x) => x.saved ?? x.ok)) {
       const a = body.assignments.find((x) => x.deviceId === r.deviceId);
       if (!a) continue;
       try {
@@ -1652,6 +1652,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
         }
         await linkDeviceAccountsToProxy(tenantId, r.deviceId, record);
       } catch (err) {
+        r.syncError = 'Настройка сохранена в агенте, но привязку в базе обновить не удалось';
         logger.warn({ err: String(err), deviceId: r.deviceId }, 'farm: failed to sync applied proxy into DB');
       }
     }
@@ -1742,10 +1743,13 @@ export async function accountFarmRoutes(app: FastifyInstance) {
   app.post('/devices/proxy/test', async (request, reply) => {
     const { tenantId } = request.user;
     const body = TestProxyBody.parse(request.body);
+    if (body.deviceId && await findForeignDeviceBinding(tenantId, [body.deviceId])) {
+      return reply.status(403).send({ error: 'Плата принадлежит другому рабочему пространству' });
+    }
     const source = await resolveProxySource(tenantId, body);
     if (!source) return reply.status(404).send({ error: 'Proxy record not found' });
     try {
-      const res = await deviceAgentClient.testProxy(source.cfg);
+      const res = await deviceAgentClient.testProxy({ ...source.cfg, deviceId: body.deviceId });
       if (source.record) {
         await db.proxy.update({
           where: { id: source.record.id },
@@ -1899,7 +1903,7 @@ export async function accountFarmRoutes(app: FastifyInstance) {
       return reply.send({ ...res, proxyId: record.id, linkedAccounts });
     } catch (err) {
       logger.warn({ err: String(err), deviceId }, 'farm: proxy applied on phone but DB sync failed');
-      return reply.send(res);
+      return reply.send({ ...res, syncError: 'Настройка сохранена в агенте, но привязку в базе обновить не удалось' });
     }
   });
 
