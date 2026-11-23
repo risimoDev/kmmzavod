@@ -1,7 +1,7 @@
 .:53 {
     bind {$FARM_RELAY_DNS_LISTEN}
     acl {
-        allow net {$FARM_RELAY_DNS_ALLOW}
+        allow net {$FARM_RELAY_DNS_ALLOW_CIDR} {$FARM_RELAY_DNS_ALLOW_ALT_CIDR}
         block
     }
     cache 300 {

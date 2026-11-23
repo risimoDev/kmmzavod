@@ -2,7 +2,7 @@
 .SYNOPSIS
     KMMZAVOD - Запуск агента стойки телефонной фермы (Native ADB Device-Agent)
 .DESCRIPTION
-    Скрипт проверяет окружение, очищает зависшие процессы ADB, опрашивает подключенные платы
+    Скрипт проверяет окружение и ADB, опрашивает подключенные платы
     и запускает bridge-сервер между фермой и оркестратором платформы.
 #>
 
@@ -113,38 +113,59 @@ if ($relayUrl) {
     Write-Host "[OK] Реле и DNS через главный VPS доступны." -ForegroundColor Green
 }
 
-# 3. Очистка старых зависших процессов и подготовка ADB
-Write-Host ""
-Write-Host "Проверка порта агента (8300)..." -ForegroundColor Yellow
-
-# Очистка старого процесса device-agent на порту 8300 через netstat (не зависает на VPN/TUN)
-try {
-    $lines8300 = netstat -ano 2>$null | Select-String ":8300\s+.*LISTENING"
-    foreach ($line in $lines8300) {
-        if ($line.Line -match '\s+(\d+)\s*$') {
-            $pId = [int]$matches[1]
-            if ($pId -gt 0) {
-                Write-Host "[ОЧИСТКА] Завершение процесса на порту 8300 (PID $pId)..." -ForegroundColor Yellow
-                Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue
-            }
+# 3. Подготовка ADB до замены работающего агента
+function Invoke-FarmAdb([string]$Arguments, [int]$TimeoutMs) {
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo.FileName = $adbBin
+    $process.StartInfo.Arguments = $Arguments
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            try { $process.Kill() } catch [System.InvalidOperationException] {}
+            throw "Команда ADB ($Arguments) не завершилась за $($TimeoutMs / 1000) сек."
         }
+        # A daemon may keep a redirected handle open after the client has exited.
+        $remainingMs = [Math]::Max(0, $TimeoutMs - [int]$timer.ElapsedMilliseconds)
+        if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdout, $stderr), $remainingMs)) {
+            throw "ADB ($Arguments) завершилась, но поток вывода остался открытым."
+        }
+        if ($process.ExitCode -ne 0) {
+            $detail = $stderr.Result.Trim()
+            if (-not $detail) { $detail = $stdout.Result.Trim() }
+            throw "ADB ($Arguments) вернула код $($process.ExitCode). $detail"
+        }
+        return $stdout.Result -split '\r?\n'
+    } finally {
+        $process.Dispose()
     }
-} catch {}
-
-if ($adbBin) {
-    Write-Host "Запуск службы ADB..." -ForegroundColor Yellow
-    & $adbBin start-server
-    Write-Host "[OK] Служба ADB активна." -ForegroundColor Green
 }
 
 if ($adbBin) {
-    Write-Host "Ожидание обнаружения USB-плат в стойке (2 сек)..." -ForegroundColor Yellow
-    Start-Sleep -Seconds 2
+    Write-Host "Проверка ADB и обнаружение USB-плат..." -ForegroundColor Yellow
+    try {
+        # The client starts the local ADB server itself when needed.
+        $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
+        if (-not ($rawDevices -match '^\S+\s+device(?:\s|$)')) {
+            Start-Sleep -Seconds 2
+            $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
+        }
+    } catch {
+        Write-Host "[ОШИБКА] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[ПРОВЕРКА] Посмотрите, какой процесс слушает локальный порт ADB 5037." -ForegroundColor Yellow
+        exit 1
+    }
 
     Write-Host ""
     Write-Host "Подключенные платы в стойке:" -ForegroundColor Cyan
-    $rawDevices = & $adbBin devices -l
     $deviceCount = 0
+    $readyCount = 0
     foreach ($line in $rawDevices) {
         if ($line -match "^([^\s]+)\s+(device|offline|unauthorized)(.*)$") {
             $deviceCount++
@@ -154,16 +175,23 @@ if ($adbBin) {
             $color = if ($state -eq "device") { "Green" } else { "Red" }
             Write-Host "  [$deviceCount] $serial - $state ($info)" -ForegroundColor $color
             if ($state -eq "device") {
-                & $adbBin -s $serial shell "cmd netpolicy set restrict-background false; cmd netpolicy set metered-network false tun0; settings put global data_saver 0; settings put global data_saver_enabled 0; true" 2>$null | Out-Null
+                $readyCount++
+                if ($serial -notmatch '^[a-zA-Z0-9_.:%\[\]-]+$') { continue }
+                try {
+                    $adbArgs = '-s "{0}" shell "cmd netpolicy set restrict-background false; cmd netpolicy set metered-network false tun0; settings put global data_saver 0; settings put global data_saver_enabled 0; true"' -f $serial
+                    Invoke-FarmAdb -Arguments $adbArgs -TimeoutMs 5000 | Out-Null
+                } catch {
+                    Write-Host "[ВНИМАНИЕ] $($serial): $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
         }
     }
 
-    if ($deviceCount -eq 0) {
+    if ($readyCount -eq 0) {
         Write-Host "  [ВНИМАНИЕ] Ни одна плата не обнаружена в статусе 'device'!" -ForegroundColor Yellow
         Write-Host "  Проверьте USB-подключение хаба и отладку по USB на телефонах." -ForegroundColor Yellow
     } else {
-        Write-Host "  Всего активно плат: $deviceCount" -ForegroundColor Green
+        Write-Host "  Всего активно плат: $readyCount" -ForegroundColor Green
     }
 }
 
@@ -213,6 +241,14 @@ if (-not (Test-Path "node_modules")) {
 }
 
 # 7. Запуск приложения
+Write-Host ""
+Write-Host "Проверка порта агента (8300)..." -ForegroundColor Yellow
+foreach ($line in (netstat -ano 2>$null | Select-String ':8300\s+.*LISTENING')) {
+    if ($line.Line -match '\s+(\d+)\s*$') {
+        Write-Host "[ВНИМАНИЕ] Порт 8300 занят процессом PID $($matches[1]). Проверьте, не запущена ли другая копия агента." -ForegroundColor Yellow
+    }
+}
+
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "   ЗАПУСК NATIVE DEVICE-AGENT (порт 8300)...                    " -ForegroundColor Cyan

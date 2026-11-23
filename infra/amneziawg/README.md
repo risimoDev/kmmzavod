@@ -79,3 +79,34 @@ sudo ufw allow <ваш WG порт>/udp   # если ufw активен
 - В `.env` сервера: `DEVICE_AGENT_URL=http://10.66.66.2:8300`.
 - Проверка доступности с сервера:
   `curl http://10.66.66.2:8300/devices`
+
+### DNS для фермы через главный VPS
+
+На VPS разрешите DNS только с туннельного IP ПК фермы через `awg0`.
+Для другой подсети подставьте адреса из активной конфигурации AmneziaWG и
+укажите туннельный IP сервера в `FARM_RELAY_DNS_LISTEN` в серверном `.env`.
+Если в `.env` задан список `FARM_RELAY_DNS_ALLOW`, перенесите его в
+`FARM_RELAY_DNS_ALLOW_CIDR` и `FARM_RELAY_DNS_ALLOW_ALT_CIDR`, по одной подсети
+в каждой переменной. Для одного ПК достаточно `FARM_RELAY_DNS_ALLOW_CIDR=10.66.66.2/32`.
+
+```bash
+sudo ufw allow in on awg0 from 10.66.66.2 to 10.66.66.1 port 53 proto udp
+sudo ufw allow in on awg0 from 10.66.66.2 to 10.66.66.1 port 53 proto tcp
+```
+
+Если `sudo ufw status verbose` показывает `deny (outgoing)` или `reject (outgoing)`,
+разрешите CoreDNS исходящий DNS-over-TLS только к адресам из `Corefile`.
+
+```bash
+sudo ufw allow out to 1.1.1.1 port 853 proto tcp
+sudo ufw allow out to 1.0.0.1 port 853 proto tcp
+```
+
+Из корня проекта на VPS запустите `docker compose up -d farm-dns` и проверьте
+`docker compose logs --tail=40 farm-dns`. Перед запуском `start-farm.bat`
+проверьте с ПК фермы обычный запрос и запрос по TCP.
+
+```powershell
+Resolve-DnsName api.ipify.org -Server 10.66.66.1 -Type A -DnsOnly -NoHostsFile
+Resolve-DnsName api.ipify.org -Server 10.66.66.1 -Type A -DnsOnly -NoHostsFile -TcpOnly
+```

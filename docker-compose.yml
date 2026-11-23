@@ -415,7 +415,8 @@ services:
       - ./infra/proxy-relay/Corefile:/etc/coredns/Corefile:ro
     environment:
       FARM_RELAY_DNS_LISTEN: ${FARM_RELAY_DNS_LISTEN:-10.66.66.1}
-      FARM_RELAY_DNS_ALLOW: "${FARM_RELAY_DNS_ALLOW:-10.66.66.0/24 10.13.13.0/24}"
+      FARM_RELAY_DNS_ALLOW_CIDR: ${FARM_RELAY_DNS_ALLOW_CIDR:-${FARM_RELAY_DNS_ALLOW:-10.66.66.0/24}}
+      FARM_RELAY_DNS_ALLOW_ALT_CIDR: ${FARM_RELAY_DNS_ALLOW_ALT_CIDR:-${FARM_RELAY_DNS_ALLOW_CIDR:-${FARM_RELAY_DNS_ALLOW:-10.13.13.0/24}}}
     security_opt:
       - no-new-privileges:true
     logging:
