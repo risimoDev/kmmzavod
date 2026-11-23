@@ -114,6 +114,32 @@ if ($relayUrl) {
 }
 
 # 3. Подготовка ADB до замены работающего агента
+function Get-FarmPortListeners([int]$Port) {
+    foreach ($line in (netstat -ano 2>$null)) {
+        if ($line -match "^\s*TCP\s+(\S+):$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+            [PSCustomObject]@{ Address = $matches[1]; ProcessId = [int]$matches[2] }
+        }
+    }
+}
+
+function Get-LocalAdbServer {
+    if ($env:ADB_SERVER_SOCKET -or $env:ANDROID_ADB_SERVER_ADDRESS -or $env:ANDROID_ADB_SERVER_PORT) { return }
+    $listener = Get-FarmPortListeners 5037 |
+        Where-Object { $_.Address -in @('127.0.0.1', '0.0.0.0', '[::1]', '[::]') } |
+        Select-Object -First 1
+    if ($listener) { Get-Process -Id $listener.ProcessId -ErrorAction SilentlyContinue }
+}
+
+function Stop-FarmProcess([System.Diagnostics.Process]$Process) {
+    if ($Process.HasExited) { return }
+    try { Stop-Process -InputObject $Process -Force -ErrorAction Stop } catch {
+        if (-not $Process.HasExited) { throw }
+    }
+    if (-not $Process.WaitForExit(5000)) {
+        throw "Процесс PID $($Process.Id) не завершился за 5 сек."
+    }
+}
+
 function Invoke-FarmAdb([string]$Arguments, [int]$TimeoutMs) {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo.FileName = $adbBin
@@ -129,7 +155,7 @@ function Invoke-FarmAdb([string]$Arguments, [int]$TimeoutMs) {
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMs)) {
             try { $process.Kill() } catch [System.InvalidOperationException] {}
-            throw "Команда ADB ($Arguments) не завершилась за $($TimeoutMs / 1000) сек."
+            throw [System.TimeoutException]::new("Команда ADB ($Arguments) не завершилась за $($TimeoutMs / 1000) сек.")
         }
         # A daemon may keep a redirected handle open after the client has exited.
         $remainingMs = [Math]::Max(0, $TimeoutMs - [int]$timer.ElapsedMilliseconds)
@@ -147,18 +173,34 @@ function Invoke-FarmAdb([string]$Arguments, [int]$TimeoutMs) {
     }
 }
 
+$adbServerRestarted = $false
 if ($adbBin) {
     Write-Host "Проверка ADB и обнаружение USB-плат..." -ForegroundColor Yellow
     try {
-        # The client starts the local ADB server itself when needed.
-        $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
-        if (-not ($rawDevices -match '^\S+\s+device(?:\s|$)')) {
-            Start-Sleep -Seconds 2
+        try {
+            # The client starts the local ADB server itself when needed.
+            $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
+            if (-not ($rawDevices -match '^\S+\s+device(?:\s|$)')) {
+                Start-Sleep -Seconds 2
+                $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
+            }
+        } catch [System.TimeoutException] {
+            $adbServer = Get-LocalAdbServer
+            if ($adbServer.ProcessName -ne 'adb') { throw }
+            Write-Host "[ADB] Сервер PID $($adbServer.Id) не отвечает. Перезапускаю ADB и повторяю обнаружение плат." -ForegroundColor Yellow
+            Stop-FarmProcess $adbServer
+            $adbServerRestarted = $true
             $rawDevices = Invoke-FarmAdb -Arguments 'devices -l' -TimeoutMs 20000
         }
     } catch {
         Write-Host "[ОШИБКА] $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "[ПРОВЕРКА] Посмотрите, какой процесс слушает локальный порт ADB 5037." -ForegroundColor Yellow
+        $adbServer = Get-LocalAdbServer
+        if ($adbServer) {
+            $owner = if ($adbServer.Path) { $adbServer.Path } else { $adbServer.ProcessName }
+            Write-Host "[ADB] Порт 5037 слушает PID $($adbServer.Id) ($owner)." -ForegroundColor Yellow
+        } elseif (-not ($env:ADB_SERVER_SOCKET -or $env:ANDROID_ADB_SERVER_ADDRESS -or $env:ANDROID_ADB_SERVER_PORT)) {
+            Write-Host "[ADB] Локальный слушатель на порту 5037 не обнаружен." -ForegroundColor Yellow
+        }
         exit 1
     }
 
@@ -203,7 +245,7 @@ if (Test-Path $gnirehtetExe) {
     $dnsArgument = [regex]::Escape($gnirehtetDns)
     $relayRunning = Get-CimInstance Win32_Process -Filter "Name='gnirehtet.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match ('(?:^|\s)-d\s+"?' + $dnsArgument + '"?(?:\s|$)') }
-    if (-not $relayRunning) {
+    if ($adbServerRestarted -or -not $relayRunning) {
         Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -ErrorAction Stop
         Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", $gnirehtetDns -WindowStyle Hidden
     }
@@ -243,9 +285,39 @@ if (-not (Test-Path "node_modules")) {
 # 7. Запуск приложения
 Write-Host ""
 Write-Host "Проверка порта агента (8300)..." -ForegroundColor Yellow
-foreach ($line in (netstat -ano 2>$null | Select-String ':8300\s+.*LISTENING')) {
-    if ($line.Line -match '\s+(\d+)\s*$') {
-        Write-Host "[ВНИМАНИЕ] Порт 8300 занят процессом PID $($matches[1]). Проверьте, не запущена ли другая копия агента." -ForegroundColor Yellow
+$agentsToStop = foreach ($listener in (Get-FarmPortListeners 8300 | Sort-Object ProcessId -Unique)) {
+    $oldAgent = Get-Process -Id $listener.ProcessId -ErrorAction SilentlyContinue
+    if (-not $oldAgent) { continue }
+    $knownAgent = $false
+    if ($oldAgent.ProcessName -eq 'node') {
+        $address = switch ($listener.Address) {
+            '0.0.0.0' { '127.0.0.1' }
+            '[::]' { '[::1]' }
+            default { $listener.Address }
+        }
+        $health = & curl.exe -fsS --noproxy '*' -m 10 "http://$($address):8300/health" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $health) {
+            $status = $health | ConvertFrom-Json -ErrorAction SilentlyContinue
+            $knownAgent = $status.ok -eq $true -and $status.driver -eq 'Native ADB Controller (Open-Source, 0$)'
+        }
+        if (-not $knownAgent) {
+            $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$($oldAgent.Id)" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue).CommandLine
+            $knownAgent = $commandLine -match '(?i)[\\/]apps[\\/]device-agent[\\/](?:src[\\/]index\.ts|dist[\\/]index\.js)(?:["\s]|$)'
+        }
+    }
+    if (-not $knownAgent) {
+        Write-Host "[ОШИБКА] Порт 8300 занят процессом $($oldAgent.ProcessName) (PID $($oldAgent.Id))." -ForegroundColor Red
+        exit 1
+    }
+    $oldAgent
+}
+foreach ($oldAgent in $agentsToStop) {
+    try {
+        Write-Host "[ОЧИСТКА] Останавливаю предыдущий device-agent (PID $($oldAgent.Id))." -ForegroundColor Yellow
+        Stop-FarmProcess $oldAgent
+    } catch {
+        Write-Host "[ОШИБКА] $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
     }
 }
 
