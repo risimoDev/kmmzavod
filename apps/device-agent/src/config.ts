@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import fs from 'node:fs';
+import { isIPv4 } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +10,11 @@ function env(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
   if (v === undefined) throw new Error(`Missing required env var ${name}`);
   return v;
+}
+
+const relayDns = env('DEVICE_AGENT_DNS_VIA', '').trim();
+if (relayDns && (!isIPv4(relayDns) || !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(relayDns) || !env('DEVICE_AGENT_UPSTREAM_VIA', ''))) {
+  throw new Error('DEVICE_AGENT_DNS_VIA requires the tunnel IPv4 of the VPS and DEVICE_AGENT_UPSTREAM_VIA');
 }
 
 function detectTunnelHost(): string | null {
@@ -87,6 +93,7 @@ export const config = {
   // reached over AmneziaWG), e.g. http://10.66.66.1:3129. Needed when the farm ISP's DPI blocks
   // Instagram/Facebook/TikTok inside plain proxy connections. Empty = connect to proxies directly.
   PROXY_UPSTREAM_VIA: env('DEVICE_AGENT_UPSTREAM_VIA', ''),
+  PROXY_DNS_VIA: relayDns,
   // 'auto' = transparent sing-box+iptables on rooted boards, 'off' = system HTTP proxy only.
   PROXY_ROOT_MODE: env('DEVICE_AGENT_PROXY_ROOT_MODE', 'auto') === 'off' ? 'off' as const : 'auto' as const,
   // How often the watchdog re-checks that every phone is still wired to its gateway.

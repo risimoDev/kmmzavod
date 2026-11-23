@@ -50,9 +50,72 @@ if (Test-Path (Join-Path $localPlatformTools "adb.exe")) {
     Write-Host "[ВНИМАНИЕ] adb.exe не найден! Поместите папку platform-tools рядом со скриптом." -ForegroundColor Yellow
 }
 
+# Verify the VPS relay and its DNS before interrupting a running farm.
+$agentEnvPath = Join-Path $PSScriptRoot '.env'
+function Get-AgentSetting([string]$Name) {
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ($value) { return $value.Trim() }
+    if (-not (Test-Path -LiteralPath $agentEnvPath)) { return '' }
+    $assignment = Select-String -LiteralPath $agentEnvPath -Pattern "^\s*$Name\s*=" | Select-Object -First 1
+    if (-not $assignment) { return '' }
+    return (($assignment.Line -split '=', 2)[1] -replace '\s+#.*$', '').Trim().Trim('"', "'")
+}
+
+$relayUrl = Get-AgentSetting 'DEVICE_AGENT_UPSTREAM_VIA'
+$allowDirect = (Get-AgentSetting 'DEVICE_AGENT_ALLOW_DIRECT') -eq '1'
+if (-not $relayUrl -and -not $allowDirect) {
+    foreach ($address in @('10.66.66.1', '10.13.13.1', '10.8.0.1')) {
+        $candidate = "http://${address}:3129"
+        & curl.exe -fsS --noproxy '*' -m 3 -o NUL "$candidate/health" 2>$null
+        if ($LASTEXITCODE -eq 0) { $relayUrl = $candidate; break }
+    }
+}
+if (-not $relayUrl -and -not $allowDirect) {
+    Write-Host '[ОШИБКА] Реле главного VPS недоступно. Проверьте AmneziaWG.' -ForegroundColor Red
+    exit 1
+}
+$gnirehtetDns = '77.88.8.8,1.1.1.1'
+if ($relayUrl) {
+    if ((Get-AgentSetting 'DEVICE_AGENT_PROXY_ROOT_MODE') -eq 'off') {
+        Write-Host '[ОШИБКА] Маршрут через VPS требует прозрачного режима. Проверьте DEVICE_AGENT_PROXY_ROOT_MODE.' -ForegroundColor Red
+        exit 1
+    }
+    if ($relayUrl -notmatch '^\w+://') { $relayUrl = "http://$relayUrl" }
+    $relayUri = $null
+    if (-not [Uri]::TryCreate($relayUrl, [UriKind]::Absolute, [ref]$relayUri) -or
+        $relayUri.Scheme -ne 'http' -or $relayUri.UserInfo -or
+        $relayUri.Host -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9.]+$') {
+        Write-Host '[ОШИБКА] Укажите HTTP-адрес реле VPS без реквизитов.' -ForegroundColor Red
+        exit 1
+    }
+    if ($relayUri.IsDefaultPort) { $relayUrl = 'http://{0}:3129' -f $relayUri.Host }
+    & curl.exe -fsS --noproxy '*' -m 4 -o NUL "$($relayUrl.TrimEnd('/'))/health" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[ОШИБКА] Реле VPS не отвечает на /health.' -ForegroundColor Red
+        exit 1
+    }
+    $dnsIp = Get-AgentSetting 'DEVICE_AGENT_DNS_VIA'
+    if (-not $dnsIp) { $dnsIp = $relayUri.Host }
+    $parsedDns = $null
+    if ($dnsIp -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' -or
+        -not [System.Net.IPAddress]::TryParse($dnsIp, [ref]$parsedDns) -or $parsedDns.ToString() -ne $dnsIp) {
+        Write-Host '[ОШИБКА] DEVICE_AGENT_DNS_VIA должен указывать на IPv4 DNS внутри туннеля.' -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Resolve-DnsName -Name 'api.ipify.org' -Server $dnsIp -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress })) {
+        Write-Host "[ОШИБКА] DNS через VPS ($dnsIp) не отвечает. Проверьте сервис farm-dns и доступ по порту 53 внутри туннеля." -ForegroundColor Red
+        exit 1
+    }
+    $env:DEVICE_AGENT_UPSTREAM_VIA = $relayUrl
+    $env:DEVICE_AGENT_DNS_VIA = $dnsIp
+    $gnirehtetDns = $dnsIp
+    Write-Host "[OK] Реле и DNS через главный VPS доступны." -ForegroundColor Green
+}
+
 # 3. Очистка старых зависших процессов и подготовка ADB
 Write-Host ""
-Write-Host "Проверка и освобождение портов (8300 и 5037)..." -ForegroundColor Yellow
+Write-Host "Проверка порта агента (8300)..." -ForegroundColor Yellow
 
 # Очистка старого процесса device-agent на порту 8300 через netstat (не зависает на VPN/TUN)
 try {
@@ -67,21 +130,6 @@ try {
         }
     }
 } catch {}
-
-Write-Host "Очистка процессов ADB и Gnirehtet..." -ForegroundColor Yellow
-Get-Process -Name adb, gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-try {
-    $lines5037 = netstat -ano 2>$null | Select-String ":5037\s+.*LISTENING"
-    foreach ($line in $lines5037) {
-        if ($line.Line -match '\s+(\d+)\s*$') {
-            $pId = [int]$matches[1]
-            if ($pId -gt 0) {
-                Stop-Process -Id $pId -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-} catch {}
-Start-Sleep -Seconds 1
 
 if ($adbBin) {
     Write-Host "Запуск службы ADB..." -ForegroundColor Yellow
@@ -124,9 +172,14 @@ $gnirehtetExe = Join-Path $PSScriptRoot "platform-tools\gnirehtet.exe"
 if (Test-Path $gnirehtetExe) {
     Write-Host ""
     Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
-    Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", "77.88.8.8,1.1.1.1"
-    Write-Host "[OK] Служба Gnirehtet запущена для всех USB-плат." -ForegroundColor Green
+    $dnsArgument = [regex]::Escape($gnirehtetDns)
+    $relayRunning = Get-CimInstance Win32_Process -Filter "Name='gnirehtet.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match ('(?:^|\s)-d\s+"?' + $dnsArgument + '"?(?:\s|$)') }
+    if (-not $relayRunning) {
+        Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -ErrorAction Stop
+        Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", $gnirehtetDns -WindowStyle Hidden
+    }
+    Write-Host "[OK] Gnirehtet использует DNS $gnirehtetDns." -ForegroundColor Green
 }
 
 # 4. Проверка VPN-туннеля AmneziaWG
@@ -138,27 +191,6 @@ if ($ipconfig -match "10\.66\.66\.2" -or $ipconfig -match "10\.13\.13\.2") {
 } else {
     Write-Host "[ВНИМАНИЕ] Туннельный IP 10.66.66.2 не найден в ipconfig!" -ForegroundColor Yellow
     Write-Host "Убедитесь, что клиент AmneziaWG запущен и подключен." -ForegroundColor Yellow
-}
-
-# 4a. Relay HTTP/SOCKS5 через сервер (обход DPI провайдера фермы для Instagram/Facebook/TikTok)
-$agentEnvPath = Join-Path $PSScriptRoot '.env'
-$relayConfigured = $env:DEVICE_AGENT_UPSTREAM_VIA -or (
-    (Test-Path -LiteralPath $agentEnvPath) -and
-    (Select-String -LiteralPath $agentEnvPath -Pattern '^\s*DEVICE_AGENT_UPSTREAM_VIA\s*=\s*[^#\s]' -Quiet)
-)
-if (-not $relayConfigured -and $env:DEVICE_AGENT_ALLOW_DIRECT -ne '1') {
-    foreach ($relayAddress in @('10.66.66.1', '10.13.13.1', '10.8.0.1')) {
-        $relayUrl = "http://${relayAddress}:3129"
-        & curl.exe -fsS --noproxy '*' -m 4 -o NUL "$relayUrl/health" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $env:DEVICE_AGENT_UPSTREAM_VIA = $relayUrl
-            break
-        }
-    }
-    if (-not $env:DEVICE_AGENT_UPSTREAM_VIA) {
-        Write-Host '[ОШИБКА] Реле VPS недоступно. Проверьте туннель или задайте DEVICE_AGENT_UPSTREAM_VIA в .env агента.' -ForegroundColor Red
-        exit 1
-    }
 }
 
 # 4b. Проверка правила Брандмауэра Windows для порта 8300

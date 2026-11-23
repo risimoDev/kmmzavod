@@ -54,6 +54,7 @@ const server = http.createServer((req, res) => {
 
 server.on('connect', (req, client, head) => {
   client.on('error', () => {});
+  client.setKeepAlive(true, 15_000);
   const reject = (status, reason) => {
     client.end(`HTTP/1.1 ${status}\r\nX-Relay-Error: ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   };
@@ -69,6 +70,7 @@ server.on('connect', (req, client, head) => {
     return;
   }
   const upstream = net.connect({ host: m[1] || m[2], port });
+  upstream.setKeepAlive(true, 15_000);
   let established = false;
   upstream.setTimeout(15_000, () => upstream.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })));
   upstream.once('connect', () => {

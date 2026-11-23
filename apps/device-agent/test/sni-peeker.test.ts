@@ -8,10 +8,10 @@ const quiet: any = { info() {}, warn() {}, error() {}, debug() {}, child() { ret
 
 async function testSniParser() {
   // 1. Test parseSni with real TLS ClientHello
-  let capturedSni: string | null = null;
+  let clientHello = Buffer.alloc(0);
   const dummyServer = net.createServer((sock) => {
     sock.once('data', (chunk) => {
-      capturedSni = parseSni(chunk);
+      clientHello = Buffer.from(chunk);
       sock.destroy();
     });
   });
@@ -29,19 +29,16 @@ async function testSniParser() {
   await new Promise((r) => tlsSock.once('close', r));
   dummyServer.close();
 
-  assert.strictEqual(capturedSni, 'api16-normal-c-alisg.tiktokv.com', 'SNI parser should correctly extract tiktok domain');
+  assert.strictEqual(parseSni(clientHello), 'api16-normal-c-alisg.tiktokv.com', 'SNI parser should correctly extract tiktok domain');
   console.log('PASS parseSni extracts TLS ClientHello SNI accurately');
+  return clientHello;
 }
 
-async function testDeviceProxyListenerSniPeeking() {
+async function testDeviceProxyListenerSniPeeking(clientHello: Buffer) {
   // Target: upstream server expecting the peeked hostname
-  let upstreamReceivedData = false;
   let receivedHost = '';
   const targetServer = net.createServer((sock) => {
-    sock.once('data', (d) => {
-      upstreamReceivedData = true;
-      sock.write(d); // Echo TLS
-    });
+    sock.on('data', (chunk) => sock.write(chunk));
   });
   targetServer.listen(0, '127.0.0.1');
   await new Promise((r) => targetServer.once('listening', r));
@@ -57,7 +54,7 @@ async function testDeviceProxyListenerSniPeeking() {
 
   const listener = new DeviceProxyListener(
     'test-device-1',
-    (targetHost) => {
+    () => {
       return { kind: 'proxy', upstream: mockUpstream };
     },
     quiet,
@@ -74,28 +71,33 @@ async function testDeviceProxyListenerSniPeeking() {
     clientSock.write(`CONNECT 162.159.61.3:443 HTTP/1.1\r\nHost: 162.159.61.3:443\r\n\r\n`);
   });
 
-  await new Promise<void>((resolve, reject) => {
-    clientSock.once('data', (resp) => {
-      assert(resp.toString().includes('200 Connection Established'), 'Must respond 200 Connection Established');
-
-      // Now client sends TLS ClientHello
-      const secureSocket = tls.connect({
-        socket: clientSock,
-        servername: 'api.tiktokv.com',
-        rejectUnauthorized: false,
+  try {
+    const echoed = await new Promise<Buffer>((resolve, reject) => {
+      clientSock.setTimeout(5_000, () => reject(new Error('Proxy did not echo ClientHello')));
+      clientSock.once('error', reject);
+      clientSock.once('data', (response) => {
+        if (!response.toString().includes('200 Connection Established')) {
+          reject(new Error('Expected 200 Connection Established'));
+          return;
+        }
+        let received = Buffer.alloc(0);
+        clientSock.on('data', (chunk) => {
+          received = Buffer.concat([received, chunk]);
+          if (received.length >= clientHello.length) resolve(received);
+        });
+        // Split inside the TLS record header to exercise incremental parsing.
+        clientSock.write(clientHello.subarray(0, 3));
+        setTimeout(() => clientSock.write(clientHello.subarray(3)), 30);
       });
-      secureSocket.on('error', () => {});
-      setTimeout(() => {
-        assert.strictEqual(receivedHost, 'api.tiktokv.com', 'Upstream proxy must receive peeked SNI instead of raw IP');
-        secureSocket.destroy();
-        resolve();
-      }, 200);
     });
-  });
-
-  await listener.stop();
-  targetServer.close();
-  console.log('PASS DeviceProxyListener successfully peeks SNI and dials upstream with domain name');
+    assert.strictEqual(receivedHost, 'api16-normal-c-alisg.tiktokv.com');
+    assert.deepStrictEqual(echoed, clientHello);
+  } finally {
+    clientSock.destroy();
+    await listener.stop();
+    targetServer.close();
+  }
+  console.log('PASS DeviceProxyListener preserves fragmented ClientHello and routes by its SNI');
 }
 
 async function testMediaCdnClassification() {
@@ -121,8 +123,7 @@ async function testMediaCdnClassification() {
 }
 
 async function main() {
-  await testSniParser();
-  await testDeviceProxyListenerSniPeeking();
+  await testDeviceProxyListenerSniPeeking(await testSniParser());
   await testMediaCdnClassification();
   console.log('\nAll SNI peeking and traffic saver tests PASSED successfully!');
 }

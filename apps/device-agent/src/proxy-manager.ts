@@ -30,6 +30,7 @@ import {
   ProxyError,
   UpstreamProxy,
   isBypassedHost,
+  isLocalProxyHost,
   isWildberriesHost,
   isBlackholeHost,
   isHeavyMediaCdn,
@@ -235,7 +236,7 @@ export class ProxyManager {
     }
   }
 
-  /** Cheap check without `su`: reverse mapping, system proxy setting, sing-box process. */
+  /** Check reverse mapping, the system proxy, and transparent routing when required. */
   private async isWiringHealthy(deviceId: string): Promise<boolean> {
     const listener = this.listeners.get(deviceId);
     const rt = this.runtime(deviceId);
@@ -249,6 +250,7 @@ export class ProxyManager {
         10_000,
       );
       if (!out.includes(`127.0.0.1:${config.PROXY_DEVICE_PORT}`)) return false;
+      if (config.PROXY_DNS_VIA) return rt.method === 'transparent' && await this.root.isRunning(deviceId);
       return !out.includes('KMM_NO_SINGBOX');
     } catch {
       return false;
@@ -370,7 +372,12 @@ export class ProxyManager {
       up = new UpstreamProxy(
         { host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password, type: proxy.type },
         this.logger,
-        { maxConnections: config.PROXY_MAX_CONNECTIONS, retryWindowMs: config.PROXY_RETRY_WINDOW_MS, via: config.PROXY_UPSTREAM_VIA || undefined },
+        {
+          maxConnections: config.PROXY_MAX_CONNECTIONS,
+          retryWindowMs: config.PROXY_RETRY_WINDOW_MS,
+          via: config.PROXY_UPSTREAM_VIA || undefined,
+          dnsServer: config.PROXY_DNS_VIA || undefined,
+        },
       );
       this.upstreams.set(key, up);
     }
@@ -386,6 +393,13 @@ export class ProxyManager {
 
   private routeFor(deviceId: string, targetHost?: string, targetPort?: number): RouteDecision {
     const entry = this.devices.get(deviceId);
+    const relayOnly = Boolean(config.PROXY_UPSTREAM_VIA);
+    if (targetHost && isLocalProxyHost(targetHost)) return { kind: 'direct' };
+    const standby = this.trafficStandby;
+    const inactive = this.mode === 'shared_sequential' && this.activeDeviceId !== deviceId;
+    if (relayOnly && (!entry || standby || inactive)) {
+      return { kind: 'block', reason: standby ? 'Трафик плат на паузе' : !entry ? 'У платы нет назначенного прокси' : 'Плата ждёт общий прокси' };
+    }
     if (!entry) return { kind: 'direct' };
 
     // Standby mode: pause all proxying across the farm to preserve balance when rack is idle
@@ -401,17 +415,17 @@ export class ProxyManager {
 
     // Bypass non-web background services (Google FCM push 5228-5230, Apple push 5223)
     // Some upstream proxies restrict non-HTTP/HTTPS ports.
-    if (targetPort && [5228, 5229, 5230, 5223].includes(targetPort)) {
+    if (!relayOnly && targetPort && [5228, 5229, 5230, 5223].includes(targetPort)) {
       return { kind: 'direct' };
     }
 
     // Bypass OS telemetry, captive portal checks, Google Play downloads, local network directly
-    if (targetHost && isBypassedHost(targetHost, config.PROXY_BYPASS_LIST)) {
+    if (!relayOnly && targetHost && isBypassedHost(targetHost, config.PROXY_BYPASS_LIST)) {
       return { kind: 'direct' };
     }
 
     // Wildberries routing: must always open with Russian IP.
-    if (targetHost && isWildberriesHost(targetHost)) {
+    if (!relayOnly && targetHost && isWildberriesHost(targetHost)) {
       if (entry.proxy.country && !['Russia', 'Russian Federation', 'RU'].includes(entry.proxy.country)) {
         this.logger.debug({ deviceId, targetHost, proxyCountry: entry.proxy.country }, 'proxy-manager: routing Wildberries direct to ensure Russian IP');
         return { kind: 'direct' };
@@ -423,7 +437,7 @@ export class ProxyManager {
       if (this.trafficSaver === 'block_media') {
         return { kind: 'block', reason: 'traffic saver: heavy video CDN stream blocked (-98% bandwidth)' };
       }
-      if (this.trafficSaver === 'direct_media') {
+      if (!relayOnly && this.trafficSaver === 'direct_media') {
         return { kind: 'direct' };
       }
     }
@@ -501,6 +515,9 @@ export class ProxyManager {
 
       let method: CaptureMethod = 'system_proxy';
       const isRoot = config.PROXY_ROOT_MODE !== 'off' && (await this.root.isRooted(deviceId, true));
+      if (config.PROXY_DNS_VIA && !isRoot) {
+        throw new Error('Маршрут через VPS требует root и прозрачного проксирования');
+      }
       if (isRoot) {
         try {
           await this.root.start(deviceId, devicePort);
@@ -508,11 +525,12 @@ export class ProxyManager {
           rt.transparentError = undefined;
         } catch (err) {
           rt.transparentError = err instanceof Error ? err.message : String(err);
+          await this.root.stop(deviceId);
+          if (config.PROXY_DNS_VIA) throw err;
           this.logger.warn(
             { deviceId, err: rt.transparentError },
             'proxy-manager: transparent mode failed on rooted board — falling back to system proxy',
           );
-          await this.root.stop(deviceId);
         }
       } else if (config.PROXY_ROOT_MODE !== 'off') {
         rt.transparentError = 'Root не обнаружен или не разрешён в Magisk для Shell (UID 2000)';
@@ -521,7 +539,7 @@ export class ProxyManager {
       await this.adb.shell(
         deviceId,
         [
-          `settings put global global_http_proxy_exclusion_list "${config.PROXY_BYPASS_LIST}"`,
+          `settings put global global_http_proxy_exclusion_list "${config.PROXY_UPSTREAM_VIA ? 'localhost,127.0.0.1' : config.PROXY_BYPASS_LIST}"`,
           `settings put global http_proxy 127.0.0.1:${devicePort}`,
           `settings put global global_http_proxy_host 127.0.0.1`,
           `settings put global global_http_proxy_port ${devicePort}`,
@@ -597,8 +615,7 @@ export class ProxyManager {
     return {
       mode: this.mode,
       inactivePolicy: this.inactivePolicy,
-      trafficSaver: this.trafficSaver,
-      trafficStandby: this.trafficStandby,
+      ...this.getTrafficConfig(),
       activeDeviceId: this.activeDeviceId,
       hasSharedProxy: this.hasAnyProxy(),
       busyDeviceId: this.lease?.deviceId ?? null,
@@ -607,7 +624,7 @@ export class ProxyManager {
 
   getTrafficConfig(): { trafficSaver: TrafficSaverMode; trafficStandby: boolean } {
     return {
-      trafficSaver: this.trafficSaver,
+      trafficSaver: config.PROXY_UPSTREAM_VIA && this.trafficSaver === 'direct_media' ? 'off' : this.trafficSaver,
       trafficStandby: this.trafficStandby,
     };
   }
@@ -693,8 +710,7 @@ export class ProxyManager {
     return {
       mode: this.mode,
       inactivePolicy: this.inactivePolicy,
-      trafficSaver: this.trafficSaver,
-      trafficStandby: this.trafficStandby,
+      ...this.getTrafficConfig(),
       activeDeviceId: this.activeDeviceId,
       busyDeviceId: this.lease?.deviceId ?? null,
       hostIp: this.hostPublicIp,
@@ -1070,6 +1086,10 @@ export class ProxyManager {
       'auth_failed', 'relay_denied', 'relay_unavailable', 'relay_upstream', 'protocol',
     ].includes(check.code))) return check;
 
+    // The gateway probe already repairs broken ADB wiring. DNS and remote outages
+    // should not cycle radios or restart sing-box on an otherwise wired board.
+    if (config.PROXY_UPSTREAM_VIA) return check;
+
     this.logger.warn({ deviceId, error: check.error }, 'proxy-manager: device has no internet — initiating active self-healing');
 
     // 1. Wake up & enable Wi-Fi
@@ -1129,7 +1149,8 @@ export class ProxyManager {
         detail: `Плата выходит в интернет с домашнего IP фермы (${ipCheck.ip}) — назначьте ей прокси или включите режим Private`,
       };
     }
-    if (usingProxies && (!ipCheck.hostIp || (config.PROXY_ROOT_MODE === 'auto' && ipCheck.method !== 'transparent'))) {
+    const requiresTransparent = Boolean(config.PROXY_DNS_VIA) || config.PROXY_ROOT_MODE === 'auto';
+    if (usingProxies && (!ipCheck.hostIp || (requiresTransparent && ipCheck.method !== 'transparent'))) {
       const detail = !ipCheck.hostIp
         ? 'Не удалось определить внешний IP ПК фермы для проверки утечки'
         : 'Прозрачное проксирование не подтверждено. Проверьте root и перенаправление трафика на плате';
@@ -1221,6 +1242,9 @@ export class ProxyManager {
       method: this.runtimes.get(deviceId)?.method ?? undefined,
     });
 
+    if (!configured && config.PROXY_UPSTREAM_VIA) {
+      return { ...base(), ok: false, error: 'У платы нет назначенного прокси' };
+    }
     if (configured) {
       let probe = await this.probeGateway(deviceId);
       if (!probe.ok || !probe.systemProxyOk) {
@@ -1241,6 +1265,9 @@ export class ProxyManager {
       }
       if (this.routeKind(deviceId) === 'block') {
         return { ...base(), ok: false, error: this.trafficStandby ? 'Трафик плат на паузе' : 'Режим Shared: плата ждёт общий прокси' };
+      }
+      if (config.PROXY_DNS_VIA && (base().method !== 'transparent' || !(await this.root.isRunning(deviceId)))) {
+        return { ...base(), ok: false, error: this.runtimes.get(deviceId)?.applyError ?? 'Прозрачный маршрут и DNS через VPS не подтверждены' };
       }
     }
 

@@ -7,16 +7,16 @@
  * (the same `adb reverse` port the system proxy uses). Credentials, SOCKS/HTTP and
  * connection limits are therefore handled in one place — the PC gateway.
  *
- * Proxies only carry TCP, so the leak guard also rejects IPv6 and non-DNS/NTP UDP
- * (QUIC, WebRTC): apps fall back to IPv4/TCP, which goes through the proxy.
+ * In VPS mode, DNS uses the tunnel resolver and public IPv4 TCP goes through
+ * the proxy. Other public transport (including QUIC) is rejected by the guard.
  *
- * Fail-safe: iptables -w 3 rules are installed only after sing-box is confirmed listening,
- * otherwise the board would lose all connectivity.
+ * The VPS guard stays in place while sing-box and its redirects are rebuilt.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { Logger } from 'pino';
 import type { AdbClient } from './adb-client';
 import { config } from './config';
@@ -36,8 +36,45 @@ BIN=${REMOTE_BIN}
 CFG=${REMOTE_CFG}
 LOG=${REMOTE_DIR}/kmm-singbox.log
 PORT=${REDIRECT_PORT}
+DNS_VIA=${config.PROXY_DNS_VIA}
+LOCAL_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
+
+stop_guard() {
+  iptables -w 3 -D OUTPUT -j KMM_WAN 2>/dev/null
+  iptables -w 3 -F KMM_WAN 2>/dev/null
+  iptables -w 3 -X KMM_WAN 2>/dev/null
+  ip6tables -w 3 -D OUTPUT -j KMM_WAN6 2>/dev/null
+  ip6tables -w 3 -F KMM_WAN6 2>/dev/null
+  ip6tables -w 3 -X KMM_WAN6 2>/dev/null
+}
+
+start_guard() {
+  # OUTPUT filtering sees the destination after NAT. A healthy redirect
+  # reaches loopback; a broken redirect cannot escape to the WAN.
+  if ! iptables -w 3 -C OUTPUT -j KMM_WAN 2>/dev/null; then
+    iptables -w 3 -N KMM_WAN 2>/dev/null || iptables -w 3 -F KMM_WAN || return 1
+    for net in $LOCAL_V4; do
+      iptables -w 3 -A KMM_WAN -d "$net" -j RETURN || return 1
+    done
+    iptables -w 3 -A KMM_WAN -j REJECT || return 1
+    iptables -w 3 -I OUTPUT 1 -j KMM_WAN || return 1
+  fi
+  if ! ip6tables -w 3 -C OUTPUT -j KMM_WAN6 2>/dev/null; then
+    ip6tables -w 3 -N KMM_WAN6 2>/dev/null || ip6tables -w 3 -F KMM_WAN6 || return 1
+    for net in ::1/128 fe80::/10 fc00::/7 ff00::/8; do
+      ip6tables -w 3 -A KMM_WAN6 -d "$net" -j RETURN || return 1
+    done
+    ip6tables -w 3 -A KMM_WAN6 -j REJECT || return 1
+    ip6tables -w 3 -I OUTPUT 1 -j KMM_WAN6 || return 1
+  fi
+}
 
 stop_rules() {
+  for proto in udp tcp; do
+    iptables -w 3 -t nat -D OUTPUT -p "$proto" --dport 53 -j KMM_DNS 2>/dev/null
+  done
+  iptables -w 3 -t nat -F KMM_DNS 2>/dev/null
+  iptables -w 3 -t nat -X KMM_DNS 2>/dev/null
   iptables -w 3 -t nat -D OUTPUT -p udp --dport 53 -d 8.8.8.8 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null
   iptables -w 3 -t nat -D OUTPUT -p udp --dport 53 -d 8.8.4.4 -j DNAT --to-destination 77.88.8.8:53 2>/dev/null
   iptables -w 3 -t nat -D OUTPUT -p tcp -j KMM_PROXY 2>/dev/null
@@ -65,10 +102,22 @@ listening() {
 
 start_rules() {
   iptables -w 3 -t nat -N KMM_PROXY || return 1
-  iptables -w 3 -t nat -A KMM_PROXY -m owner --uid-owner 0 -j RETURN 2>/dev/null || true
-  for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+  if [ -z "$DNS_VIA" ]; then
+    iptables -w 3 -t nat -A KMM_PROXY -m owner --uid-owner 0 -j RETURN 2>/dev/null || true
+  fi
+  for net in $LOCAL_V4; do
     iptables -w 3 -t nat -A KMM_PROXY -d "$net" -j RETURN || return 1
   done
+  if [ -n "$DNS_VIA" ]; then
+    iptables -w 3 -t nat -N KMM_DNS || return 1
+    for proto in udp tcp; do
+      iptables -w 3 -t nat -A KMM_DNS -p "$proto" -j DNAT --to-destination "$DNS_VIA:53" || return 1
+      iptables -w 3 -t nat -I OUTPUT 1 -p "$proto" --dport 53 -j KMM_DNS || return 1
+    done
+    iptables -w 3 -t nat -A KMM_PROXY -p tcp -j REDIRECT --to-ports "$PORT" || return 1
+    iptables -w 3 -t nat -A OUTPUT -p tcp -j KMM_PROXY || return 1
+    return 0
+  fi
   iptables -w 3 -t nat -A KMM_PROXY -p tcp --dport 80 -j REDIRECT --to-ports "$PORT" || return 1
   iptables -w 3 -t nat -A KMM_PROXY -p tcp --dport 443 -j REDIRECT --to-ports "$PORT" || return 1
   iptables -w 3 -t nat -A OUTPUT -p tcp -j KMM_PROXY || return 1
@@ -103,6 +152,14 @@ start_rules() {
 
 case "$1" in
   start)
+    if [ -n "$DNS_VIA" ]; then
+      if ! start_guard; then
+        echo "KMM_FAIL: WAN guard could not be installed"
+        exit 1
+      fi
+    else
+      stop_guard
+    fi
     stop_rules
     stop_daemon
     chmod 755 "$BIN"
@@ -127,12 +184,22 @@ case "$1" in
     echo KMM_OK
     ;;
   stop)
+    if [ -z "$DNS_VIA" ]; then stop_guard; fi
     stop_rules
     stop_daemon
     echo KMM_STOPPED
     ;;
   status)
-    if pidof sing-box >/dev/null && listening && iptables -w 3 -t nat -C OUTPUT -p tcp -j KMM_PROXY 2>/dev/null; then
+    if [ -n "$DNS_VIA" ] && ! {
+      iptables -w 3 -C OUTPUT -j KMM_WAN &&
+      ip6tables -w 3 -C OUTPUT -j KMM_WAN6 &&
+      iptables -w 3 -t nat -C OUTPUT -p udp --dport 53 -j KMM_DNS &&
+      iptables -w 3 -t nat -C OUTPUT -p tcp --dport 53 -j KMM_DNS &&
+      iptables -w 3 -t nat -C KMM_DNS -p udp -j DNAT --to-destination "$DNS_VIA:53" &&
+      iptables -w 3 -t nat -C KMM_DNS -p tcp -j DNAT --to-destination "$DNS_VIA:53";
+    } 2>/dev/null; then
+      echo KMM_DOWN
+    elif pidof sing-box >/dev/null && listening && iptables -w 3 -t nat -C OUTPUT -p tcp -j KMM_PROXY 2>/dev/null; then
       echo KMM_RUNNING
     else
       echo KMM_DOWN
@@ -254,8 +321,17 @@ export class RootTransparentProxy {
       .catch(() => {});
   }
 
+  async isRunning(deviceId: string): Promise<boolean> {
+    const out = await this.adb.shell(
+      deviceId,
+      `su -c 'sh ${REMOTE_SCRIPT} status' 2>/dev/null || su 0 sh ${REMOTE_SCRIPT} status 2>/dev/null`,
+      10_000,
+    ).catch(() => '');
+    return out.includes('KMM_RUNNING');
+  }
+
   private async pushText(deviceId: string, content: string, remotePath: string): Promise<void> {
-    const tmp = path.join(os.tmpdir(), `kmm-${process.pid}-${Date.now()}-${path.basename(remotePath)}`);
+    const tmp = path.join(os.tmpdir(), `kmm-${randomUUID()}-${path.basename(remotePath)}`);
     fs.writeFileSync(tmp, content.replace(/\r\n/g, '\n'), 'utf-8');
     try {
       await this.adb.exec(['-s', deviceId, 'push', tmp, remotePath], 30_000);

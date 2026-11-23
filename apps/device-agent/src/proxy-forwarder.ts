@@ -211,19 +211,22 @@ export function parseSni(buf: Buffer): string | null {
  * (HTTP 403 / SOCKS5 error 2: "connection not allowed by ruleset").
  * When a target is a numeric IP, resolve its PTR hostname so the upstream proxy accepts it.
  */
-export async function resolveHostForUpstream(host: string): Promise<string> {
+export async function resolveHostForUpstream(host: string, dnsServer?: string): Promise<string> {
   const clean = host.replace(/^\[|\]$/g, '').trim();
   if (!net.isIP(clean)) return host;
 
   const now = Date.now();
-  const cached = ipHostnameCache.get(clean);
+  const cacheKey = `${dnsServer || ''}|${clean}`;
+  const cached = ipHostnameCache.get(cacheKey);
   if (cached && cached.expires > now) return cached.hostname;
 
   try {
-    const timer = new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500));
-    const names = await Promise.race([dns.promises.reverse(clean), timer]);
+    const resolver = new dns.promises.Resolver({ timeout: 1200, tries: 1 });
+    if (dnsServer) resolver.setServers([dnsServer]);
+    const names = await resolver.reverse(clean);
     if (Array.isArray(names) && names.length > 0 && names[0]) {
-      ipHostnameCache.set(clean, { hostname: names[0], expires: now + 3600_000 });
+      if (ipHostnameCache.size >= 1024) ipHostnameCache.delete(ipHostnameCache.keys().next().value!);
+      ipHostnameCache.set(cacheKey, { hostname: names[0], expires: now + 3600_000 });
       return names[0];
     }
   } catch {
@@ -297,6 +300,7 @@ export interface UpstreamOptions {
   retryWindowMs?: number;
   connectTimeoutMs?: number;
   queueTimeoutMs?: number;
+  dnsServer?: string;
   /**
    * Reach the upstream proxy through this HTTP CONNECT relay (`http://host:port`), e.g. the
    * production server over AmneziaWG, so the farm ISP's DPI can't see/block the destinations.
@@ -312,6 +316,7 @@ function openTcp(host: string, port: number, via: { host: string; port: number }
   return new Promise((resolve, reject) => {
     const sock = net.connect(via ? { host: via.host, port: via.port } : { host, port });
     sock.setNoDelay(true);
+    sock.setKeepAlive(true, 15_000);
     let relayConnected = false;
     let settled = false;
     const finish = (err?: Error) => {
@@ -431,6 +436,7 @@ export class UpstreamProxy {
   private readonly queueTimeoutMs: number;
   private readonly retryWindowMs: number;
   private readonly via?: { host: string; port: number };
+  private readonly dnsServer?: string;
   private waitingLoggedAt = 0;
   lastError?: string;
   lastErrorAt?: number;
@@ -446,6 +452,7 @@ export class UpstreamProxy {
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 20_000;
     this.retryWindowMs = opts.retryWindowMs ?? 25_000;
     this.via = parseVia(opts.via);
+    this.dnsServer = opts.dnsServer;
   }
 
   get label(): string {
@@ -547,7 +554,7 @@ export class UpstreamProxy {
     const deadline = retryWindowMs === undefined ? this.connectionDeadline() : Date.now() + retryWindowMs;
     const release = await this.limiter.acquire(Math.min(this.queueTimeoutMs, timeLeft(deadline)));
     try {
-      const targetHost = await withinDeadline(resolveHostForUpstream(host), deadline);
+      const targetHost = await withinDeadline(resolveHostForUpstream(host, this.dnsServer), deadline);
       let lastErr: ProxyError | undefined;
       for (let attempt = 1; ; attempt++) {
         try {
@@ -923,54 +930,26 @@ export function isHeavyMediaCdn(host: string): boolean {
   return false;
 }
 
+export function isLocalProxyHost(host: string): boolean {
+  const h = host.toLowerCase().trim();
+  if (h === 'localhost' || h === '::1') return true;
+  if (!net.isIPv4(h)) return false;
+
+  const [first, second] = h.split('.').map(Number);
+  return first === 10 || first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) || (first === 169 && second === 254);
+}
+
 /** Check if host is system telemetry, captive portal check or excluded from proxying. */
 export function isBypassedHost(host: string, bypassList?: string): boolean {
   if (!host) return false;
   const h = host.toLowerCase().trim();
+  if (isLocalProxyHost(h) || isWildberriesHost(h)) return true;
 
-  // Local loopback & private RFC1918 networks (never proxy local traffic)
-  if (
-    h === 'localhost' ||
-    h === '127.0.0.1' ||
-    h === '::1' ||
-    h.startsWith('10.') ||
-    h.startsWith('192.168.') ||
-    h.startsWith('172.16.') ||
-    h.startsWith('172.17.') ||
-    h.startsWith('172.18.') ||
-    h.startsWith('172.19.') ||
-    h.startsWith('172.20.') ||
-    h.startsWith('172.21.') ||
-    h.startsWith('172.22.') ||
-    h.startsWith('172.23.') ||
-    h.startsWith('172.24.') ||
-    h.startsWith('172.25.') ||
-    h.startsWith('172.26.') ||
-    h.startsWith('172.27.') ||
-    h.startsWith('172.28.') ||
-    h.startsWith('172.29.') ||
-    h.startsWith('172.30.') ||
-    h.startsWith('172.31.')
-  ) {
-    return true;
-  }
-
-  // Wildberries always uses Russian IP direct
-  if (isWildberriesHost(h)) return true;
-
-  // Samsung OS telemetry, push notifications, and background store services
-  if (
-    h.includes('samsung.com') ||
-    h.includes('samsungapps.com') ||
-    h.includes('samsungcloud.com') ||
-    h.includes('samsungqbe.com') ||
-    h.includes('ssp.samsung.com') ||
-    h.includes('secb2b.com') ||
-    h.includes('ospserver.net') ||
-    h.includes('samsungmobile.com')
-  ) {
-    return true;
-  }
+  // Samsung OS telemetry, push notifications, and background store services.
+  if (['samsung.com', 'samsungapps.com', 'samsungcloud.com', 'samsungqbe.com', 'secb2b.com', 'ospserver.net', 'samsungmobile.com']
+    .some((domain) => h.includes(domain))) return true;
 
   // Android OS connectivity checks, time sync, and Google Play Store downloads (never waste paid proxy on OS updates)
   if (
@@ -1187,7 +1166,7 @@ export class DeviceProxyListener {
     }
 
     // Direct connections do not go through upstream proxy rulesets, and domain-named targets already have a domain.
-    if (!isRawIp || initialRoute.kind === 'direct') {
+    if (!isRawIp || initialRoute.kind === 'direct' || (target.port !== 80 && target.port !== 443)) {
       this.open(initialRoute, target.host, target.port).then(
         (upstream) => {
           if (client.destroyed) {
@@ -1208,68 +1187,36 @@ export class DeviceProxyListener {
       return;
     }
 
-    // Target host is a raw IP and route is 'proxy'.
-    // Residential/mobile proxies reject raw IPs (SOCKS5 0x02 "connection not allowed by ruleset").
-    // We reply 200 Connection Established immediately, read the first packet (TLS SNI or HTTP Host),
-    // and connect to upstream with the resolved domain name.
-    const handleFirstPayload = (firstChunk: Buffer) => {
-      let resolvedDomain = target.host;
-      if (target.port === 443) {
-        const sni = parseSni(firstChunk);
-        if (sni) {
-          resolvedDomain = sni;
-          ipHostnameCache.set(target.host, { hostname: sni, expires: Date.now() + 3600_000 });
-        } else {
-          const cached = ipHostnameCache.get(target.host);
-          if (cached && cached.expires > Date.now()) {
-            resolvedDomain = cached.hostname;
-          }
-        }
-      } else if (target.port === 80) {
-        const hostMatch = firstChunk.toString('latin1').match(/(?:^|\r\n)Host:\s*([^\r\n:]+)/i);
-        if (hostMatch && hostMatch[1] && !net.isIP(hostMatch[1].trim())) {
-          resolvedDomain = hostMatch[1].trim();
-          ipHostnameCache.set(target.host, { hostname: resolvedDomain, expires: Date.now() + 3600_000 });
-        } else {
-          const cached = ipHostnameCache.get(target.host);
-          if (cached && cached.expires > Date.now()) {
-            resolvedDomain = cached.hostname;
-          }
-        }
-      }
-
+    // Trace only this connection's hostname. Several unrelated hosts can share a CDN IP.
+    let pending = head;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      clearTimeout(timer);
+      client.removeListener('data', collect);
+      client.removeListener('close', cleanup);
+    };
+    const connect = () => {
+      cleanup();
+      client.pause();
+      const name = target.port === 443
+        ? parseSni(pending)
+        : pending.toString('latin1').match(/(?:^|\r\n)Host:\s*([^\r\n:]+)/i)?.[1]?.trim();
+      const resolvedDomain = name && !net.isIP(name) ? name : target.host;
       const activeRoute = this.route(resolvedDomain, target.port);
       if (activeRoute.kind === 'block') {
         client.destroy();
         return;
       }
-
-      // Buffer incoming data while upstream proxy connects
-      const buffered: Buffer[] = [firstChunk];
-      let upstreamConnected = false;
-      const onAdditionalData = (d: Buffer) => {
-        if (!upstreamConnected) {
-          buffered.push(d);
-        }
-      };
-      client.on('data', onAdditionalData);
-
       this.open(activeRoute, resolvedDomain, target.port).then(
         (upstream) => {
-          upstreamConnected = true;
-          client.removeListener('data', onAdditionalData);
           if (client.destroyed) {
             upstream.destroy();
             return;
           }
-          for (const b of buffered) {
-            upstream.write(b);
-          }
+          if (pending.length) upstream.write(pending);
           this.splice(client, upstream);
         },
         (err) => {
-          upstreamConnected = true;
-          client.removeListener('data', onAdditionalData);
           client.destroy();
           const e = toProxyError(err);
           this.logger.warn(
@@ -1280,21 +1227,28 @@ export class DeviceProxyListener {
         },
       );
     };
+    const inspect = () => {
+      const complete = target.port === 443
+        ? pending[0] !== 0x16 || (pending.length >= 5 && pending.length >= 5 + pending.readUInt16BE(3))
+        : pending.includes('\r\n\r\n');
+      if (complete || pending.length >= 16_389) connect();
+    };
+    const collect = (chunk: Buffer) => {
+      if (pending.length === 0) {
+        clearTimeout(timer);
+        timer = setTimeout(connect, 250);
+      }
+      pending = Buffer.concat([pending, chunk]);
+      inspect();
+    };
 
     client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-    if (head && head.length > 0) {
-      handleFirstPayload(head);
-    } else {
-      const sniTimer = setTimeout(() => {
-        client.destroy();
-      }, 15_000);
-
-      client.once('data', (chunk: Buffer) => {
-        clearTimeout(sniTimer);
-        handleFirstPayload(chunk);
-      });
-      client.resume();
-    }
+    client.on('close', cleanup);
+    client.on('data', collect);
+    timer = pending.length ? setTimeout(connect, 250) : setTimeout(() => client.destroy(), 15_000);
+    if (pending.length) inspect();
+    // The HTTP parser hands off a paused socket. Resume only while waiting for the header.
+    if (client.listeners('data').includes(collect)) client.resume();
   }
 
   private splice(client: net.Socket, upstream: net.Socket): void {
@@ -1371,7 +1325,6 @@ export class DeviceProxyListener {
     if (net.isIP(host) && req.headers.host) {
       const headerDomain = req.headers.host.split(':')[0].replace(/^\[|\]$/g, '').trim();
       if (headerDomain && !net.isIP(headerDomain)) {
-        ipHostnameCache.set(host, { hostname: headerDomain, expires: Date.now() + 3600_000 });
         host = headerDomain;
       }
     }

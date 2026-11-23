@@ -6,6 +6,7 @@
 #
 #  Опции:
 #    --no-build      Не пересобирать образы (только перезапустить)
+#    --no-cache      Собрать образы без использования кэша
 #    --no-migrate    Не применять миграции
 #    --service NAME  Пересобрать только один сервис (api | web | orchestrator...)
 #    --create-admin  Создать администратора после деплоя
@@ -41,6 +42,7 @@ sql_escape() {
 
 # ── Параметры ────────────────────────────────────────────────────────────────
 DO_BUILD=true
+BUILD_OPTIONS=()
 DO_MIGRATE=true
 SINGLE_SERVICE=""
 CREATE_ADMIN=false
@@ -49,6 +51,7 @@ DO_ROLLBACK=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build)    DO_BUILD=false ;;
+    --no-cache)    BUILD_OPTIONS=(--no-cache) ;;
     --no-migrate)  DO_MIGRATE=false ;;
     --service)     SINGLE_SERVICE="$2"; shift ;;
     --create-admin) CREATE_ADMIN=true ;;
@@ -58,6 +61,7 @@ while [[ $# -gt 0 ]]; do
 Использование: ./scripts/deploy.sh [опции]
 
   --no-build       Не пересобирать Docker образы
+  --no-cache       Собрать без использования кэша
   --no-migrate     Не применять миграции БД
   --service NAME   Обновить только один сервис (api|web|orchestrator|video-processor)
   --create-admin   Создать admin-пользователя
@@ -198,17 +202,23 @@ docker compose ps --format "table {{.Service}}\t{{.Status}}" 2>/dev/null || dock
 if $DO_BUILD; then
   header "3/6 · Сборка Docker образов"
 
-  BUILD_ARGS="--build"
-
   if [ -n "$SINGLE_SERVICE" ]; then
     info "Сборка только: ${BOLD}$SINGLE_SERVICE${RESET}"
-    docker compose build --no-cache "$SINGLE_SERVICE"
+    BUILD_OPTIONS+=("$SINGLE_SERVICE")
   else
     info "Сборка всех сервисов..."
-    # Compose V2 собирает параллельно по умолчанию. Показываем прогресс и проверяем код возврата.
-    if ! docker compose build --no-cache; then
-      error "Сборка образов не удалась. Проверьте логи: docker compose build"
-    fi
+  fi
+
+  if ! docker compose --parallel "${COMPOSE_PARALLEL_LIMIT:-1}" build "${BUILD_OPTIONS[@]}"; then
+    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    storage_paths=("$REPO_ROOT")
+    for storage in "$docker_root" /var/lib/containerd; do
+      if [ -d "$storage" ]; then storage_paths+=("$storage"); fi
+    done
+    info "Свободное место и inode на файловых системах Docker и проекта:"
+    df -hP -- "${storage_paths[@]}" >&2 || true
+    df -iP -- "${storage_paths[@]}" >&2 || true
+    error "Сборка образов не удалась. Проверьте сообщение Docker выше."
   fi
   success "Образы собраны"
 else

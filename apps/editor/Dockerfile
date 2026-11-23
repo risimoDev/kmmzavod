@@ -38,14 +38,14 @@ ENV HF_HOME=/app/.hf
 ARG WHISPER_PRELOAD=small
 ARG HF_ENDPOINT=""
 COPY download_model.py .
+
+# Create the writable cache before downloading so the weights live in one layer.
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
+    && install -d -o appuser -g appgroup "$HF_HOME"
+USER appuser
 RUN HF_ENDPOINT="$HF_ENDPOINT" python download_model.py "$WHISPER_PRELOAD"
 
 COPY . .
-
-# Non-root user for security
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
-    && mkdir -p /app/.hf && chown -R appuser:appgroup /app/.hf
-USER appuser
 
 EXPOSE 8300
 

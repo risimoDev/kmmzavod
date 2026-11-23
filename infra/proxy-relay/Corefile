@@ -1,0 +1,16 @@
+.:53 {
+    bind {$FARM_RELAY_DNS_LISTEN}
+    acl {
+        allow net {$FARM_RELAY_DNS_ALLOW}
+        block
+    }
+    cache 300 {
+        serve_stale 1h verify 150ms
+    }
+    forward . tls://1.1.1.1 tls://1.0.0.1 {
+        tls_servername cloudflare-dns.com
+        health_check 5s
+        max_concurrent 256
+        failover SERVFAIL REFUSED
+    }
+}
