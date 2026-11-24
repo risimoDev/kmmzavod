@@ -1006,6 +1006,7 @@ export interface TunnelTraceEvent {
   status?: number;
   bytesUp?: number;
   bytesDown?: number;
+  firstFin?: 'client' | 'upstream';
 }
 
 export interface ListenerOptions {
@@ -1053,7 +1054,7 @@ export class DeviceProxyListener {
     host: string,
     port: number,
     event: string,
-    details?: Pick<TunnelTraceEvent, 'code' | 'status' | 'bytesUp' | 'bytesDown'>,
+    details?: Pick<TunnelTraceEvent, 'code' | 'status' | 'bytesUp' | 'bytesDown' | 'firstFin'>,
   ): void {
     const now = Date.now();
     if (!this.trace || now > this.trace.until) return;
@@ -1290,8 +1291,12 @@ export class DeviceProxyListener {
   }
 
   private splice(client: net.Socket, upstream: net.Socket, host: string, port: number, prefixBytes: number): void {
+    // A TCP FIN ends only one direction. Let pipe flush and end the peer's write side.
+    client.allowHalfOpen = true;
+    upstream.allowHalfOpen = true;
     this.tunnels++;
     let closed = false;
+    let firstFin: TunnelTraceEvent['firstFin'];
     const clientBytesAtStart = client.bytesRead;
     const upstreamBytesAtStart = upstream.bytesRead;
     this.recordTrace(host, port, 'opened');
@@ -1300,6 +1305,7 @@ export class DeviceProxyListener {
         code,
         bytesUp: prefixBytes + client.bytesRead - clientBytesAtStart,
         bytesDown: upstream.bytesRead - upstreamBytesAtStart,
+        firstFin,
       });
     };
     const close = (event: string) => {
@@ -1312,8 +1318,14 @@ export class DeviceProxyListener {
     };
     client.setTimeout(this.opts.idleTimeoutMs, () => close('client-timeout'));
     upstream.setTimeout(this.opts.idleTimeoutMs, () => close('upstream-timeout'));
-    client.once('close', () => close('client-closed'));
-    upstream.once('close', () => close('upstream-closed'));
+    client.once('end', () => { firstFin ??= 'client'; });
+    upstream.once('end', () => { firstFin ??= 'upstream'; });
+    client.once('close', () => {
+      if (!client.readableEnded || !client.writableFinished || upstream.closed) close('client-closed');
+    });
+    upstream.once('close', () => {
+      if (!upstream.readableEnded || !upstream.writableFinished || client.closed) close('upstream-closed');
+    });
     client.once('error', (err: NodeJS.ErrnoException) => traceSocket('client-error', err.code));
     upstream.once('error', (err: NodeJS.ErrnoException) => traceSocket('upstream-error', err.code));
     client.on('data', (d: Buffer) => {

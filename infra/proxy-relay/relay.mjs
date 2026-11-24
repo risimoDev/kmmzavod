@@ -69,12 +69,16 @@ server.on('connect', (req, client, head) => {
     reject('400 Bad Request', 'invalid_connect_target');
     return;
   }
-  const upstream = net.connect({ host: m[1] || m[2], port });
+  client.allowHalfOpen = true;
+  const upstream = net.connect({ host: m[1] || m[2], port, allowHalfOpen: true });
   upstream.setKeepAlive(true, 15_000);
   let established = false;
-  upstream.setTimeout(15_000, () => upstream.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })));
+  const connectTimer = setTimeout(
+    () => upstream.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })),
+    15_000,
+  );
   upstream.once('connect', () => {
-    upstream.setTimeout(0);
+    clearTimeout(connectTimer);
     established = true;
     active++;
     client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -98,8 +102,21 @@ server.on('connect', (req, client, head) => {
     }
     close();
   });
-  upstream.on('close', () => { if (established) close(); });
-  client.on('close', close);
+  let draining = false;
+  const drain = () => {
+    if (!established || draining) return;
+    draining = true;
+    upstream.setTimeout(60_000, close);
+  };
+  client.once('end', drain);
+  upstream.once('end', drain);
+  upstream.on('close', () => {
+    clearTimeout(connectTimer);
+    if (established && (!upstream.readableEnded || !upstream.writableFinished || client.closed)) close();
+  });
+  client.on('close', () => {
+    if (!established || !client.readableEnded || !client.writableFinished || upstream.closed) close();
+  });
 });
 
 server.on('error', (err) => {
@@ -107,4 +124,4 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(listenPort, listenHost, () => log(`farm proxy relay listening on ${listenHost}:${listenPort}, allow=${process.env.RELAY_ALLOW || '10.66.66.0/24,10.13.13.0/24'}`));
+server.listen(listenPort, listenHost, () => log(`farm proxy relay listening on ${listenHost}:${server.address().port}, allow=${process.env.RELAY_ALLOW || '10.66.66.0/24,10.13.13.0/24'}`));
