@@ -238,18 +238,45 @@ if ($adbBin) {
 }
 
 # 3b. Автозапуск Gnirehtet для раздачи интернета по USB (стойки без Wi-Fi)
-$gnirehtetExe = Join-Path $PSScriptRoot "platform-tools\gnirehtet.exe"
-if (Test-Path $gnirehtetExe) {
+$gnirehtetExe = @($localPlatformTools, $rootPlatformTools) |
+    ForEach-Object { Join-Path $_ 'gnirehtet.exe' } |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+if (-not $gnirehtetExe) {
+    $gnirehtetExe = (Get-Command gnirehtet.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+}
+if ($gnirehtetExe) {
     Write-Host ""
     Write-Host "[GNIREHTET] Запуск раздачи интернета по USB..." -ForegroundColor Cyan
     $dnsArgument = [regex]::Escape($gnirehtetDns)
     $relayRunning = Get-CimInstance Win32_Process -Filter "Name='gnirehtet.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match ('(?:^|\s)-d\s+"?' + $dnsArgument + '"?(?:\s|$)') }
-    if ($adbServerRestarted -or -not $relayRunning) {
-        Get-Process -Name gnirehtet -ErrorAction SilentlyContinue | Stop-Process -ErrorAction Stop
-        Start-Process -FilePath $gnirehtetExe -ArgumentList "autorun", "-d", $gnirehtetDns -WindowStyle Hidden
+        Where-Object { $_.CommandLine -match '(?:^|\s)autorun(?:\s|$)' -and
+            $_.CommandLine -match ('(?:^|\s)-d\s+"?' + $dnsArgument + '"?(?:\s|$)') } |
+        Select-Object -First 1
+    try {
+        $gnirehtetPid = $relayRunning.ProcessId
+        if ($adbServerRestarted -or -not $relayRunning) {
+            if ($adbBin -and -not $env:ADB) { $env:ADB = $adbBin }
+            $localApk = Join-Path (Split-Path -Parent $gnirehtetExe) 'gnirehtet.apk'
+            if (-not $env:GNIREHTET_APK -and (Test-Path -LiteralPath $localApk -PathType Leaf)) {
+                $env:GNIREHTET_APK = (Get-Item -LiteralPath $localApk).FullName
+            }
+            foreach ($previousRelay in (Get-Process -Name gnirehtet -ErrorAction SilentlyContinue)) {
+                Stop-FarmProcess $previousRelay
+            }
+            $gnirehtetProcess = Start-Process -FilePath $gnirehtetExe -ArgumentList 'autorun', '-d', $gnirehtetDns -WindowStyle Hidden -PassThru -ErrorAction Stop
+            if ($gnirehtetProcess.WaitForExit(1500)) {
+                throw "Gnirehtet завершился при запуске (код $($gnirehtetProcess.ExitCode))."
+            }
+            $gnirehtetPid = $gnirehtetProcess.Id
+        }
+        Write-Host "[OK] Gnirehtet autorun работает (PID $gnirehtetPid, DNS $gnirehtetDns)." -ForegroundColor Green
+    } catch {
+        Write-Host "[ОШИБКА] Раздача интернета по USB через Gnirehtet не запустилась. $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
     }
-    Write-Host "[OK] Gnirehtet использует DNS $gnirehtetDns." -ForegroundColor Green
+} else {
+    Write-Host "[ВНИМАНИЕ] gnirehtet.exe не найден. Для USB-интернета положите gnirehtet.exe и gnirehtet.apk в $localPlatformTools." -ForegroundColor Yellow
 }
 
 # 4. Проверка VPN-туннеля AmneziaWG
