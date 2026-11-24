@@ -89,9 +89,9 @@ try {
 if ($Trace) {
     $traceUri = 'http://127.0.0.1:8300/proxy/trace/' + [uri]::EscapeDataString($Serial)
     try {
-        Invoke-RestMethod $traceUri -Method Post -Headers $AgentHeaders -TimeoutSec 5 | Out-Null
+        Invoke-RestMethod $traceUri -Method Post -Headers $AgentHeaders -ContentType 'application/json' -Body '{}' -TimeoutSec 5 | Out-Null
     } catch {
-        throw "Не удалось включить трассировку платы. Проверьте, что запущен обновлённый агент. $($_.Exception.Message)"
+        throw "Не удалось включить трассировку платы. $($_.Exception.Message)"
     }
 }
 Write-Host "Сбор запущен на $Seconds сек. Сейчас воспроизведите одну ошибку на плате $Serial."
