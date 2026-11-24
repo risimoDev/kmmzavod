@@ -997,6 +997,17 @@ export interface ListenerStats {
   lastErrorCode?: ProxyErrorCode;
 }
 
+export interface TunnelTraceEvent {
+  at: string;
+  host: string;
+  port: number;
+  event: string;
+  code?: string;
+  status?: number;
+  bytesUp?: number;
+  bytesDown?: number;
+}
+
 export interface ListenerOptions {
   bindHost: string;
   idleTimeoutMs: number;
@@ -1030,6 +1041,27 @@ export class DeviceProxyListener {
   private lastErrorAt?: number;
   private lastErrorLogAt = 0;
   private lastErrorCode?: ProxyErrorCode;
+  private trace?: { until: number; events: TunnelTraceEvent[] };
+
+  traceSnapshot(start = false): TunnelTraceEvent[] {
+    const now = Date.now();
+    if (start) this.trace = { until: now + 120_000, events: [] };
+    return this.trace && now <= this.trace.until + 60_000 ? this.trace.events.slice() : [];
+  }
+
+  private recordTrace(
+    host: string,
+    port: number,
+    event: string,
+    details?: Pick<TunnelTraceEvent, 'code' | 'status' | 'bytesUp' | 'bytesDown'>,
+  ): void {
+    const now = Date.now();
+    if (!this.trace || now > this.trace.until) return;
+    if (!net.isIP(host) && !/^[a-zA-Z0-9_.-]{1,253}$/.test(host)) return;
+    const events = this.trace.events;
+    if (events.length >= 128) events.shift();
+    events.push({ at: new Date(now).toISOString(), host, port, event, ...details });
+  }
 
   constructor(
     readonly deviceId: string,
@@ -1160,6 +1192,7 @@ export class DeviceProxyListener {
     const isRawIp = !!net.isIP(target.host);
     const initialRoute = this.route(target.host, target.port);
     if (initialRoute.kind === 'block') {
+      this.recordTrace(target.host, target.port, 'blocked');
       this.logger.debug({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, reason: initialRoute.reason }, 'proxy: blocked connection');
       this.rejectSocket(client, 403, initialRoute.reason);
       return;
@@ -1167,6 +1200,7 @@ export class DeviceProxyListener {
 
     // Direct connections do not go through upstream proxy rulesets, and domain-named targets already have a domain.
     if (!isRawIp || initialRoute.kind === 'direct' || (target.port !== 80 && target.port !== 443)) {
+      this.recordTrace(target.host, target.port, 'opening');
       this.open(initialRoute, target.host, target.port).then(
         (upstream) => {
           if (client.destroyed) {
@@ -1175,10 +1209,11 @@ export class DeviceProxyListener {
           }
           client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
           if (head?.length) upstream.write(head);
-          this.splice(client, upstream);
+          this.splice(client, upstream, target.host, target.port, head.length);
         },
         (err) => {
           const e = toProxyError(err);
+          this.recordTrace(target.host, target.port, 'connect-error', { code: e.code, status: e.status });
           this.logger.warn({ deviceId: this.deviceId, target: `${target.host}:${target.port}`, err: e.message }, 'proxy: tunnel failed');
           this.recordError(`${target.host}:${target.port} — ${e.message}`, e.code);
           this.rejectSocket(client, e.code === 'busy' ? 503 : 502, e.message);
@@ -1204,9 +1239,11 @@ export class DeviceProxyListener {
       const resolvedDomain = name && !net.isIP(name) ? name : target.host;
       const activeRoute = this.route(resolvedDomain, target.port);
       if (activeRoute.kind === 'block') {
+        this.recordTrace(resolvedDomain, target.port, 'blocked');
         client.destroy();
         return;
       }
+      this.recordTrace(resolvedDomain, target.port, 'opening');
       this.open(activeRoute, resolvedDomain, target.port).then(
         (upstream) => {
           if (client.destroyed) {
@@ -1214,11 +1251,12 @@ export class DeviceProxyListener {
             return;
           }
           if (pending.length) upstream.write(pending);
-          this.splice(client, upstream);
+          this.splice(client, upstream, resolvedDomain, target.port, pending.length);
         },
         (err) => {
           client.destroy();
           const e = toProxyError(err);
+          this.recordTrace(resolvedDomain, target.port, 'connect-error', { code: e.code, status: e.status });
           this.logger.warn(
             { deviceId: this.deviceId, target: `${resolvedDomain}:${target.port}`, originalIp: target.host, err: e.message },
             'proxy: peeked tunnel failed',
@@ -1251,20 +1289,33 @@ export class DeviceProxyListener {
     if (client.listeners('data').includes(collect)) client.resume();
   }
 
-  private splice(client: net.Socket, upstream: net.Socket): void {
+  private splice(client: net.Socket, upstream: net.Socket, host: string, port: number, prefixBytes: number): void {
     this.tunnels++;
     let closed = false;
-    const close = () => {
+    const clientBytesAtStart = client.bytesRead;
+    const upstreamBytesAtStart = upstream.bytesRead;
+    this.recordTrace(host, port, 'opened');
+    const traceSocket = (event: string, code?: string) => {
+      this.recordTrace(host, port, event, {
+        code,
+        bytesUp: prefixBytes + client.bytesRead - clientBytesAtStart,
+        bytesDown: upstream.bytesRead - upstreamBytesAtStart,
+      });
+    };
+    const close = (event: string) => {
       if (closed) return;
       closed = true;
       this.tunnels--;
+      traceSocket(event);
       client.destroy();
       upstream.destroy();
     };
-    client.setTimeout(this.opts.idleTimeoutMs, close);
-    upstream.setTimeout(this.opts.idleTimeoutMs, close);
-    client.once('close', close);
-    upstream.once('close', close);
+    client.setTimeout(this.opts.idleTimeoutMs, () => close('client-timeout'));
+    upstream.setTimeout(this.opts.idleTimeoutMs, () => close('upstream-timeout'));
+    client.once('close', () => close('client-closed'));
+    upstream.once('close', () => close('upstream-closed'));
+    client.once('error', (err: NodeJS.ErrnoException) => traceSocket('client-error', err.code));
+    upstream.once('error', (err: NodeJS.ErrnoException) => traceSocket('upstream-error', err.code));
     client.on('data', (d: Buffer) => {
       this.counters.bytesUp += d.length;
     });
@@ -1331,9 +1382,11 @@ export class DeviceProxyListener {
 
     const route = this.route(host, port);
     if (route.kind === 'block') {
+      this.recordTrace(host, port, 'blocked');
       this.replyError(res, 403, route.reason);
       return;
     }
+    this.recordTrace(host, port, 'opening');
     const headers: http.OutgoingHttpHeaders = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (v !== undefined && !HOP_HEADERS.has(k.toLowerCase())) headers[k] = v;
@@ -1395,6 +1448,7 @@ export class DeviceProxyListener {
 
       upstreamReq.setTimeout(this.opts.idleTimeoutMs, () => upstreamReq.destroy(new Error('таймаут ответа')));
       upstreamReq.on('response', (upRes) => {
+        this.recordTrace(host, port, 'http-response', { status: upRes.statusCode });
         if (absoluteProxy && upstream && upRes.statusCode === 407) {
           const error = `HTTP-прокси ${upstream.label} отклонил авторизацию`;
           this.recordError(`${url.host} — ${error}`, 'auth_failed');
@@ -1409,6 +1463,7 @@ export class DeviceProxyListener {
         upRes.pipe(res);
       });
       upstreamReq.on('error', (err) => {
+        this.recordTrace(host, port, 'http-error', { code: (err as NodeJS.ErrnoException).code });
         this.recordError(`${url.host} — ${err.message}`);
         this.replyError(res, 502, `Ошибка запроса через шлюз: ${err.message}`);
       });
@@ -1418,6 +1473,7 @@ export class DeviceProxyListener {
       req.pipe(upstreamReq);
     })().catch((err) => {
       const e = toProxyError(err);
+      this.recordTrace(host, port, 'connect-error', { code: e.code, status: e.status });
       this.recordError(`${url.host} — ${e.message}`, e.code);
       this.replyError(res, e.code === 'busy' ? 503 : 502, e.message);
     });

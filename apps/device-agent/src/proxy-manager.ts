@@ -725,6 +725,10 @@ export class ProxyManager {
     };
   }
 
+  traceDevice(deviceId: string, start: boolean) {
+    return this.listeners.get(deviceId)?.traceSnapshot(start);
+  }
+
   getDeviceStatus(deviceId: string): DeviceProxyStatus {
     const entry = this.devices.get(deviceId);
     const rt = this.runtimes.get(deviceId);

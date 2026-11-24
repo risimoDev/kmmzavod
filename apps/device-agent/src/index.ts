@@ -178,6 +178,19 @@ app.post('/proxy/test', async (req, reply) => {
 
 app.get('/proxy/status', async () => ({ ok: true, ...proxyManager.getStatus() }));
 
+app.route<{ Params: { deviceId: string } }>({
+  method: ['GET', 'POST'],
+  url: '/proxy/trace/:deviceId',
+  async handler(req, reply) {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.ip)) {
+      return reply.code(403).send({ ok: false, error: 'Трассировка доступна с ПК фермы.' });
+    }
+    const events = proxyManager.traceDevice(req.params.deviceId, req.method === 'POST');
+    if (!events) return reply.code(404).send({ ok: false, error: 'Шлюз платы не запущен.' });
+    return { ok: true, events };
+  },
+});
+
 const ClearProxyBody = z.object({
   deviceId: z.string().min(1),
 });

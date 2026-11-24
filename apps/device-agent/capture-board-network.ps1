@@ -4,7 +4,8 @@ param(
     [ValidatePattern('^[a-zA-Z0-9_.:%\[\]-]+$')]
     [string]$Serial,
     [ValidateRange(15, 120)]
-    [int]$Seconds = 45
+    [int]$Seconds = 45,
+    [switch]$Trace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,10 +73,26 @@ Add-Report (Read-Gateway)
 
 $stamp = $null
 try {
-    $stamp = Read-Adb shell "date '+%m-%d %H:%M:%S'" |
-        Where-Object { $_ -match '^\d{2}-\d{2} \d{2}:\d{2}:\d{2}$' } | Select-Object -First 1
+    $clock = @(Read-Adb shell "date '+%m-%d %H:%M:%S'; date '+%Y-%m-%dT%H:%M:%S%z'; date +%s")
+    $stamp = $clock | Where-Object { $_ -match '^\d{2}-\d{2} \d{2}:\d{2}:\d{2}$' } | Select-Object -First 1
+    $androidTime = $clock | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}T' } | Select-Object -First 1
+    $androidEpoch = $clock | Where-Object { $_ -match '^\d{10,}$' } | Select-Object -First 1
+    $pcTime = [DateTimeOffset]::Now
+    Add-Report "Начало попытки. ПК $($pcTime.ToString('o')), Android $androidTime."
+    if ($androidEpoch) {
+        $offset = [long]$androidEpoch - $pcTime.ToUnixTimeSeconds()
+        Add-Report "Расхождение часов Android и ПК (сек) $offset."
+    }
 } catch {
     Add-Report $_.Exception.Message
+}
+if ($Trace) {
+    $traceUri = 'http://127.0.0.1:8300/proxy/trace/' + [uri]::EscapeDataString($Serial)
+    try {
+        Invoke-RestMethod $traceUri -Method Post -Headers $AgentHeaders -TimeoutSec 5 | Out-Null
+    } catch {
+        throw "Не удалось включить трассировку платы. Проверьте, что запущен обновлённый агент. $($_.Exception.Message)"
+    }
 }
 Write-Host "Сбор запущен на $Seconds сек. Сейчас воспроизведите одну ошибку на плате $Serial."
 $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -89,6 +106,16 @@ while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
     Start-Sleep -Seconds 1
 }
 Add-Report "$((Get-Date).ToString('o')) $(Read-Gateway)"
+if ($Trace) {
+    Add-Report 'События шлюза по адресам назначения'
+    try {
+        $traceResult = Invoke-RestMethod $traceUri -Headers $AgentHeaders -TimeoutSec 5
+        if (-not $traceResult.events) { Add-Report 'За время записи событий не зафиксировано.' }
+        $traceResult.events | ForEach-Object { Add-Report ($_ | ConvertTo-Json -Compress) }
+    } catch {
+        Add-Report "Ошибка чтения трассировки. $($_.Exception.Message)"
+    }
+}
 Add-Report 'Сетевые ошибки и ошибки загрузки из logcat'
 $filter = 'net::ERR_|UnknownHostException|SSLHandshakeException|CertPathValidatorException|SSLPeerUnverifiedException|ConnectException|SocketTimeoutException|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOSPC|EACCES|CLEARTEXT|Network connection error|No internet connection|(?:DownloadManager|DownloadProvider|DownloadThread|Cronet|ttnet|apkpure).*(?:error|failed|timeout|status[=: ]+[45]\d{2})'
 try {

@@ -65,6 +65,8 @@ async function testDeviceProxyListenerSniPeeking(clientHello: Buffer) {
   );
 
   const listenPort = await listener.start(0);
+  assert.deepStrictEqual(listener.traceSnapshot(), []);
+  listener.traceSnapshot(true);
 
   // Client connects to 127.0.0.1:listenPort with raw IP (like sing-box redirect)
   const clientSock = net.connect({ host: '127.0.0.1', port: listenPort }, () => {
@@ -92,6 +94,10 @@ async function testDeviceProxyListenerSniPeeking(clientHello: Buffer) {
     });
     assert.strictEqual(receivedHost, 'api16-normal-c-alisg.tiktokv.com');
     assert.deepStrictEqual(echoed, clientHello);
+    assert.deepStrictEqual(
+      listener.traceSnapshot().map(({ host, event }) => [host, event]),
+      [['api16-normal-c-alisg.tiktokv.com', 'opening'], ['api16-normal-c-alisg.tiktokv.com', 'opened']],
+    );
   } finally {
     clientSock.destroy();
     await listener.stop();
