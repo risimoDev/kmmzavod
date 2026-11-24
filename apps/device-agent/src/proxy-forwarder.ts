@@ -883,18 +883,18 @@ export function isTikTokMediaCdn(host: string): boolean {
   if (!host) return false;
   const h = host.toLowerCase().trim();
 
-  // 0. Heavy media object storage first: it must be classified as CDN even though some
-  //    of its substrings also appear in API-domain names below.
+  // Explicit login and upload hosts take priority over broad storage suffixes.
+  if (h.includes('passport') || h.includes('login') || h.includes('auth') || h.includes('upload')) {
+    return false;
+  }
+
+  // Heavy media object storage overlaps with the ByteDance API domain names below.
   if (h.includes('ibytedtos') || h.endsWith('.byteoversea.net') || h === 'byteoversea.net') {
     return true;
   }
 
-  // 1. Safeguard: Critical API, passport/auth, upload endpoints must ALWAYS pass (not CDN)
+  // API and configuration hosts do not carry video chunks.
   if (
-    h.includes('passport') ||
-    h.includes('login') ||
-    h.includes('auth') ||
-    h.includes('upload') ||
     h.includes('byteoversea') ||     // TikTok oversea configuration endpoints (.com APIs)
     h.includes('byteintl') ||        // ByteDance international endpoints
     h.includes('bytegoofy') ||       // ByteDance dynamic client configurations

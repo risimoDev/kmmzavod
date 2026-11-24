@@ -104,6 +104,7 @@ async function testMediaCdnClassification() {
   // 1. Critical APIs must NEVER be matched as CDN
   assert.strictEqual(isTikTokMediaCdn('api-va.tiktokv.com'), false, 'TikTok API must not be CDN');
   assert.strictEqual(isTikTokMediaCdn('passport.tiktokv.com'), false, 'Passport auth must not be CDN');
+  assert.strictEqual(isHeavyMediaCdn('passport.byteoversea.net'), false, 'Auth must take priority over the broad storage suffix');
   assert.strictEqual(isTikTokMediaCdn('upload-va.tiktokv.com'), false, 'Upload endpoint must not be CDN');
   assert.strictEqual(isTikTokMediaCdn('api-h2.byteoversea.com'), false, 'Byteoversea API must not be CDN');
   assert.strictEqual(isTikTokMediaCdn('tiktok.com'), false, 'tiktok.com must not be CDN');
