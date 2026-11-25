@@ -5,7 +5,8 @@ param(
     [string]$Serial,
     [ValidateRange(15, 120)]
     [int]$Seconds = 45,
-    [switch]$Trace
+    [switch]$Trace,
+    [switch]$TikTokLogin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,35 @@ function Read-Gateway {
     }
 }
 
+function Read-TikTokProcesses {
+    $packages = 'com\.(?:zhiliaoapp\.musically(?:\.go)?|ss\.android\.ugc\.(?:trill|aweme|tiktok\.lite))'
+    try {
+        Read-Adb shell 'ps -A -o PID,NAME' | ForEach-Object {
+            if ($_ -match "^\s*(\d+)\s+$packages(?::[^\s]+)?\s*$") { $Matches[1] }
+        }
+    } catch {
+        Add-Report 'Не удалось прочитать список процессов TikTok.'
+    }
+}
+
+function Write-LoginLog([string[]]$Log, [string[]]$TikTokPids) {
+    $header = '^\d{2}-\d{2} (?<time>\d{2}:\d{2}:\d{2}\.\d+)\s+(?<pid>\d+)\s+\d+\s+(?<level>[VDIWEFA])\s+(?<tag>[^:\s]+)\s*:\s*(?<message>.*)$'
+    $signal = '(?i)\b(?:No internet connection|UnknownHostException|(?:SSL|TLS)HandshakeException|SSLPeerUnverifiedException|CertPathValidatorException|ConnectException|SocketTimeoutException|SSLProtocolException|ERR_[A-Z0-9_]+|E(?:CONNRESET|TIMEDOUT|NETUNREACH|HOSTUNREACH)|(?:http(?:[_ ]?status)?|status[_ ]?code|error[_ ]?code|net_error|err_no)["'']?\s*[:= ]\s*-?\d{1,6}(?!\d))\b'
+    $count = 0
+    foreach ($line in $Log) {
+        $parts = [regex]::Match($line, $header)
+        if (-not $parts.Success) { continue }
+        $tag = $parts.Groups['tag'].Value
+        $message = $parts.Groups['message'].Value
+        $signals = @([regex]::Matches($message, $signal) | ForEach-Object { $_.Value } | Select-Object -Unique)
+        if ($TikTokPids -notcontains $parts.Groups['pid'].Value -and $message -notmatch 'No internet connection') { continue }
+        if (-not $signals.Count -and $tag -notmatch 'passport|ttnet|cronet|captcha|^AndroidRuntime$') { continue }
+        Add-Report ('{0} {1} {2} {3}' -f $parts.Groups['time'].Value, $parts.Groups['level'].Value, $tag, ($signals -join ', '))
+        $count++
+    }
+    if (-not $count) { Add-Report 'Коды ошибок авторизации в logcat не найдены.' }
+}
+
 if ((Read-Adb get-state) -notcontains 'device') { throw "Плата $Serial недоступна по ADB." }
 Add-Report "Плата $Serial. Время ПК $((Get-Date).ToString('o'))"
 Add-Report 'Android, модель, место на диске, настройки DNS и системного прокси'
@@ -71,6 +101,12 @@ try {
 Add-Report 'Начальное состояние шлюза'
 Add-Report (Read-Gateway)
 
+$loginPids = @()
+if ($TikTokLogin) {
+    $Trace = $true
+    Read-Host 'Open TikTok at the Send code screen. Press Enter here when ready' | Out-Null
+    $loginPids = @(Read-TikTokProcesses)
+}
 $stamp = $null
 try {
     $clock = @(Read-Adb shell "date '+%m-%d %H:%M:%S'; date '+%Y-%m-%dT%H:%M:%S%z'; date +%s")
@@ -122,9 +158,15 @@ try {
     $logArgs = @('-b', 'main', '-b', 'system', '-b', 'crash', '-v', 'threadtime')
     if ($stamp) { $logArgs += '-d', '-T', "$stamp.000" }
     else { $logArgs += '-t', '800' }
-    Read-Adb logcat @logArgs |
-        Where-Object { $_ -match $filter } | Select-Object -Last 180 | ForEach-Object { Add-Report $_ }
+    if ($TikTokLogin) {
+        $loginPids += @(Read-TikTokProcesses)
+        Write-LoginLog -Log @(Read-Adb logcat @logArgs) -TikTokPids $loginPids
+    } else {
+        Read-Adb logcat @logArgs |
+            Where-Object { $_ -match $filter } | Select-Object -Last 180 | ForEach-Object { Add-Report $_ }
+    }
 } catch {
-    Add-Report $_.Exception.Message
+    if ($TikTokLogin) { Add-Report 'Не удалось прочитать logcat для попытки авторизации.' }
+    else { Add-Report $_.Exception.Message }
 }
 Write-Host "Отчёт сохранён в $reportPath"
