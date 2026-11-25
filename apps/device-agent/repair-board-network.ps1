@@ -42,9 +42,26 @@ function Assert-VpsGuard {
 }
 
 function Read-UsbVpn {
-    Invoke-BoardAdb shell dumpsys -t 5 connectivity |
-        Where-Object { $_ -match 'NetworkAgentInfo.*type: VPN\[\].*state: CONNECTED/CONNECTED.*InterfaceName: tun0\b' } |
+    $row = Invoke-BoardAdb shell dumpsys -t 5 connectivity |
+        Where-Object { $_ -match 'NetworkAgentInfo.*type: VPN\[\].*state: CONNECTED/CONNECTED.*InterfaceName: tun\d+\b' } |
         Select-Object -First 1
+    if ($row -match '\bnetwork\{(?<id>\d+)\}.*\bInterfaceName: (?<link>tun\d+)\b.*\bDnsAddresses: \[(?<dns>[^\]]*)\]') {
+        [pscustomobject]@{
+            Id = $Matches['id']
+            Interface = $Matches['link']
+            Dns = @($Matches['dns'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        }
+    }
+}
+
+function Wait-UsbVpn([scriptblock]$Ready, [int]$Seconds) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $vpn = Read-UsbVpn
+        if (& $Ready $vpn) { return @{ Ready = $true; Vpn = $vpn } }
+        Start-Sleep -Milliseconds 750
+    } while ($clock.Elapsed.TotalSeconds -lt $Seconds)
+    return @{ Ready = $false; Vpn = $vpn }
 }
 
 if ((Invoke-BoardAdb get-state) -notcontains 'device') { throw "Плата $Serial недоступна по ADB." }
@@ -55,11 +72,9 @@ if (-not $board.configured -or $board.method -ne 'transparent' -or $board.route 
 }
 Assert-VpsGuard
 $oldVpn = Read-UsbVpn
-if ($oldVpn -notmatch '\bnetwork\{(?<id>\d+)\}') { throw 'Не найден действующий USB-VPN для сравнения до и после перезапуска.' }
-$oldNetworkId = $Matches['id']
+$oldNetworkId = if ($oldVpn) { $oldVpn.Id } else { 'отключён' }
 $reverse = Invoke-BoardAdb reverse --list | Select-String 'localabstract:gnirehtet\s+tcp:(\d+)\s*$' | Select-Object -First 1
-if (-not $reverse) { throw 'Не найден ADB reverse Gnirehtet на этой плате.' }
-$relayPort = [int]$reverse.Matches[0].Groups[1].Value
+$relayPort = if ($reverse) { [int]$reverse.Matches[0].Groups[1].Value } else { 31416 }
 $loopbackRelay = Test-NetConnection -ComputerName '127.0.0.1' -Port $relayPort -InformationLevel Quiet -WarningAction SilentlyContinue
 if (-not $loopbackRelay) { throw "Локальное реле Gnirehtet на порту $relayPort недоступно." }
 
@@ -67,9 +82,11 @@ $restrictBefore = Invoke-BoardAdb shell cmd netpolicy get restrict-background
 $blacklist = Invoke-BoardAdb shell cmd netpolicy list restrict-background-blacklist
 Write-Host "[$Serial] Data Saver до восстановления. $restrictBefore"
 Write-Host "[$Serial] Ограничения фонового трафика до восстановления. $blacklist"
-Invoke-BoardAdb shell cmd netpolicy set restrict-background false | Out-Null
-$restrictAfter = Invoke-BoardAdb shell cmd netpolicy get restrict-background
-if ($restrictAfter -notmatch '\bdisabled\b') { throw "Android не подтвердил отключение Data Saver. $restrictAfter" }
+if ($restrictBefore -notmatch '\bdisabled\b') {
+    Invoke-BoardAdb shell cmd netpolicy set restrict-background false | Out-Null
+    $restrictAfter = Invoke-BoardAdb shell cmd netpolicy get restrict-background
+    if ($restrictAfter -notmatch '\bdisabled\b') { throw "Android не подтвердил отключение Data Saver. $restrictAfter" }
+}
 $installed = @(Invoke-BoardAdb shell pm list packages)
 $removedUids = @(
     foreach ($package in 'com.zhiliaoapp.musically', 'com.zhiliaoapp.musically.go', 'com.ss.android.ugc.tiktok.lite', 'com.tiktok.lite.go') {
@@ -85,29 +102,36 @@ $removedUids = @(
 )
 if ($removedUids.Count) { Write-Host "[$Serial] Снято ограничение для UID TikTok. $($removedUids -join ', ')" }
 
-Write-Host "[$Serial] Перезапуск USB-VPN с DNS $VpsDns..."
 $previousAdb = $env:ADB
 try {
     $env:ADB = $adbPath
-    & $gnirehtet restart $Serial -d $VpsDns -p $relayPort
+    if ($oldVpn) {
+        Write-Host "[$Serial] Останавливаю USB-VPN $($oldVpn.Interface) ($oldNetworkId)..."
+        & $gnirehtet stop $Serial
+        if ($LASTEXITCODE -ne 0) { throw "Gnirehtet stop завершился с кодом $LASTEXITCODE." }
+        $stopped = Wait-UsbVpn { param($state) -not $state } 8
+        if (-not $stopped.Ready) {
+            Invoke-BoardAdb shell am force-stop com.genymobile.gnirehtet | Out-Null
+            $stopped = Wait-UsbVpn { param($state) -not $state } 8
+            if (-not $stopped.Ready) { throw 'Android продолжает показывать старый USB-VPN после остановки Gnirehtet.' }
+        }
+    }
+    Write-Host "[$Serial] Запускаю USB-VPN с DNS $VpsDns..."
+    & $gnirehtet start $Serial -d $VpsDns -p $relayPort
     if ($LASTEXITCODE -ne 0) { throw "Gnirehtet завершился с кодом $LASTEXITCODE." }
 } finally {
     $env:ADB = $previousAdb
 }
 
-$wait = [Diagnostics.Stopwatch]::StartNew()
-$newNetworkId = $null
-$dnsPattern = [regex]::Escape($VpsDns)
-do {
-    $vpn = Read-UsbVpn
-    if ($vpn -match "\bDnsAddresses: \[\s*${dnsPattern},?\s*\]" -and
-        $vpn -match '\bnetwork\{(?<id>\d+)\}' -and $Matches['id'] -ne $oldNetworkId) {
-        $newNetworkId = $Matches['id']
-        break
+$started = Wait-UsbVpn { param($state) $state -and $state.Dns.Count -eq 1 -and $state.Dns[0] -eq $VpsDns } 20
+if (-not $started.Ready) {
+    if ($started.Vpn) {
+        throw "USB-VPN $($started.Vpn.Interface) поднялся с DNS $($started.Vpn.Dns -join ', '), ожидался $VpsDns."
     }
-    Start-Sleep -Milliseconds 750
-} while ($wait.Elapsed.TotalSeconds -lt 20)
-if (-not $newNetworkId) { throw 'Android не подтвердил новый USB-VPN с DNS VPS. Проверь системный запрос разрешения VPN на этой плате.' }
+    Invoke-BoardAdb logcat -d -t 200 -s GnirehtetActivity GnirehtetService | Write-Host
+    throw 'Android не поднял USB-VPN. Если на плате открыт запрос разрешения VPN, подтверди его.'
+}
+$newNetworkId = $started.Vpn.Id
 
 $applied = Invoke-Agent '/proxy/apply-device'
 if (-not $applied.ok -or $applied.status.method -ne 'transparent' -or $applied.status.route -ne 'proxy') {
