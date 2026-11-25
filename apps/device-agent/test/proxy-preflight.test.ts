@@ -5,7 +5,7 @@ import { config } from '../src/config';
 
 test('transparent IP check neither falls back to the explicit proxy nor accepts an IP in an error', async () => {
   const commands: string[] = [];
-  const manager = Object.assign(Object.create(ProxyManager.prototype) as ProxyManager, {
+  const manager = Object.assign(Object.create(ProxyManager.prototype), {
     devices: new Map([['board', {}]]),
     runtimes: new Map([['board', { method: 'transparent' }]]),
     listeners: new Map(),
@@ -18,7 +18,7 @@ test('transparent IP check neither falls back to the explicit proxy nor accepts 
         return command.includes(' -x ') ? '198.51.100.2' : 'curl: failed to connect to 192.0.2.21';
       },
     },
-  });
+  }) as ProxyManager;
 
   const check = await manager.checkDeviceIp('board');
   assert.equal(check.ok, false);
@@ -35,11 +35,11 @@ test('publication requires transparent routing in auto mode and a known farm IP'
       ok: true, ip: '198.51.100.2', leakDetected: false, exposesHostIp: false,
       route: 'proxy' as const, method: 'system_proxy' as 'system_proxy' | 'transparent', hostIp: '192.0.2.1',
     };
-    const manager = Object.assign(Object.create(ProxyManager.prototype) as ProxyManager, {
+    const manager = Object.assign(Object.create(ProxyManager.prototype), {
       devices: new Map([['board', {}]]),
       hasAnyProxy: () => true,
       ensureDeviceInternet: async () => check,
-    });
+    }) as ProxyManager;
 
     assert.equal((await manager.preflight('board')).ok, false);
     check.method = 'transparent';
@@ -48,5 +48,61 @@ test('publication requires transparent routing in auto mode and a known farm IP'
     assert.equal((await manager.preflight('board')).ok, false);
   } finally {
     config.PROXY_ROOT_MODE = previousMode;
+  }
+});
+
+test('transparent-only mode clears the system proxy on the selected board once its firewall is confirmed', async () => {
+  const serial = 'test-transparent-only';
+  const previousDns = config.PROXY_DNS_VIA;
+  const previousRootMode = config.PROXY_ROOT_MODE;
+  config.PROXY_DNS_VIA = '10.66.66.1';
+  config.PROXY_ROOT_MODE = 'auto';
+  config.PROXY_TRANSPARENT_ONLY_DEVICES.add(serial);
+  try {
+    const settings = new Map<string, string>();
+    const listener = { port: 18800 };
+    const entry = { proxy: { host: '192.0.2.1', port: 1080, type: 'socks5' } };
+    let firewallReady = false;
+    const manager = Object.assign(Object.create(ProxyManager.prototype), {
+      devices: new Map([[serial, entry], ['standard-board', entry]]),
+      runtimes: new Map(),
+      upstreams: new Map(),
+      listeners: new Map([[serial, listener], ['standard-board', listener]]),
+      routeKind: () => 'proxy',
+      withDeviceLock: async (_id: string, action: () => Promise<void>) => action(),
+      ensureListener: async () => listener,
+      logger: { info() {}, warn() {} },
+      root: {
+        isRooted: async () => true,
+        start: async () => {},
+        isRunning: async () => firewallReady,
+      },
+      adb: {
+        exec: async () => `tcp:${config.PROXY_DEVICE_PORT} tcp:${listener.port}`,
+        shell: async (id: string, command: string) => {
+          if (command.startsWith('echo "__PROXY=')) {
+            return id === serial
+              ? '__PROXY=null\r\n__PROXY_HOST=null\r\n'
+              : `__PROXY=127.0.0.1:${config.PROXY_DEVICE_PORT}\r\n`;
+          }
+          settings.set(id, command);
+          return '';
+        },
+      },
+    }) as ProxyManager;
+
+    await assert.rejects(manager.reapplyDevice(serial), /без подтверждённого прозрачного маршрута/);
+    assert.equal(settings.has(serial), false);
+    firewallReady = true;
+    await manager.reapplyDevice(serial);
+    await manager.reapplyDevice('standard-board');
+    assert.match(settings.get(serial) ?? '', /settings delete global global_http_proxy_host/);
+    assert.match(settings.get('standard-board') ?? '', /settings put global http_proxy 127\.0\.0\.1:/);
+    assert.equal(await manager['isWiringHealthy'](serial), true);
+    assert.equal(await manager['isWiringHealthy']('standard-board'), true);
+  } finally {
+    config.PROXY_TRANSPARENT_ONLY_DEVICES.delete(serial);
+    config.PROXY_DNS_VIA = previousDns;
+    config.PROXY_ROOT_MODE = previousRootMode;
   }
 });

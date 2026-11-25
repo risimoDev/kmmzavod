@@ -192,7 +192,10 @@ case "$1" in
   status)
     if [ -n "$DNS_VIA" ] && ! {
       iptables -w 3 -C OUTPUT -j KMM_WAN &&
+      iptables -w 3 -C KMM_WAN -j REJECT &&
       ip6tables -w 3 -C OUTPUT -j KMM_WAN6 &&
+      ip6tables -w 3 -C KMM_WAN6 -j REJECT &&
+      iptables -w 3 -t nat -C KMM_PROXY -p tcp -j REDIRECT --to-ports "$PORT" &&
       iptables -w 3 -t nat -C OUTPUT -p udp --dport 53 -j KMM_DNS &&
       iptables -w 3 -t nat -C OUTPUT -p tcp --dport 53 -j KMM_DNS &&
       iptables -w 3 -t nat -C KMM_DNS -p udp -j DNAT --to-destination "$DNS_VIA:53" &&

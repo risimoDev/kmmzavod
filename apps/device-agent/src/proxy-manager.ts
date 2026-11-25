@@ -127,6 +127,28 @@ interface PersistedStateV2 {
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const clearSystemProxy = [
+  'settings put global http_proxy :0',
+  'settings delete global http_proxy',
+  'settings delete global global_http_proxy_host',
+  'settings delete global global_http_proxy_port',
+  'settings delete global global_http_proxy_exclusion_list',
+];
+
+function readSystemProxy(deviceId: string): string {
+  const proxy = 'echo "__PROXY=$(settings get global http_proxy)"';
+  return config.PROXY_TRANSPARENT_ONLY_DEVICES.has(deviceId)
+    ? `${proxy}; echo "__PROXY_HOST=$(settings get global global_http_proxy_host)"`
+    : proxy;
+}
+
+function systemProxyMatches(deviceId: string, output: string): boolean {
+  const value = /^__PROXY=([^\r\n]*)/m.exec(output)?.[1];
+  if (config.PROXY_TRANSPARENT_ONLY_DEVICES.has(deviceId)) {
+    return (value === 'null' || value === ':0') && /^__PROXY_HOST=null\r?$/m.test(output);
+  }
+  return value === `127.0.0.1:${config.PROXY_DEVICE_PORT}`;
+}
 
 function sameEndpoint(a: DeviceProxyConfig | undefined, b: DeviceProxyConfig): boolean {
   return Boolean(a && a.host === b.host && a.port === b.port && (a.username ?? '') === (b.username ?? ''));
@@ -246,10 +268,10 @@ export class ProxyManager {
       if (!reverse.includes(`tcp:${config.PROXY_DEVICE_PORT} tcp:${listener.port}`)) return false;
       const out = await this.adb.shell(
         deviceId,
-        `settings get global http_proxy; ${rt.method === 'transparent' ? 'pidof sing-box >/dev/null || echo KMM_NO_SINGBOX' : 'true'}`,
+        `${readSystemProxy(deviceId)}; ${rt.method === 'transparent' ? 'pidof sing-box >/dev/null || echo KMM_NO_SINGBOX' : 'true'}`,
         10_000,
       );
-      if (!out.includes(`127.0.0.1:${config.PROXY_DEVICE_PORT}`)) return false;
+      if (!systemProxyMatches(deviceId, out)) return false;
       if (config.PROXY_DNS_VIA) return rt.method === 'transparent' && await this.root.isRunning(deviceId);
       return !out.includes('KMM_NO_SINGBOX');
     } catch {
@@ -536,14 +558,18 @@ export class ProxyManager {
         rt.transparentError = 'Root не обнаружен или не разрешён в Magisk для Shell (UID 2000)';
       }
 
+      const transparentOnly = config.PROXY_TRANSPARENT_ONLY_DEVICES.has(deviceId);
+      if (transparentOnly && (method !== 'transparent' || !(await this.root.isRunning(deviceId)))) {
+        throw new Error('Нельзя отключить системный прокси без подтверждённого прозрачного маршрута через VPS');
+      }
       await this.adb.shell(
         deviceId,
-        [
+        (transparentOnly ? clearSystemProxy : [
           `settings put global global_http_proxy_exclusion_list "${config.PROXY_UPSTREAM_VIA ? 'localhost,127.0.0.1' : config.PROXY_BYPASS_LIST}"`,
           `settings put global http_proxy 127.0.0.1:${devicePort}`,
           `settings put global global_http_proxy_host 127.0.0.1`,
           `settings put global global_http_proxy_port ${devicePort}`,
-        ].join(' && '),
+        ]).join(' && '),
         15_000,
       );
 
@@ -576,13 +602,7 @@ export class ProxyManager {
       await this.adb
         .shell(
           deviceId,
-          [
-            'settings put global http_proxy :0',
-            'settings delete global http_proxy',
-            'settings delete global global_http_proxy_host',
-            'settings delete global global_http_proxy_port',
-            'settings delete global global_http_proxy_exclusion_list',
-          ].join('; '),
+          clearSystemProxy.join('; '),
           15_000,
         )
         .catch(() => {});
@@ -1221,12 +1241,12 @@ export class ProxyManager {
     try {
       const out = await this.adb.shell(
         deviceId,
-        `echo "__PROXY=$(settings get global http_proxy)"; ` +
+        `${readSystemProxy(deviceId)}; ` +
           `{ if command -v curl >/dev/null 2>&1; then curl -s -S -m 5 http://127.0.0.1:${port}/__kmm/ping; ` +
           `else (printf 'GET /__kmm/ping HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n'; sleep 2) | toybox nc 127.0.0.1 ${port}; fi; } 2>&1; true`,
         20_000,
       );
-      const systemProxyOk = out.includes(`__PROXY=127.0.0.1:${port}`);
+      const systemProxyOk = systemProxyMatches(deviceId, out);
       if (out.includes('KMM_GATEWAY_OK')) return { ok: true, detail: 'ok', systemProxyOk };
       return { ok: false, systemProxyOk, detail: out.replace(/__PROXY=\S*/, '').trim().slice(0, 200) || 'нет ответа' };
     } catch (err) {
@@ -1256,13 +1276,15 @@ export class ProxyManager {
         await this.applyDevice(deviceId).catch(() => {});
         probe = await this.probeGateway(deviceId);
       }
-      if (!probe.ok || (!probe.systemProxyOk && this.runtimes.get(deviceId)?.method !== 'transparent')) {
+      if (!probe.ok || (!probe.systemProxyOk && (
+        config.PROXY_TRANSPARENT_ONLY_DEVICES.has(deviceId) || this.runtimes.get(deviceId)?.method !== 'transparent'
+      ))) {
         const rt = this.runtimes.get(deviceId);
         return {
           ...base(),
           ok: false,
           error:
-            (probe.ok ? 'Системный HTTP-прокси платы не указывает на шлюз агента' :
+            (probe.ok ? 'Системный HTTP-прокси платы не соответствует настройкам агента' :
               `Плата не достаёт до шлюза агента (127.0.0.1:${config.PROXY_DEVICE_PORT} через adb reverse): ${probe.detail}`) +
             (rt?.applyError ? `. Последняя ошибка настройки: ${rt.applyError}` : ''),
         };

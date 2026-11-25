@@ -16,6 +16,11 @@ const relayDns = env('DEVICE_AGENT_DNS_VIA', '').trim();
 if (relayDns && (!isIPv4(relayDns) || !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(relayDns) || !env('DEVICE_AGENT_UPSTREAM_VIA', ''))) {
   throw new Error('DEVICE_AGENT_DNS_VIA requires the tunnel IPv4 of the VPS and DEVICE_AGENT_UPSTREAM_VIA');
 }
+const proxyRootMode = env('DEVICE_AGENT_PROXY_ROOT_MODE', 'auto') === 'off' ? 'off' as const : 'auto' as const;
+const transparentOnlyDevices = new Set(env('DEVICE_AGENT_TRANSPARENT_ONLY_DEVICES', '').split(',').map((id) => id.trim()).filter(Boolean));
+if (transparentOnlyDevices.size > 0 && (!relayDns || proxyRootMode !== 'auto')) {
+  throw new Error('DEVICE_AGENT_TRANSPARENT_ONLY_DEVICES requires root proxy mode and DNS through the VPS');
+}
 
 function detectTunnelHost(): string | null {
   if (process.env.DEVICE_AGENT_HOST) return process.env.DEVICE_AGENT_HOST;
@@ -95,7 +100,9 @@ export const config = {
   PROXY_UPSTREAM_VIA: env('DEVICE_AGENT_UPSTREAM_VIA', ''),
   PROXY_DNS_VIA: relayDns,
   // 'auto' = transparent sing-box+iptables on rooted boards, 'off' = system HTTP proxy only.
-  PROXY_ROOT_MODE: env('DEVICE_AGENT_PROXY_ROOT_MODE', 'auto') === 'off' ? 'off' as const : 'auto' as const,
+  PROXY_ROOT_MODE: proxyRootMode,
+  // Comma-separated serials that use only sing-box interception, even for proxy-aware apps.
+  PROXY_TRANSPARENT_ONLY_DEVICES: transparentOnlyDevices,
   // How often the watchdog re-checks that every phone is still wired to its gateway.
   PROXY_WATCHDOG_INTERVAL_MS: Number(env('DEVICE_AGENT_PROXY_WATCHDOG_MS', '20000')),
   // Hosts the phone reaches directly (Android global-proxy exclusion list).
