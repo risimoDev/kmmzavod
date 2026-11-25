@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isNewPostOnProfile, uploadPercent, type FlowState } from '../src/publish-flow';
+import { decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
 import { parsePostsCount, parseProfileDump } from '../src/profile-stats';
 
@@ -72,6 +72,14 @@ const discard = screen(IG,
   button('Keep editing', [60, 1220, 1020, 1320]));
 a = decide('instagram', discard, st({ targetChosen: true }), true);
 ok(a.kind === 'tap' && /keep editing/i.test(a.el.text || a.el.parent?.text || ''), 'discard dialog → Keep editing (never Discard)');
+
+const saveDraft = button('Save to drafts', [60, 1100, 1020, 1200]);
+a = decide('instagram', screen(IG, saveDraft, button('Keep editing', [60, 1220, 1020, 1320])), st(), true);
+ok(a.kind === 'tap' && a.el.text === 'Keep editing', 'offer to save a draft → keep editing when possible');
+a = decide('instagram', screen(IG, saveDraft), st(), true);
+ok(a.kind === 'error' && !a.retryable, 'offer to save a draft alone → stop');
+a = decide('tiktok', screen(TT, el({ text: 'Saved to drafts', b: [60, 900, 1020, 1000] })), st({ shareTapped: true }), true);
+ok(a.kind === 'error' && !a.retryable, 'draft confirmation after share → failure');
 
 const tip = screen(IG, el({ text: 'Reels are now longer', b: [60, 900, 1020, 1000] }), button('OK', [60, 1100, 1020, 1200]));
 a = decide('instagram', tip, st({ targetChosen: true }), true);
@@ -217,6 +225,8 @@ ok(!!fpb && fpb.bounds[1] > 2000 && fpb.text === 'Post', `TikTok: bottom "Post" 
 a = decide('tiktok', ttPostReal, st({ captionDone: true }), true);
 ok(a.kind === 'tap' && a.marks === 'share' && a.el.bounds[1] > 2000, `TikTok real screen, caption typed → tap bottom Post (${a.kind} @${a.kind === 'tap' ? a.el.bounds[1] : '-'})`);
 ok(isComposeScreen('tiktok', ttPostReal), 'TikTok real screen recognised as compose screen');
+ok(isDraftTap(ttPostReal, { x: 65, y: 2240 }), 'coordinate inside the clickable drafts container is blocked');
+ok(!isDraftTap(ttPostReal, { x: 800, y: 2240 }), 'neighboring Post button is outside the drafts container');
 const ttHeaderOnly = screen(TT, el({ text: 'Post', b: [470, 110, 610, 170] }),
   el({ id: 'com.zhiliaoapp.musically:id/desc', cls: 'android.widget.EditText', click: true, b: [40, 230, 760, 640], text: 'x' }));
 ok(!findPostButton(ttHeaderOnly, 'tiktok'), 'TikTok: header "Post" alone is never the button');
@@ -226,6 +236,7 @@ ok(!isComposeScreen('tiktok', ttFeedAfter), 'TikTok feed after posting is not a 
 // ── Real dump from the farm (TikTok Lite 47.0.3, 2026-10-25): upload stuck at 58%, "Network error"
 const netErr = parseUi(fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-lite-network-error.xml'), 'utf8'));
 ok(isAppOffline(netErr), 'real dump: TikTok Lite "Network error" detected');
+ok(isAppOffline(screen(TT, el({ text: 'No network connection', b: [60, 900, 1020, 1000] }))), 'TikTok Lite "No network connection" detected');
 ok(uploadPercent(netErr) === 58, `real dump: upload badge 58% read (${uploadPercent(netErr)})`);
 ok(!isAppOffline(ttPostReal) && uploadPercent(ttPostReal) === null, 'post screen: neither offline nor uploading');
 

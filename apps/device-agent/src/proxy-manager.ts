@@ -419,7 +419,7 @@ export class ProxyManager {
     if (targetHost && isLocalProxyHost(targetHost)) return { kind: 'direct' };
     const standby = this.trafficStandby;
     const inactive = this.mode === 'shared_sequential' && this.activeDeviceId !== deviceId;
-    if (relayOnly && (!entry || standby || inactive)) {
+    if ((relayOnly || this.mode === 'private_parallel') && (!entry || standby || inactive)) {
       return { kind: 'block', reason: standby ? 'Трафик плат на паузе' : !entry ? 'У платы нет назначенного прокси' : 'Плата ждёт общий прокси' };
     }
     if (!entry) return { kind: 'direct' };
@@ -1002,6 +1002,9 @@ export class ProxyManager {
     targetDeviceId: string,
     opts: { force?: boolean } = {},
   ): Promise<{ ok: boolean; activeDeviceId: string; previousDeviceId?: string }> {
+    if (this.mode !== 'shared_sequential') {
+      throw new Error('Передача общего прокси доступна только в режиме Shared Sequential');
+    }
     if (!opts.force && this.isLeasedByOther(targetDeviceId)) {
       throw new Error(`Общий прокси сейчас занят задачей на плате ${this.lease!.deviceId} — дождитесь её завершения`);
     }
@@ -1110,9 +1113,9 @@ export class ProxyManager {
       'auth_failed', 'relay_denied', 'relay_unavailable', 'relay_upstream', 'protocol',
     ].includes(check.code))) return check;
 
-    // The gateway probe already repairs broken ADB wiring. DNS and remote outages
-    // should not cycle radios or restart sing-box on an otherwise wired board.
-    if (config.PROXY_UPSTREAM_VIA) return check;
+    // Dedicated proxies retain their address on failure. The gateway probe can
+    // repair the same ADB wiring, but a failed probe cannot rotate IP or enable Wi-Fi.
+    if (this.mode === 'private_parallel' || config.PROXY_UPSTREAM_VIA) return check;
 
     this.logger.warn({ deviceId, error: check.error }, 'proxy-manager: device has no internet — initiating active self-healing');
 
@@ -1155,7 +1158,7 @@ export class ProxyManager {
    * home IP while proxies are in use on this farm.
    */
   async preflight(deviceId: string): Promise<{ ok: boolean; detail?: string; ipCheck?: DeviceIpCheckResult }> {
-    const usingProxies = Boolean(config.PROXY_UPSTREAM_VIA) || this.hasAnyProxy();
+    const usingProxies = this.mode === 'private_parallel' || Boolean(config.PROXY_UPSTREAM_VIA) || this.hasAnyProxy();
     if (usingProxies && !this.devices.has(deviceId)) {
       return { ok: false, detail: 'У платы нет назначенного прокси' };
     }

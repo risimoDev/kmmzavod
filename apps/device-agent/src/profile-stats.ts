@@ -6,8 +6,8 @@
  *   • followers (header),
  *   • the post grid: view count on each tile (newest first), pinned tiles.
  *
- * The orchestrator matches tiles to its PublishJobs (newest ↔ newest) to record
- * per-post views and to VERIFY that a post really appeared on the profile.
+ * A tile has no stable post ID. The analytics page shows these counts as a
+ * profile snapshot, without attributing them to individual publish jobs.
  * Parsing is a pure function (`parseProfileDump`) so it is unit-testable on
  * XML fixtures without a phone.
  */
@@ -24,7 +24,9 @@ export interface ProfileTile {
 export interface ProfileStats {
   ok: boolean;
   platform: 'instagram' | 'tiktok';
+  username?: string;
   followers: number | null;
+  posts?: number | null;
   tiles: ProfileTile[];
   detail?: string;
 }
@@ -123,6 +125,18 @@ function headerCount(nodes: UiNode[], labelRe: RegExp, inlineRe: RegExp, screenW
 /** Instagram profile header "N posts / N публикаций" (TikTok shows no post count → null). */
 export function parsePostsCount(xml: string, screenW: number): number | null {
   return headerCount(parseUiTree(xml), POSTS_RE, /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(публикаци|posts?\b)/i, screenW).value;
+}
+
+export function profileMatchesUsername(xml: string, screenH: number, username: string, platform: ProfileStats['platform']): boolean {
+  const normalize = (value: string) => value.trim().replace(/^@/, '').toLowerCase();
+  const expected = normalize(username);
+  if (!/^[a-z\d._]{1,100}$/.test(expected)) return false;
+  return parseUiTree(xml).some((node) => {
+    const [, top, , bottom] = node.bounds;
+    if (bottom <= top || top >= screenH * (platform === 'instagram' ? 0.18 : 0.32)) return false;
+    return [node.text, node.desc].some((value) => normalize(value) === expected &&
+      (platform === 'instagram' || value.trim().startsWith('@') || /user_?name/i.test(node.resId)));
+  });
 }
 const PINNED_RE = /(закреплен|pinned)/i;
 
@@ -275,25 +289,35 @@ export async function collectProfileStats(
     await openProfile(adb, deviceId, platform, user, targetPkg);
     await new Promise((r) => setTimeout(r, 5000));
 
-    let xml = await dump(adb, deviceId);
+    const xml = await dump(adb, deviceId);
+    if (!profileMatchesUsername(xml, height, user, platform)) {
+      await adb.home(deviceId).catch(() => {});
+      return { ok: false, platform, followers: null, tiles: [], detail: `На телефоне не удалось подтвердить профиль @${user}` };
+    }
+    const header = parseProfileDump(xml, width, height);
+    if (!header.onProfile) {
+      await adb.home(deviceId).catch(() => {});
+      return { ok: false, platform, followers: null, tiles: [], detail: `Профиль @${user} не открылся (нет счётчика подписчиков на экране)` };
+    }
+    const posts = platform === 'instagram' ? parsePostsCount(xml, width) : null;
+    let tiles = header.tiles;
     // Instagram shows view counts only on the Reels tab of the profile.
     if (platform === 'instagram') {
-      const reelsTab = parseUiTree(xml).find((n) => /^reels$/i.test(n.desc.trim()) || /^reels$/i.test(n.text.trim()));
+      const reelsLabel = /^(reels|рилс|видео reels)$/i;
+      const reelsTab = parseUiTree(xml).find((n) => reelsLabel.test(n.desc.trim()) || reelsLabel.test(n.text.trim()));
+      tiles = [];
       if (reelsTab) {
         const [x1, y1, x2, y2] = reelsTab.bounds;
         await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
         await new Promise((r) => setTimeout(r, 3000));
-        xml = await dump(adb, deviceId);
+        const reels = parseProfileDump(await dump(adb, deviceId), width, height);
+        if (reels.onProfile) tiles = reels.tiles;
       }
     }
 
-    const parsed = parseProfileDump(xml, width, height);
     await adb.home(deviceId).catch(() => {});
-    if (!parsed.onProfile) {
-      return { ok: false, platform, followers: null, tiles: [], detail: `Профиль @${user} не открылся (нет счётчика подписчиков на экране)` };
-    }
-    logger.info({ deviceId, platform, user, followers: parsed.followers, tiles: parsed.tiles.length }, 'profile-stats: snapshot');
-    return { ok: true, platform, followers: parsed.followers, tiles: parsed.tiles };
+    logger.info({ deviceId, platform, user, followers: header.followers, tiles: tiles.length }, 'profile-stats: snapshot');
+    return { ok: true, platform, username: user, followers: header.followers, posts, tiles };
   } catch (err) {
     logger.error({ deviceId, err: (err as Error).message }, 'profile-stats: failed');
     return { ok: false, platform, followers: null, tiles: [], detail: (err as Error).message };

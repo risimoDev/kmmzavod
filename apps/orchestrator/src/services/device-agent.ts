@@ -58,7 +58,10 @@ function getAlternateUrl(currentUrl: string): string | null {
   return null;
 }
 
-export async function requestWithFallback<T>(fn: (base: string) => Promise<{ data: T }>): Promise<T> {
+export async function requestWithFallback<T>(
+  fn: (base: string) => Promise<{ data: T }>,
+  { reportAlternateError = false } = {},
+): Promise<T> {
   const base = await getDeviceAgentBaseUrl();
   try {
     const res = await fn(base);
@@ -71,8 +74,8 @@ export async function requestWithFallback<T>(fn: (base: string) => Promise<{ dat
         activeBaseUrl = alt;
         lastBaseCheck = Date.now();
         return res.data;
-      } catch {
-        // preserve original error
+      } catch (alternateError) {
+        if (reportAlternateError) throw alternateError;
       }
     }
     throw err;
@@ -216,7 +219,9 @@ export const deviceAgentService = {
         checkIpFirst: true,
         claudehubApiKey: opts.claudehubApiKey,
         aiModel: opts.aiModel,
-      }, { timeout: DEVICE_PUBLISH_TIMEOUT_MS })
+      }, { timeout: DEVICE_PUBLISH_TIMEOUT_MS }),
+      // The alternate request may have reached the phone even if its response was lost.
+      { reportAlternateError: true },
     );
   },
 

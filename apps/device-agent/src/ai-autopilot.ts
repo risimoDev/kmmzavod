@@ -32,7 +32,7 @@ export interface AiAutopilotInput {
   logger: Logger;
 }
 
-export type AiActionKind = 'tap' | 'tap_coord' | 'type_caption' | 'tap_draft' | 'retry_network' | 'key_back' | 'swipe_up' | 'abort' | 'require_human' | 'none';
+export type AiActionKind = 'tap' | 'tap_coord' | 'type_caption' | 'retry_network' | 'key_back' | 'swipe_up' | 'abort' | 'require_human' | 'none';
 
 export interface AiAutopilotDecision {
   screenType: 'modal_dialog' | 'editor' | 'compose' | 'share_target' | 'drafts' | 'network_error' | 'blocker' | 'feed' | 'other';
@@ -212,16 +212,12 @@ export async function consultAiAutopilot(input: AiAutopilotInput): Promise<AiAut
   const elementsSummary = buildElementsSummary(input.screen);
 
   const systemPrompt = `Ты — автономный мобильный AI-ассистент автоматизации публикации видео в ${input.platform}.
-Твоя цель: помочь скрипту преодолеть любой экран на телефоне (включая черновики, сбои сети, модальные окна) и гарантированно выложить ролик с правильным описанием.
+Твоя цель — помочь скрипту опубликовать текущий ролик с правильным описанием. При блокировке публикации остановись и объясни причину.
 
 ПРАВИЛА И СТРАТЕГИИ ПОВЕДЕНИЯ:
 
 1. ЧЕРНОВИКИ / DRAFTS (ВОССТАНОВЛЕНИЕ НЕВЫЛОЖЕННОГО РОЛИКА):
-   - Если открыт профиль, галерея или раздел черновиков, и виден пункт "Черновики" / "Drafts" (например "Drafts: 1", "Черновики: 1"):
-     action = "tap" (targetText = "Черновики" / "Drafts") или "tap_coord" по плитке черновиков. marks = "target".
-   - Если открыт список черновиков (список видео): нажми на первый (самый новый/верхний) черновик. action = "tap" или "tap_coord".
-   - Если открылся видеоредактор черновика: нажми "Далее" / "Next" (marks = "next").
-   - Если открылся экран публикации черновика: проверь подпись (если пустая — action = "type_caption"), и нажми "Опубликовать" / "Post" (marks = "share").
+   - Публикуй только ролик, открытый текущей задачей. Если открыт список черновиков или редактор черновика, верни action = "require_human". Плитку «Черновики» оставь без действий.
 
 2. СЕТЕВЫЕ СБОИ И ПОВТОРЫ ЗАГРУЗКИ ("Network error" / "Ошибка сети"):
    - Если на экране ошибка сети ("Network error", "Не удалось загрузить", "Сохранено в черновиках", "Попробуйте позже"):
@@ -232,7 +228,7 @@ export async function consultAiAutopilot(input: AiAutopilotInput): Promise<AiAut
    - Если открыто всплывающее окно (синхронизация контактов, запрос уведомлений, опрос, реклама, подтверждение):
      - Найди способ отклонить или закрыть: крестик [X], "Не сейчас", "Позже", "Отклонить", "Пропустить", "Don't allow", "Not now", "Dismiss", "Cancel", "OK".
      - Если диалог спрашивает "Сохранить в черновики или сбросить?" ("Save to drafts or discard?"):
-       ВСЕГДА выбирай "Сохранить в черновики" ("Save to drafts" / "Keep editing"), НИКОГДА не удаляй/сбрасывай черновик!
+       Выбирай только "Продолжить редактирование" ("Keep editing"). Если такого варианта нет, верни action = "require_human".
      - action = "tap" (с targetText) или "tap_coord" (с x, y).
 
 4. ВЫБОР ФОРМАТА / ШТОРКА (Share on TikTok, Reels vs Feed):
@@ -261,7 +257,7 @@ export async function consultAiAutopilot(input: AiAutopilotInput): Promise<AiAut
 ФОРМАТ ОТВЕТА (ТОЛЬКО JSON, без разметки markdown):
 {
   "screenType": "modal_dialog" | "editor" | "compose" | "share_target" | "drafts" | "network_error" | "blocker" | "feed" | "other",
-  "action": "tap" | "tap_coord" | "type_caption" | "tap_draft" | "retry_network" | "key_back" | "swipe_up" | "abort" | "require_human" | "none",
+  "action": "tap" | "tap_coord" | "type_caption" | "retry_network" | "key_back" | "swipe_up" | "abort" | "require_human" | "none",
   "targetText": "текст или описание кнопки",
   "x": 500,
   "y": 750,
@@ -297,8 +293,12 @@ ${elementsSummary || '(список элементов пуст, ориенти�
         logger: input.logger,
       });
 
-      const parsed = extractJsonFromText<AiAutopilotDecision>(responseText);
+      const parsed = extractJsonFromText<Omit<AiAutopilotDecision, 'action'> & { action: AiActionKind | 'tap_draft' }>(responseText);
       if (parsed && parsed.action) {
+        if (parsed.action === 'tap_draft' || parsed.screenType === 'drafts' ||
+          /^(?:drafts?|черновики?|save (?:to )?drafts?|сохранить в черновики?)(?::|$)/i.test(parsed.targetText?.trim() ?? '')) {
+          return { screenType: 'drafts', action: 'require_human', reason: 'Автопилот не открывает и не сохраняет черновики' };
+        }
         input.logger.info(
           {
             deviceId: input.deviceId,
@@ -310,7 +310,7 @@ ${elementsSummary || '(список элементов пуст, ориенти�
           },
           'ai-autopilot: decision received'
         );
-        return parsed;
+        return { ...parsed, action: parsed.action };
       }
     } catch (err: any) {
       input.logger.warn({ model, err: err.message }, 'ai-autopilot: model query failed, trying fallback');

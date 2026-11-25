@@ -540,7 +540,7 @@ app.post('/publish', async (req, reply) => {
     release = () => { restoreMedia(); releaseLease(); };
     let exitIp: string | undefined;
     let country: string | undefined;
-    if (checkIpFirst) {
+    if (checkIpFirst || proxyManager.mode === 'private_parallel' || config.PROXY_UPSTREAM_VIA) {
       const guard = await proxyManager.preflight(publishReq.deviceId);
       exitIp = guard.ipCheck?.ip;
       country = guard.ipCheck?.country;

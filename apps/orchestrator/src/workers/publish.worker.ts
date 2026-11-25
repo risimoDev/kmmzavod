@@ -329,6 +329,10 @@ export function createPublishWorker(deps: Deps): Worker {
           where: { id: socialAccountId },
         });
         accountName = accountRaw.accountName;
+        if (autopilotId && (accountRaw.authMethod !== 'device' || !accountRaw.deviceId ||
+          accountRaw.tenantId !== tenantId || accountRaw.platform !== platform)) {
+          throw new UnrecoverableError('Автопилот: аккаунт больше не привязан к плате для этой публикации');
+        }
         const account = {
           ...accountRaw,
           accessToken: decrypt(accountRaw.accessToken),
@@ -349,7 +353,7 @@ export function createPublishWorker(deps: Deps): Worker {
         youtube.proxyUrl = accountProxy;
         if (postbridge) postbridge.proxyUrl = accountProxy;
 
-        if (accountProxy) {
+        if (accountProxy && accountRaw.authMethod !== 'device') {
           const safeProxy = accountProxy.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
           logger.info({ socialAccountId, proxy: safeProxy }, 'Publish: using per-account proxy');
         }
@@ -603,7 +607,7 @@ export function createPublishWorker(deps: Deps): Worker {
           if (result.verified?.profile) verifiedAt = new Date();
           if (result.detail) publishNote = result.detail; // e.g. caption could not be checked
           if (result.exitIp) {
-            logger.info({ deviceId: accountRaw.deviceId, platform, exitIp: result.exitIp, country: result.country }, 'Publish: phone upload confirmed with rotated proxy IP');
+            logger.info({ deviceId: accountRaw.deviceId, platform, exitIp: result.exitIp, country: result.country }, 'Publish: phone upload confirmed with the board proxy IP');
             publishNote = publishNote ? `${publishNote} (IP: ${result.exitIp})` : `Опубликовано с IP: ${result.exitIp}`;
           }
           // No external post id available from real-app UI automation.

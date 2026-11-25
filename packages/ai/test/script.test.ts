@@ -1,3 +1,4 @@
+import { strictEqual } from 'node:assert';
 import { LlmChain, writeScript, countWords, trimMiddle, sanitizeForVoiceover, observePace, paceFor, templateScript, LlmUnavailableError } from '../src/index';
 
 const calls: { url: string; body: any }[] = [];
@@ -29,6 +30,7 @@ const ok = (c: boolean, m: string) => console.log(c ? 'PASS' : 'FAIL', m);
   }));
   const r = await writeScript(llm, { product: 'Пылесос X', style: 'review', seconds: 30, wps: 2.3, narrator: 'male', captionsCount: 3 });
   ok(r.provider === 'gptunnel', `fallback to gptunnel (got ${r.provider})`);
+  strictEqual(r.hook, 'Начало.', 'the reported hook must come from the spoken script');
   ok(r.words >= 62 && r.words <= 75, `length corrected to ${r.words} (target ${r.targetWords})`);
   ok(r.captions.length === 3 && new Set(r.captions.map((c) => c.caption)).size === 3, `3 distinct captions: ${r.captions.map((c) => c.caption).join(' | ')}`);
   ok(r.captions[0].hashtags[0] === '#обзор', 'hashtags normalised with #');
@@ -48,6 +50,14 @@ const ok = (c: boolean, m: string) => console.log(c ? 'PASS' : 'FAIL', m);
   const r2 = await writeScript(llm2, { product: 'Пылесос', style: 'hype', seconds: 30, wps: 2.3, avoidHooks: ['вы делаете уборку неправильно!'] });
   ok(r2.hook.startsWith('Этот пылесос'), `hook re-rolled → "${r2.hook}"`);
   ok(r2.notes.some((x) => x.includes('Хук')), 'note about hook regen');
+
+  let greetingCalls = 0;
+  const llm3 = new LlmChain([{ name: 'openrouter', baseUrl: 'https://or', apiKey: 'k', models: ['a'] }], fakeFetch(() => {
+    const opening = greetingCalls++ === 0 ? 'Привет!' : 'Как убрать крошки с дивана?';
+    return reply({ hook: 'Посторонний заголовок', script: `${opening} ${words(61)}. Ссылка в описании.`, captions: [{ caption: 'c' }] });
+  }));
+  const r3 = await writeScript(llm3, { product: 'Пылесос', style: 'blogger', seconds: 30, wps: 2.3 });
+  strictEqual(r3.hook, 'Как убрать крошки с дивана?', 'a greeting triggers a retry based on the spoken opening');
 
   // 3. No providers: error vs template.
   const none = new LlmChain([{ name: 'openrouter', baseUrl: 'x', apiKey: '', models: ['a'] }]);

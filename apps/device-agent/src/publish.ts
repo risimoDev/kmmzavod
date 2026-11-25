@@ -24,9 +24,10 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
-import { decide, findPostButton, initialFlowState, isAppOffline, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
+import type { ProxyManager } from './proxy-manager';
+import { decide, findPostButton, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
-import { dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
+import { center, clickTarget, dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
 
 function escapeRegExp(str: string): string {
@@ -143,35 +144,36 @@ const UPLOAD_STALL_MS = 90_000;
 const PROFILE_CHECK_GAP_MS = 20_000;
 const MEDIA_URI = 'content://media/external/video/media';
 
-/**
- * Executes proactive self-healing for the board's network connection:
- * wakes the device, enables Wi-Fi radio, and invokes proxyManager.ensureDeviceInternet.
- */
-async function selfHealBoardInternet(
-  adb: AdbClient,
+/** Check the board route; the proxy manager owns any recovery policy. */
+async function checkBoardInternet(
   deviceId: string,
-  proxyManager: any | undefined,
+  proxyManager: ProxyManager | undefined,
   logger: Logger,
   reason: string,
   updateProgressFn?: (step: string) => void,
 ): Promise<{ ok: boolean; ip?: string; detail?: string }> {
-  logger.warn({ deviceId, reason }, 'publish: self-healing board internet connection');
-  updateProgressFn?.(`Восстановление сети на плате (${reason})...`);
-  await adb.wakeUp(deviceId).catch(() => {});
-  await adb.fastShell(deviceId, 'svc wifi enable').catch(() => {});
-  if (proxyManager && typeof proxyManager.ensureDeviceInternet === 'function') {
-    const res = await proxyManager.ensureDeviceInternet(deviceId).catch(() => ({ ok: false }));
+  logger.debug({ deviceId, reason }, 'publish: checking board internet connection');
+  updateProgressFn?.(`Проверка сети платы (${reason})...`);
+  if (!proxyManager) return { ok: true };
+  try {
+    if (proxyManager.mode === 'private_parallel' || config.PROXY_UPSTREAM_VIA) {
+      const guard = await proxyManager.preflight(deviceId);
+      return { ok: guard.ok, ip: guard.ipCheck?.ip, detail: guard.detail ?? guard.ipCheck?.error };
+    }
+    const res = await proxyManager.ensureDeviceInternet(deviceId);
     if (res.ok) {
-      updateProgressFn?.(`Сеть платы восстановлена (IP: ${res.ip || 'OK'})`);
+      updateProgressFn?.(`Сеть платы доступна (IP: ${res.ip || 'OK'})`);
       return res;
     }
     return { ok: false, detail: res.error || 'Не удалось восстановить доступ в интернет на плате' };
+  } catch (err) {
+    logger.warn({ deviceId, reason, err }, 'publish: board route check failed');
+    return { ok: false, detail: 'Ошибка проверки маршрута платы' };
   }
-  return { ok: true };
 }
 
 export interface PublishToDeviceDeps {
-  proxyManager?: any;
+  proxyManager?: ProxyManager;
   logger: Logger;
 }
 
@@ -181,7 +183,7 @@ export async function publishToDevice(
   depsOrProxyManager: PublishToDeviceDeps | any,
   maybeLogger?: Logger,
 ): Promise<PublishResult> {
-  const proxyManager = maybeLogger ? depsOrProxyManager : (depsOrProxyManager?.proxyManager ?? undefined);
+  const proxyManager: ProxyManager | undefined = maybeLogger ? depsOrProxyManager : depsOrProxyManager?.proxyManager;
   const logger: Logger = maybeLogger || depsOrProxyManager?.logger || depsOrProxyManager;
   const { deviceId, platform, videoUrl } = req;
   const caption = req.caption.trim();
@@ -235,12 +237,11 @@ export async function publishToDevice(
     await adb.fastShell(deviceId, 'svc power stayon true').catch(() => {});
     await adb.fastShell(deviceId, 'wm dismiss-keyguard; input keyevent 82').catch(() => {});
 
-    // Proactive self-healing of board internet connection before proceeding
-    const internetCheck = await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'подготовка к публикации', (msg) => {
+    const internetCheck = await checkBoardInternet(deviceId, proxyManager, logger, 'подготовка к публикации', (msg) => {
       updateProgress(deviceId, { platform, stage: 'prepare', step: msg, percent: 46 });
     });
     if (!internetCheck.ok) {
-      logger.warn({ deviceId, detail: internetCheck.detail }, 'publish: board internet check warning, continuing flow');
+      return result({ ok: false, retryable: true, detail: internetCheck.detail || 'Маршрут платы перед публикацией не подтверждён' });
     }
 
     const resolved = await new PackageResolver(adb, logger).resolve(deviceId, platform);
@@ -264,10 +265,11 @@ export async function publishToDevice(
     // (seen on the farm: TikTok stuck at 58%). Nothing is posted yet → safe to retry later.
     let before = await dumpScreen(adb, deviceId, 1);
     if (before && before.pkg === pkg && isAppOffline(before)) {
-      logger.warn({ deviceId, platform }, 'publish: обнаружена «Network error» до публикации — попытка авто-восстановления сети');
-      await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'Network error в приложении перед публикацией', (msg) => {
+      logger.warn({ deviceId, platform }, 'publish: приложение сообщило об ошибке сети перед публикацией');
+      const recovered = await checkBoardInternet(deviceId, proxyManager, logger, 'Network error в приложении перед публикацией', (msg) => {
         updateProgress(deviceId, { platform, stage: 'prepare', step: msg, percent: 48 });
       });
+      if (!recovered.ok) return result({ ok: false, retryable: true, detail: recovered.detail || 'Маршрут платы не подтверждён' });
       await adb.fastShell(deviceId, `am force-stop ${pkg}`).catch(() => {});
       await sleep(2000);
       await adb.openApp(deviceId, pkg).catch(() => {});
@@ -374,11 +376,15 @@ export async function publishToDevice(
 
           if (aiDecision) {
             updateProgress(deviceId, { platform, stage: 'compose', step: `ИИ: ${aiDecision.reason || 'восстановление'}`, percent: 60 });
-            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
+            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
               let targetEl = aiDecision.targetText
                 ? screen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
                 : undefined;
               const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, { width: sw, height: sh });
+              const point = targetEl ? center(isVisible(targetEl) ? targetEl : clickTarget(targetEl)) : coords;
+              if (point && isDraftTap(screen, point)) {
+                return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
+              }
               if (targetEl) {
                 logger.info({ deviceId, targetText: aiDecision.targetText, reason: aiDecision.reason }, 'publish: ИИ нажал элемент на рабочем столе');
                 await tapEl(adb, deviceId, targetEl);
@@ -450,10 +456,10 @@ export async function publishToDevice(
           } else if (action.marks === 'target') {
             updateProgress(deviceId, { platform, stage: 'compose', step: `Выбор формата (${action.why})...`, percent: 60 });
           }
+          if (action.marks === 'share') { st.shareTapped = true; posted = 'unknown'; }
           await tapEl(adb, deviceId, action.el);
           if (action.marks === 'target') st.targetChosen = true;
           if (action.marks === 'next') st.nextTaps++;
-          if (action.marks === 'share') { st.shareTapped = true; posted = 'unknown'; }
           unknown = 0;
           await sleep(2500);
           continue;
@@ -524,9 +530,10 @@ export async function publishToDevice(
             if (aiDecision.action === 'retry_network') {
               logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot retry network requested');
               updateProgress(deviceId, { platform, stage: 'upload', step: 'ИИ: повтор отправки и самовосстановление сети...', percent: 75 });
-              await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'ИИ запрос на повтор сети', (msg) => {
+              const recovered = await checkBoardInternet(deviceId, proxyManager, logger, 'ИИ запрос на повтор сети', (msg) => {
                 updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 76 });
               });
+              if (!recovered.ok) return result({ ok: false, retryable: true, detail: recovered.detail || 'Маршрут платы не подтверждён' });
               const retryBtn = screen.els.find((e) => /try again|повторить|retry/i.test(`${e.text} ${e.desc}`));
               if (retryBtn) await tapEl(adb, deviceId, retryBtn);
               unknown = 0;
@@ -559,6 +566,9 @@ export async function publishToDevice(
               } else {
                 const captionCoords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
                 if (captionCoords) {
+                  if (isDraftTap(screen, captionCoords)) {
+                    return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
+                  }
                   logger.info({ deviceId, platform, x: captionCoords.x, y: captionCoords.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
                   await adb.tap(deviceId, captionCoords.x, captionCoords.y);
                 } else if (aiDecision.targetText) {
@@ -581,7 +591,7 @@ export async function publishToDevice(
               continue;
             }
 
-            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord' || aiDecision.action === 'tap_draft') {
+            if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
               let targetEl: UiEl | undefined;
               if (aiDecision.targetText) {
                 const escaped = escapeRegExp(aiDecision.targetText.trim());
@@ -597,27 +607,25 @@ export async function publishToDevice(
               }
 
               const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
-
-              if (targetEl) {
-                logger.info({ deviceId, platform, target: targetEl.text || targetEl.desc, reason: aiDecision.reason }, 'publish: AI Autopilot tapped element');
-                await tapEl(adb, deviceId, targetEl);
-              } else if (coords) {
-                logger.info({ deviceId, platform, x: coords.x, y: coords.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapped coordinates');
-                await adb.tap(deviceId, coords.x, coords.y);
+              const point = targetEl ? center(isVisible(targetEl) ? targetEl : clickTarget(targetEl)) : coords;
+              if (point && isDraftTap(screen, point)) {
+                return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
               }
 
-              if (targetEl || coords) {
+              if (point) {
                 const postButton = findPostButton(screen, flowPlatform);
+                const postBounds = postButton && clickTarget(postButton).bounds;
                 const isPostTarget =
                   aiDecision.marks === 'share' ||
-                  (targetEl && postButton && (targetEl.text === postButton.text || targetEl.desc === postButton.desc)) ||
+                  (postBounds && point.x >= postBounds[0] && point.x < postBounds[2] && point.y >= postBounds[1] && point.y < postBounds[3]) ||
                   /опубликовать|поделиться|publish|share|post\b/i.test(aiDecision.targetText || '');
 
                 if (isPostTarget) {
-                  logger.info({ deviceId, platform }, 'publish: AI tapped share/publish target -> setting shareTapped = true, posted = unknown');
                   st.shareTapped = true;
                   posted = 'unknown';
                 }
+                logger.info({ deviceId, platform, ...point, reason: aiDecision.reason }, 'publish: AI Autopilot tapping target');
+                await adb.tap(deviceId, point.x, point.y);
                 if (aiDecision.marks === 'target') st.targetChosen = true;
                 if (aiDecision.marks === 'next') st.nextTaps++;
                 unknown = 0;
@@ -658,13 +666,14 @@ export async function publishToDevice(
         lastActivity = Date.now();
         updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер (${lastPct}%)...`, percent: Math.min(94, 85 + Math.round(lastPct * 0.1)) });
       }
-      // "Network error" and a frozen percentage: the upload is not moving — stop waiting and self-heal.
+      // A stalled upload can still have an uncertain result. Confirm it in the profile.
       if (offline && Date.now() - lastPctChange > UPLOAD_STALL_MS) {
-        logger.warn({ deviceId, platform, lastPct }, 'publish: app offline, upload stalled — initiating self-healing');
-        updateProgress(deviceId, { platform, stage: 'upload', step: 'Загрузка зависла (потеря сети). Попытка самовосстановления...', percent: 87 });
-        await selfHealBoardInternet(adb, deviceId, proxyManager, logger, 'зависание загрузки ролика', (msg) => {
-          updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 88 });
-        });
+        logger.warn({ deviceId, platform, lastPct }, 'publish: app offline, upload stalled');
+        if (proxyManager?.mode !== 'private_parallel' && !config.PROXY_UPSTREAM_VIA) {
+          await checkBoardInternet(deviceId, proxyManager, logger, 'зависание загрузки ролика', (msg) => {
+            updateProgress(deviceId, { platform, stage: 'upload', step: msg, percent: 88 });
+          });
+        }
         break;
       }
 

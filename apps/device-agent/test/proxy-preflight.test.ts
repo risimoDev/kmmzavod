@@ -3,6 +3,38 @@ import { test } from 'node:test';
 import { ProxyManager } from '../src/proxy-manager';
 import { config } from '../src/config';
 
+test('private publication keeps the assigned routes and fails closed without rotating or switching', async () => {
+  const previousRelay = config.PROXY_UPSTREAM_VIA;
+  config.PROXY_UPSTREAM_VIA = '';
+  try {
+    const first = { host: '198.51.100.1', port: 1080, type: 'socks5', rotateUrl: 'https://example.test/rotate' };
+    const second = { host: '198.51.100.2', port: 8080, type: 'http' };
+    const failedCheck = { ok: false, route: 'proxy', code: 'timeout' };
+    const manager = Object.assign(Object.create(ProxyManager.prototype), {
+      mode: 'private_parallel', activeDeviceId: 'second', inactivePolicy: 'direct',
+      devices: new Map([['first', { proxy: first }], ['second', { proxy: second }]]),
+      publishTraffic: new Map(),
+      getUpstream: (proxy: unknown) => proxy,
+      checkDeviceIp: async () => failedCheck,
+    }) as ProxyManager;
+
+    const release = await manager.acquireTaskLease('first');
+    assert.deepEqual(manager['routeFor']('first'), { kind: 'proxy', upstream: first });
+    assert.deepEqual(manager['routeFor']('second'), { kind: 'proxy', upstream: second });
+    assert.equal(await manager.ensureDeviceInternet('first'), failedCheck);
+    await assert.rejects(manager.switchActiveDevice('first', { force: true }), /Shared Sequential/);
+    assert.equal(manager.activeDeviceId, 'second');
+    release();
+
+    assert.equal(manager['routeFor']('unconfigured', 'api.example.test').kind, 'block');
+    assert.equal((await manager.preflight('unconfigured')).ok, false);
+    manager.trafficStandby = true;
+    assert.equal(manager['routeFor']('first', 'api.example.test').kind, 'block');
+  } finally {
+    config.PROXY_UPSTREAM_VIA = previousRelay;
+  }
+});
+
 test('transparent IP check neither falls back to the explicit proxy nor accepts an IP in an error', async () => {
   const commands: string[] = [];
   const manager = Object.assign(Object.create(ProxyManager.prototype), {

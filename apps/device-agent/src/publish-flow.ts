@@ -73,7 +73,7 @@ const VIDEO_REJECTED = /(video|видео) (is )?(too (short|long)|слишко�
 const UPLOAD_FAILED = /((couldn.?t|could not|can.?t|unable to) (post|upload|share))|не удалось (опубликовать|загрузить|поделиться|отправить)|upload failed|ошибка (загрузки|публикации)|публикация не удалась/i;
 const IN_PROGRESS = /\b(posting|uploading|sharing|processing)\b|публикуется|загружается|идёт загрузка|идет загрузка|отправка|обработка видео|^публикация\.{0,3}$|\b\d{1,3}\s?%/i;
 /** The app itself says it has no connection (TikTok: "Network error / Please check your network"). */
-const APP_OFFLINE = /network error|check your network|no internet connection|you.?re offline|нет (подключения к интернету|соединения|сети)|ошибка сети|проверьте (подключение|соединение)/i;
+const APP_OFFLINE = /network error|check your network|no (internet|network) connection|you.?re offline|нет (подключения к интернету|соединения|сети)|ошибка сети|проверьте (подключение|соединение)/i;
 const PERCENT = /^(\d{1,3})\s?%$/;
 const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео загружено|^загружено$|публикация завершена/i;
 
@@ -193,8 +193,12 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     }
   }
 
-  const keep = byLabel(s, KEEP_EDITING) ?? byLabel(s, SAVE_TO_DRAFTS);
-  if (keep) return { kind: 'tap', el: keep, why: 'сохранить в черновики / продолжить редактирование' };
+  if (isSavedToDrafts(s)) return { kind: 'error', why: 'Приложение сохранило видео в черновики', retryable: false };
+  const keep = byLabel(s, KEEP_EDITING);
+  if (keep) return { kind: 'tap', el: keep, why: 'продолжить редактирование' };
+  if (byLabel(s, SAVE_TO_DRAFTS)) {
+    return { kind: 'error', why: 'Приложение предлагает сохранить видео в черновики', retryable: false };
+  }
 
   const retryBtn = byLabel(s, NETWORK_RETRY);
   if (retryBtn) return { kind: 'tap', el: retryBtn, why: 'повторить попытку отправки (сеть)' };
@@ -408,7 +412,6 @@ export function uploadPercent(s: UiScreen): number | null {
 function decideAfterShare(s: UiScreen): FlowAction {
   const retryBtn = byLabel(s, NETWORK_RETRY);
   if (retryBtn) return { kind: 'tap', el: retryBtn, why: 'повторить попытку отправки (сеть)' };
-  if (screenHas(s, SAVED_TO_DRAFTS)) return { kind: 'progress', why: 'видео сохранено в черновики' };
   if (screenHas(s, UPLOAD_FAILED)) return { kind: 'error', why: 'Приложение сообщило об ошибке загрузки', retryable: false };
   const confirm = byLabel(s, POST_CONFIRM);
   if (confirm) return { kind: 'tap', el: confirm, why: 'подтверждение публикации' };
@@ -432,4 +435,15 @@ export function findDraftsTile(s: UiScreen): UiEl | undefined {
     isVisible(e) &&
     (DRAFTS_TILE.test(e.text.trim()) || DRAFTS_TILE.test(e.desc.trim()) || /draft/i.test(e.resId))
   );
+}
+
+export function isDraftTap(s: UiScreen, { x, y }: { x: number; y: number }): boolean {
+  return s.els.some((el) => {
+    if (!isVisible(el)) return false;
+    const draftLabel = [el.text, el.desc].some((label) =>
+      DRAFTS_TILE.test(label.trim()) || SAVE_TO_DRAFTS.test(label.trim()));
+    if (!draftLabel && !/draft/i.test(el.resId)) return false;
+    const [x1, y1, x2, y2] = clickTarget(el).bounds;
+    return x >= x1 && x < x2 && y >= y1 && y < y2;
+  });
 }

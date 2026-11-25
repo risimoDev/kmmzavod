@@ -11,6 +11,10 @@ agentClient.interceptors.request.use((reqConfig) => {
 
 const BASE = config.DEVICE_AGENT_URL.replace(/\/+$/, '');
 
+export function hasFarmAccess(user: { tenantId: string; platformRole: string }): boolean {
+  return user.platformRole === 'super_admin' || config.FARM_TENANT_IDS.includes(user.tenantId);
+}
+
 let activeBaseUrl: string | null = null;
 let lastBaseCheck = 0;
 

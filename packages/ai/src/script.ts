@@ -26,7 +26,7 @@ export const SCRIPT_STYLES: { id: ScriptStyle; label: string; desc: string }[] =
   { id: 'blogger', label: 'Блогер / Находка', desc: 'Живой UGC, восторг от находки' },
   { id: 'story', label: 'Боль → Решение', desc: 'Проблема, до/после' },
   { id: 'review', label: 'Тест / Обзор', desc: 'Честная проверка на практике' },
-  { id: 'hype', label: 'Вирусный POV', desc: 'Шок-крючок, высокий темп' },
+  { id: 'hype', label: 'Вирусный POV', desc: 'Цепкая первая реплика, быстрый темп' },
   { id: 'educational', label: 'Лайфхак', desc: 'Экспертный совет' },
   { id: 'sales', label: 'Рекомендация', desc: 'Выгода и нативный оффер' },
   { id: 'humor', label: 'С юмором', desc: 'Лёгкая ирония' },
@@ -81,9 +81,9 @@ export interface ScriptResult {
 
 const PERSONA: Record<ScriptStyle, string> = {
   blogger: 'Живой блогер делится находкой: разговорно, тепло, с искренним восторгом, как другу.',
-  story: 'Сторителлинг «боль → решение»: начни с узнаваемой проблемы, покажи, как товар её снял, контраст до/после.',
-  review: 'Честный тест на практике: проверяешь заявленное, называешь факты и ощущения, звучишь независимо.',
-  hype: 'Вирусный POV: разрыв шаблона в первые секунды, высокий темп, акцент на вау-эффекте.',
+  story: 'Начни с короткой узнаваемой ситуации и объясни, что в ней меняет товар.',
+  review: 'Дай полезный критерий выбора и объясни, кому подойдёт товар, опираясь на его свойства.',
+  hype: 'Откройся неожиданным, но подтверждённым наблюдением. Держи темп короткими фразами.',
   educational: 'Экспертный лайфхак: полезный совет, как правильно пользоваться, чего избегать.',
   sales: 'Нативная рекомендация: выгоды для зрителя на первом месте, без телемагазина.',
   humor: 'Лёгкая ирония и самоирония, шутка на узнаваемой бытовой ситуации, но товар — главный герой.',
@@ -91,15 +91,13 @@ const PERSONA: Record<ScriptStyle, string> = {
 };
 
 const HOOK_ARCHETYPES = [
-  'вопрос, который зритель задаёт себе сам',
-  'POV-ситуация («POV: ты наконец…»)',
-  'контраст «раньше / теперь»',
-  'конкретная цифра или неожиданный факт',
-  'типичная ошибка («перестаньте…», «вы делаете это неправильно»)',
-  'интрига («покажу то, о чём молчат»)',
-  'реакция «не ожидал(а), что это сработает»',
-  'прямое попадание в боль аудитории',
-  'спор с распространённым мнением',
+  'конкретная бытовая ситуация, в которой зритель узнаёт себя',
+  'вопрос о выборе товара, на который следующие фразы дадут ответ',
+  'практический совет перед покупкой этой категории товара',
+  'одна деталь, которая имеет значение в конкретном сценарии использования',
+  'неожиданный факт или цифра, если они прямо есть в брифе',
+  'узнаваемое неудобство, с которым связано свойство товара',
+  'кому или для какой задачи подойдёт этот товар',
 ];
 
 function genderRule(g: VoiceGender | undefined): string {
@@ -129,31 +127,36 @@ function pickArchetypes(n: number): string[] {
   return out;
 }
 
-function systemPrompt(b: ScriptBrief, words: number, min: number, max: number): string {
+function systemPrompt(b: ScriptBrief, words: number, min: number, max: number, hookWords: number): string {
   return [
-    'Ты — сценарист вирусных коротких видео (Reels, TikTok, Shorts) о товарах. Пишешь текст для диктора (озвучка нейросетью).',
+    'Ты пишешь разговорную озвучку для короткого ролика о товаре. Типичный видеоряд — человек держит товар или красиво двигается с ним. Весь смысл должен быть понятен на слух. Не ссылайся на кадры, жесты и видимый результат. Не обещай показать тест, распаковку или сравнение в кадре.',
     `ПОДАЧА: ${PERSONA[b.style] ?? PERSONA.blogger}`,
     genderRule(b.narrator),
     b.audience
       ? `АУДИТОРИЯ: ${b.audience}. Обращайся к ней естественно.`
-      : 'АУДИТОРИЯ не указана: обращайся нейтрально («смотрите», «ребята»), без «девчонки/пацаны».',
+      : 'АУДИТОРИЯ не указана: говори нейтрально, без «девчонки/пацаны» и обращения по полу.',
     `ДЛИНА: ролик ${b.seconds} с. Текст для произнесения — ${min}–${max} слов (цель ${words}); теги эмоций в словах не считаются.`,
-    'СТРУКТУРА: хук в первые 2–3 секунды (до 8 слов) → польза/как работает в реальной жизни → призыв в последние 3–4 секунды.',
+    `ХУК: первая произнесённая фраза, до ${hookWords} слов. С первых слов назови категорию товара, знакомую ситуацию или понятную пользу. Начинай сразу, без приветствия и разгона. Исключи «досмотри до конца», «вы не поверите», «нашла кое-что» и пустые обещания. Поле hook — дословная первая фраза из script без тегов.`,
+    'ОСНОВНАЯ ЧАСТЬ: уже следующая фраза раскрывает хук. Выбери одну главную мысль и свяжи свойство товара с пользой в конкретной ситуации. Добавь ещё одну деталь только если она помогает выбору. Каждая фраза продвигает мысль. Пиши короткими предложениями, которые легко сказать вслух.',
     ctaRule(b.cta),
-    'ЗАПРЕЩЕНО: «купите прямо сейчас», «спешите», «уникальное предложение», выдуманные цены и скидки, обещания, которых нет в описании товара.',
-    'Называй товар по-разговорному («эта штука», «находка», по типу товара), не длинным магазинным названием.',
-    'ТЕГИ ЭМОЦИЙ (3–6 штук, перед фразой, в квадратных скобках): [excited] [confident] [whispering] [surprised] [gasp] [curious] [calm] [laughing] [urgent] [sigh]. Другие теги не используй.',
+    'ФАКТЫ: используй сведения из брифа. При нехватке сведений опиши обычную ситуацию применения или критерий выбора. Не выдумывай свойства, гарантии, цены, скидки, сравнения и личный опыт покупки или теста. Избегай «купите прямо сейчас», «спешите», «уникальное предложение».',
+    'Назови товар простым словом по его типу. При чтении вслух текст должен звучать как конкретный совет знакомого человека.',
+    'ТЕГИ ЭМОЦИЙ: до 3 тегов перед фразами, когда они помогают интонации. Допустимы [excited] [confident] [whispering] [surprised] [gasp] [curious] [calm] [laughing] [urgent] [sigh]. Для начала предпочтительны естественные [curious] или [confident], если подходят по смыслу.',
     'ТЕКСТ: без эмодзи, ссылок, хэштегов и разметки; числа — словами.',
     'Ответ — строго один JSON-объект: {"hook":"хук без тегов","title":"короткое название ролика","script":"текст для диктора с тегами","captions":[{"caption":"подпись к посту","hashtags":["#…"]}]}',
   ].join('\n');
 }
 
-function userPrompt(b: ScriptBrief, words: number, captions: number): string {
-  const lines = [
+function productContext(b: ScriptBrief): string[] {
+  return [
     `Товар/тема: «${b.product}»`,
     b.productInfo ? `Факты о товаре (используй только их, не выдумывай): ${b.productInfo}` : '',
-    b.sourceTranscript ? `Что звучит/видно в исходном видео: ${b.sourceTranscript.slice(0, 1500)}` : '',
-  ];
+    b.sourceTranscript ? `Дополнительный контекст о товаре или теме: ${b.sourceTranscript.slice(0, 1500)}` : '',
+  ].filter(Boolean);
+}
+
+function userPrompt(b: ScriptBrief, words: number, captions: number): string {
+  const lines = productContext(b);
   if (b.mode === 'fit' && b.currentScript) {
     const cur = countWords(b.currentScript);
     lines.push(
@@ -184,6 +187,8 @@ export async function writeScript(llm: LlmChain, brief: ScriptBrief): Promise<Sc
   const min = Math.round(target * 0.9);
   const max = Math.round(target * 1.08);
   const captionsCount = Math.max(1, Math.min(30, b.captionsCount ?? 1));
+  const hookWords = Math.min(8, Math.max(3, Math.floor(wps * Math.min(2.7, seconds * 0.4))));
+  const instructions = systemPrompt(b, target, min, max, hookWords);
   const notes: string[] = [];
 
   if (!llm.configured) {
@@ -193,7 +198,7 @@ export async function writeScript(llm: LlmChain, brief: ScriptBrief): Promise<Sc
 
   let res;
   try {
-    res = await llm.chatJson<RawScript>(systemPrompt(b, target, min, max), userPrompt(b, target, captionsCount), {
+    res = await llm.chatJson<RawScript>(instructions, userPrompt(b, target, captionsCount), {
       temperature: b.mode === 'fit' ? 0.5 : 0.9, maxTokens: 1800,
     });
   } catch (e) {
@@ -205,14 +210,28 @@ export async function writeScript(llm: LlmChain, brief: ScriptBrief): Promise<Sc
   if (!script) throw new Error('Модель вернула пустой сценарий');
 
   // Repeat guard: a hook too close to a recent one gets one re-roll.
-  const hook0 = stripEmotionTags(String(raw.hook ?? '')) || firstSentence(script);
-  if (b.mode !== 'fit' && b.avoidHooks?.some((h) => similarity(h, hook0) > 0.55)) {
+  const hook0 = firstSentence(script);
+  const repeats = (hook: string) => b.avoidHooks?.some((h) => similarity(h, hook) > 0.55) ?? false;
+  const hookIssue = (hook: string): string | undefined => {
+    if (repeats(hook)) return 'слишком похож на прошлые';
+    if (countWords(hook) > hookWords) return `длиннее ${hookWords} слов`;
+    if (/^(?:привет|всем привет|досмотри(?:те)? до конца|вы не поверите|наш[её]л кое-что|нашла кое-что)(?=$|[^\p{L}])/iu.test(hook)) {
+      return 'начинается с шаблонной фразы';
+    }
+  };
+  const issue = b.mode === 'fit' ? undefined : hookIssue(hook0);
+  if (issue) {
     try {
-      const again = await llm.chatJson<RawScript>(systemPrompt(b, target, min, max),
-        `${userPrompt(b, target, captionsCount)}\nПредыдущий хук «${hook0}» слишком похож на старые — придумай принципиально другой заход.`,
+      const again = await llm.chatJson<RawScript>(instructions,
+        `${userPrompt(b, target, captionsCount)}\nПервая фраза «${hook0}» ${issue}. Начни сценарий с другой короткой реплики, которая передаёт конкретику на слух.`,
         { temperature: 1.0, maxTokens: 1800 });
       const s2 = sanitizeForVoiceover(String(again.data.script ?? ''));
-      if (s2) { raw = again.data; script = s2; res = again; notes.push('Хук перегенерирован: был похож на прошлые'); }
+      if (s2 && !hookIssue(firstSentence(s2))) {
+        raw = again.data;
+        script = s2;
+        res = again;
+        notes.push(`Хук перегенерирован: ${issue}`);
+      }
     } catch { /* keep the first answer */ }
   }
 
@@ -220,11 +239,12 @@ export async function writeScript(llm: LlmChain, brief: ScriptBrief): Promise<Sc
   let words = countWords(script);
   if (words < min || words > max) {
     try {
-      const fix = await llm.chatJson<RawScript>(systemPrompt(b, target, min, max),
-        `В тексте ${words} слов, нужно ${min}–${max} (цель ${target}). ${words > max ? 'Сократи' : 'Дополни конкретикой о товаре'}, сохранив хук, факты, теги и призыв. Верни тот же JSON.\n${script}`,
+      const fix = await llm.chatJson<RawScript>(instructions,
+        `В тексте ${words} слов, нужно ${min}–${max} (цель ${target}). ${words > max ? 'Сократи' : 'Дополни при наличии фактов'} только середину. Первую фразу и призыв сохрани.\n${productContext(b).join('\n')}\nТекущий текст:\n${script}`,
         { temperature: 0.4, maxTokens: 1800 });
       const s2 = sanitizeForVoiceover(String(fix.data.script ?? ''));
-      if (s2 && Math.abs(countWords(s2) - target) < Math.abs(words - target)) {
+      if (s2 && normalizeForCompare(firstSentence(s2)) === normalizeForCompare(firstSentence(script))
+        && Math.abs(countWords(s2) - target) < Math.abs(words - target)) {
         script = s2;
         notes.push(`Длина скорректирована: ${words} → ${countWords(s2)} слов`);
         words = countWords(s2);
@@ -239,7 +259,7 @@ export async function writeScript(llm: LlmChain, brief: ScriptBrief): Promise<Sc
     notes.push(`Текст короче цели (${words} из ~${target} слов) — видео подстроится под голос`);
   }
 
-  const hook = stripEmotionTags(String(raw.hook ?? '')) || firstSentence(script);
+  const hook = firstSentence(script);
   const captions = await ensureCaptions(llm, b, normalizeCaptions(raw.captions), captionsCount, hook);
   return {
     hook,

@@ -11,7 +11,7 @@ import { encrypt, decrypt } from '../lib/crypto';
 import { computeReadiness } from '../lib/publish-readiness';
 import { getRedis } from '../lib/redis';
 import { logger } from '../logger';
-import { deviceAgentClient, describeDeviceAgentError, deviceAgentErrorStatus, type DeviceProxyConfig } from '../lib/device-agent';
+import { deviceAgentClient, describeDeviceAgentError, deviceAgentErrorStatus, hasFarmAccess, type DeviceProxyConfig } from '../lib/device-agent';
 import { farmScheduler } from '../lib/farm-scheduler';
 import { signValue, verifySignedValue } from '../lib/signed-url';
 import { config } from '../config';
@@ -641,10 +641,6 @@ function isFarmDeviceRoute(route: string): boolean {
     /^\/proxies\/batch-/.test(p) ||
     /^\/social-accounts\/:id\/(device-login|test-email|submit-code)$/.test(p)
   );
-}
-
-function hasFarmAccess(user: { tenantId: string; platformRole: string }): boolean {
-  return user.platformRole === 'super_admin' || config.FARM_TENANT_IDS.includes(user.tenantId);
 }
 
 /** First deviceId (of `deviceIds`) already bound to a SocialAccount of ANOTHER tenant, if any. */

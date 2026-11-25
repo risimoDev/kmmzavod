@@ -1,4 +1,5 @@
-import { parseCount, parseProfileDump } from '../src/profile-stats';
+import { strictEqual } from 'node:assert';
+import { parseCount, parseProfileDump, profileMatchesUsername } from '../src/profile-stats';
 
 const ok = (c: boolean, m: string) => console.log(c ? 'PASS' : 'FAIL', m);
 const W = 1080, H = 2400;
@@ -23,6 +24,10 @@ const tiktok = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarc
   txt('99+', [100, 2300, 200, 2350]) + txt('5', [500, 2300, 540, 2350])) + `</hierarchy>`;
 
 const t = parseProfileDump(tiktok, W, H);
+strictEqual(profileMatchesUsername(tiktok, H, 'SHOP_NAHODKI', 'tiktok'), true, 'the expected account is visible in the header');
+strictEqual(profileMatchesUsername(tiktok, H, 'shop', 'tiktok'), false, 'a partial username does not confirm the profile');
+strictEqual(profileMatchesUsername(tiktok, H, '125', 'tiktok'), false, 'a counter does not confirm the profile');
+strictEqual(profileMatchesUsername(tiktok, H, 'not_the_account', 'tiktok'), false, 'a different account must not be attributed to this profile');
 ok(t.onProfile, 'tiktok: profile detected');
 ok(t.followers === 12300, `tiktok followers 12,3 тыс. → ${t.followers}`);
 ok(t.tiles.length === 7, `tiktok tiles 7 → ${t.tiles.length}`);
@@ -32,10 +37,12 @@ ok(t.tiles.slice(1).every((x) => !x.pinned), 'only first pinned');
 
 // Instagram: single node "1 234 подписчика" style in content-desc, reels tiles with ▶ counts.
 const ig = `<hierarchy>` + node([0, 0, W, H], '',
+  txt('shop_nahodki', [100, 35, 340, 95]) +
   `<node text="" content-desc="5 678 подписчиков" clickable="true" bounds="[400,500][700,640]" />` +
   `<node text="" content-desc="Reels" clickable="true" bounds="[360,950][720,1050]" />` +
   tile(0, 0, '10,1 тыс.') + tile(1, 0, '977') + tile(2, 0, '4.2M')) + `</hierarchy>`;
 const g = parseProfileDump(ig, W, H);
+strictEqual(profileMatchesUsername(ig, H, 'shop_nahodki', 'instagram'), true, 'Instagram can show the handle without @');
 ok(g.followers === 5678, `ig followers in content-desc → ${g.followers}`);
 ok(JSON.stringify(g.tiles.map((x) => x.views)) === JSON.stringify([10100, 977, 4200000]), `ig tiles ${g.tiles.map((x) => x.views)}`);
 

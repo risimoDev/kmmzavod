@@ -33,6 +33,7 @@ import { editorRoutes } from './routes/editor.routes';
 import { distributeScheduleRoutes } from './routes/distribute-schedules.routes';
 import { campaignRoutes } from './routes/campaigns.routes';
 import { autopilotRoutes } from './routes/autopilot.routes';
+import { analyticsRoutes } from './routes/analytics.routes';
 import { notificationRoutes } from './routes/notifications.routes';
 
 export async function buildApp() {
@@ -149,6 +150,7 @@ export async function buildApp() {
   app.register(distributeScheduleRoutes, { prefix: '/api/v1/distribute-schedules' });
   app.register(campaignRoutes, { prefix: '/api/v1/campaigns' });
   app.register(autopilotRoutes, { prefix: '/api/v1/autopilots' });
+  app.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
   app.register(notificationRoutes, { prefix: '/api/v1/notifications' });
 
   // Health check — includes Redis and DB liveness

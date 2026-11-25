@@ -1,4 +1,5 @@
-import { ok, strictEqual, deepStrictEqual } from 'node:assert';
+import { ok, strictEqual } from 'node:assert';
+import axios from 'axios';
 import pino from 'pino';
 import { extractJsonFromText, consultAiAutopilot, type AiAutopilotInput } from '../src/ai-autopilot';
 import type { UiScreen } from '../src/ui-automation';
@@ -6,7 +7,7 @@ import { initialFlowState } from '../src/publish-flow';
 
 const logger = pino({ level: 'silent' });
 
-function runTests() {
+async function runTests() {
   console.log('Testing ai-autopilot...');
 
   // 1. Test extractJsonFromText
@@ -45,6 +46,9 @@ function runTests() {
           bounds: [100, 200, 300, 250],
           clickable: true,
           enabled: true,
+          pkg: 'com.zhiliaoapp.musically',
+          focused: false,
+          parent: null,
         },
       ],
     };
@@ -57,17 +61,26 @@ function runTests() {
       hasCaption: false,
       screen: dummyScreen,
       screenSize: { width: 1080, height: 2400 },
-      apiKey: '', // Empty key
+      apiKey: 'change_me',
       logger,
     };
 
-    consultAiAutopilot(input).then((decision) => {
-      strictEqual(decision, null, 'returns null when apiKey is empty');
-      console.log('PASS: Empty API key handled gracefully');
+    strictEqual(await consultAiAutopilot(input), null, 'returns null when apiKey is unconfigured');
+
+    const originalAdapter = axios.defaults.adapter;
+    axios.defaults.adapter = async (config) => ({
+      config, headers: {}, status: 200, statusText: 'OK',
+      data: { choices: [{ message: { content: '{"screenType":"compose","action":"tap","targetText":"Save to drafts"}' } }] },
     });
+    try {
+      const decision = await consultAiAutopilot({ ...input, apiKey: 'test-key' });
+      strictEqual(decision?.action, 'require_human', 'a model cannot choose to save the current video as a draft');
+    } finally {
+      axios.defaults.adapter = originalAdapter;
+    }
   }
 
   console.log('PASS: All basic ai-autopilot tests passed');
 }
 
-runTests();
+runTests().catch((err) => { console.error(err); process.exitCode = 1; });

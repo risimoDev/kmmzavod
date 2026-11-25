@@ -101,6 +101,15 @@ const NAV_ITEMS = [
     ),
   },
   {
+    href: "/analytics",
+    label: "Аналитика",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M4 4v16h16M9 16v-4m5 4V8m5 8V5" />
+      </svg>
+    ),
+  },
+  {
     href: "/autopilot",
     label: "Автопилот",
     highlight: true,
