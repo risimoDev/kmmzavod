@@ -65,7 +65,7 @@ app.setNotFoundHandler((req, reply) => {
 app.get('/health', async () => ({
   ok: true,
   timestamp: new Date().toISOString(),
-  hostIp: await proxyManager.refreshHostIp(),
+  hostIp: proxyManager.cachedHostIp,
   driver: 'Native ADB Controller (Open-Source, 0$)',
 }));
 
@@ -1424,6 +1424,22 @@ app.post('/device/scripts/run', async (req, reply) => {
 const LISTEN_RETRY_MS = 5_000;
 const LISTEN_RETRY_TOTAL_MS = 5 * 60_000;
 const LOOPBACK = '127.0.0.1';
+let localServer: http.Server | undefined;
+let stopping = false;
+
+if (process.env.KMMZAVOD_FARM_MANAGED === '1') {
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    localServer?.close();
+    const deadline = setTimeout(() => process.exit(0), 3_000);
+    deadline.unref();
+    void app.close().finally(() => process.exit(0));
+  };
+  process.stdin.once('end', stop);
+  process.stdin.resume();
+  process.once('SIGINT', stop);
+}
 
 /** DEVICE_AGENT_HOST already covers loopback → a second listener would only clash on the port. */
 function hostCoversLoopback(host: string | undefined): boolean {
@@ -1434,7 +1450,7 @@ async function listenLoopback(): Promise<void> {
   if (hostCoversLoopback(process.env.DEVICE_AGENT_HOST)) return;
   await app.ready();
   await new Promise<void>((resolve) => {
-    const local = http.createServer((req, res) => app.routing(req, res));
+    const local = localServer = http.createServer((req, res) => app.routing(req, res));
     local.once('error', (err) => {
       logger.warn({ err: String(err), port: config.PORT }, 'device-agent: loopback listener failed — local farm scripts must use the tunnel IP');
       resolve();
@@ -1449,6 +1465,7 @@ async function listenLoopback(): Promise<void> {
 async function listenWithRetry(): Promise<string> {
   const deadline = Date.now() + LISTEN_RETRY_TOTAL_MS;
   for (let attempt = 1; ; attempt++) {
+    if (stopping) throw new Error('device-agent is stopping');
     const listenHost = config.HOST;
     if (listenHost && !['127.0.0.1', 'localhost', '::1'].includes(listenHost)) {
       if (!config.AGENT_TOKEN) throw new Error('DEVICE_AGENT_TOKEN обязателен для сетевого интерфейса агента');
@@ -1471,6 +1488,7 @@ async function listenWithRetry(): Promise<string> {
 }
 
 listenLoopback().then(() => listenWithRetry()).then(async (host) => {
+  if (stopping) return;
   if (!config.AGENT_TOKEN) {
     logger.warn('device-agent: DEVICE_AGENT_TOKEN is empty — requests are NOT authenticated. Set it in .env here and on the prod server');
   }
@@ -1479,6 +1497,7 @@ listenLoopback().then(() => listenWithRetry()).then(async (host) => {
     logger.warn({ err: String(err) }, 'device-agent: proxy forwarder restoration failed on startup');
   });
 }).catch((err) => {
+  if (stopping) return;
   logger.error({ err }, 'device-agent: failed to start');
   process.exit(1);
 });

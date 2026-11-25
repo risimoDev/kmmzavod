@@ -1185,6 +1185,10 @@ export class ProxyManager {
 
   // ── IP checks ──────────────────────────────────────────────────────────────
 
+  get cachedHostIp(): string | null {
+    return this.hostPublicIp;
+  }
+
   allowPublishMedia(deviceId: string): () => void {
     this.publishTraffic.set(deviceId, (this.publishTraffic.get(deviceId) ?? 0) + 1);
     return () => {

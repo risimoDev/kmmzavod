@@ -8,7 +8,7 @@ title KMMZAVOD - Open-Source Phone Farm Bridge (20 Boards Rack via ADB)
 
 where powershell >nul 2>nul
 if not errorlevel 1 (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-farm.ps1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-farm.ps1" %*
     if errorlevel 1 (
         echo.
         set "EXIT_CODE=!errorlevel!"
