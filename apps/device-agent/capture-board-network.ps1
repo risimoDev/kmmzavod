@@ -6,7 +6,9 @@ param(
     [ValidateRange(15, 120)]
     [int]$Seconds = 45,
     [switch]$Trace,
-    [switch]$TikTokLogin
+    [switch]$TikTokLogin,
+    [ValidatePattern('^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$')]
+    [string]$TikTokPackage = 'com.zhiliaoapp.musically'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,24 +54,17 @@ function Read-Gateway {
     }
 }
 
-function Read-TikTokProcesses {
-    $packages = 'com\.(?:zhiliaoapp\.musically(?:\.go)?|ss\.android\.ugc\.(?:trill|aweme|tiktok\.lite))'
+function Read-TikTokProcesses([string]$AppUid) {
     try {
-        Read-Adb shell 'ps -A -o PID,NAME' | ForEach-Object {
-            if ($_ -match "^\s*(?<pid>\d+)\s+(?<package>$packages)(?::[^\s]+)?\s*$") {
-                [pscustomobject]@{ Pid = $Matches['pid']; Package = $Matches['package'] }
-            }
+        Read-Adb shell 'ps -A -n -o UID,PID' | ForEach-Object {
+            if ($_ -match "^\s*$AppUid\s+(\d+)\s*$") { $Matches[1] }
         }
     } catch {
         Add-Report 'Не удалось прочитать список процессов TikTok.'
     }
 }
 
-function New-LoginCounter([string]$Package) {
-    $uid = Read-Adb shell dumpsys package $Package | ForEach-Object {
-        if ($_ -match '^\s*userId=(\d+)\s*$') { $Matches[1] }
-    } | Select-Object -First 1
-    if (-not $uid) { throw 'Не удалось определить UID установленного TikTok.' }
+function New-LoginCounter([string]$AppUid) {
     $prefix = 'KMM_AUTH_' + [guid]::NewGuid().ToString('N').Substring(0, 12)
     foreach ($family in 'iptables', 'ip6tables') {
         $protocols = [ordered]@{
@@ -81,7 +76,7 @@ function New-LoginCounter([string]$Package) {
             $tag = "${prefix}_${family}_$key"
             [pscustomobject]@{
                 Base = "$family -w 3 -t mangle"
-                Match = "$($protocols[$key]) -m owner --uid-owner $uid -m comment --comment $tag"
+                Match = "$($protocols[$key]) -m owner --uid-owner $AppUid -m comment --comment $tag"
                 Prefix = $prefix
             }
         }
@@ -147,8 +142,15 @@ $loginProcesses = @()
 $counters = @()
 if ($TikTokLogin) {
     $Trace = $true
+    $loginUid = Read-Adb shell dumpsys package $TikTokPackage | ForEach-Object {
+        if ($_ -match '^\s*userId=(\d+)(?:\s|$)') { $Matches[1] }
+    } | Select-Object -First 1
+    if (-not $loginUid) {
+        throw "Не удалось определить UID пакета $TikTokPackage. Укажи установленный пакет через -TikTokPackage."
+    }
+    Add-Report "TikTok package=$TikTokPackage uid=$loginUid"
     Read-Host 'Open TikTok at the Send code screen. Press Enter here when ready' | Out-Null
-    $loginProcesses = @(Read-TikTokProcesses)
+    $loginProcesses = @(Read-TikTokProcesses $loginUid)
 }
 $stamp = $null
 try {
@@ -175,16 +177,11 @@ if ($Trace) {
 }
 try {
     if ($TikTokLogin) {
-        $packages = @($loginProcesses.Package | Sort-Object -Unique)
-        if ($packages.Count -eq 1) {
-            try {
-                $counters = @(New-LoginCounter $packages[0])
-                Invoke-LoginCounters $counters Start | Out-Null
-            } catch {
-                Add-Report 'Не все счётчики исходящих пакетов TikTok удалось включить.'
-            }
-        } else {
-            Add-Report "Счётчики пакетов пропущены. Число найденных запущенных вариантов TikTok: $($packages.Count)."
+        try {
+            $counters = @(New-LoginCounter $loginUid)
+            Invoke-LoginCounters $counters Start | Out-Null
+        } catch {
+            Add-Report 'Не все счётчики исходящих пакетов TikTok удалось включить.'
         }
     }
     Write-Host "Сбор запущен на $Seconds сек. Сейчас воспроизведите одну ошибку на плате $Serial."
@@ -230,8 +227,8 @@ try {
     if ($stamp) { $logArgs += '-d', '-T', "$stamp.000" }
     else { $logArgs += '-t', '800' }
     if ($TikTokLogin) {
-        $loginProcesses += @(Read-TikTokProcesses)
-        Write-LoginLog -Log @(Read-Adb logcat @logArgs) -TikTokPids @($loginProcesses.Pid)
+        $loginProcesses += @(Read-TikTokProcesses $loginUid)
+        Write-LoginLog -Log @(Read-Adb logcat @logArgs) -TikTokPids $loginProcesses
     } else {
         Read-Adb logcat @logArgs |
             Where-Object { $_ -match $filter } | Select-Object -Last 180 | ForEach-Object { Add-Report $_ }
