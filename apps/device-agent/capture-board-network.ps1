@@ -56,11 +56,53 @@ function Read-TikTokProcesses {
     $packages = 'com\.(?:zhiliaoapp\.musically(?:\.go)?|ss\.android\.ugc\.(?:trill|aweme|tiktok\.lite))'
     try {
         Read-Adb shell 'ps -A -o PID,NAME' | ForEach-Object {
-            if ($_ -match "^\s*(\d+)\s+$packages(?::[^\s]+)?\s*$") { $Matches[1] }
+            if ($_ -match "^\s*(?<pid>\d+)\s+(?<package>$packages)(?::[^\s]+)?\s*$") {
+                [pscustomobject]@{ Pid = $Matches['pid']; Package = $Matches['package'] }
+            }
         }
     } catch {
         Add-Report 'Не удалось прочитать список процессов TikTok.'
     }
+}
+
+function New-LoginCounter([string]$Package) {
+    $uid = Read-Adb shell dumpsys package $Package | ForEach-Object {
+        if ($_ -match '^\s*userId=(\d+)\s*$') { $Matches[1] }
+    } | Select-Object -First 1
+    if (-not $uid) { throw 'Не удалось определить UID установленного TikTok.' }
+    $prefix = 'KMM_AUTH_' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+    foreach ($family in 'iptables', 'ip6tables') {
+        $protocols = [ordered]@{
+            tcp = '-p tcp'
+            syn = '-p tcp --syn'
+            udp443 = '-p udp --dport 443'
+        }
+        foreach ($key in $protocols.Keys) {
+            $tag = "${prefix}_${family}_$key"
+            [pscustomobject]@{
+                Base = "$family -w 3 -t mangle"
+                Match = "$($protocols[$key]) -m owner --uid-owner $uid -m comment --comment $tag"
+                Prefix = $prefix
+            }
+        }
+    }
+}
+
+function Invoke-LoginCounters([object[]]$Counters, [ValidateSet('Start','Read','Stop')][string]$Operation) {
+    if (-not $Counters.Count) { return }
+    $commands = switch ($Operation) {
+        Start { $Counters | ForEach-Object { "$($_.Base) -I OUTPUT 1 $($_.Match)" } }
+        Read {
+            foreach ($group in ($Counters | Group-Object Base)) {
+                "$($group.Name) -L OUTPUT -nvx | grep $($group.Group[0].Prefix) || true"
+            }
+        }
+        Stop { $Counters | ForEach-Object { "$($_.Base) -D OUTPUT $($_.Match) 2>/dev/null" } }
+    }
+    $joiner = if ($Operation -eq 'Stop') { '; ' } else { ' && ' }
+    $scriptText = $commands -join $joiner
+    if ($Operation -eq 'Stop') { $scriptText += '; true' }
+    Read-Adb shell "su -c '$scriptText'"
 }
 
 function Write-LoginLog([string[]]$Log, [string[]]$TikTokPids) {
@@ -101,11 +143,12 @@ try {
 Add-Report 'Начальное состояние шлюза'
 Add-Report (Read-Gateway)
 
-$loginPids = @()
+$loginProcesses = @()
+$counters = @()
 if ($TikTokLogin) {
     $Trace = $true
     Read-Host 'Open TikTok at the Send code screen. Press Enter here when ready' | Out-Null
-    $loginPids = @(Read-TikTokProcesses)
+    $loginProcesses = @(Read-TikTokProcesses)
 }
 $stamp = $null
 try {
@@ -130,16 +173,44 @@ if ($Trace) {
         throw "Не удалось включить трассировку платы. $($_.Exception.Message)"
     }
 }
-Write-Host "Сбор запущен на $Seconds сек. Сейчас воспроизведите одну ошибку на плате $Serial."
-$timer = [Diagnostics.Stopwatch]::StartNew()
-$last = $null
-while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
-    $current = Read-Gateway
-    if ($current -ne $last) {
-        Add-Report "$((Get-Date).ToString('o')) $current"
-        $last = $current
+try {
+    if ($TikTokLogin) {
+        $packages = @($loginProcesses.Package | Sort-Object -Unique)
+        if ($packages.Count -eq 1) {
+            try {
+                $counters = @(New-LoginCounter $packages[0])
+                Invoke-LoginCounters $counters Start | Out-Null
+            } catch {
+                Add-Report 'Не все счётчики исходящих пакетов TikTok удалось включить.'
+            }
+        } else {
+            Add-Report "Счётчики пакетов пропущены. Число найденных запущенных вариантов TikTok: $($packages.Count)."
+        }
     }
-    Start-Sleep -Seconds 1
+    Write-Host "Сбор запущен на $Seconds сек. Сейчас воспроизведите одну ошибку на плате $Serial."
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $last = $null
+    while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
+        $current = Read-Gateway
+        if ($current -ne $last) {
+            Add-Report "$((Get-Date).ToString('o')) $current"
+            $last = $current
+        }
+        Start-Sleep -Seconds 1
+    }
+    if ($counters.Count) {
+        Add-Report 'Исходящие пакеты процессов TikTok на Android'
+        try {
+            Invoke-LoginCounters $counters Read | ForEach-Object { Add-Report $_ }
+        } catch {
+            Add-Report 'Счётчики пакетов собраны не полностью.'
+        }
+    }
+} finally {
+    if ($counters.Count) {
+        try { Invoke-LoginCounters $counters Stop | Out-Null }
+        catch { Add-Report 'Не удалось снять временные счётчики пакетов.' }
+    }
 }
 Add-Report "$((Get-Date).ToString('o')) $(Read-Gateway)"
 if ($Trace) {
@@ -159,8 +230,8 @@ try {
     if ($stamp) { $logArgs += '-d', '-T', "$stamp.000" }
     else { $logArgs += '-t', '800' }
     if ($TikTokLogin) {
-        $loginPids += @(Read-TikTokProcesses)
-        Write-LoginLog -Log @(Read-Adb logcat @logArgs) -TikTokPids $loginPids
+        $loginProcesses += @(Read-TikTokProcesses)
+        Write-LoginLog -Log @(Read-Adb logcat @logArgs) -TikTokPids @($loginProcesses.Pid)
     } else {
         Read-Adb logcat @logArgs |
             Where-Object { $_ -match $filter } | Select-Object -Last 180 | ForEach-Object { Add-Report $_ }
