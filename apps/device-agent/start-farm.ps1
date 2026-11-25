@@ -439,13 +439,24 @@ try {
         $timer = [Diagnostics.Stopwatch]::StartNew()
         do {
             if ($agent.HasExited) { throw "Агент завершился с кодом $($agent.ExitCode)." }
-            $owned = @(Get-FarmPortListeners $agentPort | Where-Object { $_.ProcessId -eq $agent.Id })
-            $ready = $owned.Count -gt 0 -and (Get-AgentHealth '127.0.0.1') -and
-                (-not $route -or ($owned.Address -contains $route.Host -and (Get-AgentHealth $route.Host)))
-            if ($ready) { break }
+            $addresses = @(Get-FarmPortListeners $agentPort |
+                Where-Object { $_.ProcessId -eq $agent.Id } | Select-Object -ExpandProperty Address)
+            $localBound = $addresses -contains '127.0.0.1' -or
+                $addresses -contains '0.0.0.0' -or $addresses -contains '[::]'
+            $tunnelBound = -not $route -or $addresses -contains $route.Host
+            # The Windows firewall scopes the tunnel listener to the VPS peer. A local
+            # request to our own tunnel address is not a valid test of inbound VPS access.
+            if ($localBound -and $tunnelBound) { break }
             Start-Sleep -Milliseconds 500
         } while ($timer.Elapsed.TotalSeconds -lt 20)
-        if (-not $ready) { throw "Агент PID $($agent.Id) не подтвердил готовность на TCP $agentPort. Проверьте строки device-agent в выводе запуска." }
+        if (-not $localBound -or -not $tunnelBound) {
+            $expected = if ($route) { "127.0.0.1 и $($route.Host)" } else { '127.0.0.1' }
+            $actual = if ($addresses.Count) { $addresses -join ', ' } else { 'нет' }
+            throw "Агент PID $($agent.Id) не открыл TCP $agentPort. Ожидались $expected. Слушает: $actual."
+        }
+        if (-not (Get-AgentHealth '127.0.0.1')) {
+            Write-Warning "Порт агента открыт, но локальный /health не ответил. Агент продолжает работать."
+        }
         if ($route) { Write-Host "[OK] Агент слушает $($route.Host):$agentPort. Остановка: Ctrl+C или start-farm.bat -Stop." -ForegroundColor Green }
         else { Write-Host "[OK] Агент готов. Остановка: Ctrl+C или start-farm.bat -Stop." -ForegroundColor Green }
         $mutex.ReleaseMutex()
