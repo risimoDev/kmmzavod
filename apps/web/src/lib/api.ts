@@ -2396,6 +2396,7 @@ export interface AutopilotPost {
   socialAccount: { accountName: string; platform: string; deviceId: string | null };
   publishJob: { status: string; externalPostId: string | null; error: string | null; needsReview: boolean } | null;
   canRetry: boolean;
+  verifyingAutomatically?: boolean;
   uniqueVariant: { id: string; variantIndex: number; thumbnailKey: string | null; uniquifyJobId: string };
   thumbnailUrl: string | null;
 }

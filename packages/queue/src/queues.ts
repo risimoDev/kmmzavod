@@ -275,6 +275,8 @@ export interface PipelineStateJobPayload {
 
 export interface PublishJobPayload {
   publishJobId: string;
+  /** Read the account profile and reconcile the outcome. Never submit a video. */
+  verificationOnly?: true;
   videoId?: string;
   uniqueVariantId?: string;
   tenantId: string;

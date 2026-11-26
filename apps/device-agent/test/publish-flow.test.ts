@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { allowsHashtagTap, decide, findPostButton, hasPublishReceipt, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, uploadPercent, type FlowState } from '../src/publish-flow';
+import { allowsHashtagTap, decide, findPostButton, hasDraftReceipt, hasPublishReceipt, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
 import { parsePostsCount, parseProfileDump, readPublishProfile, sampleProfileCover } from '../src/profile-stats';
+import { inspectPostCaption } from '../src/verify-post';
 
 let failed = 0;
 const ok = (c: boolean, m: string) => { if (!c) failed++; console.log(c ? 'PASS' : 'FAIL', m); };
@@ -304,6 +305,23 @@ const receipt = el({ id: `${TT}:id/publish_result`, text: 'Your video has been p
 ok(hasPublishReceipt(screen(TT, receipt)), 'an explicit TikTok success notice can confirm publication');
 ok(!hasPublishReceipt(screen(TT, el({ text: 'Your video has been posted', b: [100, 120, 960, 200] }))), 'an arbitrary text label cannot confirm publication');
 ok(!hasPublishReceipt(screen(TT, receipt, el({ text: '96%', b: [100, 210, 320, 290] }))), 'a success notice with upload still visible is inconclusive');
+const draftReceipt = el({ id: `${TT}:id/draft_saved`, text: 'Your video was saved to drafts.', b: [100, 120, 960, 200] });
+ok(hasDraftReceipt(screen(TT, draftReceipt)), 'an explicit draft notice is a known negative outcome');
+ok(!hasDraftReceipt(screen(TT, el({ text: 'Saved to drafts', b: [100, 120, 960, 200] }))), 'ordinary text is not a draft notice');
+
+const expectedCaption = 'Укладка для длинных волос.\n\n#плойка #волны';
+const playback = [el({ desc: 'Like, 0', b: [900, 1120, 1030, 1220] }), el({ desc: 'Share', b: [900, 1370, 1030, 1470] })];
+const detail = screen(TT, ...playback, el({ text: 'Укладка для длинных волос.  #плойка #волны', b: [40, 1650, 800, 1770] }));
+ok(inspectPostCaption(detail, expectedCaption, TT, false).matches === true, 'read-only check matches the whole caption of a playable post');
+ok(!inspectPostCaption(detail, expectedCaption.replace('#волны', '#локоны'), TT, false).matches, 'a caption sharing the same opening does not confirm another post');
+ok(!inspectPostCaption(detail, expectedCaption, TT, true).matches && !inspectPostCaption(detail, expectedCaption, IG, false).matches, 'a profile or another app cannot confirm a matching post');
+const collapsedCaption = el({ text: 'Укладка для длинных волос.…', b: [40, 1650, 720, 1720] });
+const collapsed = screen(TT, ...playback, collapsedCaption, button('See more', [720, 1650, 850, 1720]));
+ok(inspectPostCaption(collapsed, expectedCaption, TT, false).expand?.text === 'See more', 'a truncated caption is expanded before matching');
+const split = screen(TT, ...playback, el({ cls: 'android.widget.LinearLayout', b: [40, 1650, 800, 1850] },
+  el({ text: 'Укладка для длинных волос.', b: [40, 1650, 700, 1720] }) +
+  el({ text: '#плойка', b: [40, 1750, 200, 1820] }) + el({ text: '#волны', b: [220, 1750, 400, 1820] })));
+ok(inspectPostCaption(split, expectedCaption, TT, false).matches === true, 'caption and hashtag siblings match together');
 const mainProfileXml = fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-main-profile-uploading.xml'), 'utf8');
 const prof = parseProfileDump(mainProfileXml, 1080, 2220);
 ok(prof.uploading === 96, `profile: uploading tile read as 96% (${prof.uploading})`);

@@ -441,7 +441,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
         select: {
           id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
           socialAccount: { select: { accountName: true, platform: true, deviceId: true } },
-          publishJob: { select: { status: true, externalPostId: true, error: true, needsReview: true } },
+          publishJob: { select: { id: true, status: true, externalPostId: true, error: true, needsReview: true } },
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
@@ -456,7 +456,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
         select: {
           id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
           socialAccount: { select: { accountName: true, platform: true, deviceId: true } },
-          publishJob: { select: { status: true, externalPostId: true, error: true, needsReview: true } },
+          publishJob: { select: { id: true, status: true, externalPostId: true, error: true, needsReview: true } },
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
@@ -585,11 +585,17 @@ export async function autopilotRoutes(app: FastifyInstance) {
       accounts,
       sources,
       readyVariants: ready,
-      posts: await Promise.all(posts.map(async (p) => ({
-        ...p,
-        canRetry: p.status === 'failed' && canRetryPublish(p.publishJob, p.error),
-        thumbnailUrl: await presign(p.uniqueVariant.thumbnailKey),
-      }))),
+      posts: await Promise.all(posts.map(async (p) => {
+        const [thumbnailUrl, verification] = await Promise.all([
+          presign(p.uniqueVariant.thumbnailKey),
+          p.publishJob?.needsReview ? publishQueue.getJobState(`verify-${p.publishJob.id}`).catch(() => 'unknown') : null,
+        ]);
+        return {
+          ...p, thumbnailUrl,
+          canRetry: p.status === 'failed' && canRetryPublish(p.publishJob, p.error),
+          verifyingAutomatically: verification === 'active' || verification === 'waiting' || verification === 'prioritized' || verification === 'delayed',
+        };
+      })),
       aiKeys: await aiKeyStatus(),
       farmProxy,
       liveProgress,

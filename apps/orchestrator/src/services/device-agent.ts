@@ -199,6 +199,12 @@ export async function checkDeviceAgentHealth(): Promise<string | null> {
 let cachedProxyMode: { state: ProxyModeState; expiresAt: number } | null = null;
 
 export const deviceAgentService = {
+  async verifyPost(opts: { deviceId: string; platform: 'instagram' | 'tiktok'; username: string; caption: string; since: number }): Promise<{
+    status: 'confirmed' | 'not_found' | 'processing' | 'unavailable'; detail?: string;
+  }> {
+    return requestWithFallback((base) => agentClient.post(`${base}/publish/verify`, opts, { timeout: 5 * 60_000 }));
+  },
+
   async publish(opts: {
     deviceId: string;
     platform: 'instagram' | 'tiktok' | 'youtube_shorts';

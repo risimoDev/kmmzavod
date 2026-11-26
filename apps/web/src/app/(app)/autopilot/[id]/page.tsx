@@ -98,6 +98,7 @@ export default function AutopilotDetailPage() {
   const unconfirmedPublished = unconfirmedPosts.filter((p) => p.status === "published").length;
   const unconfirmedFailed = Math.max(liveProgress?.verificationPendingCount ?? 0, unconfirmedPosts.length - unconfirmedPublished);
   const verificationCount = unconfirmedPublished + unconfirmedFailed;
+  const automaticChecks = unconfirmedPosts.filter((p) => p.verifyingAutomatically).length;
   const retryableCount = posts.filter((p) => p.canRetry && !needsVerification(p)).length;
   const basePublished = liveProgress?.publishedCount ?? posts.filter((p) => p.status === "published").length;
   const published = Math.max(0, basePublished - unconfirmedPublished);
@@ -163,8 +164,8 @@ export default function AutopilotDetailPage() {
     liveStatusTitle = `Ошибки публикации: ${failedCount}`;
     liveStatusSubtitle = "Подробности доступны в списке публикаций.";
   } else if (verificationCount > 0) {
-    liveStatusTitle = `Требуется проверка: ${verificationCount}`;
-    liveStatusSubtitle = "Сверьте ролики с профилями аккаунтов на платах.";
+    liveStatusTitle = automaticChecks ? `Идёт автопроверка публикаций: ${automaticChecks}` : `Без подтверждения: ${verificationCount}`;
+    liveStatusSubtitle = automaticChecks ? "Автопилот сверяет свежие ролики в профилях." : "Недостаточно данных профиля для подтверждения.";
   } else if (published > 0) {
     liveStatusTitle = `Все ${published} публикаций успешно завершены!`;
     liveStatusSubtitle = `Следующее автоматическое окно публикации: ${ap.status === "active" && ap.nextWindowAt ? formatWindow(ap.nextWindowAt, ap.timezone) : "по расписанию"}`;
@@ -353,7 +354,7 @@ export default function AutopilotDetailPage() {
                         <span className="text-danger font-medium">✕ Ошибок: {failedCount}</span>
                       )}
                       {verificationCount > 0 && (
-                        <span className="text-warning font-medium">Требуют проверки: {verificationCount}</span>
+                        <span className="text-warning font-medium">Без подтверждения: {verificationCount}</span>
                       )}
                     </div>
                   </div>
@@ -385,7 +386,7 @@ export default function AutopilotDetailPage() {
                       <div
                         className="bg-warning transition-all duration-500"
                         style={{ width: `${(verificationCount / totalCyclePosts) * 100}%` }}
-                        title={`Требуют проверки: ${verificationCount}`}
+                        title={`Без подтверждения: ${verificationCount}`}
                       />
                     )}
                     {scheduledPosts.length > 0 && (
@@ -501,7 +502,7 @@ export default function AutopilotDetailPage() {
                         {posts.map((p) => {
                           const isUnconfirmed = needsVerification(p);
                           const isPublishingThis = p.status === "publishing";
-                          const errText = p.error ?? p.publishJob?.error;
+                          const errText = p.verifyingAutomatically ? "Сверяем описание ролика в профиле." : p.error ?? p.publishJob?.error;
 
                           return (
                             <div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 hover:bg-surface-2/40 transition-colors">
@@ -560,7 +561,7 @@ export default function AutopilotDetailPage() {
                                 )}
                                 {isUnconfirmed ? (
                                   <Badge variant="warning" dot className="text-xs">
-                                    Требуется проверка
+                                    {p.verifyingAutomatically ? "Автопроверка" : "Нет подтверждения"}
                                   </Badge>
                                 ) : (
                                   <StatusBadge status={p.status} />

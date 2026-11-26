@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import axios from 'axios';
-import { Worker, Queue, DelayedError, UnrecoverableError, type ConnectionOptions } from 'bullmq';
+import { Worker, Queue, DelayedError, UnrecoverableError, type ConnectionOptions, type Job } from 'bullmq';
 import { QUEUES, type PublishJobPayload, type ShadowBanCheckPayload } from '@kmmzavod/queue';
 import type { Prisma, PrismaClient } from '@kmmzavod/db';
 import type { IStorageClient } from '@kmmzavod/storage';
@@ -106,19 +106,20 @@ export function isOutcomeUnknown(err: unknown, serverErrorsUnknown: boolean): bo
   return !PRE_CONNECT_CODES.has(err.code ?? '');
 }
 
-type PublishOutcome = { status: 'published'; at: Date } | { status: 'failed'; error: string };
+type PublishOutcome = { status: 'published'; at: Date; recovered?: boolean } | { status: 'failed'; error: string };
 
 class PublishOutcomeUnknownError extends UnrecoverableError {}
 
 async function settleItem(tx: Prisma.TransactionClient, publishJobId: string, outcome: PublishOutcome) {
   const item = await tx.distributeItem.findFirst({
     where: { publishJobId },
-    select: { id: true, distributeJobId: true },
+    select: { id: true, distributeJobId: true, status: true },
   });
   if (!item) return;
 
+  const recovered = outcome.status === 'published' && outcome.recovered === true && item.status === 'failed';
   const claimed = await tx.distributeItem.updateMany({
-    where: { id: item.id, status: { in: ['pending', 'scheduled', 'publishing'] } },
+    where: { id: item.id, status: recovered ? 'failed' : { in: ['pending', 'scheduled', 'publishing'] } },
     data: outcome.status === 'published'
       ? { status: 'published', publishedAt: outcome.at, error: null }
       : { status: 'failed', error: outcome.error },
@@ -127,7 +128,9 @@ async function settleItem(tx: Prisma.TransactionClient, publishJobId: string, ou
 
   const distJob = await tx.distributeJob.update({
     where: { id: item.distributeJobId },
-    data: outcome.status === 'published' ? { publishedCount: { increment: 1 } } : { failedCount: { increment: 1 } },
+    data: outcome.status === 'published'
+      ? { publishedCount: { increment: 1 }, ...(recovered && { failedCount: { decrement: 1 } }) }
+      : { failedCount: { increment: 1 } },
     select: { publishedCount: true, failedCount: true, totalItems: true },
   });
   if (distJob.publishedCount + distJob.failedCount >= distJob.totalItems) {
@@ -157,14 +160,17 @@ export function finalizePublishSuccess(
   db: PrismaClient,
   publishJobId: string,
   socialAccountId: string,
-  data: { externalPostId?: string | null; verifiedAt?: Date | null; publishNote?: string | null },
+  data: { externalPostId?: string | null; verifiedAt?: Date | null; publishNote?: string | null; recoveredAt?: Date },
 ) {
   return db.$transaction(async tx => {
     const now = new Date();
+    const at = data.recoveredAt ?? now;
     const claimed = await tx.publishJob.updateMany({
-      where: { id: publishJobId, status: 'uploading' },
+      where: { id: publishJobId, socialAccountId, ...(data.recoveredAt
+        ? { status: 'failed', needsReview: true, updatedAt: data.recoveredAt }
+        : { status: 'uploading' }) },
       data: {
-        status: 'published', publishedAt: now, externalPostId: data.externalPostId,
+        status: 'published', publishedAt: at, externalPostId: data.externalPostId,
         verifiedAt: data.verifiedAt, error: data.publishNote, needsReview: false,
       },
     });
@@ -174,16 +180,21 @@ export function finalizePublishSuccess(
       where: { id: socialAccountId },
       select: { lastPostAt: true, accountGroup: { select: { timezone: true } } },
     });
-    const sameDay = account.lastPostAt && account.lastPostAt >= accountDay(now, account.accountGroup?.timezone);
+    const today = accountDay(now, account.accountGroup?.timezone);
+    const sameDay = account.lastPostAt && account.lastPostAt >= today;
     await tx.socialAccount.update({
       where: { id: socialAccountId },
-      data: { dailyPostCount: sameDay ? { increment: 1 } : 1, lastPostAt: now, healthScore: { increment: 5 } },
+      data: {
+        ...(at >= today && { dailyPostCount: sameDay ? { increment: 1 } : 1 }),
+        ...((!account.lastPostAt || at > account.lastPostAt) && { lastPostAt: at }),
+        healthScore: { increment: 5 },
+      },
     });
     await tx.socialAccount.updateMany({
       where: { id: socialAccountId, healthScore: { gt: 100 } },
       data: { healthScore: 100 },
     });
-    await settleItem(tx, publishJobId, { status: 'published', at: now });
+    await settleItem(tx, publishJobId, { status: 'published', at, recovered: Boolean(data.recoveredAt) });
   });
 }
 
@@ -236,6 +247,10 @@ export function createPublishWorker(deps: Deps): Worker {
   return new Worker<PublishJobPayload>(
     QUEUES['publish'].name,
     async (job, token) => {
+      if (job.data.verificationOnly) {
+        await verifyDevicePublication(db, job, token);
+        return;
+      }
       const { publishJobId, videoId, tenantId, platform, socialAccountId } = job.data;
       logger.info({ publishJobId, platform, videoId, attempt: job.attemptsMade + 1 }, 'Publish: старт');
 
@@ -875,4 +890,62 @@ function buildCaption(caption: string | null, hashtags: string[]): string {
     }
   }
   return normalizeCaption(parts.join('\n\n'));
+}
+
+// Same normalization as the read-only scanner on the device agent.
+function verificationCaptionKey(value: string): string {
+  return value.normalize('NFC').replace(/[\u200B\uFEFF\uFE0F]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+async function verifyDevicePublication(db: PrismaClient, job: Job<PublishJobPayload>, token?: string) {
+  const { publishJobId, tenantId, socialAccountId } = job.data;
+  const post = await db.publishJob.findFirst({
+    where: { id: publishJobId, tenantId, socialAccountId, status: 'failed', needsReview: true },
+    select: { caption: true, hashtags: true, platform: true, updatedAt: true,
+      socialAccount: { select: { accountName: true, sessionData: true, deviceId: true, authMethod: true, isActive: true } } },
+  });
+  if (!post) return;
+  const { platform, socialAccount: account } = post;
+  if ((platform !== 'tiktok' && platform !== 'instagram') || !account.deviceId || account.authMethod !== 'device' || !account.isActive) return;
+  const username = deviceUsername(account.sessionData, account.accountName);
+  const caption = buildCaption(post.caption, post.hashtags);
+  const expected = verificationCaptionKey(caption);
+  if (!username || expected.length < 20 || caption.length > 4000) return;
+
+  const redis = getRedisConnection();
+  const deviceId = account.deviceId;
+  const lock = await acquireDeviceLock(redis, deviceId, 6 * 60, 100);
+  if (!lock) {
+    await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+    throw new DelayedError();
+  }
+  let sharedLock: string | null = null;
+  try {
+    // Check uniqueness while holding the device lock, so a later upload cannot be mistaken for this one.
+    const siblings = await db.publishJob.findMany({
+      where: { id: { not: publishJobId }, tenantId, socialAccountId, platform,
+        OR: [{ status: { in: ['published', 'uploading'] } }, { status: 'failed', needsReview: true }] },
+      select: { caption: true, hashtags: true },
+    });
+    if (siblings.some((item) => verificationCaptionKey(buildCaption(item.caption, item.hashtags)) === expected)) return;
+    const mode = await deviceAgentService.getProxyMode();
+    if (mode.mode === 'shared_sequential') {
+      sharedLock = await acquireDeviceLock(redis, 'farm:shared-proxy', 6 * 60, 100);
+      if (!sharedLock) {
+        await job.moveToDelayed(Date.now() + DEVICE_BUSY_RETRY_MS, token);
+        throw new DelayedError();
+      }
+    }
+    const since = post.updatedAt.getTime() - 60 * 60_000;
+    const result = await deviceAgentService.verifyPost({ deviceId, platform, username, caption, since }).catch((err: unknown) => {
+      throw new Error(`Проверка профиля недоступна: ${describeDeviceAgentError(err)}`);
+    });
+    if (result.status !== 'confirmed') throw new Error(`Публикация ещё не подтверждена (${result.status})`);
+    await finalizePublishSuccess(db, publishJobId, socialAccountId, {
+      recoveredAt: post.updatedAt, verifiedAt: new Date(), publishNote: null,
+    });
+  } finally {
+    if (sharedLock) await releaseDeviceLock(redis, 'farm:shared-proxy', sharedLock);
+    await releaseDeviceLock(redis, deviceId, lock);
+  }
 }

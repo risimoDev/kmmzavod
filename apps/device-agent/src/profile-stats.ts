@@ -353,7 +353,7 @@ export function readPublishProfile(xml: string, width: number, height: number, p
 
 /** Open the own profile and read post count + grid (used to verify a fresh post). */
 export async function snapshotProfile(
-  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg: string, refresh = true,
+  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg: string, refresh = true, capture = true,
 ): Promise<ProfileSnapshot> {
   const { width, height } = await adb.getScreenSize(deviceId);
   await openProfile(adb, deviceId, platform, username, targetPkg);
@@ -376,7 +376,7 @@ export async function snapshotProfile(
         await adb.swipe(deviceId, midX, appHeight * 0.35, midX, appHeight * 0.72, 400).catch(() => {});
         continue;
       }
-      if (snapshot.posts == null && snapshot.tiles.some((tile) => tile.bounds)) {
+      if (capture && snapshot.posts == null && snapshot.tiles.some((tile) => tile.bounds)) {
         const frame = await adb.captureScreenPixels(deviceId).catch(() => null);
         if (frame) for (const tile of snapshot.tiles.slice(0, 3)) {
           if (tile.bounds) tile.cover = sampleProfileCover(frame, tile.bounds);

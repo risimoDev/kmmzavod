@@ -25,7 +25,7 @@ import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
 import type { ProxyManager } from './proxy-manager';
-import { allowsHashtagTap, decide, findPostButton, hasPublishReceipt, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
+import { allowsHashtagTap, decide, findPostButton, hasDraftReceipt, hasPublishReceipt, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
 import { center, clickTarget, dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
@@ -686,6 +686,9 @@ export async function publishToDevice(
         appConfirmed = true;
         publishReceipt = true;
         break;
+      }
+      if (screen?.pkg === pkg && hasDraftReceipt(screen)) {
+        return result({ ok: false, posted: 'no', retryable: false, captionTyped, detail: 'Приложение подтвердило сохранение ролика в черновики' });
       }
       if (screen) {
         const action = decide(flowPlatform, screen, st, !!caption);

@@ -11,6 +11,7 @@ import { AutoHealManager } from './auto-heal';
 import { ApkManager } from './apk-manager';
 import { ScriptEngine } from './script-engine';
 import { collectProfileStats } from './profile-stats';
+import { verifyRecentPost } from './verify-post';
 import { PackageResolver } from './package-resolver';
 import { runDeviceAccountLogin, submitVerificationCodeOnDevice } from './account-login';
 import { testImapConnection, pollVerificationCode } from './imap-client';
@@ -589,6 +590,31 @@ const ProfileStatsBody = z.object({
   deviceId: z.string().min(1),
   platform: z.enum(['instagram', 'tiktok']),
   username: z.string().min(1).max(100),
+});
+
+app.post('/publish/verify', async (req, reply) => {
+  const input = ProfileStatsBody.extend({ caption: z.string().trim().min(20).max(4000), since: z.number().int().nonnegative() }).safeParse(req.body);
+  if (!input.success) return reply.code(400).send({ status: 'unavailable' });
+  const { deviceId, platform, username, caption, since } = input.data;
+  let unlock: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  try {
+    unlock = await deviceMutex.acquire(deviceId, 3_000);
+    release = await proxyManager.acquireTaskLease(deviceId);
+    const guard = await proxyManager.preflight(deviceId);
+    if (!guard.ok) return { status: 'unavailable', detail: guard.detail };
+    const resolved = await packageResolver.resolve(deviceId, platform);
+    if (!resolved.installed || !resolved.packageName) return { status: 'unavailable' };
+    await adb.wakeUp(deviceId);
+    const status = await verifyRecentPost(adb, deviceId, platform, username, resolved.packageName, caption, since);
+    return { status };
+  } catch (err) {
+    logger.warn({ deviceId, err: (err as Error).message }, 'device-agent: read-only publish verification unavailable');
+    return { status: 'unavailable' };
+  } finally {
+    release?.();
+    unlock?.();
+  }
 });
 
 app.post('/stats/profile', async (req, reply) => {

@@ -85,7 +85,8 @@ const APP_OFFLINE = /network error|check your network|no (internet|network) conn
 const PERCENT = /^(\d{1,3})\s?%$/;
 const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео загружено|^загружено$|публикация завершена/i;
 const PUBLISH_RECEIPT = /^(?:(?:your )?(?:video|reel) (?:has been |was )?(?:successfully )?(?:posted|shared)(?: successfully)?|(?:post|video) published successfully|(?:видео|ролик|публикация) (?:успешно )?опубликован[оа]?|публикация успешно завершена)[.!✓\s]*$/i;
-const RECEIPT_ELEMENT = /toast|snackbar|publish_result|post_success|share_success/i;
+const DRAFT_RECEIPT = /^(?:(?:your )?(?:video|post|reel) (?:was |has been )?)?saved to drafts?\.?$|^(?:(?:видео|ролик) )?сохранен[оа]? в черновик(?:и|ах)?\.?$/i;
+const RECEIPT_ELEMENT = /toast|snackbar|publish_result|post_success|share_success|draft_saved/i;
 
 // ── Decision ──────────────────────────────────────────────────────────────────
 
@@ -487,7 +488,15 @@ export function uploadPercent(s: UiScreen): number | null {
 
 export function hasPublishReceipt(s: UiScreen): boolean {
   if (editTexts(s).length || uploadPercent(s) != null || isSavedToDrafts(s) || isAppOffline(s) || screenHas(s, UPLOAD_FAILED)) return false;
-  const receipt = byLabel(s, PUBLISH_RECEIPT);
+  return hasStatusNotice(s, PUBLISH_RECEIPT);
+}
+
+export function hasDraftReceipt(s: UiScreen): boolean {
+  return !editTexts(s).length && uploadPercent(s) == null && hasStatusNotice(s, DRAFT_RECEIPT);
+}
+
+function hasStatusNotice(s: UiScreen, label: RegExp): boolean {
+  const receipt = byLabel(s, label);
   for (let node = receipt ?? null; node; node = node.parent) {
     if (RECEIPT_ELEMENT.test(`${node.cls} ${node.resId}`)) return true;
   }
