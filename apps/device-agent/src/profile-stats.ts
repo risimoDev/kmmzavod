@@ -14,11 +14,16 @@
 import type { Logger } from 'pino';
 import type { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
+import { dumpScreen, sleep } from './ui-automation';
+
+type Bounds = [number, number, number, number];
 
 export interface ProfileTile {
   index: number;          // 0 = top-left (newest unless pinned)
   views: number | null;
   pinned: boolean;
+  bounds?: Bounds;
+  cover?: number[];
 }
 
 export interface ProfileStats {
@@ -60,8 +65,10 @@ interface UiNode {
   text: string;
   desc: string;
   resId: string;
+  cls: string;
   clickable: boolean;
-  bounds: [number, number, number, number];
+  selected: boolean;
+  bounds: Bounds;
   parent: UiNode | null;
   children: UiNode[];
 }
@@ -84,7 +91,9 @@ export function parseUiTree(xml: string): UiNode[] {
       text: attr(tag, 'text'),
       desc: attr(tag, 'content-desc'),
       resId: attr(tag, 'resource-id'),
+      cls: attr(tag, 'class'),
       clickable: attr(tag, 'clickable') === 'true',
+      selected: attr(tag, 'selected') === 'true',
       bounds: b ? [Number(b[1]), Number(b[2]), Number(b[3]), Number(b[4])] : [0, 0, 0, 0],
       parent: stack[stack.length - 1] ?? null,
       children: [],
@@ -127,18 +136,38 @@ export function parsePostsCount(xml: string, screenW: number): number | null {
   return headerCount(parseUiTree(xml), POSTS_RE, /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(публикаци|posts?\b)/i, screenW).value;
 }
 
-export function profileMatchesUsername(xml: string, screenH: number, username: string, platform: ProfileStats['platform']): boolean {
+function matchesUsername(nodes: UiNode[], screenH: number, username: string, platform: ProfileStats['platform']): boolean {
   const normalize = (value: string) => value.trim().replace(/^@/, '').toLowerCase();
   const expected = normalize(username);
   if (!/^[a-z\d._]{1,100}$/.test(expected)) return false;
-  return parseUiTree(xml).some((node) => {
+  return nodes.some((node) => {
     const [, top, , bottom] = node.bounds;
     if (bottom <= top || top >= screenH * (platform === 'instagram' ? 0.18 : 0.32)) return false;
     return [node.text, node.desc].some((value) => normalize(value) === expected &&
       (platform === 'instagram' || value.trim().startsWith('@') || /user_?name/i.test(node.resId)));
   });
 }
-const PINNED_RE = /(закреплен|pinned)/i;
+
+export function profileMatchesUsername(xml: string, screenH: number, username: string, platform: ProfileStats['platform']): boolean {
+  return matchesUsername(parseUiTree(xml), screenH, username, platform);
+}
+
+const PINNED_RE = /закрепл[её]н|pinned|^(?:pin|top)_?(?:icon|label|tag)$/i;
+const DRAFT_TILE = /^(?:drafts?|черновики?)(?:\s*[:·]?\s*\d+)?$/i;
+const PROFILE_TAB = /^(?:profile|профиль|я|me)(?:\s*,\s*(?:tab|вкладка)\b.*)?$/i;
+const VIDEOS_TAB = /^(?:videos|posts|видео|публикации)$/i;
+const OTHER_PROFILE_TABS = /^(?:private (?:videos|posts)|liked videos|favorites|reposts|закрытые видео|приватные видео|понравившиеся|избранное|репосты)$/i;
+const EMPTY_GRID = /^(?:no (?:videos|posts)(?: yet)?|no content|(?:create|share) your first (?:video|post)|(?:пока )?нет (?:видео|публикаций)|создайте первое видео)\.?$/i;
+
+function hasLabel(node: UiNode, label: RegExp): boolean {
+  return label.test(node.text.trim()) || label.test(node.desc.trim());
+}
+
+function tiktokProfileTab(nodes: UiNode[], width: number, height: number): UiNode | undefined {
+  return nodes.find((n) => n.clickable && n.bounds[0] >= width * 0.7 && n.bounds[1] >= height * 0.8 &&
+    n.bounds[2] > n.bounds[0] && n.bounds[3] > n.bounds[1] &&
+    (hasLabel(n, PROFILE_TAB) || /profile_tab|navigation_profile|tab_me|me_tab/i.test(n.resId)));
+}
 
 function descendants(n: UiNode): UiNode[] {
   const out: UiNode[] = [];
@@ -148,19 +177,29 @@ function descendants(n: UiNode): UiNode[] {
 }
 
 /** Pure parser: followers + grid tiles (with views) from a profile screen dump. */
-export function parseProfileDump(xml: string, screenW: number, screenH: number): { followers: number | null; tiles: ProfileTile[]; onProfile: boolean; uploading: number | null } {
+export function parseProfileDump(xml: string, screenW: number, screenH: number) {
   const nodes = parseUiTree(xml);
+  const root = nodes[0]?.bounds;
+  const width = root && root[2] - root[0] >= screenW * 0.8 ? root[2] : screenW;
+  const height = root && root[3] - root[1] >= screenH * 0.7 ? root[3] : screenH;
+  const profileTab = tiktokProfileTab(nodes, width, height);
+  const gridTab = nodes.find((n) => n.selected && hasLabel(n, VIDEOS_TAB));
+  const otherGridTabSelected = nodes.some((n) => n.selected && hasLabel(n, OTHER_PROFILE_TABS));
 
   // Followers: "1,2 тыс.\nподписчиков" in one node, or a number node right above
   // (same column) a "Подписчики/Followers" label.
-  const header = headerCount(nodes, FOLLOWERS_RE, /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(подписчик|followers)/i, screenW);
+  const header = headerCount(nodes.filter((n) => n.bounds[3] <= height * 0.62), FOLLOWERS_RE,
+    /([\d\s.,]+(?:k|к|тыс\.?|m|м|млн\.?)?)\s*(подписчик|followers?\b)/i, width);
   const followers = header.value;
-  const headerBottom = header.bottom;
-  const onProfile = headerBottom > 0;
+  const headerBottom = Math.max(header.bottom, gridTab?.bounds[3] ?? 0);
+  const onProfile = header.bottom > 0 || Boolean(profileTab?.selected && gridTab);
 
   // Grid tiles: count nodes below the header and above the bottom navigation,
   // grouped by their tile container (≈ 1/3 of the screen wide).
-  const tileW = screenW / 3;
+  const tileW = width / 3;
+  const gridBottom = profileTab?.bounds[1] ?? height * 0.96;
+  const isTile = (n: UiNode) => Math.abs((n.bounds[2] - n.bounds[0]) - tileW) < tileW * 0.3 &&
+    n.bounds[3] - n.bounds[1] > tileW * 0.6 && n.bounds[1] >= headerBottom && n.bounds[1] < gridBottom;
   // A tile still uploading shows a percentage ("96%") instead of a view count — it is a
   // post all the same (the newest one), so it must be counted as a tile.
   const pctOf = (n: UiNode): number | null => {
@@ -170,30 +209,43 @@ export function parseProfileDump(xml: string, screenW: number, screenH: number):
   let uploading: number | null = null;
   const counts = nodes.filter((n) => {
     const v = parseCount(n.text) ?? parseCount(n.desc) ?? pctOf(n);
-    return v != null && n.bounds[1] > headerBottom + 20 && n.bounds[3] < screenH * 0.93;
+    return v != null && n.bounds[1] > headerBottom + 12 && n.bounds[3] <= gridBottom;
   });
-  const tiles = new Map<UiNode, { node: UiNode; views: number | null }>();
+  const tiles = new Map<string, { node: UiNode; views: number | null }>();
+  for (const node of nodes) {
+    if (!isTile(node) || !(/(?:^|[:/])(?:cover|(?:video|aweme|post|item)_cover|cover_image)$/i.test(node.resId) ||
+      /\.GridView$/.test(node.parent?.cls ?? ''))) continue;
+    const key = node.bounds.join(',');
+    const cell = node.parent?.bounds.join(',') === key ? node.parent : node;
+    if (!tiles.has(key)) tiles.set(key, { node: cell, views: null });
+  }
   for (const c of counts) {
-    let t: UiNode | null = c.parent;
-    while (t && !(Math.abs((t.bounds[2] - t.bounds[0]) - tileW) < tileW * 0.3 && t.bounds[3] - t.bounds[1] > tileW * 0.6)) t = t.parent;
-    const tile = t ?? c;
+    let tile: UiNode | null = c;
+    while (tile && !isTile(tile)) tile = tile.parent;
+    if (!tile) continue;
     const pct = pctOf(c);
     if (pct != null) uploading = uploading ?? pct;
     const views = pct != null ? null : parseCount(c.text) ?? parseCount(c.desc);
-    const known = tiles.get(tile);
-    if (!known) tiles.set(tile, { node: tile, views });
-    else if (pct != null) known.views = null; // an uploading tile has no views yet
+    const key = tile.bounds.join(',');
+    const known = tiles.get(key);
+    if (!known) tiles.set(key, { node: tile, views });
+    else if (pct != null || known.views == null) known.views = views;
   }
   const ordered = [...tiles.values()]
+    .filter(({ node }) => ![node, ...descendants(node)].some((child) => hasLabel(child, DRAFT_TILE)))
     .sort((a, b) => (Math.round(a.node.bounds[1] / 40) - Math.round(b.node.bounds[1] / 40)) || (a.node.bounds[0] - b.node.bounds[0]));
   return {
     followers,
     onProfile,
     uploading,
+    ownTabSelected: Boolean(profileTab?.selected),
+    otherGridTabSelected,
+    empty: nodes.some((n) => n.bounds[1] >= headerBottom && hasLabel(n, EMPTY_GRID)),
     tiles: ordered.map((t, index) => ({
       index,
       views: t.views,
-      pinned: [t.node, ...descendants(t.node)].some((x) => PINNED_RE.test(`${x.text} ${x.desc}`)),
+      pinned: [t.node, ...descendants(t.node)].some((x) => hasLabel(x, PINNED_RE) || PINNED_RE.test(x.resId.split('/').pop() ?? '')),
+      bounds: t.node.bounds[3] <= gridBottom ? t.node.bounds : undefined,
     })),
   };
 }
@@ -215,31 +267,33 @@ export async function openProfile(
       .catch(() => adb.openUrl(deviceId, `https://www.instagram.com/${user}`, targetPkg));
   } else {
     const pkg = targetPkg || 'com.zhiliaoapp.musically';
-    await adb.openApp(deviceId, pkg).catch(() => {});
-    await new Promise((r) => setTimeout(r, 2000));
-    const xml = await adb.fastShell(deviceId, 'uiautomator dump --compressed /sdcard/kmm_ui.xml >/dev/null 2>&1; cat /sdcard/kmm_ui.xml; rm -f /sdcard/kmm_ui.xml', 15_000).catch(() => '');
-    if (xml) {
-      const nodes = parseUiTree(xml);
-      const profileTab = nodes.find((n) =>
-        /^(profile|профиль|я|me)$/i.test(n.desc.trim()) ||
-        /^(profile|профиль|я|me)$/i.test(n.text.trim()) ||
-        /profile_tab|navigation_profile|tab_me|me_tab/i.test(n.resId)
-      );
-      if (profileTab) {
-        const [x1, y1, x2, y2] = profileTab.bounds;
-        await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-        return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const screen = await dumpScreen(adb, deviceId, 1);
+      if (screen?.pkg === pkg) {
+        const nodes = parseUiTree(screen.xml);
+        const bounds = nodes[0]?.bounds;
+        const tab = bounds && tiktokProfileTab(nodes, bounds[2], bounds[3]);
+        if (tab) {
+          if (!tab.selected) await tapNode(adb, deviceId, tab);
+          return;
+        }
       }
+      if (attempt === 0) await adb.openApp(deviceId, pkg).catch(() => {});
+      if (attempt < 2) await sleep(1500);
     }
-    const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-    await adb.tap(deviceId, Math.round(width * 0.9), Math.round(height * 0.96));
-
-
   }
+}
+
+async function tapNode(adb: AdbClient, deviceId: string, node: UiNode): Promise<void> {
+  const [x1, y1, x2, y2] = node.bounds;
+  await adb.tap(deviceId, (x1 + x2) / 2, (y1 + y2) / 2);
 }
 
 export interface ProfileSnapshot {
   onProfile: boolean;
+  /** An identifiable, different TikTok account was open. */
+  wrongAccount?: boolean;
+  empty?: boolean;
   /** Instagram header post count; null on TikTok / when not readable. */
   posts: number | null;
   /** Grid tiles excluding pinned ones, newest first. */
@@ -248,26 +302,90 @@ export interface ProfileSnapshot {
   uploading: number | null;
 }
 
+type ScreenPixels = Awaited<ReturnType<AdbClient['captureScreenPixels']>>;
+
+export function sampleProfileCover({ pixels, width, height }: ScreenPixels, bounds: Bounds): number[] | undefined {
+  const [left, top, right, bottom] = bounds;
+  if (pixels.length !== width * height * 4 || left < 0 || top < 0 || right > width || bottom > height ||
+      right - left < 48 || bottom - top < 48) return;
+
+  const samples: number[] = [];
+  for (let y = 0; y < 6; y++) {
+    for (let x = 0; x < 7; x++) {
+      // The post counter and pin badge sit outside the sampled area.
+      const px = Math.round(left + (right - left) * (0.14 + x * 0.12));
+      const py = Math.round(top + (bottom - top) * (0.23 + y * 0.09));
+      for (let channel = 0; channel < 3; channel++) {
+        let sum = 0;
+        for (const dy of [-2, 0, 2]) for (const dx of [-2, 0, 2]) {
+          sum += pixels[((py + dy) * width + px + dx) * 4 + channel];
+        }
+        samples.push(Math.round(sum / 9));
+      }
+    }
+  }
+  const luminance = samples.filter((_, index) => index % 3 === 0)
+    .map((red, index) => (red + samples[index * 3 + 1] + samples[index * 3 + 2]) / 3);
+  return Math.max(...luminance) - Math.min(...luminance) >= 20 ? samples : undefined;
+}
+
+export function readPublishProfile(xml: string, width: number, height: number, platform: ProfileStats['platform'], username: string): ProfileSnapshot {
+  const parsed = parseProfileDump(xml, width, height);
+  const nodes = parseUiTree(xml);
+  const viewportHeight = nodes[0]?.bounds[3] || height;
+  const expected = username.trim();
+  const sameAccount = expected ? matchesUsername(nodes, viewportHeight, expected, platform) : parsed.ownTabSelected;
+  const hasHandle = nodes.some((n) => n.bounds[3] > n.bounds[1] && n.bounds[1] < viewportHeight * 0.32 &&
+    hasLabel(n, /^@[a-z\d._]+$/i));
+  const wrongAccount = platform === 'tiktok' && Boolean(expected && !sameAccount && parsed.ownTabSelected && hasHandle);
+  const onProfile = (parsed.onProfile || parsed.tiles.length > 0 || parsed.empty) &&
+    sameAccount && !(platform === 'tiktok' && parsed.otherGridTabSelected);
+  const tiles = onProfile ? parsed.tiles.filter((tile) => !tile.pinned) : [];
+  return {
+    onProfile,
+    wrongAccount,
+    posts: onProfile && platform === 'instagram' ? parsePostsCount(xml, width) : null,
+    empty: onProfile && parsed.empty && tiles.length === 0,
+    tiles,
+    uploading: onProfile ? parsed.uploading : null,
+  };
+}
+
 /** Open the own profile and read post count + grid (used to verify a fresh post). */
 export async function snapshotProfile(
-  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg?: string,
+  adb: AdbClient, deviceId: string, platform: 'instagram' | 'tiktok', username: string, targetPkg: string, refresh = true,
 ): Promise<ProfileSnapshot> {
   const { width, height } = await adb.getScreenSize(deviceId);
   await openProfile(adb, deviceId, platform, username, targetPkg);
-  if (platform === 'tiktok') {
-    // Swipe down to refresh TikTok profile grid (otherwise cached view without new post is read)
-    await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.35), Math.round(width / 2), Math.round(height * 0.75), 400).catch(() => {});
-    await new Promise((r) => setTimeout(r, 3000));
+  let last: ProfileSnapshot = { onProfile: false, posts: null, tiles: [], uploading: null };
+  let refreshed = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await sleep(attempt === 0 ? 650 : 1_500);
+    const screen = await dumpScreen(adb, deviceId, 1);
+    if (screen?.pkg !== targetPkg) continue;
+    const snapshot = readPublishProfile(screen.xml, width, height, platform, username);
+    last = snapshot;
+    if (snapshot.wrongAccount) return snapshot;
+    if (!snapshot.onProfile || (platform === 'tiktok' && !snapshot.empty && !snapshot.tiles.length)) continue;
+    if (snapshot.uploading == null) {
+      if (platform === 'tiktok' && refresh && !refreshed && attempt < 3) {
+        refreshed = true;
+        const viewport = parseUiTree(screen.xml)[0]?.bounds;
+        const midX = (viewport?.[2] ?? width) / 2;
+        const appHeight = viewport?.[3] ?? height;
+        await adb.swipe(deviceId, midX, appHeight * 0.35, midX, appHeight * 0.72, 400).catch(() => {});
+        continue;
+      }
+      if (snapshot.posts == null && snapshot.tiles.some((tile) => tile.bounds)) {
+        const frame = await adb.captureScreenPixels(deviceId).catch(() => null);
+        if (frame) for (const tile of snapshot.tiles.slice(0, 3)) {
+          if (tile.bounds) tile.cover = sampleProfileCover(frame, tile.bounds);
+        }
+      }
+    }
+    return snapshot;
   }
-  await new Promise((r) => setTimeout(r, 5000));
-  const xml = await dump(adb, deviceId).catch(() => '');
-  const parsed = parseProfileDump(xml, width, height);
-  return {
-    onProfile: parsed.onProfile,
-    posts: platform === 'instagram' ? parsePostsCount(xml, width) : null,
-    tiles: parsed.tiles.filter((t) => !t.pinned),
-    uploading: parsed.uploading,
-  };
+  return last;
 }
 
 export async function collectProfileStats(

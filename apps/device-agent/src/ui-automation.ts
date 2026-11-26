@@ -117,7 +117,7 @@ export async function dumpScreen(adb: AdbClient, deviceId: string, attempts = 3)
   for (let i = 0; i < attempts; i++) {
     try {
       const dumpCmd = i % 2 === 0 ? `uiautomator dump --compressed ${DUMP_PATH}` : `uiautomator dump ${DUMP_PATH}`;
-      const out = await adb.fastShell(deviceId, `${dumpCmd} >/dev/null 2>&1; cat ${DUMP_PATH}; rm -f ${DUMP_PATH}`, 20_000);
+      const out = await adb.fastShell(deviceId, `rm -f ${DUMP_PATH}; ${dumpCmd} >/dev/null 2>&1 && cat ${DUMP_PATH}; rm -f ${DUMP_PATH}`, 20_000);
       const start = out.indexOf('<?xml');
       if (start >= 0 && out.includes('<hierarchy')) return parseUi(out.slice(start));
     } catch {

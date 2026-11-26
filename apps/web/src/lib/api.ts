@@ -2394,7 +2394,8 @@ export interface AutopilotPost {
   error: string | null;
   createdAt: string;
   socialAccount: { accountName: string; platform: string; deviceId: string | null };
-  publishJob: { status: string; externalPostId: string | null; error: string | null } | null;
+  publishJob: { status: string; externalPostId: string | null; error: string | null; needsReview: boolean } | null;
+  canRetry: boolean;
   uniqueVariant: { id: string; variantIndex: number; thumbnailKey: string | null; uniquifyJobId: string };
   thumbnailUrl: string | null;
 }
@@ -2423,6 +2424,7 @@ export interface AutopilotLiveProgress {
   publishingCount: number;
   publishedCount: number;
   failedCount: number;
+  verificationPendingCount?: number;
   cycleTotal?: number;
   isPublishing: boolean;
   activeItem: {

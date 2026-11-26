@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { allowsHashtagTap, decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, uploadPercent, type FlowState } from '../src/publish-flow';
+import { allowsHashtagTap, decide, findPostButton, hasPublishReceipt, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
-import { parsePostsCount, parseProfileDump } from '../src/profile-stats';
+import { parsePostsCount, parseProfileDump, readPublishProfile, sampleProfileCover } from '../src/profile-stats';
 
 let failed = 0;
 const ok = (c: boolean, m: string) => { if (!c) failed++; console.log(c ? 'PASS' : 'FAIL', m); };
@@ -214,15 +214,29 @@ ok(a.kind === 'tap' && /Загрузить/.test(a.el.text || a.el.desc), 'TikTo
 // ── Profile verification ─────────────────────────────────────────────────────
 ok(isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 13, tiles: [] }), 'IG: posts 12 → 13 = new post');
 ok(!isNewPostOnProfile({ posts: 12, tiles: [] }, { posts: 12, tiles: [] }), 'IG: posts unchanged = not posted');
-ok(isNewPostOnProfile({ posts: null, tiles: [{ views: 5 }, { views: 40 }] }, { posts: null, tiles: [{ views: 0 }, { views: 5 }, { views: 40 }] }),
-  'TikTok: grid not full and gained a tile');
-const fullBefore = { posts: null, tiles: Array.from({ length: 9 }, (_, i) => ({ views: 300 + i * 100 })) };
-ok(isNewPostOnProfile(fullBefore, { posts: null, tiles: [{ views: 0 }, ...fullBefore.tiles.slice(0, 8).map((t) => ({ views: t.views + 3 }))] }),
-  'TikTok full grid: newest shifted to #2, fresh tile with 0 views → new post');
-ok(!isNewPostOnProfile(fullBefore, { posts: null, tiles: fullBefore.tiles.map((t) => ({ views: t.views + 10 })) }),
-  'TikTok full grid: same tiles, views grew → NOT a new post');
-const zeroBefore = { posts: null, tiles: Array.from({ length: 9 }, () => ({ views: 0 })) };
-ok(!isNewPostOnProfile(zeroBefore, zeroBefore), 'ambiguous (all 0 views, full grid) → unverified, not guessed');
+ok(!isNewPostOnProfile({ posts: null, tiles: [{ views: 5 }, { views: 40 }] }, { posts: null, tiles: [{ views: 0 }, { views: 5 }, { views: 40 }] }),
+  'TikTok: viewport can expose more tiles without a new post');
+const covers = [0, 60, 120].map((base) => ({ views: 0, cover: [base, base + 20, base + 40] }));
+const zeroBefore = { posts: null, tiles: covers.slice(1) };
+const zeroAfter = { posts: null, tiles: covers };
+ok(isNewPostOnProfile(zeroBefore, zeroAfter), 'TikTok: new cover shifts previous covers even when every counter is zero');
+ok(!isNewPostOnProfile(zeroBefore, zeroBefore), 'TikTok: same covers are inconclusive');
+ok(!isNewPostOnProfile(zeroBefore, { ...zeroAfter, uploading: 96 }), 'TikTok: upload badge blocks verification');
+ok(!isNewPostOnProfile(zeroBefore, { posts: null, tiles: [covers[2], covers[1]] }), 'TikTok: reordering a cover from the baseline does not confirm a new post');
+ok(!isNewPostOnProfile({ posts: null, tiles: [] }, zeroAfter), 'TikTok: a missing grid does not mean an empty account');
+ok(isNewPostOnProfile({ posts: null, tiles: [], empty: true }, zeroAfter), 'TikTok: a readable empty profile can confirm its first video');
+
+const size = 144;
+const pixels = Buffer.alloc(size * size * 4);
+for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+  pixels.fill(x, (y * size + x) * 4, (y * size + x) * 4 + 3);
+}
+const tallCover: B = [12, 12, 120, 132];
+const originalCover = sampleProfileCover({ pixels, width: size, height: size }, tallCover);
+pixels.fill(250, size * 112 * 4); // changing the bottom play count does not change the image samples
+const updatedCover = sampleProfileCover({ pixels, width: size, height: size }, tallCover);
+ok(originalCover?.length === 126 && JSON.stringify(originalCover) === JSON.stringify(updatedCover), 'cover samples stay stable when the lower counter changes');
+ok(!sampleProfileCover({ pixels: Buffer.alloc(pixels.length), width: size, height: size }, tallCover), 'a blank placeholder is not evidence');
 
 // ── IG header post count ──────────────────────────────────────────────────────
 const header = (posts: string) => `<?xml version='1.0' ?><hierarchy rotation="0">` +
@@ -285,12 +299,23 @@ ok(isComposeScreen('tiktok', mainPost), 'main TikTok post screen is the compose 
 const mainAfter = fx('tiktok-main-after-post.xml');
 ok(decide('tiktok', mainAfter, st({ shareTapped: true }), true).kind === 'success', 'main TikTok: back on the Friends tab after Post → app accepted');
 ok(!isComposeScreen('tiktok', mainAfter), 'Friends tab is not a compose screen');
+ok(!hasPublishReceipt(mainAfter), 'Friends tab is not an explicit confirmation');
+const receipt = el({ id: `${TT}:id/publish_result`, text: 'Your video has been posted', b: [100, 120, 960, 200] });
+ok(hasPublishReceipt(screen(TT, receipt)), 'an explicit TikTok success notice can confirm publication');
+ok(!hasPublishReceipt(screen(TT, el({ text: 'Your video has been posted', b: [100, 120, 960, 200] }))), 'an arbitrary text label cannot confirm publication');
+ok(!hasPublishReceipt(screen(TT, receipt, el({ text: '96%', b: [100, 210, 320, 290] }))), 'a success notice with upload still visible is inconclusive');
 const mainProfileXml = fs.readFileSync(path.join(__dirname, 'fixtures', 'tiktok-main-profile-uploading.xml'), 'utf8');
 const prof = parseProfileDump(mainProfileXml, 1080, 2220);
 ok(prof.uploading === 96, `profile: uploading tile read as 96% (${prof.uploading})`);
 ok(prof.tiles.length === 3 && prof.tiles[0].views === null, `profile: uploading tile counted first, no views (${JSON.stringify(prof.tiles.map((t) => t.views))})`);
-ok(isNewPostOnProfile({ posts: null, tiles: [{ views: 0 }, { views: 436 }] }, { posts: null, tiles: prof.tiles }),
-  'profile: [0, 436] → [uploading, 0, 436] is a new post');
+const profileNoCounterLabel = mainProfileXml.replace('text="Follower"', 'text="Seguidores"');
+const ownProfile = readPublishProfile(profileNoCounterLabel, 1080, 2220, 'tiktok', 'test_account_1');
+ok(ownProfile.onProfile && ownProfile.uploading === 96 && ownProfile.tiles.length === 3, 'TikTok recognizes the matching account and real grid independently of follower label and physical screen height');
+const wrongProfile = readPublishProfile(profileNoCounterLabel, 1080, 2220, 'tiktok', 'other_account');
+ok(wrongProfile.wrongAccount && !wrongProfile.onProfile && wrongProfile.tiles.length === 0, 'a different logged-in account cannot confirm publication');
+const privateTab = profileNoCounterLabel.replace(/(content-desc="Videos"[^>]*selected=")true/, '$1false')
+  .replace(/(content-desc="Private videos"[^>]*selected=")false/, '$1true');
+ok(!readPublishProfile(privateTab, 1080, 2220, 'tiktok', 'test_account_1').onProfile, 'the private tab cannot confirm a public post');
 
 
 // ── Additional TikTok edge cases ─────────────────────────────────────────────

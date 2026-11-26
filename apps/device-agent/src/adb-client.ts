@@ -180,7 +180,7 @@ export class AdbClient {
   private async captureFrameUncached(serial: string, timeoutMs: number): Promise<ScreenFrame> {
     let raw: { pixels: Buffer; width: number; height: number };
     try {
-      raw = await this.rawScreencap(serial, timeoutMs);
+      raw = await this.captureScreenPixels(serial, timeoutMs);
     } catch (rawErr: any) {
       this.logger.debug({ serial, err: rawErr.message }, 'adb: raw screencap failed, falling back to screencap -p (PNG)');
       const pngBase64 = await this.takeScreenshot(serial, timeoutMs);
@@ -197,7 +197,7 @@ export class AdbClient {
   }
 
   /** `adb exec-out screencap` → RGBA pixels + full-resolution size. */
-  private rawScreencap(serial: string, timeoutMs: number): Promise<{ pixels: Buffer; width: number; height: number }> {
+  captureScreenPixels(serial: string, timeoutMs = 5_000): Promise<{ pixels: Buffer; width: number; height: number }> {
     return new Promise((resolve, reject) => {
       const proc = spawn(this.adbPath, ['-s', serial, 'exec-out', 'screencap'], { windowsHide: true });
       const chunks: Buffer[] = [];

@@ -414,6 +414,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       realScheduledCount,
       realPublishingCount,
       realFailedCount,
+      verificationPendingCount,
       activeItems,
       recentPublishedItems,
     ] = await Promise.all([
@@ -428,6 +429,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'scheduled' } }),
       db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'publishing' } }),
       db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: { in: ['failed', 'skipped'] } } }),
+      db.distributeItem.count({ where: { distributeJob: { autopilotId: id }, status: 'failed', publishJob: { needsReview: true } } }),
       // All active in-flight / queued / failed items
       db.distributeItem.findMany({
         where: {
@@ -439,7 +441,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
         select: {
           id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
           socialAccount: { select: { accountName: true, platform: true, deviceId: true } },
-          publishJob: { select: { status: true, externalPostId: true, error: true } },
+          publishJob: { select: { status: true, externalPostId: true, error: true, needsReview: true } },
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
@@ -454,7 +456,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
         select: {
           id: true, status: true, scheduledAt: true, publishedAt: true, error: true, createdAt: true,
           socialAccount: { select: { accountName: true, platform: true, deviceId: true } },
-          publishJob: { select: { status: true, externalPostId: true, error: true } },
+          publishJob: { select: { status: true, externalPostId: true, error: true, needsReview: true } },
           uniqueVariant: { select: { id: true, variantIndex: true, thumbnailKey: true, uniquifyJobId: true } },
         },
       }),
@@ -553,6 +555,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       publishingCount: realPublishingCount,
       publishedCount: realPublishedCount,
       failedCount: realFailedCount,
+      verificationPendingCount,
       cycleTotal: Math.max(cycleTotal, 1),
       isPublishing: realPublishingCount > 0,
       activeItem: activePublishing ? {
@@ -584,6 +587,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
       readyVariants: ready,
       posts: await Promise.all(posts.map(async (p) => ({
         ...p,
+        canRetry: p.status === 'failed' && canRetryPublish(p.publishJob, p.error),
         thumbnailUrl: await presign(p.uniqueVariant.thumbnailKey),
       }))),
       aiKeys: await aiKeyStatus(),
@@ -879,7 +883,7 @@ export async function autopilotRoutes(app: FastifyInstance) {
 
 type RetryItem = Prisma.DistributeItemGetPayload<{ include: { publishJob: true; socialAccount: true; uniqueVariant: true } }>;
 
-function canRetryPublish(post: RetryItem['publishJob'], error: string | null) {
+function canRetryPublish(post: Pick<NonNullable<RetryItem['publishJob']>, 'status' | 'needsReview' | 'error'> | null, error: string | null) {
   return (!post || (post.status === 'failed' && !post.needsReview))
     && !/не подтвержд|появление в профиле ожидается|проверьте профиль вручную/i.test(`${error ?? ''} ${post?.error ?? ''}`);
 }

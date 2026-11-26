@@ -89,7 +89,7 @@ export interface DevicePublishResult {
   /** no = nothing reached the platform (retry is safe); unknown = Share tapped, not confirmed. */
   posted?: 'yes' | 'no' | 'unknown';
   retryable?: boolean;
-  verified?: { app: boolean; profile: boolean | null };
+  verified?: { app: boolean; profile: boolean | null; receipt?: boolean };
   captionTyped?: boolean;
   debugSnapshot?: string;
   exitIp?: string;

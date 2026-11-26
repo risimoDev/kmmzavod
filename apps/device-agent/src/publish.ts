@@ -25,7 +25,7 @@ import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
 import type { ProxyManager } from './proxy-manager';
-import { allowsHashtagTap, decide, findPostButton, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
+import { allowsHashtagTap, decide, findPostButton, hasPublishReceipt, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
 import { center, clickTarget, dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
@@ -76,7 +76,7 @@ export interface PublishResult {
   posted: 'yes' | 'no' | 'unknown';
   /** false → retrying the same request will fail the same way (or could double-post). */
   retryable: boolean;
-  verified?: { app: boolean; profile: boolean | null };
+  verified?: { app: boolean; profile: boolean | null; receipt?: boolean };
   captionTyped?: boolean;
   onDevicePath?: string;
   detail?: string;
@@ -255,8 +255,11 @@ export async function publishToDevice(
     let baseline: ProfileSnapshot | null = null;
     if (canReadProfile) {
       baseline = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
+      if (baseline?.wrongAccount) {
+        return result({ ok: false, retryable: false, detail: `На плате открыт другой аккаунт TikTok. Ожидается @${username}` });
+      }
       if (!baseline?.onProfile) {
-        logger.warn({ deviceId, username }, 'publish: own profile not readable before posting — verification falls back to the app');
+        logger.warn({ deviceId, username }, 'publish: could not read a profile baseline');
         baseline = null;
       }
     }
@@ -487,7 +490,7 @@ export async function publishToDevice(
           if (action.marks === 'target') st.targetChosen = true;
           if (action.marks === 'next') st.nextTaps++;
           unknown = 0;
-          await sleep(2500);
+          if (!st.shareTapped) await sleep(2500);
           continue;
         }
         unknown++;
@@ -649,13 +652,16 @@ export async function publishToDevice(
     stage = 'upload';
     updateProgress(deviceId, { platform, stage: 'upload', step: `Загрузка видеоролика на сервер ${platform === 'tiktok' ? 'TikTok' : 'Instagram'}...`, percent: 86 });
     let appConfirmed = false;
+    let publishReceipt = false;
     let offline = false;
     let lastPct: number | null = null;
     let lastPctChange = Date.now();
     let lastActivity = Date.now();
     const uploadDeadline = Date.now() + UPLOAD_TIMEOUT_MS;
+    let firstUploadPoll = true;
     while (Date.now() < uploadDeadline && Date.now() < overallDeadline && Date.now() - lastActivity < UPLOAD_QUIET_MS) {
-      await sleep(3000);
+      await sleep(firstUploadPoll ? 750 : 3_000);
+      firstUploadPoll = false;
       const screen = await dumpScreen(adb, deviceId, 1);
       const pct = screen ? uploadPercent(screen) : null;
       if (screen && isAppOffline(screen)) offline = true;
@@ -676,6 +682,11 @@ export async function publishToDevice(
         break;
       }
 
+      if (screen?.pkg === pkg && hasPublishReceipt(screen)) {
+        appConfirmed = true;
+        publishReceipt = true;
+        break;
+      }
       if (screen) {
         const action = decide(flowPlatform, screen, st, !!caption);
         if (action.kind === 'success' && !offline && pct == null) { appConfirmed = true; break; }
@@ -704,7 +715,8 @@ export async function publishToDevice(
     updateProgress(deviceId, { platform, stage: 'verify', step: 'Верификация: проверка появления видео в профиле...', percent: 95 });
     let profileVerified: boolean | null = null;
     let stuckAt: number | null = null;
-    if (baseline) {
+    let wrongAccount = false;
+    if (canReadProfile) {
       for (let i = 0; i < PROFILE_CHECKS && Date.now() < overallDeadline; i++) {
         let after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
         // TikTok shows the new post in the grid with a "96%" badge while it still uploads.
@@ -720,31 +732,37 @@ export async function publishToDevice(
           if (Date.now() - lastUploadChange > UPLOAD_STALL_MS) break;
           logger.info({ deviceId, platform, uploading: after.uploading }, 'publish: post still uploading in the profile grid');
           await sleep(15_000);
-          after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg).catch(() => null);
+          after = await snapshotProfile(adb, deviceId, flowPlatform, username ?? '', pkg, false).catch(() => null);
         }
         if (after?.uploading != null) { stuckAt = after.uploading; profileVerified = false; break; }
-        if (after?.onProfile && isNewPostOnProfile(baseline, after)) { profileVerified = true; break; }
-        profileVerified = false;
+        if (after?.wrongAccount) { wrongAccount = true; break; }
+        if (after?.onProfile) {
+          if (baseline && isNewPostOnProfile(baseline, after)) { profileVerified = true; break; }
+          profileVerified = false;
+        }
         if (i < PROFILE_CHECKS - 1 && Date.now() + PROFILE_CHECK_GAP_MS < overallDeadline) await sleep(PROFILE_CHECK_GAP_MS);
       }
     }
     if (profileVerified === true) verifiedProfile = true;
-    const verified = { app: appConfirmed, profile: profileVerified };
-    // For TikTok (and Instagram with username), profile verification is the ground truth.
-    // An app returning to MainActivity is NEVER proof of publication if the video is missing from profile!
-    if (!verifiedProfile) {
+    // A completion notice is stronger than a return to the feed or disappearance of an upload badge.
+    const verifiedReceipt = publishReceipt && !wrongAccount && stuckAt == null && !offline &&
+      Boolean(baseline?.onProfile || profileVerified !== null);
+    const verified = { app: appConfirmed, profile: profileVerified, ...(verifiedReceipt && { receipt: true }) };
+    if (!verifiedProfile && !verifiedReceipt) {
       // Capture the screen the app is on now — before leaving it.
       const unconfirmedScreen = await dumpScreen(adb, deviceId, 1);
       const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_unconfirmed`, unconfirmedScreen?.xml).catch(() => undefined);
       await adb.home(deviceId).catch(() => {});
       return result({
         ok: false, posted: 'unknown', retryable: false, verified, captionTyped, debugSnapshot: snap,
-        detail: stuckAt != null
-          ? `Загрузка ролика остановилась на ${stuckAt}% (черновик не опубликован) — проверьте сеть/прокси платы.`
+        detail: wrongAccount
+          ? 'При проверке на плате открыт другой аккаунт TikTok — завершение публикации не подтверждено'
+          : stuckAt != null
+          ? `Последний статус загрузки в профиле — ${stuckAt}%. Завершение не подтверждено.`
           : offline
-          ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, загрузка остановилась на ${lastPct}%` : ''} — черновик не опубликован. Проверьте прокси/интернет платы.`
+          ? `Приложение на телефоне потеряло сеть («Network error»)${lastPct != null ? `, последний статус загрузки — ${lastPct}%` : ''}. Завершение не подтверждено.`
           : profileVerified === false
-          ? 'Пост не подтверждён в профиле — проверьте профиль и черновики вручную'
+          ? 'Профиль открыт, но данных недостаточно, чтобы подтвердить новый ролик'
           : canReadProfile
             ? 'Профиль не удалось проверить — проверьте публикацию вручную'
             : 'Приложение не подтвердило публикацию, а профиль Instagram проверить нельзя (у аккаунта не указан username) — проверьте вручную',
@@ -754,11 +772,13 @@ export async function publishToDevice(
     await adb.home(deviceId).catch(() => {});
     stage = 'done';
     posted = 'yes';
-    updateProgress(deviceId, { platform, stage: 'done', step: 'Публикация успешно завершена и подтверждена в профиле!', percent: 100 });
+    const confirmation = verifiedProfile ? 'Публикация подтверждена в профиле' : 'Приложение подтвердило публикацию';
+    updateProgress(deviceId, { platform, stage: 'done', step: confirmation, percent: 100 });
     logger.info({ deviceId, platform, verified, captionTyped }, 'publish: post confirmed');
     return result({
       ok: true, retryable: false, verified, captionTyped,
-      ...(!captionTyped ? { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' } : {}),
+      ...(!captionTyped ? { detail: 'Пост опубликован, но подпись не удалось проверить в поле ввода' }
+        : !verifiedProfile ? { detail: confirmation } : {}),
     });
   } catch (err) {
     logger.error({ deviceId, platform, stage, err: (err as Error).message }, 'publish: failed');

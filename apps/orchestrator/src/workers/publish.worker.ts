@@ -575,15 +575,15 @@ export function createPublishWorker(deps: Deps): Worker {
             await releaseDeviceLock(redis, accountRaw.deviceId, lockOwner);
           }
 
-          if (result.ok && !result.verified?.profile) {
-            throw new PublishOutcomeUnknownError(`device-${platform}: Публикация не подтверждена в профиле`);
+          if (result.ok && !result.verified?.profile && !(result.posted === 'yes' && result.verified?.receipt === true)) {
+            throw new PublishOutcomeUnknownError(`device-${platform}: Публикация не подтверждена`);
           }
           if (!result.ok) {
             await setAutopilotLiveProgress(redis, autopilotId, {
               deviceId: accountRaw.deviceId,
               accountName,
               platform,
-              step: `Ошибка публикации: ${result.detail ?? 'не подтверждено'}`,
+              step: result.posted === 'unknown' ? 'Требуется проверка публикации' : `Ошибка публикации: ${result.detail ?? 'не подтверждено'}`,
               percent: 0,
               stage: 'failed',
             });
@@ -599,7 +599,7 @@ export function createPublishWorker(deps: Deps): Worker {
             deviceId: accountRaw.deviceId,
             accountName,
             platform,
-            step: 'Публикация успешно завершена и подтверждена в профиле!',
+            step: result.verified?.profile ? 'Публикация подтверждена в профиле' : 'Приложение подтвердило публикацию',
             percent: 100,
             stage: 'done',
           });
@@ -845,8 +845,8 @@ export function createPublishWorker(deps: Deps): Worker {
         await db.notification.create({
           data: {
             tenantId,
-            type: 'job_failed',
-            title: `Ошибка публикации (${platform.toUpperCase()})`,
+            type: unknown ? 'system' : 'job_failed',
+            title: `${unknown ? 'Требуется проверка публикации' : 'Ошибка публикации'} (${platform.toUpperCase()})`,
             body: `Аккаунт: ${accountName}. Ошибка: ${errorMsg}`,
             actionUrl: `/uniquify`,
           },

@@ -84,6 +84,8 @@ const IN_PROGRESS = /\b(posting|uploading|sharing|processing)\b|публикуе
 const APP_OFFLINE = /network error|check your network|no (internet|network) connection|you.?re offline|нет (подключения к интернету|соединения|сети)|ошибка сети|проверьте (подключение|соединение)/i;
 const PERCENT = /^(\d{1,3})\s?%$/;
 const POSTED = /\b(shared|posted|uploaded)\b|опубликован|видео загружено|^загружено$|публикация завершена/i;
+const PUBLISH_RECEIPT = /^(?:(?:your )?(?:video|reel) (?:has been |was )?(?:successfully )?(?:posted|shared)(?: successfully)?|(?:post|video) published successfully|(?:видео|ролик|публикация) (?:успешно )?опубликован[оа]?|публикация успешно завершена)[.!✓\s]*$/i;
+const RECEIPT_ELEMENT = /toast|snackbar|publish_result|post_success|share_success/i;
 
 // ── Decision ──────────────────────────────────────────────────────────────────
 
@@ -438,31 +440,32 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
 /** Minimal profile view for post verification (see profile-stats.snapshotProfile). */
 export interface ProfileView {
   posts: number | null;
-  tiles: { views: number | null }[]; // non-pinned, newest first
+  tiles: { views: number | null; cover?: number[] }[]; // non-pinned, newest first
+  empty?: boolean;
+  uploading?: number | null;
 }
 
-/** Views a brand-new post can plausibly have within minutes of upload. */
-const FRESH_POST_MAX_VIEWS = 100;
+function coverDistance(a?: number[], b?: number[]): number | undefined {
+  if (!a?.length || !b?.length || a.length !== b.length) return;
+  return a.reduce((delta, sample, index) => delta + Math.abs(sample - b[index]), 0) / a.length;
+}
 
-/**
- * Did a new post appear between `before` and `after` (own profile, same account)?
- *   - Instagram: the header post count grew;
- *   - grid not full before (< 9 tiles) and it gained a tile;
- *   - the previous newest tile moved to position 2 (views never drop, so it has at least
- *     as many as before) and the new first tile has STRICTLY fewer views than the old
- *     newest had — without a new post the first tile is that same old post, whose views
- *     cannot have gone down. A first tile with no counter yet (still processing) counts
- *     as fresh. Equal counts (both 0) are ambiguous → false: unverified, never a guess.
- */
+/** A new finished cover must precede the previous newest cover on the same profile. */
 export function isNewPostOnProfile(before: ProfileView, after: ProfileView): boolean {
+  if (after.uploading != null || before.uploading != null) return false;
   if (before.posts != null && after.posts != null) return after.posts > before.posts;
-  if (before.tiles.length < 9 && after.tiles.length > before.tiles.length) return true;
-  const prevNewest = before.tiles[0];
-  const shifted = after.tiles[1];
-  const fresh = after.tiles[0];
-  if (!prevNewest || !shifted || !fresh || prevNewest.views == null || shifted.views == null) return false;
-  if (shifted.views < prevNewest.views) return false;
-  return fresh.views == null || (fresh.views < prevNewest.views && fresh.views <= FRESH_POST_MAX_VIEWS);
+  if (before.empty && !before.tiles.length) return Boolean(after.tiles[0]?.cover);
+
+  const newestBefore = before.tiles[0]?.cover;
+  const newestAfter = after.tiles[0]?.cover;
+  const shift = coverDistance(newestBefore, after.tiles[1]?.cover);
+  const novelty = coverDistance(newestBefore, newestAfter);
+  if (shift === undefined || shift > 10 || novelty === undefined || novelty < 20) return false;
+  // Reject an old cover moved to the front and use a second anchor when visible.
+  const nextBefore = before.tiles[1]?.cover;
+  const secondShift = coverDistance(nextBefore, after.tiles[2]?.cover);
+  const matchesOld = coverDistance(nextBefore, newestAfter);
+  return (secondShift === undefined || secondShift <= 10) && (matchesOld === undefined || matchesOld >= 20);
 }
 
 /** The app shows its own "no network" message. */
@@ -480,6 +483,15 @@ export function uploadPercent(s: UiScreen): number | null {
     }
   }
   return null;
+}
+
+export function hasPublishReceipt(s: UiScreen): boolean {
+  if (editTexts(s).length || uploadPercent(s) != null || isSavedToDrafts(s) || isAppOffline(s) || screenHas(s, UPLOAD_FAILED)) return false;
+  const receipt = byLabel(s, PUBLISH_RECEIPT);
+  for (let node = receipt ?? null; node; node = node.parent) {
+    if (RECEIPT_ELEMENT.test(`${node.cls} ${node.resId}`)) return true;
+  }
+  return false;
 }
 
 function decideAfterShare(s: UiScreen): FlowAction {

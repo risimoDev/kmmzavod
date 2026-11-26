@@ -14,7 +14,12 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { AutopilotForm } from "@/components/autopilot/AutopilotForm";
 import { AutopilotStatusBadge, BATCH_STAGES, formatWindow, stageIndex } from "@/components/autopilot/status";
 import { cn, relativeTime } from "@/lib/utils";
-import { autopilotApi, type AutopilotBatch, type AutopilotDetail, type AutopilotInput, type AutopilotRun } from "@/lib/api";
+import { autopilotApi, type AutopilotBatch, type AutopilotDetail, type AutopilotInput, type AutopilotPost, type AutopilotRun } from "@/lib/api";
+
+function needsVerification(post: AutopilotPost) {
+  if (post.status !== "failed" && post.status !== "published") return false;
+  return post.publishJob?.needsReview || /публикация не подтвержд|появление в профиле ожидается|проверьте профиль вручную/i.test(`${post.error ?? ""} ${post.publishJob?.error ?? ""}`);
+}
 
 export default function AutopilotDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -89,19 +94,22 @@ export default function AutopilotDetailPage() {
   const inFlight = batches.filter((b) => !["ready", "failed"].includes(b.status));
 
   // Метрики публикаций: истинные агрегаты из базы данных (никогда не зависят от размера выборки)
-  const unconfirmedPosts = posts.filter((p) => p.status === "published" && Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается")));
+  const unconfirmedPosts = posts.filter(needsVerification);
+  const unconfirmedPublished = unconfirmedPosts.filter((p) => p.status === "published").length;
+  const unconfirmedFailed = Math.max(liveProgress?.verificationPendingCount ?? 0, unconfirmedPosts.length - unconfirmedPublished);
+  const verificationCount = unconfirmedPublished + unconfirmedFailed;
+  const retryableCount = posts.filter((p) => p.canRetry && !needsVerification(p)).length;
   const basePublished = liveProgress?.publishedCount ?? posts.filter((p) => p.status === "published").length;
-  const published = Math.max(0, basePublished - unconfirmedPosts.length);
+  const published = Math.max(0, basePublished - unconfirmedPublished);
   const publishingCount = liveProgress?.publishingCount ?? posts.filter((p) => p.status === "publishing").length;
   const scheduledCount = liveProgress?.scheduledCount ?? posts.filter((p) => p.status === "scheduled").length;
-  const failedCount = (liveProgress?.failedCount ?? posts.filter((p) => p.status === "failed" || p.status === "skipped").length) + unconfirmedPosts.length;
+  const failedCount = Math.max(0, (liveProgress?.failedCount ?? posts.filter((p) => p.status === "failed" || p.status === "skipped").length) - unconfirmedFailed);
 
   const publishingPosts = posts.filter((p) => p.status === "publishing");
   const scheduledPosts = posts.filter((p) => p.status === "scheduled");
-  const failedPosts = posts.filter((p) => p.status === "failed" || p.status === "skipped" || Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается")));
 
   // Полный объём цикла: всё, что запланировано, публикуется, завершено или упало
-  const totalCyclePosts = Math.max(liveProgress?.cycleTotal ?? (published + publishingCount + scheduledCount + failedCount), 1);
+  const totalCyclePosts = Math.max(liveProgress?.cycleTotal ?? (published + publishingCount + scheduledCount + failedCount + verificationCount), 1);
   const progressPercent = Math.min(100, Math.round((published / totalCyclePosts) * 100));
 
   const isActivelyPublishing = publishingCount > 0 || publishingPosts.length > 0 || Boolean(liveProgress?.activeItem);
@@ -152,9 +160,11 @@ export default function AutopilotDetailPage() {
     liveStatusSubtitle = `Следующий запуск: ~${nextTimeStr} (поочерёдная публикация плат)`;
     currentActionDetail = "Посты распределяются последовательно с защитой стойки от блокировок. Нажмите «Опубликовать сейчас» для мгновенной выгрузки.";
   } else if (hasFailed) {
-    liveStatusTitle = `Внимание: ${failedCount} из ${totalCyclePosts} публикаций требуют перезапуска`;
-    liveStatusSubtitle = "Ошибки зафиксированы. Вы можете перезапустить их все одной кнопкой или по отдельности.";
-    currentActionDetail = "Используйте кнопку «↻ Перезапустить все упавшие» выше для мгновенной повторной отправки.";
+    liveStatusTitle = `Ошибки публикации: ${failedCount}`;
+    liveStatusSubtitle = "Подробности доступны в списке публикаций.";
+  } else if (verificationCount > 0) {
+    liveStatusTitle = `Требуется проверка: ${verificationCount}`;
+    liveStatusSubtitle = "Сверьте ролики с профилями аккаунтов на платах.";
   } else if (published > 0) {
     liveStatusTitle = `Все ${published} публикаций успешно завершены!`;
     liveStatusSubtitle = `Следующее автоматическое окно публикации: ${ap.status === "active" && ap.nextWindowAt ? formatWindow(ap.nextWindowAt, ap.timezone) : "по расписанию"}`;
@@ -170,14 +180,14 @@ export default function AutopilotDetailPage() {
             <AutopilotStatusBadge status={ap.status} />
 
             {/* Быстрая кнопка перезапуска упавших публикаций в шапке */}
-            {failedCount > 0 && (
+            {retryableCount > 0 && (
               <Button
                 size="sm"
                 variant="danger"
                 loading={busy === "retry-failed"}
                 onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
               >
-                ↻ Перезапустить упавшие ({failedCount})
+                ↻ Перезапустить упавшие
               </Button>
             )}
 
@@ -299,7 +309,7 @@ export default function AutopilotDetailPage() {
 
                   {/* Быстрые кнопки ручного регулирования */}
                   <div className="flex flex-wrap items-center gap-2">
-                    {failedCount > 0 && (
+                    {retryableCount > 0 && (
                       <Button
                         size="sm"
                         variant="primary"
@@ -307,7 +317,7 @@ export default function AutopilotDetailPage() {
                         loading={busy === "retry-failed"}
                         onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
                       >
-                        ↻ Перезапустить все упавшие ({failedCount})
+                        ↻ Перезапустить все упавшие
                       </Button>
                     )}
                     <Button
@@ -342,6 +352,9 @@ export default function AutopilotDetailPage() {
                       {failedCount > 0 && (
                         <span className="text-danger font-medium">✕ Ошибок: {failedCount}</span>
                       )}
+                      {verificationCount > 0 && (
+                        <span className="text-warning font-medium">Требуют проверки: {verificationCount}</span>
+                      )}
                     </div>
                   </div>
 
@@ -361,11 +374,18 @@ export default function AutopilotDetailPage() {
                         title={`В процессе: ${publishingPosts.length}`}
                       />
                     )}
-                    {failedPosts.length > 0 && (
+                    {failedCount > 0 && (
                       <div
                         className="bg-danger transition-all duration-500"
-                        style={{ width: `${(failedPosts.length / totalCyclePosts) * 100}%` }}
-                        title={`Ошибок: ${failedPosts.length}`}
+                        style={{ width: `${(failedCount / totalCyclePosts) * 100}%` }}
+                        title={`Ошибок: ${failedCount}`}
+                      />
+                    )}
+                    {verificationCount > 0 && (
+                      <div
+                        className="bg-warning transition-all duration-500"
+                        style={{ width: `${(verificationCount / totalCyclePosts) * 100}%` }}
+                        title={`Требуют проверки: ${verificationCount}`}
                       />
                     )}
                     {scheduledPosts.length > 0 && (
@@ -456,14 +476,14 @@ export default function AutopilotDetailPage() {
                       <span className="text-xs text-text-tertiary">
                         всего: {liveProgress?.totalPosts ?? ap.postsScheduled} · опубликовано: {published}
                       </span>
-                      {failedCount > 0 && (
+                      {retryableCount > 0 && (
                         <Button
                           size="xs"
                           variant="danger"
                           loading={busy === "retry-failed"}
                           onClick={() => act("retry-failed", () => autopilotApi.retryFailed(id))}
                         >
-                          ↻ Перезапустить все {failedCount}
+                          ↻ Перезапустить упавшие
                         </Button>
                       )}
                     </div>
@@ -479,8 +499,7 @@ export default function AutopilotDetailPage() {
                     <Card>
                       <CardContent className="divide-y divide-border p-0">
                         {posts.map((p) => {
-                          const isUnconfirmed = p.status === "published" && Boolean((p.error ?? p.publishJob?.error)?.includes("появление в профиле ожидается"));
-                          const isFailed = p.status === "failed" || p.status === "skipped" || isUnconfirmed;
+                          const isUnconfirmed = needsVerification(p);
                           const isPublishingThis = p.status === "publishing";
                           const errText = p.error ?? p.publishJob?.error;
 
@@ -519,7 +538,7 @@ export default function AutopilotDetailPage() {
                                       : ""}
                                   </div>
                                   {errText && (
-                                    <div className="text-2xs text-danger/90 mt-0.5 max-w-xl break-words" title={errText}>
+                                    <div className={cn("text-2xs mt-0.5 max-w-xl break-words", isUnconfirmed ? "text-warning" : "text-danger/90")} title={errText}>
                                       {errText}
                                     </div>
                                   )}
@@ -528,7 +547,7 @@ export default function AutopilotDetailPage() {
 
                               <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
                                 {/* Кнопка точечного перезапуска конкретного упавшего поста */}
-                                {isFailed && (
+                                {p.canRetry && !isUnconfirmed && (
                                   <Button
                                     size="xs"
                                     variant="outline"
@@ -541,7 +560,7 @@ export default function AutopilotDetailPage() {
                                 )}
                                 {isUnconfirmed ? (
                                   <Badge variant="warning" dot className="text-xs">
-                                    Не подтверждено
+                                    Требуется проверка
                                   </Badge>
                                 ) : (
                                   <StatusBadge status={p.status} />
