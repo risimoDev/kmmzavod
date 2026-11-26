@@ -23,6 +23,7 @@ export interface FlowState {
 export type FlowAction =
   | { kind: 'tap'; el: UiEl; why: string; marks?: 'share' | 'target' | 'next' }
   | { kind: 'caption'; el: UiEl }
+  | { kind: 'hashtag'; tag: string; suggestion?: UiEl; field: UiEl }
   | { kind: 'progress'; why: string }
   | { kind: 'success'; why: string }
   | { kind: 'error'; why: string; retryable: boolean }
@@ -40,6 +41,9 @@ const ALLOW = /^(allow|allow all|разрешить|разрешить все|wh
 const DISMISS = /^(not now|не сейчас|skip|пропустить|got it|понятно|понял|ok|ок|okay|no thanks|нет,?\s*спасибо|later|позже|maybe later|dismiss|отклонить|не разрешать|не переносить|отмена|cancel|close|закрыть|сохранить|понятно, продолжить)$/i;
 /** "Discard reel?" dialogs → keep editing, never discard. */
 const KEEP_EDITING = /^(keep editing|продолжить редактирование|continue editing)$/i;
+const OPTIONAL_PROMPT = /^(?:sync (?:your )?contacts\b|turn on notifications\b|enable notifications\b|save (?:your )?login (?:info|information)\b|синхронизировать контакты|синхронизация контактов|включить уведомления|разрешить уведомления|сохранить данные для входа)/i;
+const DECLINE_OPTIONAL = /^(?:not now|maybe later|later|no thanks|don['’]t allow|skip|dismiss|close|cancel|не сейчас|позже|нет,? спасибо|не разрешать|пропустить|отклонить|закрыть|отмена)$/i;
+const AUTH_CHALLENGE = /^(?:security verification|verify (?:your identity|that you are human)|enter (?:the )?(?:sms |verification )code|drag (?:the )?slider to (?:verify|complete the puzzle)|проверка безопасности|подтвердите свою личность|введите код (?:подтверждения|из смс))(?=$|[\s.!?:])/i;
 const SAVE_TO_DRAFTS = /^(save to drafts?|сохранить в черновик(и)?|save draft)$/i;
 const NETWORK_RETRY = /^(try again|повторить|retry|попробовать снова)$/i;
 const SAVED_TO_DRAFTS = /saved to drafts?|сохранено в черновик(и)?/i;
@@ -67,6 +71,10 @@ const TT_HOME_NAV = /^(home|главная|friends|друзья|explore|инте
 
 const CAPTION_FIELD_ID = /caption|desc|title|content|input|text_field/i;
 const CAPTION_FIELD_HINT = /caption|подпис|describe|description|описан|хэштег|hashtag|расскажите|о чем|добавьте|введите|write a caption|напишите подпись/i;
+const HASHTAG_CHIP = /^#?\s*(?:hashtags?|х[еэ]штег(?:и)?)$/i;
+// Accessibility can expose a hashtag by itself or together with the row's post count.
+const HASHTAG_LABEL = /^(#[\p{L}\p{M}\p{N}_]+)(?=$|[\s,])/u;
+const TRAILING_HASHTAG = /(?:^|\s)(#[\p{L}\p{M}\p{N}_]+)$/u;
 
 /** Before sharing: the app refused the video itself — retrying the same file will not help. */
 const VIDEO_REJECTED = /(video|видео) (is )?(too (short|long)|слишком (коротк|длинн))|unsupported (video|file|format)|неподдерживаем|can.?t (use|import) this video|не удалось импортировать/i;
@@ -143,6 +151,25 @@ export function isComposeScreen(platform: FlowPlatform, s: UiScreen): boolean {
   return Boolean(findPostButton(s, platform));
 }
 
+export function isPostLabel(platform: FlowPlatform, text: string): boolean {
+  return (platform === 'tiktok' ? TT_POST : IG_SHARE).test(text.trim());
+}
+
+function normalizedHashtag(tag: string): string {
+  return tag.normalize('NFC').toLowerCase();
+}
+
+export function allowsHashtagTap(text: string, caption: string): boolean {
+  const tag = HASHTAG_LABEL.exec(text.trim())?.[1];
+  if (!tag) return true;
+  const expected = TRAILING_HASHTAG.exec(caption.trim())?.[1];
+  return !!expected && normalizedHashtag(expected) === normalizedHashtag(tag);
+}
+
+export function isPopupDismissLabel(text: string): boolean {
+  return DECLINE_OPTIONAL.test(text) || KEEP_EDITING.test(text) || /^(?:ok|okay|got it|ок|понятно|понял|x|×)$/i.test(text);
+}
+
 function captionField(s: UiScreen): UiEl | undefined {
   const screenH = Math.max(...s.els.map((e) => e.bounds[3]), 1);
   const fields = editTexts(s);
@@ -174,10 +201,39 @@ function captionField(s: UiScreen): UiEl | undefined {
   );
 }
 
-export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCaption: boolean): FlowAction {
+function finishTikTokHashtag(s: UiScreen, caption: string): FlowAction | undefined {
+  const chip = byLabel(s, HASHTAG_CHIP);
+  const field = chip && editTexts(s).find((el) => el.enabled && el.bounds[3] <= chip.bounds[1]);
+  if (!chip || !field) return;
+
+  const tags = s.els.flatMap((el) => {
+    if (!el.enabled || !isVisible(el) || el.bounds[1] < chip.bounds[3]) return [];
+    const tag = HASHTAG_LABEL.exec(el.text.trim())?.[1] ?? HASHTAG_LABEL.exec(el.desc.trim())?.[1];
+    return tag ? [{ el, tag }] : [];
+  });
+  if (tags.length === 0) return;
+
+  const expected = TRAILING_HASHTAG.exec(caption.trim())?.[1];
+  const current = TRAILING_HASHTAG.exec(field.text.trim())?.[1];
+  if (!expected || !current || normalizedHashtag(expected) !== normalizedHashtag(current)) {
+    return { kind: 'error', why: 'TikTok открыл подсказки, но последний хештег в описании не совпал с заданием', retryable: false };
+  }
+
+  const suggestion = tags.find(({ tag }) => normalizedHashtag(tag) === normalizedHashtag(expected))?.el;
+  return { kind: 'hashtag', tag: expected, suggestion, field };
+}
+
+export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCaption: boolean, caption = ''): FlowAction {
+  const isPermissionDialog = /permissioncontroller|packageinstaller/.test(s.pkg);
+  // Notifications are optional even when Android shows the same Allow ID used for media.
+  if (isPermissionDialog && screenHas(s, /(?:send|show|receive) (?:you )?notifications|отправлять уведомления|показывать уведомления/i)) {
+    const deny = byResId(s, /^permission_deny_button$/) ?? byLabel(s, DECLINE_OPTIONAL);
+    if (deny) return { kind: 'tap', el: deny, why: 'закрыть запрос на уведомления' };
+    return { kind: 'unknown' };
+  }
   // System runtime-permission dialog (gallery / media access).
   const allow = byResId(s, PERMISSION_ALLOW_ID)
-    ?? (/permissioncontroller|packageinstaller/.test(s.pkg) ? byLabel(s, ALLOW) : undefined);
+    ?? (isPermissionDialog ? byLabel(s, ALLOW) : undefined);
   if (allow) return { kind: 'tap', el: allow, why: 'разрешение доступа к медиа' };
 
   // System share chooser / resolver (Android / Samsung share sheet)
@@ -200,6 +256,18 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
     return { kind: 'error', why: 'Приложение предлагает сохранить видео в черновики', retryable: false };
   }
 
+  const challenge = byLabel(s, AUTH_CHALLENGE);
+  if (challenge && !editTexts(s).includes(challenge)) {
+    return { kind: 'error', why: 'Приложение запросило подтверждение аккаунта. Требуется ручная проверка.', retryable: false };
+  }
+
+  const optional = byLabel(s, OPTIONAL_PROMPT);
+  if (optional && !editTexts(s).includes(optional)) {
+    const decline = byLabel(s, DECLINE_OPTIONAL);
+    if (decline) return { kind: 'tap', el: decline, why: `закрыть необязательное окно «${decline.text || decline.desc}»` };
+    return { kind: 'unknown' };
+  }
+
   const retryBtn = byLabel(s, NETWORK_RETRY);
   if (retryBtn) return { kind: 'tap', el: retryBtn, why: 'повторить попытку отправки (сеть)' };
 
@@ -210,6 +278,11 @@ export function decide(platform: FlowPlatform, s: UiScreen, st: FlowState, hasCa
   }
   if (screenHas(s, VIDEO_REJECTED)) {
     return { kind: 'error', why: 'Приложение отклонило видео (длина/формат)', retryable: false };
+  }
+
+  if (platform === 'tiktok' && st.captionDone && hasCaption && caption) {
+    const hashtag = finishTikTokHashtag(s, caption);
+    if (hashtag) return hashtag;
   }
 
   if (platform === 'instagram' && !st.targetChosen) {

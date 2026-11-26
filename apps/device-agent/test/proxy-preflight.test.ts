@@ -59,6 +59,39 @@ test('transparent IP check neither falls back to the explicit proxy nor accepts 
   assert.ok(commands.every((command) => command.includes("--noproxy '*'") && !command.includes(' -x ')));
 });
 
+test('transparent IP check reads HTTP netcat bodies with Android newline variants and still detects leaks', async () => {
+  const hostIp = '192.0.2.11';
+  const responses = (ip: string, newline: string, status = '200 OK') =>
+    [`HTTP/1.0 ${status}`, `Content-Length: ${ip.length}`, 'Content-Type: text/plain', 'Via: 1.1 google', '', ip].join(newline);
+  let output = responses('177.177.149.209', '\r\r\n');
+  const commands: string[] = [];
+  const manager = Object.assign(Object.create(ProxyManager.prototype), {
+    mode: 'private_parallel', devices: new Map([['board', {}]]),
+    runtimes: new Map([['board', { method: 'transparent' }]]), listeners: new Map(),
+    routeKind: () => 'proxy', refreshHostIp: async () => hostIp,
+    probeGateway: async () => ({ ok: true, systemProxyOk: true }),
+    logger: { warn() {} }, geo: async () => ({}), root: { isRunning: async () => true },
+    ensureDeviceInternet: () => manager.checkDeviceIp('board'),
+    adb: { shell: async (_id: string, command: string) => { commands.push(command); return output; } },
+  }) as ProxyManager;
+
+  assert.equal((await manager.preflight('board')).ipCheck?.ip, '177.177.149.209');
+  assert.match(commands[0], /toybox nc .*\| tr -d/);
+  assert.doesNotMatch(commands[0], / -x /);
+  output = responses('179.66.209.25', '\r\n');
+  const second = await manager.preflight('board');
+  assert.equal(second.ok, true);
+  assert.equal(second.ipCheck?.ip, '179.66.209.25');
+  output = responses(hostIp, '\n');
+  const leak = await manager.preflight('board');
+  assert.equal(leak.ok, false);
+  assert.equal(leak.ipCheck?.leakDetected, true);
+  output = responses('179.66.209.25', '\r\r\n', '403 Forbidden');
+  assert.equal((await manager.preflight('board')).ok, false);
+  output = 'HTTP/1.0 200 OK\r\nX-Forwarded-For: 179.66.209.25\r\n\r\n';
+  assert.equal((await manager.preflight('board')).ok, false);
+});
+
 test('publication requires transparent routing in auto mode and a known farm IP', async () => {
   const previousMode = config.PROXY_ROOT_MODE;
   config.PROXY_ROOT_MODE = 'auto';

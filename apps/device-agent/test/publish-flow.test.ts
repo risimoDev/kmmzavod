@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, uploadPercent, type FlowState } from '../src/publish-flow';
+import { allowsHashtagTap, decide, findPostButton, initialFlowState, isAppOffline, isComposeScreen, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, uploadPercent, type FlowState } from '../src/publish-flow';
 import { parseUi } from '../src/ui-automation';
 import { parsePostsCount, parseProfileDump } from '../src/profile-stats';
 
@@ -10,10 +10,10 @@ const ok = (c: boolean, m: string) => { if (!c) failed++; console.log(c ? 'PASS'
 // ── fixture builders ──────────────────────────────────────────────────────────
 type B = [number, number, number, number];
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/\n/g, '&#10;');
-const el = (o: { text?: string; desc?: string; id?: string; cls?: string; click?: boolean; b: B }, inner = '') =>
+const el = (o: { text?: string; desc?: string; id?: string; cls?: string; click?: boolean; focus?: boolean; b: B }, inner = '') =>
   `<node index="0" text="${esc(o.text ?? '')}" resource-id="${o.id ?? ''}" class="${o.cls ?? 'android.widget.TextView'}" ` +
   `package="PKG" content-desc="${esc(o.desc ?? '')}" checkable="false" checked="false" clickable="${o.click ? 'true' : 'false'}" ` +
-  `enabled="true" focusable="false" focused="false" bounds="[${o.b[0]},${o.b[1]}][${o.b[2]},${o.b[3]}]"${inner ? `>${inner}</node>` : ' />'}`;
+  `enabled="true" focusable="false" focused="${o.focus ?? false}" bounds="[${o.b[0]},${o.b[1]}][${o.b[2]},${o.b[3]}]"${inner ? `>${inner}</node>` : ' />'}`;
 const screen = (pkg: string, ...children: string[]) =>
   parseUi(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">` +
     el({ cls: 'android.widget.FrameLayout', b: [0, 0, 1080, 2400] }, children.join('')).replace(/PKG/g, pkg) + `</hierarchy>`);
@@ -121,6 +121,37 @@ a = decide('tiktok', ttPost, st(), true);
 ok(a.kind === 'caption', 'TikTok post screen (ru) → type description');
 a = decide('tiktok', ttPost, st({ captionDone: true }), true);
 ok(a.kind === 'tap' && a.marks === 'share' && /Опубликовать/.test(a.el.text || ''), 'TikTok post screen → Опубликовать (not Черновики)');
+
+const captionWithTag = 'Волны с этой плойкой. Артикул: #WW1174621\n\n#волны #плойка';
+const captionField = el({ cls: 'android.widget.EditText', text: captionWithTag, focus: true, click: true, b: [40, 280, 700, 690] });
+const hashtagsChip = button('# Hashtags', [40, 730, 270, 810]);
+const alternativeTag = button('#плойкакупри', [40, 840, 460, 940]);
+const exactTag = button('#ПЛОЙКА', [40, 970, 460, 1070]);
+const post = button('Post', [560, 2200, 1040, 2320]);
+const filled = st({ captionDone: true });
+const suggestions = screen(TT, captionField, hashtagsChip, alternativeTag, exactTag, post);
+a = decide('tiktok', suggestions, filled, true, captionWithTag);
+ok(a.kind === 'hashtag' && a.suggestion?.text === '#ПЛОЙКА', 'TikTok confirms the exact last hashtag before Post, even when Post remains in the dump');
+a = decide('tiktok', screen(TT, captionField, hashtagsChip, alternativeTag), filled, true, captionWithTag);
+ok(a.kind === 'hashtag' && !a.suggestion && a.field.focused, 'TikTok can finish an already typed hashtag without choosing a related suggestion');
+a = decide('tiktok', suggestions, filled, true, captionWithTag.replace('#плойка', '#укладка'));
+ok(a.kind === 'error' && !a.retryable, 'TikTok stops when the typed hashtag does not match the requested caption');
+a = decide('tiktok', screen(TT, captionField, hashtagsChip, post), filled, true, captionWithTag);
+ok(a.kind === 'tap' && a.marks === 'share', 'TikTok submits once the suggestion list has closed');
+ok(allowsHashtagTap('#ПЛОЙКА', captionWithTag) && !allowsHashtagTap('#плойкакупри, 1.4K posts', captionWithTag), 'AI may tap an exact hashtag only, even when the label includes a count');
+ok(isPopupDismissLabel('Not now') && isPopupDismissLabel('Keep editing') && !isPopupDismissLabel('Allow'), 'AI can close an optional dialog without accepting it');
+const notificationPrompt = screen(TT, captionField, post,
+  el({ text: 'Turn on notifications?', b: [40, 840, 1020, 940] }), button('Not now', [40, 1000, 1020, 1100]));
+a = decide('tiktok', notificationPrompt, filled, true, captionWithTag);
+ok(a.kind === 'tap' && a.el.text === 'Not now' && !a.marks, 'optional prompt takes priority over Post behind it');
+const notificationPermission = screen('com.google.android.permissioncontroller',
+  el({ text: 'Allow TikTok to send you notifications?', b: [40, 840, 1020, 940] }),
+  button('Allow', [40, 1000, 1020, 1100], 'com.android.permissioncontroller:id/permission_allow_button'),
+  button("Don't allow", [40, 1200, 1020, 1300], 'com.android.permissioncontroller:id/permission_deny_button'));
+a = decide('tiktok', notificationPermission, filled, true, captionWithTag);
+ok(a.kind === 'tap' && a.el.resId.endsWith('permission_deny_button'), 'optional notification permission is declined');
+a = decide('tiktok', screen(TT, captionField, post, el({ text: 'Security verification', b: [40, 840, 1020, 940] })), filled, true, captionWithTag);
+ok(a.kind === 'error' && !a.retryable, 'an account verification prompt stops publication even if Post is behind it');
 
 const ttConfirm = screen(TT, el({ text: 'Post video?', b: [60, 900, 1020, 1000] }), button('Post now', [60, 1100, 1020, 1200]));
 a = decide('tiktok', ttConfirm, st({ shareTapped: true }), true);

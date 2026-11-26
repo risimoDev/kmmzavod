@@ -25,9 +25,9 @@ import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
 import type { ProxyManager } from './proxy-manager';
-import { decide, findPostButton, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, uploadPercent, type FlowPlatform } from './publish-flow';
+import { allowsHashtagTap, decide, findPostButton, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
-import { center, clickTarget, dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText, type UiEl } from './ui-automation';
+import { center, clickTarget, dumpScreen, editTexts, isVisible, saveDebugSnapshot, sleep, tapEl, typeText } from './ui-automation';
 import { consultAiAutopilot } from './ai-autopilot';
 
 function escapeRegExp(str: string): string {
@@ -306,6 +306,7 @@ export async function publishToDevice(
     let captionTyped = !caption;
     let unknown = 0;
     let aiAdviceAttempts = 0;
+    let hashtagAttempts = 0;
     const MAX_AI_ADVICE = 4; // cap AI calls per publish flow (budget & time protection)
     const composeDeadline = Date.now() + COMPOSE_TIMEOUT_MS;
     let lastScreen: any = null;
@@ -350,7 +351,10 @@ export async function publishToDevice(
         await adb.swipe(deviceId, Math.round(sw / 2), Math.round(sh * 0.8), Math.round(sw / 2), Math.round(sh * 0.25), 250).catch(() => {});
 
         // ── AI Autopilot Advisor on launcher/stuck screen ──
-        if (unknown >= 3 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
+        const launcherScreen = unknown >= 3 && aiAdviceAttempts < MAX_AI_ADVICE
+          ? await dumpScreen(adb, deviceId, 1) : null;
+        if (launcherScreen && !isLauncherOrSys(launcherScreen.pkg)) continue;
+        if (launcherScreen) {
           aiAdviceAttempts++;
           logger.info({ deviceId, platform, unknown, aiAdviceAttempts }, 'publish: ИИ-автопилот анализирует экран рабочего стола/системы');
           updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ-автопилот: восстановление приложения с рабочего стола...', percent: 58 });
@@ -363,7 +367,7 @@ export async function publishToDevice(
             st,
             hasCaption: !!caption,
             captionText: caption,
-            screen,
+            screen: launcherScreen,
             base64Screenshot,
             screenSize: { width: sw, height: sh },
             apiKey: req.claudehubApiKey,
@@ -375,14 +379,16 @@ export async function publishToDevice(
           });
 
           if (aiDecision) {
+            const currentScreen = await dumpScreen(adb, deviceId, 1);
+            if (!currentScreen || currentScreen.xml !== launcherScreen.xml) continue;
             updateProgress(deviceId, { platform, stage: 'compose', step: `ИИ: ${aiDecision.reason || 'восстановление'}`, percent: 60 });
             if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
-              let targetEl = aiDecision.targetText
-                ? screen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
+              const targetEl = aiDecision.targetText
+                ? launcherScreen.els.find((e) => new RegExp(escapeRegExp(aiDecision.targetText!.trim()), 'i').test(`${e.text} ${e.desc}`))
                 : undefined;
               const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, { width: sw, height: sh });
               const point = targetEl ? center(isVisible(targetEl) ? targetEl : clickTarget(targetEl)) : coords;
-              if (point && isDraftTap(screen, point)) {
+              if (point && isDraftTap(launcherScreen, point)) {
                 return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
               }
               if (targetEl) {
@@ -426,7 +432,7 @@ export async function publishToDevice(
         await sleep(3000);
         continue;
       } else {
-        const action = decide(flowPlatform, screen, st, !!caption);
+        const action = decide(flowPlatform, screen, st, !!caption, caption);
         if (action.kind === 'error') {
           const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_error`, screen.xml).catch(() => undefined);
           return result({ ok: false, retryable: action.retryable, debugSnapshot: snap, detail: action.why });
@@ -447,6 +453,26 @@ export async function publishToDevice(
           unknown = 0;
           continue;
         }
+        if (action.kind === 'hashtag') {
+          const suggestion = hashtagAttempts === 0 ? action.suggestion : undefined;
+          if (hashtagAttempts >= 2 || (!suggestion && !action.field.focused)) {
+            const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_hashtag`, screen.xml).catch(() => undefined);
+            return result({ ok: false, retryable: false, captionTyped, debugSnapshot: snap, detail: `TikTok не закрыл подсказки для ${action.tag}` });
+          }
+          updateProgress(deviceId, { platform, stage: 'compose', step: `Подтверждение хештега ${action.tag}`, percent: 80 });
+          hashtagAttempts++;
+          if (suggestion) {
+            await tapEl(adb, deviceId, suggestion);
+          } else {
+            // Finish the existing token without choosing a related tag or leaving the editor.
+            await adb.fastShell(deviceId, 'input keyevent 123'); // KEYCODE_MOVE_END
+            await typeText(adb, deviceId, ' ');
+          }
+          await hideKeyboard(adb, deviceId);
+          unknown = 0;
+          await sleep(900);
+          continue;
+        }
         if (action.kind === 'tap') {
           logger.info({ deviceId, platform, step: action.why }, 'publish: tap');
           if (action.marks === 'share') {
@@ -465,11 +491,6 @@ export async function publishToDevice(
           continue;
         }
         unknown++;
-        if (st.captionDone && !st.shareTapped && unknown >= 1) {
-          const { width, height } = await adb.getScreenSize(deviceId).catch(() => ({ width: 1080, height: 2400 }));
-          await adb.swipe(deviceId, Math.round(width / 2), Math.round(height * 0.75), Math.round(width / 2), Math.round(height * 0.35), 300).catch(() => {});
-          await sleep(1000);
-        }
 
         // ── AI Autopilot Advisor Fallback (ClaudeHub Vision) ─────────────────
         if (unknown >= 3 && aiAdviceAttempts < MAX_AI_ADVICE && screen) {
@@ -499,6 +520,8 @@ export async function publishToDevice(
           });
 
           if (aiDecision) {
+            const currentScreen = await dumpScreen(adb, deviceId, 1);
+            if (!currentScreen || currentScreen.xml !== screen.xml) continue;
             updateProgress(deviceId, {
               platform,
               stage: 'compose',
@@ -541,7 +564,7 @@ export async function publishToDevice(
               continue;
             }
 
-            if (aiDecision.action === 'key_back') {
+            if (aiDecision.action === 'key_back' && !st.captionDone) {
               logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot pressed BACK');
               await adb.fastShell(deviceId, 'input keyevent 4').catch(() => {});
               unknown = 0;
@@ -557,29 +580,15 @@ export async function publishToDevice(
               continue;
             }
 
-            if (aiDecision.action === 'type_caption' && caption) {
+            if (aiDecision.action === 'type_caption' && aiDecision.screenType === 'compose' && caption && !st.captionDone) {
+              const fields = editTexts(screen).filter((el) => el.enabled);
+              const target = aiDecision.targetText?.trim().toLowerCase();
+              const editField = target
+                ? fields.find((el) => [el.text, el.desc].some((label) => label.trim().toLowerCase() === target))
+                : fields.length === 1 ? fields[0] : undefined;
+              if (!editField) continue;
               updateProgress(deviceId, { platform, stage: 'compose', step: 'ИИ: ввод описания в поле редактора...', percent: 74 });
-              const editField = screen.els.find((e) => /EditText|AutoCompleteTextView/i.test(e.cls));
-              if (editField) {
-                logger.info({ deviceId, platform, reason: aiDecision.reason }, 'publish: AI Autopilot typing caption into detected EditText');
-                await tapEl(adb, deviceId, editField);
-              } else {
-                const captionCoords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
-                if (captionCoords) {
-                  if (isDraftTap(screen, captionCoords)) {
-                    return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
-                  }
-                  logger.info({ deviceId, platform, x: captionCoords.x, y: captionCoords.y, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption field coordinates');
-                  await adb.tap(deviceId, captionCoords.x, captionCoords.y);
-                } else if (aiDecision.targetText) {
-                  const target = escapeRegExp(aiDecision.targetText.trim());
-                  const el = screen.els.find((e) => new RegExp(target, 'i').test(`${e.text} ${e.desc}`));
-                  if (el) {
-                    logger.info({ deviceId, platform, target, reason: aiDecision.reason }, 'publish: AI Autopilot tapping caption target');
-                    await tapEl(adb, deviceId, el);
-                  }
-                }
-              }
+              await tapEl(adb, deviceId, editField);
               await sleep(800);
               await typeText(adb, deviceId, caption);
               st.captionDone = true;
@@ -592,37 +601,27 @@ export async function publishToDevice(
             }
 
             if (aiDecision.action === 'tap' || aiDecision.action === 'tap_coord') {
-              let targetEl: UiEl | undefined;
-              if (aiDecision.targetText) {
-                const escaped = escapeRegExp(aiDecision.targetText.trim());
-                targetEl = screen.els.find((e) =>
-                  (e.clickable || /Button|TextView|ImageView|View/i.test(e.cls)) &&
-                  (new RegExp(`^${escaped}$`, 'i').test(e.text.trim()) || new RegExp(`^${escaped}$`, 'i').test(e.desc.trim()))
-                );
-                if (!targetEl) {
-                  targetEl = screen.els.find((e) =>
-                    new RegExp(escaped, 'i').test(e.text) || new RegExp(escaped, 'i').test(e.desc)
-                  );
-                }
-              }
-
-              const coords = parseAiCoordinates(aiDecision.x, aiDecision.y, screenSize);
-              const point = targetEl ? center(isVisible(targetEl) ? targetEl : clickTarget(targetEl)) : coords;
+              const target = aiDecision.targetText?.trim().toLowerCase();
+              if (!target || (flowPlatform === 'tiktok' && !allowsHashtagTap(target, caption))) continue;
+              if ((aiDecision.screenType === 'modal_dialog' || /permissioncontroller|packageinstaller/.test(screen.pkg)) && !isPopupDismissLabel(target)) continue;
+              const targetEl = screen.els.find((el) =>
+                el.enabled && isVisible(el) && clickTarget(el).clickable &&
+                [el.text, el.desc].some((label) => label.trim().toLowerCase() === target)
+              );
+              const point = targetEl ? center(targetEl) : null;
               if (point && isDraftTap(screen, point)) {
                 return result({ ok: false, retryable: false, detail: 'Автопилот остановился у кнопки черновиков' });
               }
 
               if (point) {
                 const postButton = findPostButton(screen, flowPlatform);
-                const postBounds = postButton && clickTarget(postButton).bounds;
-                const isPostTarget =
-                  aiDecision.marks === 'share' ||
-                  (postBounds && point.x >= postBounds[0] && point.x < postBounds[2] && point.y >= postBounds[1] && point.y < postBounds[3]) ||
-                  /опубликовать|поделиться|publish|share|post\b/i.test(aiDecision.targetText || '');
-
-                if (isPostTarget) {
-                  st.shareTapped = true;
-                  posted = 'unknown';
+                const postBounds = postButton?.bounds;
+                const isPostTarget = postBounds && point.x >= postBounds[0] && point.x < postBounds[2] &&
+                  point.y >= postBounds[1] && point.y < postBounds[3];
+                // An unknown screen never grants permission to submit. Only decide() can mark a final tap.
+                if (aiDecision.marks === 'share' || isPostLabel(flowPlatform, target) || isPostTarget) {
+                  logger.warn({ deviceId, platform, target }, 'publish: AI post tap deferred to deterministic compose flow');
+                  continue;
                 }
                 logger.info({ deviceId, platform, ...point, reason: aiDecision.reason }, 'publish: AI Autopilot tapping target');
                 await adb.tap(deviceId, point.x, point.y);

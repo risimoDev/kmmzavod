@@ -1232,14 +1232,15 @@ export class ProxyManager {
     const nc = viaGateway
       ? `(printf '${request}'; sleep ${Math.min(timeoutSec, 6)}) | toybox nc 127.0.0.1 ${port}`
       : `(printf '${request}'; sleep ${Math.min(timeoutSec, 6)}) | toybox nc ${host} 80`;
-    return `{ if command -v curl >/dev/null 2>&1; then ${curl}; else ${nc}; fi; } 2>&1; true`;
+    // Keep the HTTP header/body boundary even on ADB shells that expand LF to CRLF.
+    return `{ if command -v curl >/dev/null 2>&1; then ${curl}; else ${nc} | tr -d '\\015'; fi; } 2>&1; true`;
   }
 
   private static responseBody(output: string): string {
-    const text = output.trim();
-    const sep = text.search(/\r?\n\r?\n/);
+    const text = output.replace(/\r+\n/g, '\n').trim();
+    const sep = text.indexOf('\n\n');
     if (!/^HTTP\/\d/.test(text)) return text;
-    return sep !== -1 && /^HTTP\/\S+\s+2\d\d\b/.test(text) ? text.slice(sep).trim() : '';
+    return sep !== -1 && /^HTTP\/\d+(?:\.\d+)?[ \t]+2\d\d(?:[ \t]|\n)/.test(text) ? text.slice(sep + 2).trim() : '';
   }
 
   /** Phone → adb reverse → gateway leg, plus the system proxy setting. */

@@ -75,6 +75,17 @@ async function runTests() {
     try {
       const decision = await consultAiAutopilot({ ...input, apiKey: 'test-key' });
       strictEqual(decision?.action, 'require_human', 'a model cannot choose to save the current video as a draft');
+      let checked = 0;
+      axios.defaults.adapter = async (request) => ({
+        config: request, headers: {}, status: 200, statusText: 'OK',
+        data: { choices: [{ message: { content: JSON.stringify(++checked === 1
+          ? { screenType: 'modal_dialog', action: 'tap', targetText: ['Not now'] }
+          : { screenType: 'modal_dialog', action: 'tap', targetText: 'Not now', marks: null }) } }] },
+      });
+      const safeDecision = await consultAiAutopilot({ ...input, apiKey: 'test-key' });
+      strictEqual(checked, 2, 'an invalid reply is rejected and the backup model is tried');
+      strictEqual(safeDecision?.targetText, 'Not now');
+      strictEqual(safeDecision?.marks, undefined);
     } finally {
       axios.defaults.adapter = originalAdapter;
     }
