@@ -24,6 +24,7 @@ import {
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
 import { GptunnelService } from '../services/gptunnel';
+import { internalHttp } from '../services/internal-http';
 import type { MinioStorageClient } from '@kmmzavod/storage';
 import {
   writeScript, writeCaptions, fallbackCaptions, fishTts, paceFor, voiceGender, voiceById,
@@ -175,7 +176,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           sources?: Array<{ storage_key: string; scene_breaks: number[] }>;
         };
         try {
-          const analyzeResp = await axios.post(`${videoProcessorUrl}/uniquify/analyze`, {
+          const analyzeResp = await internalHttp.post(`${videoProcessorUrl}/uniquify/analyze`, {
             source_video_id: sourceVideoId,
             storage_keys: sourceStorageKeys,
           }, { timeout: 300_000 });
@@ -308,7 +309,7 @@ export function createUniquifyAnalyzeWorker(deps: Deps): Worker {
           if (enableSubtitles) {
             let voiceDuration = 0;
             try {
-              const tr = await axios.post<{
+              const tr = await internalHttp.post<{
                 subtitles: Array<{ start_sec: number; end_sec: number; text: string }>;
                 duration_sec?: number;
               }>(`${videoProcessorUrl}/transcribe`, {

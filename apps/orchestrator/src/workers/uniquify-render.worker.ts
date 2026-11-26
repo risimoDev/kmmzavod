@@ -17,6 +17,7 @@ import {
 } from '@kmmzavod/queue';
 import type { PrismaClient } from '@kmmzavod/db';
 import { logger } from '../logger';
+import { internalHttp } from '../services/internal-http';
 
 interface Deps {
   db: PrismaClient;
@@ -87,7 +88,7 @@ export function createUniquifyRenderWorker(deps: Deps): Worker {
         const subtitles = (uniquifyJob.transcript ?? []) as unknown as SubtitleLine[];
         const mode = job.data.mode ?? 'preserve_context';
 
-        const renderResp = await axios.post<{
+        const renderResp = await internalHttp.post<{
           output_key: string;
           thumbnail_key: string | null;
           duration_sec: number;
