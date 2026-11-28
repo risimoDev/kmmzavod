@@ -695,7 +695,39 @@ function getImportFormats(
     }];
   }
   if (method === "device") {
+    const instagramExport: ImportFormat = {
+      id: "instagram_device_export",
+      label: "Instagram · login;password;2fa;cookie",
+      template: "login;password;2fa;cookie",
+      placeholder: "username;password;BASE32_KEY;sessionid=...",
+      parse: (line) => {
+        const [accountName, password, seed, cookie] = line.split(";", 4);
+        const twoFactorSeed = seed?.replace(/\s/g, "").toUpperCase();
+        if (cookie === undefined || !accountName?.trim() || !password ||
+          (twoFactorSeed && !/^[A-Z2-7]{16,256}=*$/.test(twoFactorSeed))) return null;
+        return { accountName: accountName.trim(), username: accountName.trim(), password, twoFactorSeed: twoFactorSeed || undefined };
+      },
+    };
+    const tiktokExport = (microsoft: boolean): ImportFormat => ({
+      id: microsoft ? "tiktok_device_export_microsoft" : "tiktok_device_export",
+      label: microsoft ? "TikTok · экспорт с токеном почты Microsoft" : "TikTok · экспорт с паролем почты или ручным кодом",
+      template: "username|tiktok_password|email|email_password|refresh_token|client_id|cookie",
+      placeholder: "username|password|box@outlook.com||refresh_token|client_id|sessionid=...",
+      parse: (line) => {
+        const [accountName, password, email, emailPassword, token, clientId, cookie] = line.split("|", 7);
+        if (cookie === undefined || !accountName?.trim() || !password) return null;
+        if (microsoft && (!email?.trim() || !token?.trim() ||
+          !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(clientId))) return null;
+        return {
+          accountName: accountName.trim(), username: accountName.trim(), password, email: email?.trim() || undefined,
+          emailPassword: microsoft ? undefined : emailPassword || undefined,
+          emailOAuthRefreshToken: microsoft ? token.trim() : undefined,
+          emailOAuthClientId: microsoft ? clientId : undefined,
+        };
+      },
+    });
     return [
+      ...(platform === "instagram" ? [instagramExport] : platform === "tiktok" ? [tiktokExport(false), tiktokExport(true)] : []),
       {
         id: "login_pass_mail_phone",
         label: "login:password:mail:mailpass:deviceId (авто-вход на телефоне + 2FA код из почты)",
@@ -922,8 +954,7 @@ function AccountsTab() {
     try {
       const res = await accountFarmApi.deviceLogin(account.id);
       if (res.ok) {
-        const extra = res.codeRetrieved ? ` (2FA код из почты: ${res.codeRetrieved})` : "";
-        setActionToast({ id: account.id, ok: true, message: `Вход выполнен! ${res.detail}${extra}` });
+        setActionToast({ id: account.id, ok: true, message: res.detail });
       } else {
         setActionToast({ id: account.id, ok: false, message: `Ошибка входа: ${res.error || res.detail}` });
       }
@@ -954,7 +985,7 @@ function AccountsTab() {
     }
     setImporting(true);
     try {
-      const res = await accountFarmApi.bulkImportAccounts({ accounts: accounts as any, autoAssign: true });
+      const res = await accountFarmApi.bulkImportAccounts({ accounts: accounts as any, autoAssign: authMethod !== "device" });
       const failed = res.results.filter((r) => r.status === "failed");
       const notes = res.results.filter((r) => r.note);
       let msg = `Импортировано: ${res.imported}.`;
@@ -1006,7 +1037,9 @@ function AccountsTab() {
                     {a.authMethod === "private" && <Badge variant="brand" className="text-2xs">private</Badge>}
                     {a.authMethod === "device" && <Badge variant="brand" className="text-2xs">device{a.deviceId ? ` · ${a.deviceId}` : ""}</Badge>}
                     {a.authMethod === "device" && (
-                      a.deviceCredentials?.loginStatus === "logged_in" ? (
+                      a.deviceAuthRequired ? (
+                        <Badge variant="warning" className="text-2xs">требуется вход</Badge>
+                      ) : a.deviceCredentials?.loginStatus === "logged_in" ? (
                         <Badge variant="success" className="text-2xs">вход выполнен</Badge>
                       ) : a.deviceCredentials?.loginStatus === "logging_in" ? (
                         <Badge variant="warning" className="text-2xs">выполняется вход</Badge>
@@ -1219,6 +1252,9 @@ function EditCredentialsModal({
   const [email, setEmail] = useState(creds?.email ?? "");
   const [emailPassword, setEmailPassword] = useState("");
   const [showEmailPassword, setShowEmailPassword] = useState(false);
+  const [twoFactorSeed, setTwoFactorSeed] = useState("");
+  const [emailOAuthRefreshToken, setEmailOAuthRefreshToken] = useState("");
+  const [emailOAuthClientId, setEmailOAuthClientId] = useState("");
   const [imapHost, setImapHost] = useState(creds?.imapHost ?? "");
   const [imapPort, setImapPort] = useState(creds?.imapPort ? String(creds.imapPort) : "993");
   const [deviceId, setDeviceId] = useState(account.deviceId ?? "");
@@ -1256,11 +1292,11 @@ function EditCredentialsModal({
     const clean = manualCode.trim().replace(/\D/g, "");
     if (!clean) return;
     setSubmittingCode(true);
-    setFeedback({ type: "info", msg: `Отправка проверочного кода ${clean} на телефон ${deviceId || account.deviceId}...` });
+    setFeedback({ type: "info", msg: "Отправка проверочного кода на плату…" });
     try {
       const res = await accountFarmApi.submitCode(account.id, clean);
       if (res.ok) {
-        setFeedback({ type: "success", msg: res.detail || `Код ${clean} успешно подтверждён на телефоне! Вход выполнен.` });
+        setFeedback({ type: "success", msg: res.detail });
         setManualCode("");
         setShowManualCodeInput(false);
         onSaved();
@@ -1274,12 +1310,19 @@ function EditCredentialsModal({
     }
   };
 
+  const newLoginSecrets = {
+    twoFactorSeed: twoFactorSeed.trim() || undefined,
+    emailOAuthRefreshToken: emailOAuthRefreshToken.trim() || undefined,
+    emailOAuthClientId: emailOAuthClientId.trim() || undefined,
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setFeedback(null);
     try {
       const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
       await accountFarmApi.setAccountCredentials(account.id, {
+        ...newLoginSecrets,
         authMethod: targetAuthMethod,
         username: username.trim() || undefined,
         password: password.trim() || undefined,
@@ -1303,9 +1346,11 @@ function EditCredentialsModal({
     setFeedback({ type: "info", msg: "Проверка подключения к IMAP серверу почты..." });
     try {
       const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
-      if (email || emailPassword || imapHost) {
+      if (email || emailPassword || imapHost || emailOAuthRefreshToken || emailOAuthClientId) {
         await accountFarmApi.setAccountCredentials(account.id, {
+          ...newLoginSecrets,
           authMethod: targetAuthMethod,
+          deviceId: deviceId.trim() || undefined,
           email: email.trim() || undefined,
           emailPassword: emailPassword.trim() || undefined,
           imapHost: imapHost.trim() || undefined,
@@ -1339,18 +1384,20 @@ function EditCredentialsModal({
       const targetAuthMethod = (account.authMethod as "official" | "private" | "device") || "device";
       if (username || password || email || emailPassword || deviceId) {
         await accountFarmApi.setAccountCredentials(account.id, {
+          ...newLoginSecrets,
           authMethod: targetAuthMethod,
           username: username.trim() || undefined,
           password: password.trim() || undefined,
           email: email.trim() || undefined,
           emailPassword: emailPassword.trim() || undefined,
+          imapHost: imapHost.trim() || undefined,
+          imapPort: imapPort ? Number(imapPort) : undefined,
           deviceId: deviceId.trim() || undefined,
         });
       }
       const res = await accountFarmApi.deviceLogin(account.id);
       if (res.ok) {
-        const extra = res.codeRetrieved ? ` (Получен код из почты: ${res.codeRetrieved})` : "";
-        setFeedback({ type: "success", msg: `Успешный вход в приложение на телефоне! ${res.detail}${extra}` });
+        setFeedback({ type: "success", msg: res.detail });
       } else {
         setFeedback({ type: "error", msg: `Ошибка входа: ${res.error || res.detail}` });
         if (/код|подтвержден|verification|disabled|auth/i.test(`${res.error} ${res.detail}`)) {
@@ -1447,6 +1494,12 @@ function EditCredentialsModal({
           </div>
         </div>
 
+        {account.platform === "instagram" && (
+          <label className="block space-y-1 text-xs text-text-secondary">
+            <span>Ключ приложения-аутентификатора{creds?.hasTwoFactorSeed ? " (сохранён)" : ""}</span>
+            <Input type="password" autoComplete="off" value={twoFactorSeed} onChange={(e) => setTwoFactorSeed(e.target.value)} />
+          </label>
+        )}
         <div className="border-t border-border/50 pt-3 space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
@@ -1503,8 +1556,20 @@ function EditCredentialsModal({
           <p className="text-2xs text-text-tertiary">
             Когда соцсеть запрашивает код подтверждения при входе, телефонная ферма автоматически опрашивает этот ящик через IMAP (порт 993) и вводит 6-значный код на экране телефона.
             <br />
-            <span className="text-amber-400 font-medium">Важно:</span> Для <b>Outlook / Hotmail</b> Microsoft заблокировал вход по обычному паролю — требуется «Пароль приложения» (account.microsoft.com/security &rarr; Пароли приложений, требует 2FA) или OAuth2 токен, либо вводите код вручную блоком выше. Для <b>Mail.ru</b> и <b>Яндекс</b> используйте «Пароль для внешних приложений».
+            Для Outlook и Hotmail включите IMAP и укажите Microsoft OAuth2. Если OAuth2 недоступен, введите код из письма вручную. Для Mail.ru и Яндекса используйте пароль внешнего приложения.
           </p>
+          {(/@(?:outlook|hotmail|live|msn)\.com$/i.test(email) || /office365/i.test(imapHost) || creds?.hasEmailOAuth) && (
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block space-y-1 text-xs text-text-secondary">
+                <span>Microsoft refresh token{creds?.hasEmailOAuth ? " (сохранён)" : ""}</span>
+                <Input type="password" autoComplete="off" value={emailOAuthRefreshToken} onChange={(e) => setEmailOAuthRefreshToken(e.target.value)} />
+              </label>
+              <label className="block space-y-1 text-xs text-text-secondary">
+                <span>Microsoft client ID</span>
+                <Input value={emailOAuthClientId} onChange={(e) => setEmailOAuthClientId(e.target.value)} />
+              </label>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-medium text-text-secondary block mb-1">Email ящик</label>

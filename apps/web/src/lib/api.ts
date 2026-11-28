@@ -502,6 +502,8 @@ export interface DeviceCredentialsInfo {
   hasPassword?: boolean;
   email?: string;
   hasEmailPassword?: boolean;
+  hasTwoFactorSeed?: boolean;
+  hasEmailOAuth?: boolean;
   imapHost?: string;
   imapPort?: number;
   loginStatus?: 'logged_in' | 'needs_login' | 'logging_in' | 'login_failed';
@@ -533,6 +535,7 @@ export interface FarmSocialAccount {
   accountGroup?: { name: string; enforceWarmup?: boolean } | null;
   proxy?: { host: string; port: number; type: string } | null;
   deviceCredentials?: DeviceCredentialsInfo | null;
+  deviceAuthRequired?: boolean;
 }
 
 export interface FarmMetrics {
@@ -635,6 +638,8 @@ export const accountFarmApi = {
       twoFactorSeed?: string;
       email?: string;
       emailPassword?: string;
+      emailOAuthRefreshToken?: string;
+      emailOAuthClientId?: string;
       // Device-path: id of the phone as known to ADB (serial)
       deviceId?: string;
       accountGroupId?: string;
@@ -656,6 +661,9 @@ export const accountFarmApi = {
     deviceId?: string;
     email?: string;
     emailPassword?: string;
+    twoFactorSeed?: string;
+    emailOAuthRefreshToken?: string;
+    emailOAuthClientId?: string;
     imapHost?: string;
     imapPort?: number;
   }) => apiFetch<{ updated: boolean; authMethod: string }>(
@@ -668,7 +676,6 @@ export const accountFarmApi = {
     deviceId: string;
     platform: string;
     alreadyLoggedIn?: boolean;
-    codeRetrieved?: string;
     detail: string;
     error?: string;
   }>(`/api/v1/farm/social-accounts/${id}/device-login`, { method: 'POST' }),

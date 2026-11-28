@@ -33,6 +33,7 @@ import {
   deviceAgentService,
   describeDeviceAgentError,
   DEVICE_PUBLISH_TIMEOUT_MS,
+  DEVICE_AUTH_REQUIRED,
   type DevicePublishResult,
 } from '../services/device-agent';
 
@@ -109,6 +110,7 @@ export function isOutcomeUnknown(err: unknown, serverErrorsUnknown: boolean): bo
 type PublishOutcome = { status: 'published'; at: Date; recovered?: boolean } | { status: 'failed'; error: string };
 
 class PublishOutcomeUnknownError extends UnrecoverableError {}
+class DeviceAuthRequiredError extends UnrecoverableError {}
 
 async function settleItem(tx: Prisma.TransactionClient, publishJobId: string, outcome: PublishOutcome) {
   const item = await tx.distributeItem.findFirst({
@@ -348,6 +350,9 @@ export function createPublishWorker(deps: Deps): Worker {
           accountRaw.tenantId !== tenantId || accountRaw.platform !== platform)) {
           throw new UnrecoverableError('Автопилот: аккаунт больше не привязан к плате для этой публикации');
         }
+        if (autopilotId && accountRaw.lastError?.startsWith(DEVICE_AUTH_REQUIRED)) {
+          throw new DeviceAuthRequiredError(DEVICE_AUTH_REQUIRED);
+        }
         const account = {
           ...accountRaw,
           accessToken: decrypt(accountRaw.accessToken),
@@ -478,7 +483,8 @@ export function createPublishWorker(deps: Deps): Worker {
             percent: 5,
           });
           // TTL covers the whole agent call (incl. waiting for the shared farm proxy) plus margin.
-          const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId, Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) + 300);
+          const lockOwner = await acquireDeviceLock(redis, accountRaw.deviceId,
+            Math.ceil(DEVICE_PUBLISH_TIMEOUT_MS / 1000) * (autopilotId ? 2 : 1) + 300);
           if (!lockOwner) {
             // A busy phone is not the account's fault: re-queue later without consuming an
             // attempt or touching healthScore, and free this worker slot meanwhile.
@@ -559,7 +565,7 @@ export function createPublishWorker(deps: Deps): Worker {
           }
 
           try {
-            result = await deviceAgentService.publish({
+            const request = {
               deviceId: accountRaw.deviceId,
               platform,
               videoUrl: presignedUrl,
@@ -567,7 +573,37 @@ export function createPublishWorker(deps: Deps): Worker {
               username: deviceUsername(accountRaw.sessionData, accountRaw.accountName),
               claudehubApiKey: config.CLAUDEHUB_API_KEY || undefined,
               aiModel: config.CLAUDEHUB_VISION_MODEL || 'gemini-flash-3.8',
-            });
+            };
+            result = await deviceAgentService.publish(request);
+            if (autopilotId && proxyMode === 'private_parallel' && (platform === 'tiktok' || platform === 'instagram') &&
+              result.authRequired && result.posted === 'no' && request.username && accountRaw.sessionData) {
+              let creds: Record<string, unknown> = {};
+              try { creds = JSON.parse(decrypt(accountRaw.sessionData)) ?? {}; } catch { /* account needs manual login */ }
+              const { password, twoFactorSeed, email, emailPassword, emailOAuthRefreshToken, emailOAuthClientId, imapHost, imapPort } = creds;
+              if (typeof password === 'string' && password) {
+                const key = `autopilot:auth-recovery:${socialAccountId}:${accountRaw.deviceId}`;
+                if (await redis.set(key, '1', 'EX', 3600, 'NX') === 'OK') {
+                  await setAutopilotLiveProgress(redis, autopilotId, {
+                    deviceId: accountRaw.deviceId, accountName, platform,
+                    step: 'Восстановление авторизации на плате', percent: 0, stage: 'prepare',
+                  });
+                  const recovery = await deviceAgentService.recoverAccount({
+                    deviceId: accountRaw.deviceId, platform, username: request.username, password,
+                    twoFactorSeed: typeof twoFactorSeed === 'string' ? twoFactorSeed : undefined,
+                    email: typeof email === 'string' ? email : undefined,
+                    emailPassword: typeof emailPassword === 'string' ? emailPassword : undefined,
+                    emailOAuthRefreshToken: typeof emailOAuthRefreshToken === 'string' ? emailOAuthRefreshToken : undefined,
+                    emailOAuthClientId: typeof emailOAuthClientId === 'string' ? emailOAuthClientId : undefined,
+                    imapHost: typeof imapHost === 'string' ? imapHost : undefined,
+                    imapPort: typeof imapPort === 'number' ? imapPort : undefined,
+                  }).catch(() => ({ ok: false, detail: 'Агент не подтвердил завершение входа. Проверьте экран платы.' }));
+                  if (recovery.ok) result = await deviceAgentService.publish(request);
+                  else result.detail = recovery.detail ?? 'Проверьте авторизацию на плате';
+                } else {
+                  result.detail = 'Повторный вход уже запускался в течение часа. Проверьте экран платы.';
+                }
+              }
+            }
           } catch (err: unknown) {
             const msg = describeDeviceAgentError(err);
             // If the shared proxy or lease queue was busy, delay and re-queue without burning attempts
@@ -606,6 +642,14 @@ export function createPublishWorker(deps: Deps): Worker {
             const msg = `device-${platform}: ${result.detail ?? 'device-agent reported failure'}${where}`;
             // Share was tapped but the post was not confirmed → never retry (could post twice).
             if (result.posted === 'unknown') throw new PublishOutcomeUnknownError(`${msg} (публикация не подтверждена)`);
+            if (result.authRequired && result.posted === 'no') {
+              const detail = `${DEVICE_AUTH_REQUIRED}: ${result.detail ?? 'подтвердите вход в панели фермы'}`;
+              await db.socialAccount.updateMany({
+                where: { id: socialAccountId, deviceId: accountRaw.deviceId, authMethod: 'device' },
+                data: { lastError: detail },
+              });
+              throw new DeviceAuthRequiredError(detail);
+            }
             if (result.retryable === false) throw new UnrecoverableError(msg);
             throw new Error(msg);
           }
@@ -842,7 +886,7 @@ export function createPublishWorker(deps: Deps): Worker {
         const settled = await finalizePublishFailure(db, publishJobId, errorMsg, unknown);
 
         // Penalize the account once per job, and only for account/platform-side failures.
-        if (settled && !unknown && !isInfrastructureError(errorMsg)) {
+        if (settled && !unknown && !(err instanceof DeviceAuthRequiredError) && !isInfrastructureError(errorMsg)) {
           const isRateLimit = /\b(rate_limit|rate.?limit|too_many_requests|status[:\s]+429|http\s*429|action.?block|spammer|spam)\b/i.test(errorMsg);
           await db.socialAccount.update({
             where: { id: socialAccountId },
@@ -861,9 +905,9 @@ export function createPublishWorker(deps: Deps): Worker {
           data: {
             tenantId,
             type: unknown ? 'system' : 'job_failed',
-            title: `${unknown ? 'Требуется проверка публикации' : 'Ошибка публикации'} (${platform.toUpperCase()})`,
+            title: `${err instanceof DeviceAuthRequiredError ? DEVICE_AUTH_REQUIRED : unknown ? 'Требуется проверка публикации' : 'Ошибка публикации'} (${platform.toUpperCase()})`,
             body: `Аккаунт: ${accountName}. Ошибка: ${errorMsg}`,
-            actionUrl: `/uniquify`,
+            actionUrl: err instanceof DeviceAuthRequiredError ? '/farm' : '/uniquify',
           },
         }).catch(() => {});
 

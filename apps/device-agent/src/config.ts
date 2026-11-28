@@ -75,6 +75,7 @@ export const config = {
 
   // ClaudeHub AI
   CLAUDEHUB_API_KEY: env('CLAUDEHUB_API_KEY', ''),
+  TIKTOK_PLUGIN_PACKAGE: env('DEVICE_AGENT_TIKTOK_PLUGIN_PACKAGE', ''),
   CLAUDEHUB_BASE_URL: env('CLAUDEHUB_BASE_URL', 'https://api.claudehub.fun/v1'),
   CLAUDEHUB_MODEL: env('CLAUDEHUB_VISION_MODEL', env('CLAUDEHUB_MODEL', 'gemini-flash-3.8')),
 

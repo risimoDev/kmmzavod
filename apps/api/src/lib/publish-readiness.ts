@@ -18,6 +18,7 @@ export interface ReadinessInput {
   expiresAt: Date | null;        // official token expiry
   enforceWarmup: boolean;        // account group opts into the warmup gate
   hasDeviceId: boolean;           // deviceId present (device path — real phone farm)
+  deviceAuthRequired?: boolean;
 }
 
 export interface Readiness {
@@ -39,6 +40,7 @@ export function computeReadiness(a: ReadinessInput): Readiness {
     if (a.warmupStatus === 'cold' && a.enforceWarmup) blockers.push('Не прогрет (группа требует warmup)');
   } else if (a.authMethod === 'device') {
     if (!a.hasDeviceId) blockers.push('Не привязан телефон — укажите deviceId (ADB serial)');
+    if (a.deviceAuthRequired) blockers.push('Требуется вход на плате');
   } else {
     if (a.expiresAt && a.expiresAt.getTime() < Date.now()) blockers.push('Токен истёк');
   }

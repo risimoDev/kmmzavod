@@ -1,25 +1,21 @@
-/**
- * Automated Social Account Login (Instagram & TikTok) on Android Farm Boards.
- *
- * 1. Checks and opens the exact installed app on the phone.
- * 2. Inputs account credentials (login/username + password).
- * 3. Detects two-factor/email verification screens.
- * 4. Automatically queries the user's email via IMAP for the verification code.
- * 5. Enters the verification code directly into the mobile app and completes login.
- */
 import type { Logger } from 'pino';
 import type { AdbClient } from './adb-client';
-import { PackageResolver } from './package-resolver';
-import { parseUiTree } from './profile-stats';
-import { pollVerificationCode, type ImapConfig } from './imap-client';
+import type { PackageResolver } from './package-resolver';
+import { profileMatchesUsername } from './profile-stats';
+import { pollVerificationCode, isMicrosoftImap, type ImapConfig } from './imap-client';
+import { authenticatorCode } from './totp';
+import { byLabel, clickTarget, dumpScreen, editTexts, isVisible, label, sleep, tapEl, type UiScreen, type UiEl } from './ui-automation';
 
 export interface DeviceAccountLoginRequest {
   deviceId: string;
   platform: 'tiktok' | 'instagram';
   username: string;
   password?: string;
+  twoFactorSeed?: string;
   email?: string;
   emailPassword?: string;
+  emailOAuthRefreshToken?: string;
+  emailOAuthClientId?: string;
   imapHost?: string;
   imapPort?: number;
 }
@@ -27,352 +23,253 @@ export interface DeviceAccountLoginRequest {
 export interface DeviceAccountLoginResult {
   ok: boolean;
   deviceId: string;
-  platform: 'tiktok' | 'instagram';
+  platform: DeviceAccountLoginRequest['platform'];
   alreadyLoggedIn?: boolean;
-  codeRetrieved?: string;
   detail: string;
   error?: string;
 }
 
-async function dumpUi(adb: AdbClient, deviceId: string): Promise<string> {
-  const remotePath = `/sdcard/kmm_login_${Date.now()}.xml`;
-  try {
-    await adb.shell(deviceId, `uiautomator dump ${remotePath}`, 20_000);
-    const xml = await adb.shell(deviceId, `cat ${remotePath}`, 15_000);
-    await adb.shell(deviceId, `rm -f ${remotePath}`).catch(() => {});
-    return xml;
-  } catch {
-    return '';
+const LOGIN = /^(log in|log into your account|sign in|войти|вход|войти в аккаунт)$/i;
+const LOGIN_METHOD = /^(?:use phone\s*\/\s*email\s*\/\s*username|use phone or email|email\s*\/\s*username|email or username|телефон\s*\/\s*почта\s*\/\s*имя пользователя|почта\s*\/\s*имя пользователя|войти через пароль|log in with password)$/i;
+const SIGN_UP = /^(sign up(?: for tiktok)?|log in or sign up|create new account|регистрация|зарегистрироваться|создать аккаунт)$/i;
+const PASSWORD = /password|пароль/i;
+const USERNAME = /username|user_name|email|login|identifier|имя пользователя|электронная почта|логин|^почта$/i;
+const CODE_FIELD = /code|код|pin|otp|security|verification/i;
+const CODE_SCREEN = /enter (?:the |your )?(?:6.digit |security |verification |confirmation )?code|check your (?:email|inbox)|введите (?:проверочный |шестизначный )?код|код подтверждения|проверьте почту/i;
+const AUTHENTICATOR = /authentication app|authenticator app|приложени[ея].{0,25}аутентификатор/i;
+const EMAIL_CHALLENGE = /check your (?:email|inbox)|(?:sent|send).{0,45}(?:email|@)|код.{0,30}(?:отправлен|электронную почту)|проверьте почту/i;
+const BLOCKER = /captcha|verify (?:to continue|you.re human)|security check|try again later|too many attempts|account (?:suspended|banned|locked)|капч[аиу]|слишком много попыток|аккаунт заблокирован|попробуйте позже/i;
+const NETWORK = /no (?:internet|network) connection|network error|нет (?:сети|соединения)|ошибка сети/i;
+const EDIT_PROFILE = /^(edit profile|редактировать профиль|изменить профиль)$/i;
+
+const labels = (screen: UiScreen) => screen.els.map(label).join('\n');
+const idLabel = (el: UiEl) => `${label(el)} ${el.resId.split('/').pop() ?? ''}`;
+const button = (screen: UiScreen, pattern: RegExp) => {
+  const el = byLabel(screen, pattern);
+  return el && clickTarget(el).clickable ? el : undefined;
+};
+
+export function confirmedLoggedOut(screen: UiScreen): boolean {
+  const text = labels(screen);
+  if (NETWORK.test(text) || BLOCKER.test(text)) return false;
+  if (button(screen, LOGIN_METHOD) && byLabel(screen, /^(?:log in to tiktok|вход в tiktok)$/i)) return true;
+  if (!button(screen, LOGIN)) return false;
+  return !!byLabel(screen, SIGN_UP) || editTexts(screen).some((el) => PASSWORD.test(idLabel(el))) ||
+    /session (?:has )?expired|срок действия сессии ист[её]к/i.test(text);
+}
+
+function codeField(screen: UiScreen): UiEl | undefined {
+  const fields = editTexts(screen);
+  return fields.find((el) => CODE_FIELD.test(idLabel(el))) ??
+    (fields.length === 1 && CODE_SCREEN.test(labels(screen)) ? fields[0] : undefined);
+}
+
+async function screenFor(adb: AdbClient, deviceId: string, pkg: string): Promise<UiScreen | null> {
+  const screen = await dumpScreen(adb, deviceId, 1);
+  return screen?.pkg === pkg ? screen : null;
+}
+
+async function verifyOwnProfile(adb: AdbClient, deviceId: string, pkg: string, platform: DeviceAccountLoginRequest['platform'], username: string): Promise<boolean> {
+  const { height } = await adb.getScreenSize(deviceId);
+  let screen = await screenFor(adb, deviceId, pkg);
+  if (!screen) return false;
+  const profile = screen.els.find((el) => isVisible(el) && el.bounds[1] > height * 0.75 &&
+    (/^(?:profile|профиль|аккаунт)$/i.test(label(el)) || /:id\/(?:profile_tab|tab_profile)$/.test(el.resId)) && clickTarget(el).clickable);
+  if (profile && !byLabel(screen, EDIT_PROFILE)) {
+    await tapEl(adb, deviceId, profile);
+    await sleep(1300);
+    screen = await screenFor(adb, deviceId, pkg);
   }
+  return Boolean(screen && byLabel(screen, EDIT_PROFILE) && profileMatchesUsername(screen.xml, height, username, platform));
+}
+
+async function enterText(adb: AdbClient, deviceId: string, field: UiEl, value: string): Promise<void> {
+  await tapEl(adb, deviceId, field);
+  if (field.text) {
+    await adb.fastShell(deviceId, `input keyevent 123; input keyevent ${'67 '.repeat(Math.min(field.text.length, 256)).trim()}`);
+  }
+  await adb.inputText(deviceId, value, true);
+}
+
+async function submitCode(adb: AdbClient, deviceId: string, pkg: string, field: UiEl, code: string): Promise<void> {
+  await enterText(adb, deviceId, field, code);
+  const screen = await screenFor(adb, deviceId, pkg);
+  if (!screen || !codeField(screen)) return;
+  const confirm = button(screen, /^(?:confirm|next|continue|submit|done|подтвердить|далее|продолжить|отправить|готово)$/i);
+  if (confirm) await tapEl(adb, deviceId, confirm);
+}
+
+export function mailboxConfig(req: DeviceAccountLoginRequest): ImapConfig | undefined {
+  if (!req.email) return undefined;
+  const host = req.imapHost;
+  const port = req.imapPort;
+  if (isMicrosoftImap(req.email, host)) {
+    if (!req.emailOAuthRefreshToken || !req.emailOAuthClientId) return undefined;
+    return { email: req.email, host: 'outlook.office365.com', port: 993, oauthRefreshToken: req.emailOAuthRefreshToken, oauthClientId: req.emailOAuthClientId };
+  }
+  return req.emailPassword ? { email: req.email, host, port, password: req.emailPassword } : undefined;
+}
+
+export function findTikTokResetSettings(screen: UiScreen): UiEl | undefined {
+  if (!byLabel(screen, /^(?:settings|настройки)$/i)) return undefined;
+  return button(screen, /^(?:reset settings|сбросить настройки|сброс настроек)$/i);
+}
+
+export async function resetTikTokModSettings(adb: AdbClient, deviceId: string, pkg: string): Promise<boolean> {
+  if (!/^[a-zA-Z][\w]*(?:\.[a-zA-Z][\w]*)+$/.test(pkg)) return false;
+  await adb.openApp(deviceId, pkg);
+  await sleep(1400);
+  let screen = await screenFor(adb, deviceId, pkg);
+  if (!screen) return false;
+  let reset = findTikTokResetSettings(screen);
+  if (!reset) {
+    const settings = button(screen, /^(?:settings|настройки)$/i);
+    if (!settings) return false;
+    await tapEl(adb, deviceId, settings);
+    await sleep(800);
+    screen = await screenFor(adb, deviceId, pkg);
+    if (!screen) return false;
+    reset = findTikTokResetSettings(screen);
+  }
+  if (!reset) return false;
+  await tapEl(adb, deviceId, reset);
+  await sleep(800);
+  screen = await screenFor(adb, deviceId, pkg);
+  if (!screen) return false;
+  if (/(?:settings (?:have been )?reset|настройки сброшены)/i.test(labels(screen))) return true;
+  const confirm = button(screen, /^(?:reset|confirm|ok|сбросить|подтвердить|ок)$/i);
+  if (!confirm || !byLabel(screen, /^(?:reset settings[?]?|сбросить настройки[?]?|сброс настроек)$/i) ||
+    !button(screen, /^(?:cancel|отмена)$/i)) return false;
+  await tapEl(adb, deviceId, confirm);
+  await sleep(800);
+  const after = await screenFor(adb, deviceId, pkg);
+  return Boolean(after && !button(after, /^(?:cancel|отмена)$/i));
 }
 
 export async function runDeviceAccountLogin(
-  req: DeviceAccountLoginRequest,
-  adb: AdbClient,
-  packageResolver: PackageResolver,
-  logger: Logger,
+  req: DeviceAccountLoginRequest, adb: AdbClient, packageResolver: PackageResolver, logger: Logger,
 ): Promise<DeviceAccountLoginResult> {
-  const { deviceId, platform, username, password, email, emailPassword, imapHost, imapPort } = req;
-  const user = username.replace(/^@+/, '').trim();
-
-  logger.info({ deviceId, platform, user, email: email ? `${email.slice(0, 3)}***` : undefined }, 'device-agent: starting auto-login flow');
+  const { deviceId, platform, password } = req;
+  const username = req.username.replace(/^@+/, '').trim();
+  const fail = (detail: string): DeviceAccountLoginResult => ({ ok: false, deviceId, platform, detail });
+  const finish = (alreadyLoggedIn = false): DeviceAccountLoginResult =>
+    ({ ok: true, deviceId, platform, alreadyLoggedIn, detail: 'Вход подтверждён в собственном профиле' });
+  if (!/^[a-z\d._]{1,100}$/i.test(username)) return fail('Укажите @username профиля для проверки входа');
 
   try {
-    // 1. Wake screen and unlock keyguard
+    const resolved = await packageResolver.resolve(deviceId, platform);
+    if (!resolved.installed || !resolved.packageName) return fail(resolved.error || 'Приложение не установлено');
+    const pkg = resolved.packageName;
     await adb.wakeUp(deviceId);
     await adb.shell(deviceId, 'wm dismiss-keyguard');
-    const { width, height } = await adb.getScreenSize(deviceId);
-
-    // 2. Resolve installed package for the target platform
-    const resolved = await packageResolver.resolve(deviceId, platform);
-    if (!resolved.installed || !resolved.packageName) {
-      return {
-        ok: false,
-        deviceId,
-        platform,
-        detail: resolved.error || `Приложение ${platform} не установлено на плате ${deviceId}`,
-        error: resolved.error,
-      };
-    }
-    const pkg = resolved.packageName;
-
-    // 3. Grant runtime permissions in advance
-    await adb.grantAllPermissions(deviceId, pkg).catch(() => {});
-
-    // 4. Launch the application
-    logger.info({ deviceId, platform, pkg }, 'device-agent: launching app');
     await adb.openApp(deviceId, pkg);
-    await new Promise((r) => setTimeout(r, 6000));
-
-    // 5. Inspect current UI screen
-    let xml = await dumpUi(adb, deviceId);
-    let nodes = parseUiTree(xml);
-
-    // Check if already logged in (profile tab or home feed buttons)
-    const isProfileVisible = nodes.some((n) =>
-      /profile|профиль|аккаунт|settings|настройки/i.test(`${n.text} ${n.desc}`) && n.clickable,
-    );
-    const isFeedVisible = nodes.some((n) =>
-      /home|главная|reels|рекомендации|for you/i.test(`${n.text} ${n.desc}`) && n.clickable,
-    );
-    const hasLoginButton = nodes.some((n) =>
-      /log in|sign in|войти|авторизоваться|already have an account/i.test(`${n.text} ${n.desc}`),
-    );
-
-    if ((isProfileVisible || isFeedVisible) && !hasLoginButton) {
-      logger.info({ deviceId, platform, user }, 'device-agent: account is already logged in');
-      return {
-        ok: true,
-        deviceId,
-        platform,
-        alreadyLoggedIn: true,
-        detail: 'Аккаунт уже авторизован в мобильном приложении',
-      };
+    await sleep(1600);
+    const read = () => screenFor(adb, deviceId, pkg);
+    let screen = await read();
+    if (!screen) return fail('Не удалось прочитать экран входа');
+    if (!confirmedLoggedOut(screen) && !codeField(screen)) {
+      if (await verifyOwnProfile(adb, deviceId, pkg, platform, username)) return finish(true);
+      screen = await read();
     }
-
-    if (!password) {
-      return {
-        ok: false,
-        deviceId,
-        platform,
-        detail: 'Пароль от аккаунта не указан для выполнения входа',
-        error: 'Missing password',
-      };
+    if (!screen || !confirmedLoggedOut(screen)) {
+      return fail('Экран выхода из аккаунта не подтверждён. Проверьте открытый профиль или завершите вход вручную.');
     }
+    if (!password) return fail('Укажите пароль для повторного входа');
 
-    // 6. Navigate to login form if on welcome / onboarding screen
-    const welcomeLoginBtn = nodes.find((n) =>
-      /log in|войти|sign in|already have an account/i.test(`${n.text} ${n.desc}`),
-    );
-    if (welcomeLoginBtn) {
-      const [x1, y1, x2, y2] = welcomeLoginBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      await new Promise((r) => setTimeout(r, 3000));
-      xml = await dumpUi(adb, deviceId);
-      nodes = parseUiTree(xml);
-    }
-
-    // Look for EditText fields (typically username and password)
-    const editTexts = nodes.filter((n) =>
-      n.resId.includes('edit') || n.resId.includes('input') || n.text.includes('@') || n.desc.includes('login') || n.bounds[3] - n.bounds[1] > 20,
-    );
-
-    // If Instagram switch accounts button exists
-    const switchAccountBtn = nodes.find((n) => /switch account|сменить аккаунт/i.test(`${n.text} ${n.desc}`));
-    if (switchAccountBtn) {
-      const [x1, y1, x2, y2] = switchAccountBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      await new Promise((r) => setTimeout(r, 2500));
-      xml = await dumpUi(adb, deviceId);
-      nodes = parseUiTree(xml);
-    }
-
-    // Enter Username / Identifier
-    const usernameInput = nodes.find((n) =>
-      /username|phone|email|логин|телефон|почта|имя пользователя/i.test(`${n.text} ${n.desc} ${n.resId}`),
-    ) || editTexts[0];
-
-    if (usernameInput) {
-      const [x1, y1, x2, y2] = usernameInput.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      await new Promise((r) => setTimeout(r, 500));
-      // Clear field
-      for (let i = 0; i < 30; i++) await adb.keyevent(deviceId, 67); // KEYCODE_DEL
-      await adb.inputText(deviceId, user);
-      await new Promise((r) => setTimeout(r, 1000));
-    } else {
-      // Fallback coordinate tap on top field (~34% height)
-      await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.34));
-      await new Promise((r) => setTimeout(r, 500));
-      await adb.inputText(deviceId, user);
-    }
-
-    // Enter Password
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-    const passwordInput = nodes.find((n) =>
-      /password|пароль/i.test(`${n.text} ${n.desc} ${n.resId}`),
-    ) || editTexts[1];
-
-    if (passwordInput) {
-      const [x1, y1, x2, y2] = passwordInput.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      await new Promise((r) => setTimeout(r, 500));
-      for (let i = 0; i < 30; i++) await adb.keyevent(deviceId, 67);
-      await adb.inputText(deviceId, password);
-      await new Promise((r) => setTimeout(r, 1000));
-    } else {
-      // Fallback coordinate tap on second field (~41% height)
-      await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.41));
-      await new Promise((r) => setTimeout(r, 500));
-      await adb.inputText(deviceId, password);
-    }
-
-    // Dismiss keyboard and submit
-    await adb.keyevent(deviceId, 111); // KEYCODE_ESCAPE (dismiss keyboard)
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Tap Log In Submit Button
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-    const submitBtn = nodes.find((n) =>
-      /^(log in|войти|next|далее|продолжить)$/i.test(n.text.trim()) ||
-      /^(log in|войти|next|далее|продолжить)$/i.test(n.desc.trim()) ||
-      /login_button|submit|button_login/i.test(n.resId),
-    );
-
-    if (submitBtn) {
-      const [x1, y1, x2, y2] = submitBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-    } else {
-      // Press ENTER or fallback tap
-      await adb.keyevent(deviceId, 66); // KEYCODE_ENTER
-      await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.48));
-    }
-
-    // Wait for server verification response
-    await new Promise((r) => setTimeout(r, 5500));
-
-    // 7. Check for dialogs ("Save login info", permissions)
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-
-    const saveInfoBtn = nodes.find((n) => /save|сохранить|not now|не сейчас/i.test(`${n.text} ${n.desc}`));
-    if (saveInfoBtn) {
-      const [x1, y1, x2, y2] = saveInfoBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      await new Promise((r) => setTimeout(r, 2500));
-      xml = await dumpUi(adb, deviceId);
-      nodes = parseUiTree(xml);
-    }
-
-    // 8. Detect 2FA / Verification Code Screen
-    let codeRetrieved: string | undefined;
-    const isVerificationScreen = nodes.some((n) =>
-      /code|код|verification|подтвержден|security code|enter code|введите код|check your email|проверьте почту/i.test(
-        `${n.text} ${n.desc}`,
-      ),
-    );
-
-    if (isVerificationScreen) {
-      logger.info({ deviceId, platform, email }, 'device-agent: 2FA/verification screen detected, checking email');
-
-      if (!email || !emailPassword) {
-        return {
-          ok: false,
-          deviceId,
-          platform,
-          detail: 'Появился экран ввода кода с почты, но в аккаунте не указаны email / emailPassword для автоматического чтения кодов',
-          error: 'Verification code requested but no email credentials provided',
-        };
+    let submittedAfter: Date | undefined;
+    let sentEmail = false;
+    let selectedVerificationMethod = false;
+    for (let step = 0; step < 7; step++) {
+      if (!screen) return fail('Приложение не показало следующий экран входа');
+      const text = labels(screen);
+      if (NETWORK.test(text) || BLOCKER.test(text)) return fail('Вход остановлен из-за ошибки сети или запроса проверки на телефоне');
+      if (/incorrect password|wrong password|неверный пароль|incorrect code|invalid code|неверный код/i.test(text)) {
+        return fail('Приложение отклонило пароль или проверочный код');
       }
 
-      const imapConfig: ImapConfig = {
-        email,
-        password: emailPassword,
-        host: imapHost,
-        port: imapPort,
-      };
-
-      const codeRes = await pollVerificationCode(imapConfig, {
-        platform,
-        maxWaitSec: 90,
-        pollIntervalMs: 4000,
-      });
-
-      if (!codeRes.ok || !codeRes.code) {
-        return {
-          ok: false,
-          deviceId,
-          platform,
-          detail: `Экран подтверждения: ${codeRes.error || 'код не поступил на почту'}. Телефон остался на экране ввода кода — вы можете ввести код вручную.`,
-          error: codeRes.error,
-        };
+      const send = submittedAfter && !sentEmail && EMAIL_CHALLENGE.test(text) &&
+        button(screen, /^(?:send code|отправить код|получить код)$/i);
+      if (send) {
+        sentEmail = true;
+        submittedAfter = new Date();
+        await tapEl(adb, deviceId, send);
+        await sleep(1300);
+        screen = await read();
+        continue;
+      }
+      const field = codeField(screen);
+      if (field) {
+        let code: string;
+        const totp = platform === 'instagram' && AUTHENTICATOR.test(text);
+        if (totp && req.twoFactorSeed) {
+          if (30_000 - Date.now() % 30_000 < 6_000) await sleep(30_000 - Date.now() % 30_000 + 200);
+          code = authenticatorCode(req.twoFactorSeed);
+        } else if (EMAIL_CHALLENGE.test(text) && submittedAfter) {
+          const email = mailboxConfig(req);
+          if (!email) return fail('Введите код из письма на плате. Для Outlook подключите IMAP через Microsoft OAuth2.');
+          const result = await pollVerificationCode(email, { platform, maxWaitSec: 75, receivedAfter: submittedAfter });
+          if (!result.ok || !result.code) return fail(result.error || 'Код не получен. Введите его на плате.');
+          code = result.code;
+        } else {
+          return fail('Приложение запросило подтверждение. Введите код на плате.');
+        }
+        const current = await read();
+        const currentField = current && codeField(current);
+        if (!currentField) return fail('Экран ввода кода изменился');
+        await submitCode(adb, deviceId, pkg, currentField, code);
+        break;
       }
 
-      codeRetrieved = codeRes.code;
-      logger.info({ deviceId, platform, codeRetrieved }, 'device-agent: code received from email, typing into device');
-
-      // Find code input field on screen
-      xml = await dumpUi(adb, deviceId);
-      nodes = parseUiTree(xml);
-      const codeInput = nodes.find((n) =>
-        /code|код|pin|number/i.test(`${n.text} ${n.desc} ${n.resId}`) || (n.bounds[3] - n.bounds[1] > 20 && n.bounds[1] < height * 0.6),
-      );
-
-      if (codeInput) {
-        const [x1, y1, x2, y2] = codeInput.bounds;
-        await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
+      const fields = editTexts(screen);
+      const pass = fields.find((el) => PASSWORD.test(idLabel(el)));
+      const login = fields.find((el) => el !== pass && USERNAME.test(idLabel(el))) ??
+        (pass && fields.length === 2 ? fields.find((el) => el !== pass) : undefined);
+      const submit = button(screen, LOGIN);
+      if (pass && login && submit && !submittedAfter) {
+        await enterText(adb, deviceId, login, username);
+        const updated = await read();
+        const passwordField = updated && editTexts(updated).find((el) => PASSWORD.test(idLabel(el)));
+        if (!passwordField) return fail('Поле пароля больше не видно');
+        await enterText(adb, deviceId, passwordField, password);
+        const filled = await read();
+        const submitButton = filled && button(filled, LOGIN);
+        if (!submitButton) return fail('Кнопка входа недоступна');
+        submittedAfter = new Date();
+        await tapEl(adb, deviceId, submitButton);
+      } else if (!submittedAfter) {
+        const next = button(screen, LOGIN_METHOD) ?? submit;
+        if (!next) return fail('Форма входа не распознана');
+        await tapEl(adb, deviceId, next);
+      } else if (!selectedVerificationMethod && /verification method|verify your identity|способ подтверждения|подтвердите личность/i.test(text)) {
+        const preferred = platform === 'instagram' && req.twoFactorSeed
+          ? /^(?:authentication app|authenticator app|приложение-аутентификатор)$/i
+          : /^(?:email|verify by email|email verification|электронная почта|по почте)$/i;
+        const method = button(screen, preferred);
+        if (!method) break;
+        selectedVerificationMethod = true;
+        await tapEl(adb, deviceId, method);
       } else {
-        await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.4));
+        break;
       }
+      await sleep(1300);
+      screen = await read();
+    }
 
-      await new Promise((r) => setTimeout(r, 500));
-      await adb.inputText(deviceId, codeRetrieved);
-      await new Promise((r) => setTimeout(r, 1000));
-
-      // Tap Confirm / Next
-      xml = await dumpUi(adb, deviceId);
-      nodes = parseUiTree(xml);
-      const confirmBtn = nodes.find((n) =>
-        /^(confirm|подтвердить|next|далее|submit|отправить)$/i.test(n.text.trim()) ||
-        /^(confirm|подтвердить|next|далее|submit|отправить)$/i.test(n.desc.trim()),
-      );
-
-      if (confirmBtn) {
-        const [x1, y1, x2, y2] = confirmBtn.bounds;
-        await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-      } else {
-        await adb.keyevent(deviceId, 66); // ENTER
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await sleep(1400);
+      screen = await read();
+      if (!screen) continue;
+      const later = button(screen, /^(?:not now|не сейчас)$/i);
+      if (later && /save (?:your )?login|сохранить данные для входа/i.test(labels(screen))) {
+        await tapEl(adb, deviceId, later);
+        await sleep(700);
       }
-
-      // Wait for code validation
-      await new Promise((r) => setTimeout(r, 6000));
+      if (await verifyOwnProfile(adb, deviceId, pkg, platform, username)) return finish();
     }
-
-    // 9. Post-login verification
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-
-    // Check for error text (invalid password / account blocked / try again later)
-    const errorNode = nodes.find((n) =>
-      /incorrect password|неверный пароль|wrong password|try again later|попробуйте позже|error|ошибка/i.test(
-        `${n.text} ${n.desc}`,
-      ),
-    );
-
-    if (errorNode) {
-      const errText = errorNode.text || errorNode.desc || 'Ошибка авторизации';
-      logger.warn({ deviceId, platform, errText }, 'device-agent: login error on screen');
-      return {
-        ok: false,
-        deviceId,
-        platform,
-        codeRetrieved,
-        detail: `Экран приложения сообщает об ошибке: "${errText}"`,
-        error: errText,
-      };
-    }
-
-    // Re-check if feed or profile is now visible
-    const finalProfile = nodes.some((n) =>
-      /profile|профиль|reels|feed|лента|главная|for you/i.test(`${n.text} ${n.desc}`),
-    );
-
-    logger.info({ deviceId, platform, user, success: finalProfile }, 'device-agent: login flow completed');
-
-    if (!finalProfile) {
-      // A missing error dialog does not mean success: if neither feed nor profile is
-      // visible, the flow stalled on some unexpected screen — report failure so the
-      // orchestrator does not mark the account as authorized.
-      return {
-        ok: false,
-        deviceId,
-        platform,
-        codeRetrieved,
-        detail: 'Вход не подтверждён: лента/профиль не появились на экране. Проверьте телефон вручную.',
-        error: 'Login flow finished without reaching feed/profile',
-      };
-    }
-
-    return {
-      ok: true,
-      deviceId,
-      platform,
-      codeRetrieved,
-      detail: codeRetrieved
-        ? `Вход выполнен успешно с автоматическим вводом кода (${codeRetrieved})`
-        : 'Вход в аккаунт выполнен успешно',
-    };
-  } catch (err: any) {
-    logger.error({ deviceId, platform, err: err.message }, 'device-agent: login flow crashed');
-    return {
-      ok: false,
-      deviceId,
-      platform,
-      detail: `Сбой автоматического входа: ${err.message}`,
-      error: err.message,
-    };
+    return fail('Вход в ожидаемый профиль не подтверждён. Проверьте экран на плате.');
+  } catch {
+    logger.warn({ deviceId, platform }, 'device-agent: auto-login stopped');
+    return fail('Сбой автоматического входа. Проверьте экран на плате.');
   }
 }
 
@@ -380,111 +277,33 @@ export interface SubmitVerificationCodeOpts {
   deviceId: string;
   code: string;
   platform?: 'tiktok' | 'instagram';
+  username?: string;
 }
 
-/**
- * Manually submit a 4-8 digit verification code directly onto the phone screen.
- * Used when email cannot be read via IMAP (e.g. Outlook Basic Auth disabled)
- * or when the user receives the code in a browser webmail.
- */
 export async function submitVerificationCodeOnDevice(
-  opts: SubmitVerificationCodeOpts,
-  adb: AdbClient,
-  logger: Logger,
+  opts: SubmitVerificationCodeOpts, adb: AdbClient, packageResolver: PackageResolver, logger: Logger,
 ): Promise<{ ok: boolean; detail: string; error?: string }> {
-  const { deviceId, code, platform } = opts;
-  const sanitizedCode = (code || '').trim().replace(/\s+/g, '');
-  if (!sanitizedCode || sanitizedCode.length < 4 || sanitizedCode.length > 8) {
-    return { ok: false, detail: 'Код должен содержать от 4 до 8 цифр', error: 'Invalid code format' };
+  const { deviceId, platform, username } = opts;
+  const code = opts.code.trim().replace(/\s+/g, '');
+  if (!platform || !username || !/^\d{4,8}$/.test(code)) {
+    return { ok: false, detail: 'Для подтверждения нужны платформа, @username и код из 4–8 цифр' };
   }
-
-  logger.info({ deviceId, platform, codeLength: sanitizedCode.length }, 'device-agent: submitting verification code to device');
-
   try {
-    await adb.wakeUp(deviceId);
-    await adb.shell(deviceId, 'wm dismiss-keyguard');
-    const { width, height } = await adb.getScreenSize(deviceId);
-
-    let xml = await dumpUi(adb, deviceId);
-    let nodes = parseUiTree(xml);
-
-    // Find code input field or tap likely area
-    const codeInput = nodes.find((n) =>
-      /code|код|pin|number|verification/i.test(`${n.text} ${n.desc} ${n.resId}`) ||
-      (n.bounds[3] - n.bounds[1] > 20 && n.bounds[1] < height * 0.6 && n.bounds[1] > height * 0.2),
-    );
-
-    if (codeInput) {
-      const [x1, y1, x2, y2] = codeInput.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-    } else {
-      await adb.tap(deviceId, Math.round(width * 0.5), Math.round(height * 0.4));
+    const resolved = await packageResolver.resolve(deviceId, platform);
+    const pkg = resolved.packageName;
+    const screen = pkg && await screenFor(adb, deviceId, pkg);
+    const field = screen && codeField(screen);
+    if (!pkg || !field) return { ok: false, detail: 'Экран ввода кода на плате не найден' };
+    await submitCode(adb, deviceId, pkg, field, code);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await sleep(1500);
+      if (await verifyOwnProfile(adb, deviceId, pkg, platform, username)) {
+        return { ok: true, detail: 'Вход подтверждён в собственном профиле' };
+      }
     }
-
-    await new Promise((r) => setTimeout(r, 600));
-
-    // Clear existing input if any
-    for (let i = 0; i < 10; i++) {
-      await adb.keyevent(deviceId, 67); // KEYCODE_DEL
-    }
-
-    await adb.inputText(deviceId, sanitizedCode);
-    await new Promise((r) => setTimeout(r, 1000));
-
-    // Dismiss keyboard
-    await adb.keyevent(deviceId, 111); // KEYCODE_ESCAPE
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Find Confirm / Submit button
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-    const confirmBtn = nodes.find((n) =>
-      /^(confirm|подтвердить|next|далее|submit|отправить|войти|готово|done)$/i.test(n.text.trim()) ||
-      /^(confirm|подтвердить|next|далее|submit|отправить|войти|готово|done)$/i.test(n.desc.trim()) ||
-      /submit|next_button|confirm/i.test(n.resId),
-    );
-
-    if (confirmBtn) {
-      const [x1, y1, x2, y2] = confirmBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-    } else {
-      await adb.keyevent(deviceId, 66); // KEYCODE_ENTER
-    }
-
-    // Wait for validation
-    await new Promise((r) => setTimeout(r, 6000));
-
-    // Post-check screen
-    xml = await dumpUi(adb, deviceId);
-    nodes = parseUiTree(xml);
-
-    // Check for any error dialog/message on screen
-    const errorNode = nodes.find((n) =>
-      /incorrect code|неверный код|invalid code|expired|истёк|error|ошибка/i.test(`${n.text} ${n.desc}`),
-    );
-
-    if (errorNode) {
-      const errText = errorNode.text || errorNode.desc || 'Неверный проверочный код';
-      return { ok: false, detail: `Ошибка на телефоне: ${errText}`, error: errText };
-    }
-
-    // Dismiss any "Save login info" prompt if it appeared
-    const saveInfoBtn = nodes.find((n) => /save|сохранить|not now|не сейчас/i.test(`${n.text} ${n.desc}`));
-    if (saveInfoBtn) {
-      const [x1, y1, x2, y2] = saveInfoBtn.bounds;
-      await adb.tap(deviceId, Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2));
-    }
-
-    return {
-      ok: true,
-      detail: `Код ${sanitizedCode} успешно введён и подтверждён на телефоне! Вход выполнен.`,
-    };
-  } catch (err: any) {
-    logger.error({ deviceId, platform, err: err.message }, 'device-agent: manual code submission failed');
-    return {
-      ok: false,
-      detail: `Не удалось ввести код: ${err.message}`,
-      error: err.message,
-    };
+    return { ok: false, detail: 'Код введён. Вход в ожидаемый профиль пока не подтверждён.' };
+  } catch {
+    logger.warn({ deviceId, platform }, 'device-agent: manual verification stopped');
+    return { ok: false, detail: 'Не удалось подтвердить вход на плате' };
   }
 }

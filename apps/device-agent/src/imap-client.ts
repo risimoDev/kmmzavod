@@ -31,6 +31,10 @@ export interface VerificationCodeResult {
   error?: string;
 }
 
+export function isMicrosoftImap(email: string, host = detectImapHost(email).host): boolean {
+  return host.toLowerCase() === 'outlook.office365.com' || /@(?:outlook|hotmail|live|msn)\.com$/i.test(email);
+}
+
 /** Automatically determine default IMAP host & port from email domain. */
 export function detectImapHost(email: string): { host: string; port: number } {
   const domain = (email.split('@')[1] || '').toLowerCase().trim();
@@ -61,20 +65,25 @@ export function detectImapHost(email: string): { host: string; port: number } {
   return { host: `imap.${domain || 'mail.ru'}`, port: 993 };
 }
 
+function imapEndpoint(cfg: ImapConfig): { host: string; port: number } {
+  if (isMicrosoftImap(cfg.email, cfg.host)) return { host: 'outlook.office365.com', port: 993 };
+  return cfg.host ? { host: cfg.host, port: cfg.port ?? 993 } : detectImapHost(cfg.email);
+}
+
 /** Format IMAP errors into helpful, actionable messages and identify permanent auth failures. */
 export function formatImapError(err: Error | string, email: string, host: string): { message: string; isPermanentAuth: boolean } {
   const raw = typeof err === 'string' ? err : err.message || String(err);
   const domain = (email.split('@')[1] || '').toLowerCase().trim();
 
   const isPermanentAuth =
-    /basic authentication is disabled|authenticationfailed|invalid credentials|login failed|not accepted|application-specific password|password for application|bad credentials/i.test(
+    /basic authentication is disabled|authenticationfailed|invalid credentials|login failed|not accepted|application-specific password|password for application|bad credentials|требует Microsoft OAuth2|OAuth2 Error|Microsoft OAuth.*(?:400|401|403)/i.test(
       raw,
     );
 
-  if (/basic authentication is disabled/i.test(raw) || domain.includes('outlook') || domain.includes('hotmail') || host.includes('office365')) {
+  if (/basic authentication is disabled/i.test(raw) || isMicrosoftImap(email, host)) {
     if (isPermanentAuth) {
       return {
-        message: `Microsoft IMAP: вход по обычному паролю заблокирован (Basic authentication is disabled). Для почт @outlook.com / @hotmail.com используйте «Пароль приложения» (App Password) из личного кабинета Microsoft (account.microsoft.com/security -> Пароли приложений, требует включённой 2FA) или OAuth2 токен, либо введите проверочный код вручную кнопкой «Ввести код на телефоне».`,
+        message: 'Microsoft IMAP: проверьте OAuth2 для этого ящика и включите IMAP в Outlook. Код можно ввести на телефоне вручную.',
         isPermanentAuth: true,
       };
     }
@@ -108,15 +117,15 @@ export function formatImapError(err: Error | string, email: string, host: string
   }
 
   return {
-    message: raw,
+    message: isPermanentAuth ? 'IMAP отклонил данные авторизации' : 'Не удалось подключиться к ящику или прочитать IMAP',
     isPermanentAuth,
   };
 }
 
-/** Refresh Microsoft OAuth2 token using Thunderbird public client ID or custom client ID. */
+/** Exchange a Microsoft mailbox refresh token using the client that obtained consent. */
 export async function refreshMicrosoftToken(
   refreshToken: string,
-  clientId = '9e5f94bc-e8a4-4e73-b8be-63364c29d753',
+  clientId: string,
 ): Promise<string> {
   const cleanToken = refreshToken.trim();
   const params = new URLSearchParams({
@@ -130,11 +139,11 @@ export async function refreshMicrosoftToken(
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
+    signal: AbortSignal.timeout(8_000),
   });
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Microsoft OAuth токен отклонен (${res.status}): ${errText.slice(0, 300)}`);
+    throw new Error(`Microsoft OAuth токен отклонён (${res.status})`);
   }
 
   const data = (await res.json()) as any;
@@ -145,7 +154,7 @@ export async function refreshMicrosoftToken(
 }
 
 /** Extract 4 to 8 digit verification code from message subject or body text. */
-export function extractVerificationCode(text: string, platform?: 'tiktok' | 'instagram'): string | null {
+export function extractVerificationCode(text: string, platform?: 'tiktok' | 'instagram', requireCodeMarker = false): string | null {
   if (!text) return null;
 
   // Clean HTML tags and decode common entities
@@ -175,6 +184,8 @@ export function extractVerificationCode(text: string, platform?: 'tiktok' | 'ins
       }
     }
   }
+
+  if (requireCodeMarker) return null;
 
   // 2. Generic 6-digit match if message is clearly from Instagram or TikTok
   const isPlatformMessage =
@@ -230,11 +241,11 @@ class ImapSession {
       }, timeoutMs);
 
       try {
-        const socket = tls.connect({ host, port, rejectUnauthorized: false }, () => {
+        const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: true }, () => {
           clearTimeout(timer);
-          this.socket = socket;
           resolve();
         });
+        this.socket = socket;
 
         socket.on('data', (chunk) => {
           this.buffer += chunk.toString('utf-8');
@@ -283,7 +294,7 @@ class ImapSession {
     if (out.includes(`${tag} NO`) || out.includes(`${tag} BAD`)) {
       const match = out.match(new RegExp(`${tag}\\s+(?:NO|BAD)\\s+([^\\r\\n]+)`, 'i'));
       const reason = match ? match[1] : 'Command rejected';
-      throw new Error(`IMAP Error: ${reason}`);
+      throw new Error(/^LOGIN /i.test(cmd) ? 'IMAP login failed' : `IMAP Error: ${reason}`);
     }
     return out;
   }
@@ -292,8 +303,7 @@ class ImapSession {
    * Authenticate via modern OAuth2 (XOAUTH2) if tokens provided, or fall back to standard LOGIN.
    */
   async authenticate(cfg: ImapConfig): Promise<void> {
-    const isOutlook = /outlook|office365|hotmail|live|msn/i.test((cfg.host || '') + (cfg.email || ''));
-    const tokenCandidate = (cfg.password || '').trim();
+    const isOutlook = isMicrosoftImap(cfg.email, cfg.host);
 
     // 1. Direct access token provided
     if (cfg.oauthAccessToken) {
@@ -301,17 +311,17 @@ class ImapSession {
       return;
     }
 
-    // 2. Refresh token provided or password format resembles a Microsoft/OAuth token
-    if (cfg.oauthRefreshToken || (isOutlook && /^(M\.R|M\.C|eyJ)/i.test(tokenCandidate))) {
-      const refreshToken = cfg.oauthRefreshToken || tokenCandidate;
-      const accessToken = await refreshMicrosoftToken(refreshToken, cfg.oauthClientId);
+    // 2. Explicit mailbox OAuth credentials only.
+    if (isOutlook && cfg.oauthRefreshToken && cfg.oauthClientId) {
+      const accessToken = await refreshMicrosoftToken(cfg.oauthRefreshToken, cfg.oauthClientId);
       await this.authenticateXOAuth2(cfg.email, accessToken);
       return;
     }
 
+    if (isOutlook) throw new Error('Outlook требует Microsoft OAuth2');
     // 3. Standard IMAP LOGIN
     const pass = cfg.password || '';
-    if (!pass) {
+    if (!pass || /[\r\n]/.test(pass + cfg.email)) {
       throw new Error('Пароль от почты не указан');
     }
     const safeUser = cfg.email.replace(/["\\]/g, '\\$&');
@@ -363,7 +373,7 @@ class ImapSession {
  * Verify IMAP credentials and inbox access.
  */
 export async function testImapConnection(cfg: ImapConfig): Promise<{ ok: boolean; messageCount?: number; error?: string }> {
-  const { host, port } = cfg.host && cfg.port ? { host: cfg.host, port: cfg.port } : detectImapHost(cfg.email);
+  const { host, port } = imapEndpoint(cfg);
   const session = new ImapSession();
 
   try {
@@ -373,7 +383,7 @@ export async function testImapConnection(cfg: ImapConfig): Promise<{ ok: boolean
 
     await session.authenticate({ ...cfg, host, port });
 
-    const selectOut = await session.sendCommand(`SELECT INBOX`, 10_000);
+    const selectOut = await session.sendCommand('EXAMINE INBOX', 10_000);
     const countMatch = selectOut.match(/\*\s+(\d+)\s+EXISTS/i);
     const messageCount = countMatch ? parseInt(countMatch[1], 10) : 0;
 
@@ -401,65 +411,49 @@ export async function pollVerificationCode(
   } = {},
 ): Promise<VerificationCodeResult> {
   const { platform, maxWaitSec = 90, pollIntervalMs = 4000, receivedAfter = new Date(Date.now() - 120_000) } = opts;
-  const { host, port } = cfg.host && cfg.port ? { host: cfg.host, port: cfg.port } : detectImapHost(cfg.email);
+  const requireCodeMarker = opts.receivedAfter !== undefined;
+  const microsoft = isMicrosoftImap(cfg.email, cfg.host);
+  const { host, port } = imapEndpoint(cfg);
+  if (microsoft && !cfg.oauthAccessToken) {
+    if (!cfg.oauthRefreshToken || !cfg.oauthClientId) {
+      return { ok: false, error: formatImapError('Outlook требует Microsoft OAuth2', cfg.email, host).message };
+    }
+    try {
+      const oauthAccessToken = await refreshMicrosoftToken(cfg.oauthRefreshToken, cfg.oauthClientId);
+      cfg = { ...cfg, oauthAccessToken };
+    } catch (err) {
+      return { ok: false, error: formatImapError(err as Error, cfg.email, host).message };
+    }
+  }
 
-  const startTime = Date.now();
+  const deadline = Date.now() + maxWaitSec * 1000;
+  const searchSince = new Date(receivedAfter.getTime() - 86_400_000).toUTCString().slice(5, 16).replace(/ /g, '-');
   let lastError = '';
 
-  while (Date.now() - startTime < maxWaitSec * 1000) {
+  while (Date.now() < deadline) {
     const session = new ImapSession();
     try {
       await session.connect(host, port, 10_000);
       await session.readUntil((b) => b.startsWith('* OK') || b.includes('\r\n'), 6000);
 
       await session.authenticate({ ...cfg, host, port });
-      await session.sendCommand(`SELECT INBOX`, 8000);
-
-      // Search recent messages (UNSEEN or all recent)
-      let searchOut = await session.sendCommand(`SEARCH UNSEEN`, 8000).catch(() => '');
-      let uids = (searchOut.match(/\*\s+SEARCH\s+(.*)/i)?.[1] || '').trim().split(/\s+/).filter(Boolean);
-
-      if (uids.length === 0) {
-        // Fallback: search ALL and inspect last 8 messages
-        searchOut = await session.sendCommand(`SEARCH ALL`, 8000).catch(() => '');
-        const allUids = (searchOut.match(/\*\s+SEARCH\s+(.*)/i)?.[1] || '').trim().split(/\s+/).filter(Boolean);
-        uids = allUids.slice(-8).reverse();
-      } else {
-        uids = uids.reverse();
-      }
+      await session.sendCommand('EXAMINE INBOX', 8000);
+      const searchOut = await session.sendCommand(`UID SEARCH SINCE ${searchSince}`, 8000);
+      const uids = (searchOut.match(/^\* SEARCH((?: \d+)*)/m)?.[1] ?? '').trim().split(/ +/).filter(Boolean).slice(-12).reverse();
 
       for (const id of uids) {
+        if (Date.now() >= deadline) break;
         try {
-          const fetchOut = await session.sendCommand(`FETCH ${id} (BODY[HEADER.FIELDS (SUBJECT FROM DATE)] BODY[TEXT])`, 10_000);
-          const subjMatch = fetchOut.match(/Subject:\s*([^\r\n]+)/i);
-          const fromMatch = fetchOut.match(/From:\s*([^\r\n]+)/i);
-          const dateMatch = fetchOut.match(/Date:\s*([^\r\n]+)/i);
-
-          const subject = subjMatch ? subjMatch[1].trim() : '';
-          const from = fromMatch ? fromMatch[1].trim() : '';
-          const dateStr = dateMatch ? dateMatch[1].trim() : '';
-
-          // Check if message is related to target platform
-          const isRelevant =
-            !platform ||
-            (platform === 'instagram' && /instagram/i.test(`${from} ${subject} ${fetchOut}`)) ||
-            (platform === 'tiktok' && /tiktok/i.test(`${from} ${subject} ${fetchOut}`)) ||
-            /verification|security|confirm|code|код/i.test(`${subject} ${fetchOut}`);
-
-          if (isRelevant) {
-            const code = extractVerificationCode(`${subject}\n${fetchOut}`, platform);
-            if (code) {
-              await session.sendCommand(`LOGOUT`, 3000).catch(() => {});
-              session.destroy();
-              return {
-                ok: true,
-                code,
-                subject,
-                from,
-                date: dateStr,
-              };
-            }
-          }
+          const headers = await session.sendCommand(`UID FETCH ${id} (INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])`, 8000);
+          if (!isRecentVerificationMessage(headers, platform, receivedAfter)) continue;
+          const subject = /^Subject:[ \t]*([^\r\n]+)/im.exec(headers)?.[1]?.trim() ?? '';
+          const code = extractVerificationCode(subject, platform, requireCodeMarker) ?? extractVerificationCode(
+            await session.sendCommand(`UID FETCH ${id} (BODY.PEEK[TEXT]<0.16384>)`, 8000), platform, requireCodeMarker,
+          );
+          if (!code) continue;
+          await session.sendCommand('LOGOUT', 3000).catch(() => {});
+          session.destroy();
+          return { ok: true, code, subject };
         } catch {
           // continue checking other messages
         }
@@ -481,11 +475,22 @@ export async function pollVerificationCode(
       }
     }
 
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    const wait = Math.min(deadline - Date.now(), pollIntervalMs);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   }
 
   return {
     ok: false,
-    error: `Код подтверждения не поступил на почту ${cfg.email} в течение ${maxWaitSec} сек` + (lastError ? `: ${lastError}` : ''),
+    error: `Код подтверждения не поступил в течение ${maxWaitSec} сек` + (lastError ? `: ${lastError}` : ''),
   };
+}
+
+export function isRecentVerificationMessage(raw: string, platform: 'tiktok' | 'instagram' | undefined, receivedAfter: Date): boolean {
+  const date = /^\* [^\r\n]*\bINTERNALDATE "([^"]+)"/im.exec(raw)?.[1];
+  if (!date || !(Date.parse(date) >= Math.floor(receivedAfter.getTime() / 1000) * 1000)) return false;
+  if (!platform) return true;
+  const from = /^From:[ \t]*([^\r\n]+)/im.exec(raw)?.[1]?.trim() ?? '';
+  const domain = /@([a-z\d.-]+)>?$/i.exec(from)?.[1].toLowerCase();
+  if (!domain) return false;
+  return platform === 'tiktok' ? /(?:^|\.)tiktok\.com$/.test(domain) : /(?:^|\.)(?:instagram\.com|facebookmail\.com)$/.test(domain);
 }

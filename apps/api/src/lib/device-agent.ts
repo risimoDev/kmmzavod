@@ -620,8 +620,11 @@ export const deviceAgentClient = {
     platform: 'tiktok' | 'instagram';
     username: string;
     password?: string;
+    twoFactorSeed?: string;
     email?: string;
     emailPassword?: string;
+    emailOAuthRefreshToken?: string;
+    emailOAuthClientId?: string;
     imapHost?: string;
     imapPort?: number;
   }): Promise<{
@@ -629,7 +632,6 @@ export const deviceAgentClient = {
     deviceId: string;
     platform: 'tiktok' | 'instagram';
     alreadyLoggedIn?: boolean;
-    codeRetrieved?: string;
     detail: string;
     error?: string;
   }> {
@@ -638,7 +640,9 @@ export const deviceAgentClient = {
 
   async testEmail(opts: {
     email: string;
-    password: string;
+    password?: string;
+    oauthRefreshToken?: string;
+    oauthClientId?: string;
     host?: string;
     port?: number;
   }): Promise<{ ok: boolean; messageCount?: number; error?: string }> {
@@ -660,6 +664,7 @@ export const deviceAgentClient = {
     deviceId: string;
     code: string;
     platform?: 'tiktok' | 'instagram';
+    username?: string;
   }): Promise<{ ok: boolean; detail: string; error?: string }> {
     return agentPost('/device/account/submit-code', opts, { timeout: 30_000 });
   },

@@ -84,6 +84,7 @@ export async function requestWithFallback<T>(
 
 export interface DevicePublishResult {
   ok: boolean;
+  authRequired?: boolean;
   detail?: string;
   stage?: string;
   /** no = nothing reached the platform (retry is safe); unknown = Share tapped, not confirmed. */
@@ -95,6 +96,8 @@ export interface DevicePublishResult {
   exitIp?: string;
   country?: string;
 }
+
+export const DEVICE_AUTH_REQUIRED = 'Требуется вход на плате';
 
 export interface DevicePublishProgress {
   deviceId: string;
@@ -199,6 +202,23 @@ export async function checkDeviceAgentHealth(): Promise<string | null> {
 let cachedProxyMode: { state: ProxyModeState; expiresAt: number } | null = null;
 
 export const deviceAgentService = {
+  async recoverAccount(opts: {
+    deviceId: string;
+    platform: 'instagram' | 'tiktok';
+    username: string;
+    password: string;
+    twoFactorSeed?: string;
+    email?: string;
+    emailPassword?: string;
+    emailOAuthRefreshToken?: string;
+    emailOAuthClientId?: string;
+    imapHost?: string;
+    imapPort?: number;
+  }): Promise<{ ok: boolean; detail?: string }> {
+    const base = await getDeviceAgentBaseUrl();
+    const response = await agentClient.post(`${base}/device/account/login`, { ...opts, recover: true }, { timeout: 180_000 });
+    return response.data;
+  },
   async verifyPost(opts: { deviceId: string; platform: 'instagram' | 'tiktok'; username: string; caption: string; since: number }): Promise<{
     status: 'confirmed' | 'not_found' | 'processing' | 'unavailable'; detail?: string;
   }> {

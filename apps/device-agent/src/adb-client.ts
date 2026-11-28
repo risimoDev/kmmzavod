@@ -89,7 +89,7 @@ export class AdbClient {
   }
 
   /** Run ADB command and return stdout string. */
-  async exec(args: string[], timeoutMs = 30_000): Promise<string> {
+  async exec(args: string[], timeoutMs = 30_000, sensitive = false): Promise<string> {
     try {
       const { stdout } = await execFileAsync(this.adbPath, args, {
         timeout: timeoutMs,
@@ -98,6 +98,7 @@ export class AdbClient {
       });
       return stdout.trim();
     } catch (err: any) {
+      if (sensitive) throw new Error('ADB не смог ввести данные авторизации');
       const msg = err.stderr ? String(err.stderr).trim() : err.message;
       this.logger.debug({ args, err: msg }, 'adb: exec error');
       throw new Error(`ADB error (${args.join(' ')}): ${msg}`);
@@ -327,9 +328,14 @@ export class AdbClient {
   }
 
   /** Input text string. */
-  async inputText(serial: string, text: string): Promise<void> {
+  async inputText(serial: string, text: string, sensitive = false): Promise<void> {
     // Newlines would split the shell command (and `input text` cannot type them anyway).
     const oneLine = text.replace(/[\r\n]+/g, ' ');
+    if (sensitive) {
+      if (!isPlainAscii(oneLine) || oneLine !== text) throw new Error('Эти данные авторизации нужно ввести на плате вручную');
+      await this.exec(['-s', serial, 'shell', buildInputTextCommand(oneLine)], 15_000, true);
+      return;
+    }
     // `input text` only types printable ASCII — anything else goes through ADBKeyboard.
     if (!isPlainAscii(oneLine)) {
       await typeText(this, serial, oneLine);

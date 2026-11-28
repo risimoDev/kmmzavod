@@ -26,7 +26,7 @@ import type { PrismaClient, Autopilot } from '@kmmzavod/db';
 import { logger as rootLogger } from '../logger';
 import { nextWallClock, startOfZonedDay } from '../lib/tz';
 import { journal, failBatch } from './journal';
-import { deviceAgentService } from '../services/device-agent';
+import { deviceAgentService, DEVICE_AUTH_REQUIRED } from '../services/device-agent';
 
 const logger = rootLogger.child({ worker: 'autopilot-loop' });
 
@@ -276,6 +276,7 @@ export async function eligibleAccounts(db: PrismaClient, ap: Autopilot): Promise
       authMethod: 'device',
       deviceId: { not: null },
       shadowBanDetected: false,
+      AND: [{ OR: [{ lastError: null }, { NOT: { lastError: { startsWith: DEVICE_AUTH_REQUIRED } } }] }],
       healthScore: { gte: ap.minHealth },
       ...(ap.platforms.length ? { platform: { in: ap.platforms } } : {}),
       // No explicit targets → every phone account of the tenant.

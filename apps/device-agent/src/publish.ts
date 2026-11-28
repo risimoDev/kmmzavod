@@ -24,6 +24,7 @@ import type { Logger } from 'pino';
 import { config } from './config';
 import { AdbClient } from './adb-client';
 import { PackageResolver } from './package-resolver';
+import { confirmedLoggedOut } from './account-login';
 import type { ProxyManager } from './proxy-manager';
 import { allowsHashtagTap, decide, findPostButton, hasDraftReceipt, hasPublishReceipt, initialFlowState, isAppOffline, isDraftTap, isNewPostOnProfile, isPopupDismissLabel, isPostLabel, uploadPercent, type FlowPlatform } from './publish-flow';
 import { snapshotProfile, openProfile, type ProfileSnapshot } from './profile-stats';
@@ -76,6 +77,7 @@ export interface PublishResult {
   posted: 'yes' | 'no' | 'unknown';
   /** false → retrying the same request will fail the same way (or could double-post). */
   retryable: boolean;
+  authRequired?: boolean;
   verified?: { app: boolean; profile: boolean | null; receipt?: boolean };
   captionTyped?: boolean;
   onDevicePath?: string;
@@ -286,6 +288,9 @@ export async function publishToDevice(
         detail: 'Приложение на телефоне без сети («Network error») ещё до публикации — проверьте прокси/интернет платы',
       });
     }
+    if (before?.pkg === pkg && confirmedLoggedOut(before)) {
+      return result({ ok: false, retryable: false, authRequired: true, detail: 'Приложение запросило повторный вход' });
+    }
 
     // 4. Share the video into the app
     const component = await pickShareComponent(adb, deviceId, pkg, flowPlatform);
@@ -435,6 +440,9 @@ export async function publishToDevice(
         await sleep(3000);
         continue;
       } else {
+        if (screen.pkg === pkg && confirmedLoggedOut(screen)) {
+          return result({ ok: false, retryable: false, authRequired: true, detail: 'Приложение запросило повторный вход' });
+        }
         const action = decide(flowPlatform, screen, st, !!caption, caption);
         if (action.kind === 'error') {
           const snap = await saveDebugSnapshot(adb, deviceId, `pub_${platform}_error`, screen.xml).catch(() => undefined);

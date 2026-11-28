@@ -13,7 +13,8 @@ import { ScriptEngine } from './script-engine';
 import { collectProfileStats } from './profile-stats';
 import { verifyRecentPost } from './verify-post';
 import { PackageResolver } from './package-resolver';
-import { runDeviceAccountLogin, submitVerificationCodeOnDevice } from './account-login';
+import { confirmedLoggedOut, resetTikTokModSettings, runDeviceAccountLogin, submitVerificationCodeOnDevice } from './account-login';
+import { dumpScreen } from './ui-automation';
 import { testImapConnection, pollVerificationCode } from './imap-client';
 import { deviceMutex } from './lib/device-mutex';
 import crypto from 'node:crypto';
@@ -648,8 +649,12 @@ const DeviceAccountLoginBody = z.object({
   platform: z.enum(['tiktok', 'instagram']),
   username: z.string().min(1),
   password: z.string().optional(),
+  twoFactorSeed: z.string().max(512).optional(),
   email: z.string().optional(),
   emailPassword: z.string().optional(),
+  emailOAuthRefreshToken: z.string().max(8192).optional(),
+  emailOAuthClientId: z.string().uuid().optional(),
+  recover: z.boolean().default(false),
   imapHost: z.string().optional(),
   imapPort: z.number().int().min(1).max(65535).optional(),
 });
@@ -665,9 +670,28 @@ const accountLoginHandler = async (req: any, reply: any) => {
   let unlock: (() => void) | undefined;
   try {
     unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
+    if (parsed.data.recover && (!config.AGENT_TOKEN || proxyManager.mode !== 'private_parallel')) {
+      return { ok: false, detail: 'Автовосстановление требует защищённого агента в режиме Private Parallel' };
+    }
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
+    if (parsed.data.recover || proxyManager.mode === 'private_parallel' || config.PROXY_UPSTREAM_VIA) {
+      const guard = await proxyManager.preflight(parsed.data.deviceId);
+      if (!guard.ok) return { ok: false, detail: 'Перед входом нужно подтвердить маршрут через прокси платы' };
+    }
+    if (parsed.data.recover) {
+      const { deviceId } = parsed.data;
+      const app = await packageResolver.resolve(deviceId, parsed.data.platform);
+      const screen = await dumpScreen(adb, deviceId, 1);
+      if (!screen || screen.pkg !== app.packageName || !confirmedLoggedOut(screen)) {
+        return { ok: false, detail: 'Выход из аккаунта на плате больше не подтверждается' };
+      }
+      if (parsed.data.platform === 'tiktok' &&
+        (!config.TIKTOK_PLUGIN_PACKAGE || config.TIKTOK_PLUGIN_PACKAGE === app.packageName ||
+         !await resetTikTokModSettings(adb, deviceId, config.TIKTOK_PLUGIN_PACKAGE))) {
+        return { ok: false, detail: 'Сброс настроек плагина TikTok не подтверждён. Проверьте пакет плагина и экран платы.' };
+      }
+    }
     const result = await runDeviceAccountLogin(parsed.data, adb, packageResolver, logger);
-    if (!result.ok) reply.code(502);
     return result;
   } catch (err) {
     logger.error({ err }, 'device-agent: /device/account/login failed');
@@ -684,7 +708,9 @@ app.post('/account/login', accountLoginHandler);
 
 const TestEmailBody = z.object({
   email: z.string().email(),
-  password: z.string().min(1),
+  password: z.string().min(1).optional(),
+  oauthRefreshToken: z.string().max(8192).optional(),
+  oauthClientId: z.string().uuid().optional(),
   host: z.string().optional(),
   port: z.number().int().min(1).max(65535).optional(),
 });
@@ -696,7 +722,6 @@ const accountTestEmailHandler = async (req: any, reply: any) => {
     return { ok: false, error: parsed.error.flatten() };
   }
   const result = await testImapConnection(parsed.data);
-  if (!result.ok) reply.code(400);
   return result;
 };
 
@@ -731,6 +756,7 @@ const SubmitCodeBody = z.object({
   deviceId: z.string().min(1),
   code: z.string().min(4).max(8),
   platform: z.enum(['tiktok', 'instagram']).optional(),
+  username: z.string().min(1).max(100).optional(),
 });
 
 const accountSubmitCodeHandler = async (req: any, reply: any) => {
@@ -744,7 +770,7 @@ const accountSubmitCodeHandler = async (req: any, reply: any) => {
   try {
     unlock = await deviceMutex.acquire(parsed.data.deviceId, DEVICE_WAIT_MS);
     release = await proxyManager.acquireTaskLease(parsed.data.deviceId);
-    const result = await submitVerificationCodeOnDevice(parsed.data, adb, logger);
+    const result = await submitVerificationCodeOnDevice(parsed.data, adb, packageResolver, logger);
     if (!result.ok) reply.code(400);
     return result;
   } catch (err) {

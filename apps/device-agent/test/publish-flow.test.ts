@@ -330,7 +330,7 @@ const profileNoCounterLabel = mainProfileXml.replace('text="Follower"', 'text="S
 const ownProfile = readPublishProfile(profileNoCounterLabel, 1080, 2220, 'tiktok', 'test_account_1');
 ok(ownProfile.onProfile && ownProfile.uploading === 96 && ownProfile.tiles.length === 3, 'TikTok recognizes the matching account and real grid independently of follower label and physical screen height');
 const wrongProfile = readPublishProfile(profileNoCounterLabel, 1080, 2220, 'tiktok', 'other_account');
-ok(wrongProfile.wrongAccount && !wrongProfile.onProfile && wrongProfile.tiles.length === 0, 'a different logged-in account cannot confirm publication');
+ok(wrongProfile.wrongAccount === true && !wrongProfile.onProfile && wrongProfile.tiles.length === 0, 'a different logged-in account cannot confirm publication');
 const privateTab = profileNoCounterLabel.replace(/(content-desc="Videos"[^>]*selected=")true/, '$1false')
   .replace(/(content-desc="Private videos"[^>]*selected=")false/, '$1true');
 ok(!readPublishProfile(privateTab, 1080, 2220, 'tiktok', 'test_account_1').onProfile, 'the private tab cannot confirm a public post');
